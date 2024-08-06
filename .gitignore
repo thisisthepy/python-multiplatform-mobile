@@ -1,6 +1,9 @@
 # Gradle files
 .gradle/
+.kotlin/
 build/
+**/build/
+!src/**/build/
 
 # Local configuration file (sdk path, etc)
 local.properties
@@ -14,6 +17,17 @@ captures/
 .cxx/
 *.apk
 output.json
+
+# Xcode project files and folders
+xcuserdata
+.DS_Store
+.externalNativeBuild
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcodeproj/project.xcworkspace/
+!*.xcworkspace/contents.xcworkspacedata
+**/xcshareddata/WorkspaceSettings.xcsettings
 
 # IntelliJ
 *.iml
