@@ -9,16 +9,16 @@
 
 A multiplatform solution to use Python with Kotlin interoperably.
 
-Thank you to many contributors who develop dependent packages for this python-kotlin library production.
+Thanks to many contributors who develop dependent packages for this python-kotlin library production.
 
 
 #### Supporting multiplatforms:
 
-- Android (arm64, arm32, x86, x86_64) by [Kivy Android ToolChain](https://github.com/thisisthepy/toolchain-android)
-- iOS (arm64) by [Kivy ios Toolchain](https://github.com/thisisthepy/toolchain-ios)
-- masOS (universal) by [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
-- Linux (x86_64) by [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
-- Windows (x86_64) by [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
+- Android (arm64, arm32, x86, x86_64) with [Kivy Android ToolChain](https://github.com/thisisthepy/toolchain-android)
+- iOS (arm64) with [Kivy ios Toolchain](https://github.com/thisisthepy/toolchain-ios)
+- masOS (universal) with [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
+- Linux (x86_64) with [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
+- Windows (x86_64) with [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
 - WASM - Not yet supported.
 
 ** Since Xcode only runs on macOS, you need macOS to build this repo for iOS.
@@ -34,22 +34,25 @@ ___
 
 ## Build Manually
 
-### (1) Clone this repo
+#### (1) Clone this repo
 
 - RC version
 
-    $ git clone https://github.com/thisisthepy/python-multiplatform-mobile PythonMultiplatform
+
+    git clone https://github.com/thisisthepy/python-multiplatform-mobile PythonMultiplatform
 
 - dev version
 
-    $ git clone https://github.com/thisisthepy/python-multiplatform-mobile@develop PythonMultiplatform
 
-- release version
+    git clone https://github.com/thisisthepy/python-multiplatform-mobile@develop PythonMultiplatform
 
-    $ git clone https://github.com/thisisthepy/python-multiplatform-mobile@python3.13 PythonMultiplatform
+- specific release version
 
 
-### (2) Build gradle project
+    git clone https://github.com/thisisthepy/python-multiplatform-mobile@python3.13 PythonMultiplatform
+
+
+#### (2) Build gradle project
 
 This is a Kotlin Multiplatform project targeting Android, iOS, Web, Desktop.
 
@@ -78,17 +81,33 @@ You can open the web application by running the `:composeApp:wasmJsBrowserDevelo
 
 ## Use Pre-Built Package
 
-### (1) Maven Repo (Release only)
+#### (1) Maven Repo (Release only)
 
 In your project build.gradle.kts
 
-    implementation("org.thisisthepy.python:python-multiplatform:0.0.1")
+    implementation("io.github.thisisthepy:python-multiplatform:0.0.1")
 
-### (2) Jitpack (for Pre-release)
+#### (2) Jitpack (for Pre-release)
 
 In your project settings.gradle.kts
 
-    jitpack.io
+    pluginManagement {
+        repositories {
+            google {
+                mavenContent {
+                    includeGroupAndSubgroups("androidx")
+                    includeGroupAndSubgroups("com.android")
+                    includeGroupAndSubgroups("com.google")
+                }
+            }
+            mavenCentral()
+            gradlePluginPortal()
+    
+            maven {
+                setUrl("https://jitpack.io")  // Add this line!
+            }
+        }
+    }
 
 
 In your project build.gradle.kts

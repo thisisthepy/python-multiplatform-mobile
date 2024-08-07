@@ -1,6 +1,4 @@
-rootProject.name = "PythonMultiplatform"
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
-
 pluginManagement {
     repositories {
         google {
@@ -12,6 +10,10 @@ pluginManagement {
         }
         mavenCentral()
         gradlePluginPortal()
+
+        maven {
+            setUrl("https://jitpack.io")
+        }
     }
 }
 
@@ -28,5 +30,7 @@ dependencyResolutionManagement {
     }
 }
 
-//include(":python-multiplatform")
+rootProject.name = "PythonMultiplatform"
+
+include(":python-multiplatform")
 include(":demo")
