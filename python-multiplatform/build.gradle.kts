@@ -1,11 +1,18 @@
+import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.konan.target.Family
+
 
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
+    alias(libs.plugins.android.library)
     //id("org.jetbrains.dokka")
     id("maven-publish")
     id("signing")
 }
+
+version = "$version-ALPHA01"
+
 
 fun generateCinteropDefinition(defPath: String, defTemplate: String, includePath: String): File {
     val defFile = project.file(defPath)
@@ -16,8 +23,29 @@ fun generateCinteropDefinition(defPath: String, defTemplate: String, includePath
     return defFile
 }
 
-@OptIn(org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class)
 kotlin {
+    /** Uncomment this block to enable WebAssembly support (currently not supported by Python Multiplatform)
+    @OptIn(ExperimentalWasmDsl::class)
+    wasmJs {
+        moduleName = "sample"
+        browser {
+            val rootDirPath = project.rootDir.path
+            val projectDirPath = project.projectDir.path
+            commonWebpackConfig {
+                outputFileName = "demo.js"
+                devServer = (devServer ?: KotlinWebpackConfig.DevServer()).apply {
+                    static = (static ?: mutableListOf()).apply {
+                        // Serve sources to debug inside browser
+                        add(rootDirPath)
+                        add(projectDirPath)
+                    }
+                }
+            }
+        }
+        binaries.executable()
+    }
+     */
+
     val versions = version.toString().split('.')
     val pythonVersion = "${versions[0]}.${versions[1]}"
 
@@ -40,45 +68,34 @@ kotlin {
 
     val pythonDarwinDefFile = generateCinteropDefinition(pythonDarwinDef, template, darwinIncludes)
     val pythonMingwDefFile = generateCinteropDefinition(pythonMingwDef, template, mingwIncludes)
-
-    targetHierarchy.default()
-
-    js(IR) {
-        browser()
+    
+    androidTarget {
+        @OptIn(ExperimentalKotlinGradlePluginApi::class)
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+        }
     }
-
-    ios()
-
-//    androidTarget {
-//        compilations.all {
-//            kotlinOptions {
-//                jvmTarget = JavaVersion.VERSION_1_8.toString()
-//            }
-//            publishLibraryVariants("release", "debug")
-//            //publishLibraryVariantsGroupedByFlavor = true
-//        }
-//    }
-//
-//    jvm("desktop") {
-//        compilations.all {
-//            kotlinOptions.jvmTarget = JavaVersion.VERSION_17.toString()
-//        }
-//    }
-
+    
+    jvm("desktop")
+    
     listOf(
         iosX64(),
         iosArm64(),
         iosSimulatorArm64(),
-        macosX64(),
-        macosArm64(),
-        mingwX64(),
+        //macosX64(),
+        //macosArm64(),
+        //mingwX64(),
         //linuxX64(),
         //linuxArm64()
     ).forEach { nativeTarget ->
         nativeTarget.apply {
             val main by compilations.getting {
-                kotlinOptions {
-                    freeCompilerArgs = when(konanTarget.family) {
+                val python by cinterops.creating {
+                    // Supported platforms
+                    // https://github.com/JetBrains/intellij-community/blob/master/plugins/kotlin/native/src/org/jetbrains/kotlin/ide/konan/NativeDefinitions.flex
+                    defFile(if (konanTarget.family == Family.MINGW) pythonMingwDefFile else pythonDarwinDefFile)
+                    packageName("python.native.ffi")
+                    compilerOpts(when(konanTarget.family) {
                         Family.MINGW -> listOf(
                             "-include-binary", "$mingwDir/python3/lib/libpython3.11.dll.a"
                         )
@@ -95,66 +112,43 @@ kotlin {
                             "-include-binary", "$darwinDir/hostopenssl/lib/libssl.a",
                         )
                         else -> listOf()
-                    }
-                }
-                val python by cinterops.creating {
-                    // Supported platforms
-                    // https://github.com/JetBrains/intellij-community/blob/master/plugins/kotlin/native/src/org/jetbrains/kotlin/ide/konan/NativeDefinitions.flex
-                    defFile(if (konanTarget.family == Family.MINGW) pythonMingwDefFile else pythonDarwinDefFile)
-                    packageName("python.native.ffi")
+                    })
                 }
             }
-            binaries {
-//                staticLib {
-//                    binaryOptions["memoryModel"] = "experimental"
-//                    freeCompilerArgs += listOf("-Xgc=cms")
-//                }
-                if (konanTarget.family != Family.MINGW) {
-                    framework {
-                        baseName = "python"
-                        isStatic = true
-                    }
+            binaries.framework {
+                if (konanTarget.family == Family.IOS) {
+                    baseName = "python"
+                    isStatic = true
                 }
             }
         }
     }
-
+    
     sourceSets {
-        withSourcesJar()
+        val desktopMain by getting
+    }
+}
 
-        val commonMain by getting {
-            dependencies {
-                //implementation(libs.stately.concurrent.collections)
-            }
+android {
+    namespace = "org.thisisthepy.python.multiplatform"
+    compileSdk = libs.versions.android.compileSdk.get().toInt()
+
+    defaultConfig {
+        minSdk = libs.versions.android.minSdk.get().toInt()
+    }
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
-        val commonTest by getting {
-            dependencies {
-                implementation(libs.kotlin.test)
-            }
+    }
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = false
         }
-        val jsMain by getting
-        val mingwX64Main by getting
-        //val linuxX64Main by getting
-        //val linuxArm64Main by getting
-        val macosX64Main by getting
-        val macosArm64Main by getting
-        val iosX64Main by getting
-        val iosArm64Main by getting
-        val iosSimulatorArm64Main by getting
-        val iosMain by getting {
-            iosX64Main.dependsOn(this)
-            iosArm64Main.dependsOn(this)
-            iosSimulatorArm64Main.dependsOn(this)
-        }
-        val nativeMain by getting {
-            dependsOn(commonMain)
-            macosX64Main.dependsOn(this)
-            macosArm64Main.dependsOn(this)
-            mingwX64Main.dependsOn(this)
-            //linuxX64Main.dependsOn(this)
-            //linuxArm64Main.dependsOn(this)
-            iosMain.dependsOn(this)
-        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 }
 
@@ -167,7 +161,7 @@ publishing {
 
         pom {
             name.set("python-multiplatform")
-            description.set("Python Multiplatform Build Tool with Kotlin Multiplatform Mobile")
+            description.set("A multiplatform solution to use Python with Kotlin interoperably.")
             url.set("https://github.com/thisisthepy/python-multiplatform-mobile")
             licenses {
                 license {

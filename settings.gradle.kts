@@ -1,4 +1,5 @@
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
+
 pluginManagement {
     repositories {
         google {
@@ -30,7 +31,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PythonMultiplatform"
+rootProject.name = "PythonMultiplatformMobile"
 
+include(":sample")
 include(":python-multiplatform")
-include(":demo")

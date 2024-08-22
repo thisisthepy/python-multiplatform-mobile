@@ -39,17 +39,17 @@ ___
 - RC version
 
 
-    git clone https://github.com/thisisthepy/python-multiplatform-mobile PythonMultiplatform
+    git clone https://github.com/thisisthepy/python-multiplatform-mobile PythonMultiplatformMobile
 
 - dev version
 
 
-    git clone https://github.com/thisisthepy/python-multiplatform-mobile@develop PythonMultiplatform
+    git clone https://github.com/thisisthepy/python-multiplatform-mobile@develop PythonMultiplatformMobile
 
 - specific release version
 
 
-    git clone https://github.com/thisisthepy/python-multiplatform-mobile@python3.13 PythonMultiplatform
+    git clone https://github.com/thisisthepy/python-multiplatform-mobile@python3.13 PythonMultiplatformMobile
 
 
 #### (2) Build gradle project
