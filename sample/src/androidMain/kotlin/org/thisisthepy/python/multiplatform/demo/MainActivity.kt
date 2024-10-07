@@ -19,7 +19,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        Python3.finalize()
+        //Python3.finalize()
         super.onDestroy()
     }
 }

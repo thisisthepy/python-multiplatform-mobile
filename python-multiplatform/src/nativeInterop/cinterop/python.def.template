@@ -24,14 +24,3 @@ linkerOpts.ios_arm64 = -L<_DARWIN_>/lib/iphoneos -llibpython<_PY_VER_>.a
 linkerOpts.osx = -L<_DARWIN_>/hostpython3/lib -L<_DARWIN_>/hostopenssl/lib -L<_DARWIN_>/hostpython3/lib/python<_PY_VER_>/config-<_PY_VER_>-darwin -llibpython<_PY_VER_>.a
 #linkerOpts.linux = -L<_LINUX_>/python3/lib -L<_LINUX_>/python3/lib/python<_PY_VER_>/config-<_PY_VER_>-x86_64-linux-gnu -llibpython<_PY_VER_>.a
 linkerOpts.mingw_x64 = -DPY_SSIZE_T_CLEAN -L<_MINGW_>/python3/lib -llibpython<_PY_VER_>.dll.a
-
----
-
-struct KtPyObject {
-    PyObject base;
-    void* ktObject;
-};
-
-char * PyUnicode_AsString(PyObject* obj) {
-    return _PyUnicode_AsString(obj);
-}

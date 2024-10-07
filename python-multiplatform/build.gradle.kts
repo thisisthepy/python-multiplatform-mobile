@@ -1,7 +1,10 @@
 import com.codingfeline.buildkonfig.compiler.FieldSpec
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType
 import org.jetbrains.kotlin.konan.target.Family
+import org.jetbrains.kotlin.konan.target.KonanTarget.*
+import org.jetbrains.kotlin.konan.target.linker
 
 
 plugins {
@@ -89,6 +92,43 @@ kotlin {
             jvmTarget.set(JvmTarget.JVM_17)
         }
     }
+    listOf(androidNativeArm64(), androidNativeX64()).forEach {
+        it.compilations.getByName("main").cinterops.create("python") {
+            headers(
+                "src/nativeInterop/cinterop/include/Python.h",
+                "src/nativeInterop/cinterop/include/object.h",
+                "src/nativeInterop/cinterop/include/pythonrun.h",
+                "src/nativeInterop/cinterop/include/cpython/initconfig.h"
+            )
+            includeDirs(
+                "src/nativeInterop/cinterop/include/",
+                "src/nativeInterop/cinterop/include/cpython/"
+            )
+            packageName("python.native.ffi")
+        }
+        it.binaries.sharedLib("multiplatform_python$pythonVersion") {
+            val abi = when(target.konanTarget) {
+                ANDROID_ARM64 -> "arm64-v8a"
+                ANDROID_X64 -> "x86_64"
+                else -> throw RuntimeException("Unsupported ABI: ${target.konanTarget}")
+            }
+            val type = if (buildType == NativeBuildType.DEBUG) "/debug" else ""
+            val libPath = "$projectDir/src/androidMain/jniLibs/$abi$type"
+            linkerOpts("-L$libPath", "-lpython$pythonVersion")
+
+            linkTaskProvider.configure {
+                copy {
+                    from(outputFile)
+                    into(file(libPath))
+                }
+            }
+
+            afterEvaluate {
+                val preBuild by tasks.getting
+                preBuild.dependsOn(linkTaskProvider)
+            }
+        }
+    }
 
     jvm("desktop") {
         @OptIn(ExperimentalKotlinGradlePluginApi::class)
@@ -101,6 +141,8 @@ kotlin {
         iosX64(),
         iosArm64(),
         iosSimulatorArm64(),
+        //androidNativeArm64(),
+        //androidNativeX64(),
         //macosX64(),
         //macosArm64(),
         //mingwX64(),
@@ -112,8 +154,10 @@ kotlin {
                 val python by cinterops.creating {
                     // Supported platforms
                     // https://github.com/JetBrains/intellij-community/blob/master/plugins/kotlin/native/src/org/jetbrains/kotlin/ide/konan/NativeDefinitions.flex
-                    defFile(if (konanTarget.family == Family.MINGW) pythonMingwDefFile else pythonDarwinDefFile)
+                    //defFile(if (konanTarget.family == Family.MINGW) pythonMingwDefFile else pythonDarwinDefFile)
+                    defFile("src/nativeInterop/cinterop/python$pythonVersion-${konanTarget.family}.def")
                     packageName("python.native.ffi")
+                    /*
                     compilerOpts(when(konanTarget.family) {
                         Family.MINGW -> listOf(
                             "-include-binary", "$mingwDir/python3/lib/libpython3.11.dll.a"
@@ -130,14 +174,39 @@ kotlin {
                             "-include-binary", "$darwinDir/hostopenssl/lib/libcrypto.a",
                             "-include-binary", "$darwinDir/hostopenssl/lib/libssl.a",
                         )
+                        Family.ANDROID -> listOf(
+                            "-include-binary", "$darwinDir/hostpython/lib/libpython3.11.a",
+                        )
                         else -> listOf()
-                    })
+                    })*/
                 }
             }
-            binaries.framework {
+            binaries {
                 if (konanTarget.family == Family.IOS) {
-                    baseName = "python"
-                    isStatic = true
+                    framework {
+                        baseName = "python"
+                        isStatic = true
+                    }
+                } else if (konanTarget.family == Family.ANDROID) {
+                    sharedLib("multiplatform_python$pythonVersion") {
+                        linkTaskProvider.configure {
+                            copy {
+                                from(outputFile)
+                                //val typeName = if (buildType == NativeBuildType.DEBUG) "Debug" else "Release"
+                                val abi = when(target) {
+                                    ANDROID_ARM64.toString() -> "arm64-v8a"
+                                    ANDROID_X64.toString() -> "x86_64"
+                                    else -> throw RuntimeException("Unsupported ABI: $target")
+                                }
+                                into(file("$projectDir/src/androidMain/jniLibs/$abi"))
+                            }
+                        }
+
+                        afterEvaluate {
+                            val preBuild by tasks.getting
+                            preBuild.dependsOn(linkTaskProvider)
+                        }
+                    }
                 }
             }
         }
@@ -166,6 +235,15 @@ kotlin {
             val iosMain by getting
             iosMain.dependsOn(nativeMain)
         }
+
+        val artMain by creating {
+            kotlin.srcDir("src/artMain/kotlin")
+        }
+        val androidNativeX64Main by getting
+        val androidNativeArm64Main by getting
+        artMain.dependsOn(nativeMain)
+        androidNativeX64Main.dependsOn(artMain)
+        androidNativeArm64Main.dependsOn(artMain)
     }
 }
 
@@ -173,10 +251,12 @@ android {
     namespace = "python.multiplatform"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
+    sourceSets["main"].jniLibs.srcDir("src/androidMain/jniLibs")
+
     defaultConfig {
         minSdk = libs.versions.android.minSdk.get().toInt()
         ndk {
-            abiFilters.addAll(listOf("arm64-v8a"/*, "x86_64", "armeabi-v7a", "x86"*/))
+            abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
         }
     }
     packaging {

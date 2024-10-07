@@ -1,20 +1,22 @@
 package python.multiplatform.ffi
 
-import java.lang.invoke.MethodHandle
-import java.lang.invoke.MethodHandles
-import java.lang.invoke.MethodType
 
-
-actual class MethodLookup actual constructor(libLoader: () -> Any) {
-    private val lookup: MethodHandles.Lookup
+actual object Python3 {
+    actual var isInitialized: Boolean = false
+        get() {
+            field = internalIsInitialized()
+            return field
+        }
+        private set
 
     init {
-        libLoader()
-        lookup = MethodHandles.lookup()
+        loadLibPython()
+        sayHello()  // TODO: Remove this line after testing
     }
 
-    actual fun find(symbol: String, returnType: Class<*>, vararg params: Class<*>): MethodHandle {
-        val allocateType = MethodType.methodType(returnType, params)
-        return lookup.findStatic(this::class.java, symbol, allocateType)
-    }
+    external fun sayHello()
+
+    actual external fun initialize()
+    private external fun internalIsInitialized(): Boolean
+    actual external fun finalize()
 }
