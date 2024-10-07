@@ -1,3 +1,4 @@
+import org.gradle.internal.classpath.Instrumented
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
@@ -41,8 +42,13 @@ kotlin {
             jvmTarget.set(JvmTarget.JVM_17)
         }
     }
-    
-    jvm("desktop")
+
+    jvm("desktop") {
+        @OptIn(ExperimentalKotlinGradlePluginApi::class)
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+        }
+    }
     
     listOf(
         iosX64(),
@@ -54,7 +60,6 @@ kotlin {
             isStatic = true
         }
     }
-    
     sourceSets {
         val desktopMain by getting
         
@@ -67,7 +72,7 @@ kotlin {
 
             implementation(compose.runtime)
             implementation(compose.foundation)
-            implementation(compose.material)
+            implementation(compose.material3)
             implementation(compose.ui)
             implementation(compose.components.resources)
             implementation(compose.components.uiToolingPreview)
@@ -91,6 +96,9 @@ android {
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = 1
         versionName = "1.0"
+        ndk {
+            abiFilters.addAll(listOf("arm64-v8a"/*, "x86_64", "armeabi-v7a", "x86"*/))
+        }
     }
     packaging {
         resources {
@@ -122,4 +130,26 @@ compose.desktop {
             packageVersion = "1.0.0"
         }
     }
+}
+
+tasks.withType<JavaCompile>().configureEach {  // Compiler Settings
+    options.compilerArgs.addAll(listOf("--enable-preview", "--add-modules=jdk.incubator.foreign"))
+}
+
+tasks.withType<JavaExec>().configureEach {  // JVM Execution Settings
+    jvmArgs(
+        "--enable-preview",
+        "--add-modules=jdk.incubator.foreign",
+        "--enable-native-access=ALL-UNNAMED",
+        "-Djava.library.path=C:\\Users\\BREW\\Desktop\\Thisisthepy\\PythonMultiplatformMobile\\python-multiplatform\\build\\python\\standalone\\3.13.0\\windows\\amd64_msvc\\install"
+    )
+}
+
+tasks.withType<Test>().configureEach {  // Test Settings
+    jvmArgs(
+        "--enable-preview",
+        "--add-modules=jdk.incubator.foreign",
+        "--enable-native-access=ALL-UNNAMED",
+        "-Djava.library.path=C:\\Users\\BREW\\Desktop\\Thisisthepy\\PythonMultiplatformMobile\\python-multiplatform\\build\\python\\standalone\\3.13.0\\windows\\amd64_msvc\\install"
+    )
 }

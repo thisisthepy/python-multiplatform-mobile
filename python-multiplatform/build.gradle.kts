@@ -1,3 +1,4 @@
+import com.codingfeline.buildkonfig.compiler.FieldSpec
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.konan.target.Family
@@ -6,12 +7,25 @@ import org.jetbrains.kotlin.konan.target.Family
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.library)
+    id("com.codingfeline.buildkonfig").version("0.15.2")
     //id("org.jetbrains.dokka")
     id("maven-publish")
     id("signing")
 }
 
-version = "$version-ALPHA01"
+val pythonVersion = project.rootProject.version.toString()
+val libraryVersion = "$pythonVersion-alpha01"
+version = libraryVersion
+
+buildkonfig {
+    packageName = "${project.name.lowercase().replace("-", ".")}"
+    objectName = "BuildConfig"
+
+    defaultConfigs {
+        buildConfigField(FieldSpec.Type.STRING, "pythonVersion", pythonVersion)
+        buildConfigField(FieldSpec.Type.STRING, "libraryVersion", libraryVersion)
+    }
+}
 
 
 fun generateCinteropDefinition(defPath: String, defTemplate: String, includePath: String): File {
@@ -75,8 +89,13 @@ kotlin {
             jvmTarget.set(JvmTarget.JVM_17)
         }
     }
-    
-    jvm("desktop")
+
+    jvm("desktop") {
+        @OptIn(ExperimentalKotlinGradlePluginApi::class)
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+        }
+    }
     
     listOf(
         iosX64(),
@@ -125,16 +144,40 @@ kotlin {
     }
     
     sourceSets {
+        val jvmMain by creating
+        val commonMain by getting
         val desktopMain by getting
+        val androidMain by getting
+        jvmMain.dependsOn(commonMain)
+        desktopMain.dependsOn(jvmMain)
+        androidMain.dependsOn(jvmMain)
+
+        val nativeMain by creating
+        nativeMain.dependsOn(commonMain)
+        try {  // when not on macOS
+            val iosMain by creating  // This will fail on macOS
+            val iosX64Main by getting
+            val iosArm64Main by getting
+            val iosSimulatorArm64Main by getting
+            iosX64Main.dependsOn(iosMain)
+            iosArm64Main.dependsOn(iosMain)
+            iosSimulatorArm64Main.dependsOn(iosMain)
+        } finally {
+            val iosMain by getting
+            iosMain.dependsOn(nativeMain)
+        }
     }
 }
 
 android {
-    namespace = "org.thisisthepy.python.multiplatform"
+    namespace = "python.multiplatform"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     defaultConfig {
         minSdk = libs.versions.android.minSdk.get().toInt()
+        ndk {
+            abiFilters.addAll(listOf("arm64-v8a"/*, "x86_64", "armeabi-v7a", "x86"*/))
+        }
     }
     packaging {
         resources {
@@ -193,3 +236,23 @@ publishing {
 //    )
 //    sign(publishing.publications)
 //}
+
+//tasks {
+//    // TODO: Implement platform-specific tasks
+//    register<Copy>("copyLibs") {
+//        from("lib")
+//        into("${layout.buildDirectory}/libs/lib")
+//    }
+//
+//    withType<Jar> {
+//        dependsOn("copyLibs")
+//        from("${layout.buildDirectory}/libs/lib") {
+//            into("lib")
+//        }
+//    }
+//}
+
+fun downloadPythonBuilds() {
+    // TODO: Automatically download stand-alone Python builds
+    val downloadDir = "$projectDir/build/python/standalone/$pythonVersion"
+}

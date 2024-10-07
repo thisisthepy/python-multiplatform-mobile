@@ -10,5 +10,5 @@ plugins {
 
 allprojects {
     group = "io.github.thisisthepy"
-    version = "3.11.6.0"
+    version = "3.13.0"  // Official Python release version
 }
