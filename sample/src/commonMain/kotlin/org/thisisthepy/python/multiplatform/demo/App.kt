@@ -20,7 +20,7 @@ import python.multiplatform.currentPlatform
 
 @Composable
 @Preview
-fun App() {
+fun App(content: @Composable () -> Unit = {}) {
     MaterialTheme {
         var showContent by remember { mutableStateOf(false) }
         Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -32,6 +32,7 @@ fun App() {
                 Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                     Image(painterResource(Res.drawable.compose_multiplatform), null)
                     Text("$greeting")
+                    content()
                 }
             }
         }

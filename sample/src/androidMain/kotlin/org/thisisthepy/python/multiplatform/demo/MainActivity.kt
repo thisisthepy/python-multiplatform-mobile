@@ -11,15 +11,23 @@ import python.multiplatform.ffi.Python3
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Python3.initialize()
 
         setContent {
-            App()
+            App {
+                runOnUiThread {
+                    initPython()
+                }
+            }
         }
     }
 
+    @Synchronized
+    fun initPython() {
+        Python3.initialize()
+    }
+
     override fun onDestroy() {
-        //Python3.finalize()
+        Python3.finalize()
         super.onDestroy()
     }
 }
