@@ -1,3 +1,0 @@
-#!/bin/bash
-echo Can\'t run iphoneos binary
-exit 1

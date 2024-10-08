@@ -1,5 +1,0 @@
-package = python.native.ffi
-language.ios = Objective-C
-
-compilerOpts.ios = -framework Python
-linkerOpts.ios = -Objc -framework Python

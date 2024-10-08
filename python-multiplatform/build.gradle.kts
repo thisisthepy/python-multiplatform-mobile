@@ -160,9 +160,11 @@ kotlin {
 
             compilations.getByName("main").cinterops.create("python") {
                 headers("$includePath/Python.h")
+                packageName("python.native.ffi")
                 if (konanTarget.family == Family.IOS) {
                     compilerOpts.addAll(listOf(
-                        "-F$projectDir/$targetLibPath", "-I$projectDir/$includePath"
+                        "-F$projectDir/$targetLibPath", "-I$projectDir/$includePath",
+                        "-framework", "Python"
                     ))
                 } else {
                     includeDirs(includePath)
@@ -188,7 +190,9 @@ kotlin {
                     }
                 } else if (konanTarget.family == Family.IOS) {
                     all {
-                        linkerOpts.addAll(listOf("-F$projectDir/$targetLibPath"))
+                        linkerOpts.addAll(listOf(
+                            "-F$projectDir/$targetLibPath", "-framework", "Python", "-Objc"
+                        ))
                     }
                     framework {
                         baseName = "PythonMultiplatform"

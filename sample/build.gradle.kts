@@ -57,6 +57,8 @@ kotlin {
     ).forEach { iosTarget ->
         iosTarget.binaries.framework {
             baseName = "Demo"
+
+            //export(projects.pythonMultiplatform)
         }
     }
     sourceSets {

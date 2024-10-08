@@ -1,3 +1,0 @@
-#!/bin/bash
-echo Can\'t run iphonesimulator binary
-exit 1
