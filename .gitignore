@@ -45,6 +45,3 @@ google-services.json
 
 # Android Profiling
 *.hprof
-
-prebuilt/
-binary/

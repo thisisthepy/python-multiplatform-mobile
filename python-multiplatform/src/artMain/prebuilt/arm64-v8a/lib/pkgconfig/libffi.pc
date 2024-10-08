@@ -1,0 +1,11 @@
+prefix=/home/runner/work/cpython-android-source-deps/cpython-android-source-deps/libffi/build/3.4.4/aarch64-linux-android/prefix
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+toolexeclibdir=${libdir}
+includedir=${prefix}/include
+
+Name: libffi
+Description: Library supporting Foreign Function Interfaces
+Version: 3.4.4
+Libs: -L${toolexeclibdir} -lffi
+Cflags: -I${includedir}
