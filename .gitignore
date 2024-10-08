@@ -47,5 +47,4 @@ google-services.json
 *.hprof
 
 prebuilt/
-Python.xcframework/
 binary/
