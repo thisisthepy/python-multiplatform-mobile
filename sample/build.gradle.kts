@@ -56,7 +56,7 @@ kotlin {
         iosSimulatorArm64()
     ).forEach { iosTarget ->
         iosTarget.binaries.framework {
-            baseName = "demo"
+            baseName = "Demo"
             isStatic = true
         }
     }
@@ -97,7 +97,7 @@ android {
         versionCode = 1
         versionName = "1.0"
         ndk {
-            abiFilters.addAll(listOf("arm64-v8a"/*, "x86_64", "armeabi-v7a", "x86"*/))
+            abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
         }
     }
     packaging {
@@ -140,8 +140,7 @@ tasks.withType<JavaExec>().configureEach {  // JVM Execution Settings
     jvmArgs(
         "--enable-preview",
         "--add-modules=jdk.incubator.foreign",
-        "--enable-native-access=ALL-UNNAMED",
-        "-Djava.library.path=C:\\Users\\BREW\\Desktop\\Thisisthepy\\PythonMultiplatformMobile\\python-multiplatform\\build\\python\\standalone\\3.13.0\\windows\\amd64_msvc\\install"
+        "--enable-native-access=ALL-UNNAMED"
     )
 }
 
@@ -149,7 +148,6 @@ tasks.withType<Test>().configureEach {  // Test Settings
     jvmArgs(
         "--enable-preview",
         "--add-modules=jdk.incubator.foreign",
-        "--enable-native-access=ALL-UNNAMED",
-        "-Djava.library.path=C:\\Users\\BREW\\Desktop\\Thisisthepy\\PythonMultiplatformMobile\\python-multiplatform\\build\\python\\standalone\\3.13.0\\windows\\amd64_msvc\\install"
+        "--enable-native-access=ALL-UNNAMED"
     )
 }

@@ -4,7 +4,6 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType
 import org.jetbrains.kotlin.konan.target.Family
 import org.jetbrains.kotlin.konan.target.KonanTarget.*
-import org.jetbrains.kotlin.konan.target.linker
 
 
 plugins {
@@ -15,6 +14,7 @@ plugins {
     id("maven-publish")
     id("signing")
 }
+
 
 val pythonVersion = project.rootProject.version.toString()
 val libraryVersion = "$pythonVersion-alpha01"
@@ -30,15 +30,6 @@ buildkonfig {
     }
 }
 
-
-fun generateCinteropDefinition(defPath: String, defTemplate: String, includePath: String): File {
-    val defFile = project.file(defPath)
-    if (!defFile.exists()) {
-        defFile.createNewFile()
-    }
-    defFile.writeText(defTemplate.replace("<_INCL_>", includePath))
-    return defFile
-}
 
 kotlin {
     /** Uncomment this block to enable WebAssembly support (currently not supported by Python Multiplatform)
@@ -64,69 +55,58 @@ kotlin {
      */
 
     val versions = version.toString().split('.')
-    val pythonVersion = "${versions[0]}.${versions[1]}"
+    val libVersion = "${versions[0]}.${versions[1]}"
 
-    val distDir = "$projectDir/dist/toolchain"
-    val darwinDir = "$distDir/darwin"
-    val mingwDir = "$distDir/mingw"
-    val linuxDir = "$distDir/linux"
-
-    val defTemplate = "src/nativeInterop/cinterop/python.def.template"
-    val template = String(project.file(defTemplate).readBytes())
-        .replace("<_PY_VER_>", pythonVersion)
-        .replace("<_DARWIN_>", darwinDir)
-        .replace("<_MINGW_>", mingwDir)
-        .replace("<_LINUX_>", linuxDir)
-
-    val pythonDarwinDef = "src/nativeInterop/cinterop/python$pythonVersion-darwin.def"
-    val darwinIncludes = "$darwinDir/root/python3/include/python$pythonVersion"
-    val pythonMingwDef = "src/nativeInterop/cinterop/python$pythonVersion-mingw.def"
-    val mingwIncludes = "$mingwDir/python3/include/python$pythonVersion"
-
-    val pythonDarwinDefFile = generateCinteropDefinition(pythonDarwinDef, template, darwinIncludes)
-    val pythonMingwDefFile = generateCinteropDefinition(pythonMingwDef, template, mingwIncludes)
-    
     androidTarget {
         @OptIn(ExperimentalKotlinGradlePluginApi::class)
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_17)
         }
-    }
-    listOf(androidNativeArm64(), androidNativeX64()).forEach {
-        it.compilations.getByName("main").cinterops.create("python") {
-            headers(
-                "src/nativeInterop/cinterop/include/Python.h",
-                "src/nativeInterop/cinterop/include/object.h",
-                "src/nativeInterop/cinterop/include/pythonrun.h",
-                "src/nativeInterop/cinterop/include/cpython/initconfig.h"
-            )
-            includeDirs(
-                "src/nativeInterop/cinterop/include/",
-                "src/nativeInterop/cinterop/include/cpython/"
-            )
-            packageName("python.native.ffi")
-        }
-        it.binaries.sharedLib("multiplatform_python$pythonVersion") {
-            val abi = when(target.konanTarget) {
-                ANDROID_ARM64 -> "arm64-v8a"
-                ANDROID_X64 -> "x86_64"
-                else -> throw RuntimeException("Unsupported ABI: ${target.konanTarget}")
+        afterEvaluate {
+            val copyAndroidPythonBinaries by tasks.creating(Copy::class) {
+                dependsOn(
+                    tasks.named("linkAndroidNativeArm64"),
+                    tasks.named("linkAndroidNativeX64")
+                )
+                into("$projectDir/build/android/jniLibs/")
+                from("src/artMain/prebuilt/arm64-v8a/lib") {
+                    include("libpython*.*.so")
+                    include("lib*_python.so")
+                    into("arm64-v8a")
+                }
+                from("src/artMain/prebuilt/x86_64/lib") {
+                    include("libpython*.*.so")
+                    include("lib*_python.so")
+                    into("x86_64")
+                }
             }
-            val type = if (buildType == NativeBuildType.DEBUG) "/debug" else ""
-            val libPath = "$projectDir/src/androidMain/jniLibs/$abi$type"
-            linkerOpts("-L$libPath", "-lpython$pythonVersion")
-
-            linkTaskProvider.configure {
-                copy {
-                    from(outputFile)
-                    into(file(libPath))
+            val copyAndroidPythonAssets by tasks.creating(Copy::class) {
+                into("$projectDir/build/android/assets/")
+                from("src/artMain/prebuilt/arm64-v8a/include") {
+                    into("arm64-v8a/include")
+                }
+                from("src/artMain/prebuilt/x86_64/include") {
+                    into("x86_64/include")
+                }
+                from("src/artMain/prebuilt/arm64-v8a/lib/python$libVersion") {
+                    exclude("config-$libVersion-aarch64-linux-android/")
+                    into("arm64-v8a/lib/python$libVersion")
+                }
+                from("src/artMain/prebuilt/x86_64/lib/python$libVersion") {
+                    exclude("config-$libVersion-x86_64-linux-android/")
+                    into("x86_64/lib/python$libVersion")
                 }
             }
 
-            afterEvaluate {
-                val preBuild by tasks.getting
-                preBuild.dependsOn(linkTaskProvider)
+            tasks.whenTaskAdded {
+                if (name.startsWith("merge") && name.endsWith("JniLibFolders")) {
+                    dependsOn(copyAndroidPythonBinaries)
+                }
+                if (name.startsWith("package") && name.endsWith("Assets")) {
+                    dependsOn(copyAndroidPythonAssets)
+                }
             }
+
         }
     }
 
@@ -135,70 +115,101 @@ kotlin {
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_17)
         }
+
+        tasks.withType<AbstractCopyTask> {
+            duplicatesStrategy = DuplicatesStrategy.WARN
+        }
+        tasks.withType<ProcessResources> {
+            duplicatesStrategy = DuplicatesStrategy.WARN
+        }
+        tasks.withType<Jar> {
+            duplicatesStrategy = DuplicatesStrategy.WARN
+            from("$projectDir/src/desktopMain/LICENSE") {
+                into("META-INF/LICENSE")
+            }
+        }
     }
     
     listOf(
-        iosX64(),
-        iosArm64(),
-        iosSimulatorArm64(),
-        //androidNativeArm64(),
-        //androidNativeX64(),
-        //macosX64(),
-        //macosArm64(),
+        // Supported platforms
+        // https://github.com/JetBrains/intellij-community/blob/master/plugins/kotlin/native/src/org/jetbrains/kotlin/ide/konan/NativeDefinitions.flex
+        iosArm64(), iosSimulatorArm64(), iosX64(),
+        androidNativeArm64(), androidNativeX64(),
+        //macosArm64(), macosX64(),
+        //linuxX64(), linuxArm64()
         //mingwX64(),
-        //linuxX64(),
-        //linuxArm64()
     ).forEach { nativeTarget ->
         nativeTarget.apply {
             val main by compilations.getting {
                 val python by cinterops.creating {
-                    // Supported platforms
-                    // https://github.com/JetBrains/intellij-community/blob/master/plugins/kotlin/native/src/org/jetbrains/kotlin/ide/konan/NativeDefinitions.flex
-                    //defFile(if (konanTarget.family == Family.MINGW) pythonMingwDefFile else pythonDarwinDefFile)
-                    defFile("src/nativeInterop/cinterop/python$pythonVersion-${konanTarget.family}.def")
+                    var baseDir = when(target.konanTarget) {
+                        ANDROID_ARM64 -> "src/artMain/prebuilt/arm64-v8a"
+                        ANDROID_X64 -> "src/artMain/prebuilt/x86_64"
+                        IOS_ARM64 -> "src/iosMain/framework/Python.xcframework/ios-arm64"
+                        IOS_X64 -> "src/iosMain/framework/Python.xcframework/ios-arm64_x86_64-simulator"
+                        IOS_SIMULATOR_ARM64 -> "src/iosMain/framework/Python.xcframework/ios-arm64_x86_64-simulator"
+                        else -> throw RuntimeException("Unsupported ABI: ${target.konanTarget}")
+                    }
+                    if (target.konanTarget.family == Family.IOS) {
+                        compilerOpts("-F$projectDir/$baseDir")
+                        baseDir += "/Python.framework/Headers"
+                    } else {
+                        baseDir += "/include/python$libVersion"
+                    }
+                    headers(
+                        "$baseDir/Python.h", "$baseDir/object.h",
+                        "$baseDir/pythonrun.h", "$baseDir/cpython/initconfig.h"
+                    )
+                    includeDirs("$baseDir/", "$baseDir/cpython/")
                     packageName("python.native.ffi")
-                    /*
-                    compilerOpts(when(konanTarget.family) {
-                        Family.MINGW -> listOf(
-                            "-include-binary", "$mingwDir/python3/lib/libpython3.11.dll.a"
-                        )
-                        Family.IOS -> listOf(
-                            "-include-binary", "$darwinDir/lib/iphoneos/libpython3.11.a",
-                            "-include-binary", "$darwinDir/lib/iphoneos/libcrypto.a",
-                            "-include-binary", "$darwinDir/lib/iphoneos/libffi.a",
-                            "-include-binary", "$darwinDir/lib/iphoneos/libpyobjus.a",
-                            "-include-binary", "$darwinDir/lib/iphoneos/libssl.a"
-                        )
-                        Family.OSX -> listOf(
-                            "-include-binary", "$darwinDir/hostpython/lib/libpython3.11.a",
-                            "-include-binary", "$darwinDir/hostopenssl/lib/libcrypto.a",
-                            "-include-binary", "$darwinDir/hostopenssl/lib/libssl.a",
-                        )
-                        Family.ANDROID -> listOf(
-                            "-include-binary", "$darwinDir/hostpython/lib/libpython3.11.a",
-                        )
-                        else -> listOf()
-                    })*/
                 }
             }
             binaries {
                 if (konanTarget.family == Family.IOS) {
+                    val frameworkPath = "$projectDir/src/iosMain/framework/Python.xcframework" +
+                        when(target.konanTarget) {
+                            IOS_ARM64 -> "ios-arm64"
+                            else -> "ios-arm64_x86_64-simulator"
+                        }
                     framework {
-                        baseName = "python"
-                        isStatic = true
+                        baseName = "PythonMultiplatform"
+                        //isStatic = true
+                        linkerOpts.addAll(listOf("-F$frameworkPath", "-framework", "Python"))
+                        export("$projectDir/src/iosMain/framework/Python.xcframework")
+
+                        isStatic = false
+                        embedBitcode(org.jetbrains.kotlin.gradle.plugin.mpp.BitcodeEmbeddingMode.DISABLE)
+
+                        tasks.register<Copy>("copyPythonXCFramework") {
+                            from("$projectDir/src/iosMain/framework/Python.xcframework")
+                            into("$projectDir/build/xcode-frameworks/Python.xcframework")
+                        }
+
+                        tasks.named("linkReleaseFrameworkIosArm64").configure {
+                            dependsOn("copyPythonXCFramework")
+                        }
+                        tasks.named("linkReleaseFrameworkIosX64").configure {
+                            dependsOn("copyPythonXCFramework")
+                        }
+                        tasks.named("linkReleaseFrameworkIosSimulatorArm64").configure {
+                            dependsOn("copyPythonXCFramework")
+                        }
                     }
                 } else if (konanTarget.family == Family.ANDROID) {
-                    sharedLib("multiplatform_python$pythonVersion") {
+                    sharedLib("multiplatform_python$libVersion") {
+                        val abi = when(target.konanTarget) {
+                            ANDROID_ARM64 -> "arm64-v8a"
+                            ANDROID_X64 -> "x86_64"
+                            else -> throw RuntimeException("Unsupported ABI: ${target.konanTarget}")
+                        }
+                        val type = if (buildType == NativeBuildType.DEBUG) "debug" else "release"
+                        val libPath = "$projectDir/src/artMain/prebuilt/$abi/lib/"
+                        linkerOpts.addAll(listOf("-L$libPath", "-lpython$libVersion"))
+
                         linkTaskProvider.configure {
                             copy {
                                 from(outputFile)
-                                //val typeName = if (buildType == NativeBuildType.DEBUG) "Debug" else "Release"
-                                val abi = when(target) {
-                                    ANDROID_ARM64.toString() -> "arm64-v8a"
-                                    ANDROID_X64.toString() -> "x86_64"
-                                    else -> throw RuntimeException("Unsupported ABI: $target")
-                                }
-                                into(file("$projectDir/src/androidMain/jniLibs/$abi"))
+                                into(file("$projectDir/build/android/$type/jniLibs/$abi/"))
                             }
                         }
 
@@ -215,7 +226,9 @@ kotlin {
     sourceSets {
         val jvmMain by creating
         val commonMain by getting
-        val desktopMain by getting
+        val desktopMain by getting {
+            resources.srcDir("src/desktopMain/resources")
+        }
         val androidMain by getting
         jvmMain.dependsOn(commonMain)
         desktopMain.dependsOn(jvmMain)
@@ -232,7 +245,19 @@ kotlin {
             iosArm64Main.dependsOn(iosMain)
             iosSimulatorArm64Main.dependsOn(iosMain)
         } finally {
-            val iosMain by getting
+            val iosMain by getting {
+//                dependencies {
+//                    implementation {
+//                        artifacts {
+//                            add("default", fileTree(mapOf(
+//                                "dir" to "src/iosMain/framework",
+//                                "include" to listOf("**/*.xcframework")
+//                            )))
+//                        }
+//                    }
+//                }
+
+            }
             iosMain.dependsOn(nativeMain)
         }
 
@@ -251,7 +276,11 @@ android {
     namespace = "python.multiplatform"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
-    sourceSets["main"].jniLibs.srcDir("src/androidMain/jniLibs")
+    sourceSets["main"].assets.srcDirs("src/androidMain/assets", "$projectDir/build/android/assets")
+    sourceSets["debug"].jniLibs.srcDirs("src/androidMain/jniLibs",
+        "$projectDir/build/android/jniLibs", "$projectDir/build/android/debug/jniLibs")
+    sourceSets["release"].jniLibs.srcDirs("src/androidMain/jniLibs",
+        "$projectDir/build/android/jniLibs", "$projectDir/build/android/release/jniLibs")
 
     defaultConfig {
         minSdk = libs.versions.android.minSdk.get().toInt()
@@ -317,22 +346,8 @@ publishing {
 //    sign(publishing.publications)
 //}
 
-//tasks {
-//    // TODO: Implement platform-specific tasks
-//    register<Copy>("copyLibs") {
-//        from("lib")
-//        into("${layout.buildDirectory}/libs/lib")
-//    }
-//
-//    withType<Jar> {
-//        dependsOn("copyLibs")
-//        from("${layout.buildDirectory}/libs/lib") {
-//            into("lib")
-//        }
-//    }
-//}
 
 fun downloadPythonBuilds() {
     // TODO: Automatically download stand-alone Python builds
-    val downloadDir = "$projectDir/build/python/standalone/$pythonVersion"
+    //val downloadDir = "$projectDir/build/python/standalone/$pythonVersion"
 }

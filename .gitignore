@@ -45,3 +45,8 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+prebuilt/
+resources/
+Python.xcframework/
+binary/

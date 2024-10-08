@@ -1,5 +1,7 @@
 package python.multiplatform.ffi
 
+import python.multiplatform.ffi.LibPythonManager.loadLibPython
+
 
 actual object Python3 {
     actual var isInitialized: Boolean = false

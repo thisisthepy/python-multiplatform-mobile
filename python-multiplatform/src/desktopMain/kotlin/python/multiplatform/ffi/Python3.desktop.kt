@@ -89,7 +89,7 @@ actual object Python3 {
 
     init {
         scope.run {
-            val lookup = MethodLookup(::loadLibPython)
+            val lookup = MethodLookup(LibPythonManager::loadLibPython)
 
             pyInitializeHandle = lookup.find("Py_Initialize", Void.TYPE)
             pyFinalizeHandle = lookup.find("Py_Finalize", Void.TYPE)
