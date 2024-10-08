@@ -57,7 +57,6 @@ kotlin {
     ).forEach { iosTarget ->
         iosTarget.binaries.framework {
             baseName = "Demo"
-            isStatic = true
         }
     }
     sourceSets {

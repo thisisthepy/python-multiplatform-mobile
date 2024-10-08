@@ -3,8 +3,6 @@ package python.multiplatform.ffi
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.nativeHeap
-import platform.posix.pthread_mutex_init
-import platform.posix.pthread_mutex_t
 import python.native.ffi.Py_Finalize
 import python.native.ffi.Py_Initialize
 import python.native.ffi.Py_IsInitialized

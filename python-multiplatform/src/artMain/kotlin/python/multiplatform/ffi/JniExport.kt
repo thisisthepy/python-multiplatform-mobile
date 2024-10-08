@@ -123,5 +123,3 @@ fun callJava(env: CPointer<JNIEnvVar>, thiz: jobject): jstring {
 //        JNI_VERSION_1_6
 //    }
 //}
-
-// TODO: JNI 언로드 관련 함수 구현해서 메모리 비우기

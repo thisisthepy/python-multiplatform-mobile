@@ -6,7 +6,6 @@ import platform.Foundation.NSProcessInfo
 import platform.posix.uname
 import platform.posix.utsname
 
-
 object IOSPlatform: Platform {
     override val os = OSType.IOS  // UIDevice.currentDevice.systemName()
     override val arch: String = getDeviceArch()
@@ -34,7 +33,8 @@ private fun getDeviceArch(): String {
 
 private fun getBuildVersion(): Int? {
     val processInfo = NSProcessInfo.processInfo
-    return processInfo.operatingSystemVersionString.trim()?.map { it.code }?.joinToString("")?.toIntOrNull()
+    return processInfo.operatingSystemVersionString.trim().map { it.code }.joinToString("")
+        .toIntOrNull()
 }
 
 actual val currentPlatform: Platform = IOSPlatform
