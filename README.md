@@ -21,10 +21,12 @@ Thanks to many contributors who develop dependent packages for this python-kotli
 - Windows (x86_64) with [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
 - WASM - Not yet supported.
 
-** Since Xcode only runs on macOS, you need macOS to build this repo for iOS.
+
+> [!NOTE]  
+> ** Since Xcode only runs on macOS, you need macOS to build this repo for iOS.
 
 
-### Template ToDo list
+### Template ToDo list ✨
 - [x] Bring python embed API for Kotlin/JVM targets (Windows, Linux, macOS, Android).
 - [x] Bring python embed API for Kotlin/Native targets (iOS).
 - [x] Python interop API (Binder) for Kotlin side.
@@ -32,7 +34,7 @@ Thanks to many contributors who develop dependent packages for this python-kotli
 
 ___
 
-## Build Manually
+## Build Manually 🛠️
 
 #### (1) Clone this repo
 
@@ -79,7 +81,7 @@ You can open the web application by running the `:composeApp:wasmJsBrowserDevelo
 
 ---
 
-## Use Pre-Built Package
+## Use Pre-Built Package 🧰
 
 #### (1) Maven Repo (Release only)
 
@@ -114,9 +116,13 @@ In your project build.gradle.kts
 
     implementation("com.github.thisisthepy:python-multiplatform-mobile:0.0.1")
 
+
+> [!TIP]
+> Some tips
+
 ---
 
-## Usage
+## Usage 📑
 
 In your main method,
 
@@ -211,3 +217,12 @@ object PythonIntegration {
 }
 
 ```
+  
+> [!IMPORTANT]
+> Somethig important
+
+---
+
+## Stargazers over time 🌟
+
+[![Stargazers over time](https://starchart.cc/thisisthepy/python-multiplatform-mobile.svg?variant=adaptive)](https://starchart.cc/thisisthepy/python-multiplatform-mobile)
