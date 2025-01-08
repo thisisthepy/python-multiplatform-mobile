@@ -5,6 +5,7 @@ import python.multiplatform.ffi.Python3
 
 
 fun MainViewController() = ComposeUIViewController {
-    Python3.initialize()
-    App()
+    App {
+        Python3.initialize()
+    }
 }

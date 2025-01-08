@@ -4,6 +4,11 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
+import org.jetbrains.kotlin.konan.target.KonanTarget.ANDROID_ARM64
+import org.jetbrains.kotlin.konan.target.KonanTarget.ANDROID_X64
+import org.jetbrains.kotlin.konan.target.KonanTarget.IOS_ARM64
+import org.jetbrains.kotlin.konan.target.KonanTarget.IOS_SIMULATOR_ARM64
+import org.jetbrains.kotlin.konan.target.KonanTarget.IOS_X64
 
 
 plugins {
@@ -55,8 +60,20 @@ kotlin {
         iosArm64(),
         iosSimulatorArm64()
     ).forEach { iosTarget ->
+        val targetABI = when(iosTarget.konanTarget) {
+            ANDROID_ARM64 -> "arm64-v8a"
+            ANDROID_X64 -> "x86_64"
+            IOS_ARM64 -> "ios-arm64"
+            IOS_X64 -> "ios-arm64_x86_64-simulator"
+            IOS_SIMULATOR_ARM64 -> "ios-arm64_x86_64-simulator"
+            else -> throw RuntimeException("Unsupported ABI: ${iosTarget.konanTarget}")
+        }
         iosTarget.binaries.framework {
             baseName = "Demo"
+
+            linkerOpts.addAll(listOf(
+                "-framework", "Python", "-F$projectDir/build/xcode-frameworks/Python.xcframework/$targetABI", "-Objc"
+            ))
 
             //export(projects.pythonMultiplatform)
         }
