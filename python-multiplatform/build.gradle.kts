@@ -133,6 +133,13 @@ kotlin {
             from(licensePath) {
                 into("META-INF/LICENSE")
             }
+            from(libPathForDesktop) {
+                // TODO: Let the script include the only files needed for the platform
+                include("windows-*/*")
+                include("linux-*/*")
+                include("macos-*/*")
+                into("lib")
+            }
         }
     }
 
@@ -201,7 +208,7 @@ kotlin {
         val jvmMain by creating
         val commonMain by getting
         val desktopMain by getting {
-            resources.srcDirs("src/desktopMain/resources", libPathForDesktop)
+            resources.srcDirs("src/desktopMain/resources")
         }
         val androidMain by getting
         jvmMain.dependsOn(commonMain)
