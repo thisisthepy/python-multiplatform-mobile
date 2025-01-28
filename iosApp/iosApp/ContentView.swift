@@ -1,7 +1,6 @@
 import UIKit
 import SwiftUI
 import Demo
-import PythonMultiplatform
 
 
 struct ComposeView: UIViewControllerRepresentable {
