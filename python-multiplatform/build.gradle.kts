@@ -99,7 +99,9 @@ kotlin {
                     }
                 }
                 abiList.forEach {
-                    from("$libPathForAndroid/$it") {
+                    from("$libPathForAndroid/$it/python$libVersion") {
+                        exclude("config-$libVersion-aarch64-linux-android/")
+                        exclude("config-$libVersion-x86_64-linux-android/")
                         into("$it/lib/python$libVersion")  // python stdlib
                     }
                 }
@@ -177,7 +179,7 @@ kotlin {
             binaries {
                 if (konanTarget.family == Family.ANDROID) {
                     sharedLib("multiplatform_python$libVersion") {
-                        linkerOpts.addAll(listOf("-L$targetLibPath/$targetABI/", "-lpython$libVersion"))
+                        linkerOpts.addAll(listOf("-L$projectDir/$targetLibPath/$targetABI/", "-lpython$libVersion"))
 
                         linkTaskProvider.configure {
                             val type = if (buildType == NativeBuildType.DEBUG) "debug" else "release"

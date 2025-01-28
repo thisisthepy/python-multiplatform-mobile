@@ -26,15 +26,35 @@ fun pyInitializeEx() {
     println("Python initialization end")
 }
 
+//@OptIn(ExperimentalForeignApi::class)
+//fun setConfigString(env: CPointer<JNIEnvVar>, config: CPointer<PyConfig>, configStr: CPointer<CPointerVar<wchar_t>>, value: jstring): PyStatus {
+//    val valueUtf8 = env.pointed.pointed?.GetStringUTFChars!!.invoke(env, value, null) ?: error("Failed to get UTF-8 string")
+//
+//    val pyString = PyUnicode_FromStringAndSize(valueUtf8, strlen(valueUtf8).toLong().toULong())
+//    if (pyString == null) {
+//        env.pointed.pointed?.ReleaseStringUTFChars!!.invoke(env, value, valueUtf8)
+//        return PyStatus_Error("Failed to create Python string")
+//    }
+//
+//    val status = PyStatus_Ok()
+//    // pyString을 사용해서 필요한 작업을 수행
+//    // configStr 또는 config에 pyString을 사용해 설정하는 로직 추가
+//
+//    Py_DECREF(pyString)
+//    env.pointed.pointed?.ReleaseStringUTFChars!!.invoke(env, value, valueUtf8)
+//
+//    return status
+//}
+
 
 @CName("${namePrefix}pyInitializeFromConfig")
 @OptIn(ExperimentalNativeApi::class, ExperimentalForeignApi::class)
-fun pyInitializeFromConfig(/*env: CPointer<JNIEnvVar>, home: jstring, runModule: jstring*/): Int {
+fun pyInitializeFromConfig(env: CPointer<JNIEnvVar>, home: jstring, runModule: jstring): Int {
     return memScoped {
         val config = alloc<PyConfig>()
         PyConfig_InitIsolatedConfig(config.ptr)
 
-//        PyConfig_SetBytesString
+//        PyConfig_SetString
 //
 //        var status = setConfigString(env, config.ptr, config.home.ptr, home)
 //        if (PyStatus_Exception(status) == 1) {
@@ -47,15 +67,15 @@ fun pyInitializeFromConfig(/*env: CPointer<JNIEnvVar>, home: jstring, runModule:
 //            println("Failed to set run_module")
 //            return 1
 //        }
-
-        config.install_signal_handlers = 1
-
-        val status = Py_InitializeFromConfig(config.ptr)
-        if (PyStatus_Exception(status) == 1) {
-            println("Failed to initialize from config")
-            return 1
-        }
-        println("Succeed to initialize from config")
+//
+//        config.install_signal_handlers = 1
+//
+//        val status = Py_InitializeFromConfig(config.ptr)
+//        if (PyStatus_Exception(status) == 1) {
+//            println("Failed to initialize from config")
+//            return 1
+//        }
+//        println("Succeed to initialize from config")
 
         return Py_RunMain()
     }
