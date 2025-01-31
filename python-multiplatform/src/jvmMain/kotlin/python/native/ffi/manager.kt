@@ -1,4 +1,4 @@
-package python.multiplatform.ffi
+package python.native.ffi
 
 import python.multiplatform.OSType
 import python.multiplatform.Versions
@@ -8,7 +8,7 @@ import java.io.FileOutputStream
 import java.util.*
 
 
-internal object LibPythonManager {
+internal object manager {
     @Synchronized
     fun loadLibPython() {
         val pyVer = Versions.currentVersion

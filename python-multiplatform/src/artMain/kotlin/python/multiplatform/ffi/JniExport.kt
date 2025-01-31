@@ -1,7 +1,7 @@
 package python.multiplatform.ffi
 
 import kotlin.experimental.ExperimentalNativeApi
-import kotlinx.cinterop.*
+//import kotlinx.cinterop.*
 import platform.android.*
 import platform.posix.*
 import python.native.ffi.*
@@ -19,7 +19,7 @@ fun initialize() {
 }
 
 @CName("${namePrefix}pyInitializeEx")
-@OptIn(ExperimentalNativeApi::class, ExperimentalForeignApi::class)
+@OptIn(ExperimentalNativeApi::class)
 fun pyInitializeEx() {
     println("Python initialization start")
     Py_InitializeEx(0)
@@ -47,13 +47,13 @@ fun pyInitializeEx() {
 //}
 
 
-@CName("${namePrefix}pyInitializeFromConfig")
-@OptIn(ExperimentalNativeApi::class, ExperimentalForeignApi::class)
-fun pyInitializeFromConfig(env: CPointer<JNIEnvVar>, home: jstring, runModule: jstring): Int {
-    return memScoped {
-        val config = alloc<PyConfig>()
-        PyConfig_InitIsolatedConfig(config.ptr)
-
+//@CName("${namePrefix}pyInitializeFromConfig")
+//@OptIn(ExperimentalNativeApi::class, ExperimentalForeignApi::class)
+//fun pyInitializeFromConfig(env: CPointer<JNIEnvVar>, home: jstring, runModule: jstring): Int {
+//    return memScoped {
+//        val config = alloc<PyConfig>()
+//        PyConfig_InitIsolatedConfig(config.ptr)
+//
 //        PyConfig_SetString
 //
 //        var status = setConfigString(env, config.ptr, config.home.ptr, home)
@@ -76,10 +76,10 @@ fun pyInitializeFromConfig(env: CPointer<JNIEnvVar>, home: jstring, runModule: j
 //            return 1
 //        }
 //        println("Succeed to initialize from config")
-
-        return Py_RunMain()
-    }
-}
+//
+//        return Py_RunMain()
+//    }
+//}
 
 @CName("${namePrefix}internalIsInitialized")
 @OptIn(ExperimentalNativeApi::class)
@@ -100,25 +100,25 @@ fun sayHello() {
     __android_log_print(ANDROID_LOG_INFO.toInt(), "Kn", "Hello %s", "Native")
 }
 
-@OptIn(ExperimentalNativeApi::class, ExperimentalForeignApi::class)
-@CName("${namePrefix}stringFromJNI")
-fun stringFromJNI(env: CPointer<JNIEnvVar>, thiz: jobject): jstring {
-    memScoped {
-        return env.pointed.pointed!!.NewStringUTF!!.invoke(env, "This is from Kotlin Native!!".cstr.ptr)!!
-    }
-}
-
-@OptIn(ExperimentalNativeApi::class, ExperimentalForeignApi::class)
-@CName("${namePrefix}callJava")
-fun callJava(env: CPointer<JNIEnvVar>, thiz: jobject): jstring {
-    memScoped {
-        val jniEnvVal = env.pointed.pointed!!
-        val jclass = jniEnvVal.GetObjectClass!!.invoke(env, thiz)
-        val methodId = jniEnvVal.GetMethodID!!.invoke(env, jclass,
-            "callFromNative".cstr.ptr, "()Ljava/lang/String;".cstr.ptr)
-        return jniEnvVal.CallObjectMethodA!!.invoke(env, thiz, methodId, null) as jstring
-    }
-}
+//@OptIn(ExperimentalNativeApi::class, ExperimentalForeignApi::class)
+//@CName("${namePrefix}stringFromJNI")
+//fun stringFromJNI(env: CPointer<JNIEnvVar>, thiz: jobject): jstring {
+//    memScoped {
+//        return env.pointed.pointed!!.NewStringUTF!!.invoke(env, "This is from Kotlin Native!!".cstr.ptr)!!
+//    }
+//}
+//
+//@OptIn(ExperimentalNativeApi::class, ExperimentalForeignApi::class)
+//@CName("${namePrefix}callJava")
+//fun callJava(env: CPointer<JNIEnvVar>, thiz: jobject): jstring {
+//    memScoped {
+//        val jniEnvVal = env.pointed.pointed!!
+//        val jclass = jniEnvVal.GetObjectClass!!.invoke(env, thiz)
+//        val methodId = jniEnvVal.GetMethodID!!.invoke(env, jclass,
+//            "callFromNative".cstr.ptr, "()Ljava/lang/String;".cstr.ptr)
+//        return jniEnvVal.CallObjectMethodA!!.invoke(env, thiz, methodId, null) as jstring
+//    }
+//}
 
 //@OptIn(ExperimentalNativeApi::class, ExperimentalForeignApi::class)
 //@CName("JNI_OnLoad")
