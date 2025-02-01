@@ -9,66 +9,19 @@ import kotlin.jvm.JvmInline
  */
 expect inline fun <R : Any> memScoped(block: () -> R): R
 
-class IncompatiblePointerConversionException(
-    obj: Any? = null,
-    message: String = "Incompatible type conversion request (Object $obj to PyPointer)",
-    private var escalated: Boolean = true
-) : IllegalArgumentException(message) {
-    fun escalate() {
-        escalated = true
-    }
-    override fun toString(): String {
-        return (if (escalated) "IncompatiblePointerConversionException" else "WARNING") + ": ${super.message}"
-    }
-}
-
-interface NativePointer3 {
-    fun toRawValue(): Long
-}
-expect inline fun Long.toNativePointer(): NativePointer3?
 
 interface AddressValue
-
-@JvmInline
-value class NativePointer2(val rawValue: Long) {
-    override fun toString(): String = "${this::class.simpleName}(${this.rawValue})"
-}
-expect inline fun NativePointer2.toPlatformPointer(): Any?
-expect inline fun nativePointer2Of(address: Any): NativePointer2?
-
 @JvmInline
 value class NativePointer internal constructor(val address: Any) {
-    override fun toString(): String = "${this::class.simpleName}(${this.toRawLongValue()})"
-
-    companion object {
-        inline fun from(address: Any?, silent: Boolean = false, escalateIntoException: Boolean = false): NativePointer? = fromAddress(address, silent, escalateIntoException)
-    }
+    override fun toString(): String = "${this::class.simpleName}@${toRawValue().toString(16)}"
 }
-expect fun nativePointerOf(address: AddressValue): NativePointer
-expect fun nativePointerOf(rawValue: Long): NativePointer?
-
-const val INVALID_POINTER: ULong = 0UL
-
-fun processPointer(rawValue: ULong) {
-    require(rawValue != INVALID_POINTER) { "Invalid pointer: null pointer received." }
-    // 유효한 포인터 처리
-}
-
-
-
-/**
- * Converts given [address] to [NativePointer].
- * If [address] is not a valid pointer, returns null.
- *
- *             // silent  escalateIntoError
- *             // false   false       -> print warning and return null
- *             // false   true        -> print warning and throw exception
- *             // true    true        -> throw exception
- *             // true    false       -> return null
- */
-internal expect inline fun fromAddress(address: Any?, silent: Boolean = false, escalateIntoException: Boolean = false): NativePointer?
-expect inline fun NativePointer.toRawLongValue(): Long
-expect inline fun NativePointer.toPlatformPointer(): Any
+@HighOverheadNativeCall
+expect fun NativePointer.toAddressValue(): AddressValue
+expect inline fun NativePointer.toRawValue(): Long
+@HighOverheadNativeCall
+expect fun AddressValue.toNativePointer(): NativePointer
+@HighOverheadNativeCall
+expect fun Long.toNativePointer(): NativePointer?
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

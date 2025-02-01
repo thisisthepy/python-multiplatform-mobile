@@ -9,38 +9,18 @@ actual inline fun <R : Any> memScoped(block: () -> R): R = ResourceScope.newShar
 }
 
 @JvmInline
-value class NativePlatformPointer(val address: MemoryAddress): NativePointer3 {
-    override inline fun toRawValue(): Long = address.toRawLongValue()
+internal value class NativeAddressValue(val ptr: MemoryAddress): AddressValue {
+    override fun toString(): String = "${this::class.simpleName}@${ptr.toRawLongValue().toString(16)}"
 }
-actual inline fun Long.toNativePointer(): NativePointer3? = NativePlatformPointer(MemoryAddress.ofLong(this))
-
-actual inline fun NativePointer2.toPlatformPointer(): Any? = this.rawValue
-inline fun NativePointer2.toTypedPlatformPointer(): MemoryAddress? = MemoryAddress.ofLong(this.rawValue)
-
-internal actual inline fun fromAddress(address: Any?, silent: Boolean, escalateIntoException: Boolean): NativePointer? {
-    return when (address) {
-        is MemoryAddress -> NativePointer(address)
-        is Number -> MemoryAddress.ofLong(address.toLong())?.let { NativePointer(it) }
-        else -> {
-            if (address != null) {
-                val warningObject = IncompatiblePointerConversionException(address, escalated = false)
-                if (!silent) {
-                    warningObject.printStackTrace()
-                }
-                if (escalateIntoException) {
-                    warningObject.escalate()
-                    throw warningObject
-                }
-            }
-
-            null
-        }
-    }
-}
-actual inline fun NativePointer.toRawLongValue(): Long = (this.address as MemoryAddress).toRawLongValue()
-actual inline fun NativePointer.toPlatformPointer(): Any = this.address
-inline fun NativePointer.toTypedPlatformPointer(): MemoryAddress = this.address as MemoryAddress
-internal inline fun MemoryAddress?.toPyPointer(): NativePointer? = this?.let { NativePointer(it) }
+@HighOverheadNativeCall
+actual fun NativePointer.toAddressValue(): AddressValue = NativeAddressValue(toPlatformPointer())
+actual inline fun NativePointer.toRawValue(): Long = toPlatformPointer().toRawLongValue()
+inline fun NativePointer.toPlatformPointer(): MemoryAddress = this.address as MemoryAddress
+@HighOverheadNativeCall
+actual fun AddressValue.toNativePointer(): NativePointer = NativePointer((this as NativeAddressValue).ptr)
+@HighOverheadNativeCall
+actual fun Long.toNativePointer(): NativePointer? = MemoryAddress.ofLong(this).toNativePointer()
+internal inline fun MemoryAddress?.toNativePointer(): NativePointer? = this?.let { NativePointer(it) }
 
 
 // Section 1
@@ -52,15 +32,15 @@ actual inline fun Py_Finalize() = python.native.ffi.bindings.Py_Finalize()
 actual inline fun Py_FinalizeEx(): Int = python.native.ffi.bindings.Py_FinalizeEx()
 
 // Section 2
-actual fun PyErr_Occurred(): NativePointer? = python.native.ffi.bindings.PyErr_Occurred().toPyPointer()
+actual fun PyErr_Occurred(): NativePointer? = python.native.ffi.bindings.PyErr_Occurred().toNativePointer()
 
 
 
 
 
-actual fun PyLong_FromLongLong(v: Long): NativePointer? = python.native.ffi.bindings.PyLong_FromLongLong(v).toPyPointer()
-actual inline fun PyLong_AsLongLong(p: NativePointer): Long = python.native.ffi.bindings.PyLong_AsLongLong(p.toTypedPlatformPointer())
-actual inline fun PyLong_AsInt(p: NativePointer): Int = python.native.ffi.bindings.PyLong_AsInt(p.toTypedPlatformPointer())
+actual fun PyLong_FromLongLong(v: Long): NativePointer? = python.native.ffi.bindings.PyLong_FromLongLong(v).toNativePointer()
+actual inline fun PyLong_AsLongLong(p: NativePointer): Long = python.native.ffi.bindings.PyLong_AsLongLong(p.toPlatformPointer())
+actual inline fun PyLong_AsInt(p: NativePointer): Int = python.native.ffi.bindings.PyLong_AsInt(p.toPlatformPointer())
 
 
 actual inline fun Py_RunSimpleString(code: String): Int = python.native.ffi.bindings.PyRun_SimpleString(code)

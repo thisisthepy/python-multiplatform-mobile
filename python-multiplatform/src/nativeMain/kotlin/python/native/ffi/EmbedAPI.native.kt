@@ -11,51 +11,27 @@ actual inline fun <R : Any> memScoped(block: () -> R): R = memScoped {
     return block()
 }
 
-value class NativePlatformPointer @OptIn(ExperimentalForeignApi::class) constructor(val address: CPointer<*>): NativePointer3 {
+
+@OptIn(ExperimentalForeignApi::class)
+internal value class NativeAddressValue<T : CPointed> @OptIn(ExperimentalForeignApi::class) constructor(val ptr: CPointer<T>): AddressValue {
     @OptIn(ExperimentalForeignApi::class)
-    override inline fun toRawValue(): Long = address.toLong()
+    override fun toString(): String = "${this::class.simpleName}@${ptr.toLong().toString(16)}"
 }
+@HighOverheadNativeCall
 @OptIn(ExperimentalForeignApi::class)
-actual inline fun Long.toNativePointer(): NativePointer3? = this.toCPointer<PyObject>() ?.let { NativePlatformPointer(it) }
+actual fun NativePointer.toAddressValue(): AddressValue = NativeAddressValue(toPlatformPointer())
 @OptIn(ExperimentalForeignApi::class)
-inline fun <T : CPointed> Long.toNativePointer(): NativePointer3? = this.toCPointer<T>() ?.let { NativePlatformPointer(it) }
-
+actual inline fun NativePointer.toRawValue(): Long = toPlatformPointer<CPointed>().toLong()
 @OptIn(ExperimentalForeignApi::class)
-actual inline fun NativePointer2.toPlatformPointer(): Any? = this.rawValue.toCPointer<PyObject>()
+inline fun <T : CPointed> NativePointer.toPlatformPointer(): CPointer<T> = this.address as CPointer<T>
+@HighOverheadNativeCall
 @OptIn(ExperimentalForeignApi::class)
-inline fun NativePointer2.toTypedPlatformPointer(): CPointer<*>? = this.rawValue.toCPointer<PyObject>()
+actual fun AddressValue.toNativePointer(): NativePointer = NativePointer((this as NativeAddressValue<*>).ptr)
+@HighOverheadNativeCall
 @OptIn(ExperimentalForeignApi::class)
-inline fun <T : CPointed> NativePointer2.toTypedPlatformPointer(): CPointer<*>? = this.rawValue.toCPointer<T>()
-actual inline fun nativePointer2Of(address: Any): NativePointer2? = address.toLong().let { NativePointer2(it) }
-
+actual fun Long.toNativePointer(): NativePointer? = toCPointer<CPointed>()?.let { NativePointer(it) }
 @OptIn(ExperimentalForeignApi::class)
-internal actual inline fun fromAddress(address: Any?, silent: Boolean, escalateIntoException: Boolean): NativePointer? {
-    return when (address) {
-        is CPointer<*> -> NativePointer(address)
-        is Number -> address.toLong().toCPointer<PyObject>()?.let { NativePointer(it) }
-        else -> {
-            if (address != null) {
-                val warningObject = IncompatiblePointerConversionException(address, escalated = false)
-                if (!silent) {
-                    warningObject.printStackTrace()
-                }
-                if (escalateIntoException) {
-                    warningObject.escalate()
-                    throw warningObject
-                }
-            }
-
-            null
-        }
-    }
-}
-@OptIn(ExperimentalForeignApi::class)
-actual inline fun NativePointer.toRawLongValue(): Long = (this.address as CPointer<PyObject>).toLong()
-actual inline fun NativePointer.toPlatformPointer(): Any = this.address
-@OptIn(ExperimentalForeignApi::class)
-inline fun NativePointer.toTypedPlatformPointer(): CPointer<PyObject> = this.address as CPointer<PyObject>
-@OptIn(ExperimentalForeignApi::class)
-internal inline fun CPointer<PyObject>?.toPyPointer(): NativePointer? = this?.let { NativePointer(it) }
+internal inline fun CPointer<PyObject>?.toNativePointer(): NativePointer? = this?.let { NativePointer(it) }
 
 
 // Android JNI export settings
@@ -84,16 +60,16 @@ actual inline fun Py_FinalizeEx() = python.native.ffi.bindings.Py_FinalizeEx()
 // Section 2
 @CName("${namePrefix}PyErr_1Occurred")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual fun PyErr_Occurred(): NativePointer? = python.native.ffi.bindings.PyErr_Occurred().toPyPointer()
+actual fun PyErr_Occurred(): NativePointer? = python.native.ffi.bindings.PyErr_Occurred().toNativePointer()
 
 
 
 @OptIn(ExperimentalForeignApi::class)
-actual fun PyLong_FromLongLong(v: Long): NativePointer? = python.native.ffi.bindings.PyLong_FromLongLong(v).toPyPointer()
+actual fun PyLong_FromLongLong(v: Long): NativePointer? = python.native.ffi.bindings.PyLong_FromLongLong(v).toNativePointer()
 @OptIn(ExperimentalForeignApi::class)
-actual inline fun PyLong_AsLongLong(p: NativePointer): Long = python.native.ffi.bindings.PyLong_AsLongLong(p.toTypedPlatformPointer())
+actual inline fun PyLong_AsLongLong(p: NativePointer): Long = python.native.ffi.bindings.PyLong_AsLongLong(p.toPlatformPointer())
 @OptIn(ExperimentalForeignApi::class)
-actual inline fun PyLong_AsInt(p: NativePointer): Int = python.native.ffi.bindings.PyLong_AsInt(p.toTypedPlatformPointer())
+actual inline fun PyLong_AsInt(p: NativePointer): Int = python.native.ffi.bindings.PyLong_AsInt(p.toPlatformPointer())
 
 
 
