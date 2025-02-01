@@ -1,5 +1,7 @@
 package python.native.ffi
 
+import kotlin.jvm.JvmInline
+
 
 /**
  * Runs given [block] providing allocation of memory
@@ -7,10 +9,66 @@ package python.native.ffi
  */
 expect inline fun <R : Any> memScoped(block: () -> R): R
 
-
-expect class NativePointer {
-    fun toAddress(): Long
+class IncompatiblePointerConversionException(
+    obj: Any? = null,
+    message: String = "Incompatible type conversion request (Object $obj to PyPointer)",
+    private var escalated: Boolean = true
+) : IllegalArgumentException(message) {
+    fun escalate() {
+        escalated = true
+    }
+    override fun toString(): String {
+        return (if (escalated) "IncompatiblePointerConversionException" else "WARNING") + ": ${super.message}"
+    }
 }
+
+interface NativePointer3 {
+    fun toRawValue(): Long
+}
+expect inline fun Long.toNativePointer(): NativePointer3?
+
+interface AddressValue
+
+@JvmInline
+value class NativePointer2(val rawValue: Long) {
+    override fun toString(): String = "${this::class.simpleName}(${this.rawValue})"
+}
+expect inline fun NativePointer2.toPlatformPointer(): Any?
+expect inline fun nativePointer2Of(address: Any): NativePointer2?
+
+@JvmInline
+value class NativePointer internal constructor(val address: Any) {
+    override fun toString(): String = "${this::class.simpleName}(${this.toRawLongValue()})"
+
+    companion object {
+        inline fun from(address: Any?, silent: Boolean = false, escalateIntoException: Boolean = false): NativePointer? = fromAddress(address, silent, escalateIntoException)
+    }
+}
+expect fun nativePointerOf(address: AddressValue): NativePointer
+expect fun nativePointerOf(rawValue: Long): NativePointer?
+
+const val INVALID_POINTER: ULong = 0UL
+
+fun processPointer(rawValue: ULong) {
+    require(rawValue != INVALID_POINTER) { "Invalid pointer: null pointer received." }
+    // 유효한 포인터 처리
+}
+
+
+
+/**
+ * Converts given [address] to [NativePointer].
+ * If [address] is not a valid pointer, returns null.
+ *
+ *             // silent  escalateIntoError
+ *             // false   false       -> print warning and return null
+ *             // false   true        -> print warning and throw exception
+ *             // true    true        -> throw exception
+ *             // true    false       -> return null
+ */
+internal expect inline fun fromAddress(address: Any?, silent: Boolean = false, escalateIntoException: Boolean = false): NativePointer?
+expect inline fun NativePointer.toRawLongValue(): Long
+expect inline fun NativePointer.toPlatformPointer(): Any
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -31,7 +89,7 @@ expect class NativePointer {
  *
  * Note: On Windows, changes the console mode from O_TEXT to O_BINARY, which will also affect non-Python uses of the console using the C Runtime.
  */
-expect fun Py_Initialize()
+expect inline fun Py_Initialize()
 
 /**
  * Part of the Stable ABI.
@@ -43,9 +101,9 @@ expect fun Py_Initialize()
  *
  * @param initsigs: 0(skip signal handler registration) or 1(normal initialization)
  */
-expect fun Py_InitializeEx(initsigs: Int)
+expect inline fun Py_InitializeEx(initsigs: Int)
 
-//expect fun Py_InitializeFromConfig()
+//expect inline fun Py_InitializeFromConfig()
 
 /**
  * Part of the Stable ABI.
@@ -55,16 +113,16 @@ expect fun Py_InitializeEx(initsigs: Int)
  *
  * @return 1(true), 0(false)
  */
-expect fun Py_IsInitialized(): Int
+expect inline fun Py_IsInitialized(): Int
 
-// expect fun Py_IsFinalizing(): Int
+// expect inline fun Py_IsFinalizing(): Int
 
 /**
  * Part of the Stable ABI.
  *
  * This is a backwards-compatible version of Py_FinalizeEx() that disregards the return value.
  */
-expect fun Py_Finalize()
+expect inline fun Py_Finalize()
 
 /**
  * Part of the Stable ABI since version 3.6.
@@ -97,21 +155,27 @@ expect fun Py_Finalize()
  *
  * @return 0(success), -1(failure)
  */
-expect fun Py_FinalizeEx(): Int
+expect inline fun Py_FinalizeEx(): Int
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Section 2
 // Exception handling
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//expect fun PyErr_Occurred(): NativePointer?
-//expect fun PyErr_Clear()
-//expect fun PyErr_Print()
+expect fun PyErr_Occurred(): NativePointer?
+//expect inline fun PyErr_Clear()
+//expect inline fun PyErr_Print()
 
-//    // 예외 처리
-//    private val pyErrOccurredHandle: MethodHandle
-//    private val pyErrPrintHandle: MethodHandle
-//    private val pyErrClearHandle: MethodHandle
+
+
+expect fun PyLong_FromLongLong(v: Long): NativePointer?
+expect inline fun PyLong_AsLongLong(p: NativePointer): Long
+expect inline fun PyLong_AsInt(p: NativePointer): Int
+
+
+expect inline fun Py_RunSimpleString(code: String): Int
+
+
 //
 //    // 기타
 //    private val pyRunSimpleStringHandle: MethodHandle
