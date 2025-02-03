@@ -13,7 +13,8 @@ expect inline fun <R : Any> memScoped(block: () -> R): R
 interface AddressValue
 @JvmInline
 value class NativePointer internal constructor(val address: Any) {
-    override fun toString(): String = "${this::class.simpleName}@${toRawValue().toString(16)}"
+    override fun toString(): String =
+        "${this::class.simpleName}(self=0x${hashCode().toUInt().toString(16)}, target=0x${toRawValue().toString(16)})"
 }
 @HighOverheadNativeCall
 expect fun NativePointer.toAddressValue(): AddressValue

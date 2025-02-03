@@ -6,7 +6,7 @@ actual inline fun <R : Any> memScoped(block: () -> R): R = block()
 
 @JvmInline
 internal value class NativeAddressValue(val ptr: JNIPointer): AddressValue {
-    override fun toString(): String = "${this::class.simpleName}@${ptr.toString(16)}"
+    override fun toString(): String = "JNIPointer(raw=0x${ptr.toString(16)})"
 }
 @HighOverheadNativeCall
 actual fun NativePointer.toAddressValue(): AddressValue = NativeAddressValue(toPlatformPointer())

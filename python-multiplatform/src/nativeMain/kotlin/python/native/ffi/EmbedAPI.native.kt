@@ -15,7 +15,7 @@ actual inline fun <R : Any> memScoped(block: () -> R): R = memScoped {
 @OptIn(ExperimentalForeignApi::class)
 internal value class NativeAddressValue<T : CPointed> @OptIn(ExperimentalForeignApi::class) constructor(val ptr: CPointer<T>): AddressValue {
     @OptIn(ExperimentalForeignApi::class)
-    override fun toString(): String = "${this::class.simpleName}@${ptr.toLong().toString(16)}"
+    override fun toString(): String = ptr.toString()
 }
 @HighOverheadNativeCall
 @OptIn(ExperimentalForeignApi::class)

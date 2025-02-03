@@ -8,9 +8,15 @@ actual inline fun <R : Any> memScoped(block: () -> R): R = ResourceScope.newShar
     return block()
 }
 
+
 @JvmInline
 internal value class NativeAddressValue(val ptr: MemoryAddress): AddressValue {
-    override fun toString(): String = "${this::class.simpleName}@${ptr.toRawLongValue().toString(16)}"
+    override fun toString(): String = ptr
+        .toString()
+        .replace(": ", "=")
+        .replace(" offset=", ", offset=")
+        .replace("{ ", "(").replace(" }", ")")
+
 }
 @HighOverheadNativeCall
 actual fun NativePointer.toAddressValue(): AddressValue = NativeAddressValue(toPlatformPointer())
