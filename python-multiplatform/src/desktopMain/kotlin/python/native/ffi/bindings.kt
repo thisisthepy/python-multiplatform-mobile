@@ -4,7 +4,6 @@ import jdk.incubator.foreign.*
 import java.lang.invoke.MethodHandle
 import java.lang.invoke.MethodType
 import java.lang.Long as LongLong
-import java.lang.String as Str
 
 
 object bindings {
@@ -31,8 +30,18 @@ object bindings {
     val PyLong_AsIntHandle: MethodHandle
     inline fun PyLong_AsInt(p: MemoryAddress): Int = PyLong_AsIntHandle.invoke(p) as Int
 
+
     val PyRun_SimpleStringHandle: MethodHandle
-    inline fun PyRun_SimpleString(code: String): Int = PyRun_SimpleStringHandle.invoke(CLinker.toCString(code, ResourceScope.newConfinedScope()).address()) as Int
+    inline fun PyRun_SimpleString(code: String): Int =
+        PyRun_SimpleStringHandle.invoke(CLinker.toCString(code, ResourceScope.newConfinedScope()).address()) as Int
+
+
+    val PyUnicode_FromStringHandle: MethodHandle
+    inline fun PyUnicode_FromString(str: String): MemoryAddress? =
+        PyUnicode_FromStringHandle.invoke(CLinker.toCString(str, ResourceScope.newConfinedScope()).address()) as MemoryAddress?
+    val PyUnicode_AsUTF8Handle: MethodHandle
+    inline fun PyUnicode_AsUTF8(unicode: MemoryAddress): String? =
+        CLinker.toJavaString(PyUnicode_AsUTF8Handle.invoke(unicode) as MemoryAddress?)
 
 
     init {
@@ -53,7 +62,11 @@ object bindings {
             PyLong_AsLongLongHandle = lookup.find("PyLong_AsLongLong", LongLong.TYPE, MemoryAddress::class.java)
             PyLong_AsIntHandle = lookup.find("PyLong_AsInt", Integer.TYPE, MemoryAddress::class.java)
 
+
             PyRun_SimpleStringHandle = lookup.find("PyRun_SimpleString", Integer.TYPE, MemoryAddress::class.java)
+
+            PyUnicode_FromStringHandle = lookup.find("PyUnicode_FromString", MemoryAddress::class.java, MemoryAddress::class.java)
+            PyUnicode_AsUTF8Handle = lookup.find("PyUnicode_AsUTF8", MemoryAddress::class.java, MemoryAddress::class.java)
         }
     }
 }

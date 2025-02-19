@@ -127,7 +127,11 @@ expect inline fun PyLong_AsLongLong(p: NativePointer): Long
 expect inline fun PyLong_AsInt(p: NativePointer): Int
 
 
-expect inline fun Py_RunSimpleString(code: String): Int
+expect inline fun PyRun_SimpleString(code: String): Int
+
+
+expect fun PyUnicode_FromString(str: String): NativePointer?
+expect inline fun PyUnicode_AsUTF8(unicode: NativePointer): String?
 
 
 //

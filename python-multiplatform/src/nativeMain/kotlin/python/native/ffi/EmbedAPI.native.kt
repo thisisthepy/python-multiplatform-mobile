@@ -2,6 +2,8 @@ package python.native.ffi
 
 import kotlinx.cinterop.*
 import kotlinx.cinterop.memScoped
+import platform.posix.getenv
+import platform.posix.setenv
 import python.native.ffi.bindings.PyObject
 import kotlin.experimental.ExperimentalNativeApi
 
@@ -42,7 +44,11 @@ private const val namePrefix = "Java_${packageName}_${exportClassName}_"
 // Section 1
 @CName("${namePrefix}Py_1Initialize")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_Initialize() = python.native.ffi.bindings.Py_Initialize()
+actual inline fun Py_Initialize() {
+    setenv("PYTHONHOME", "/data/user/0/org.thisisthepy.python.multiplatform.demo/files", 1)
+    println("Native Python Home: ${getenv("PYTHONHOME")?.toKString()}")
+    python.native.ffi.bindings.Py_Initialize()
+}
 @CName("${namePrefix}Py_1InitializeEx")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_InitializeEx(initsigs: Int) = python.native.ffi.bindings.Py_InitializeEx(initsigs)
@@ -74,4 +80,13 @@ actual inline fun PyLong_AsInt(p: NativePointer): Int = python.native.ffi.bindin
 
 
 @OptIn(ExperimentalForeignApi::class)
-actual inline fun Py_RunSimpleString(code: String): Int = python.native.ffi.bindings.PyRun_SimpleString(code)
+actual inline fun PyRun_SimpleString(code: String): Int = python.native.ffi.bindings.PyRun_SimpleString(code)
+
+
+@OptIn(ExperimentalForeignApi::class)
+actual fun PyUnicode_FromString(str: String): NativePointer? =
+    python.native.ffi.bindings.PyUnicode_FromString(str).toNativePointer()
+@OptIn(ExperimentalForeignApi::class)
+actual inline fun PyUnicode_AsUTF8(unicode: NativePointer): String? =
+    python.native.ffi.bindings.PyUnicode_AsUTF8(unicode.toPlatformPointer())?.toKString()
+
