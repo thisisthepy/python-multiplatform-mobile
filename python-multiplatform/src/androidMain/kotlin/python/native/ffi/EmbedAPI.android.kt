@@ -40,4 +40,11 @@ actual inline fun PyLong_AsLongLong(p: NativePointer): Long = python.native.ffi.
 actual inline fun PyLong_AsInt(p: NativePointer): Int = python.native.ffi.bindings.PyLong_AsInt(p.toPlatformPointer())
 
 
-actual inline fun Py_RunSimpleString(code: String): Int = python.native.ffi.bindings.PyRun_SimpleString(code)
+actual inline fun PyRun_SimpleString(code: String): Int = python.native.ffi.bindings.PyRun_SimpleString(code)
+
+
+actual fun PyUnicode_FromString(str: String): NativePointer? =
+    python.native.ffi.bindings.PyUnicode_FromString(str).toNativePointer()
+actual inline fun PyUnicode_AsUTF8(unicode: NativePointer): String? =
+    python.native.ffi.bindings.PyUnicode_AsUTF8(unicode.toPlatformPointer())
+

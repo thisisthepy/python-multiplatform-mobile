@@ -25,4 +25,7 @@ object bindings {
 
 
     external fun PyRun_SimpleString(code: String): Int
+
+    external fun PyUnicode_FromString(str: String): JNIPointer?
+    external fun PyUnicode_AsUTF8(unicode: JNIPointer): String?
 }

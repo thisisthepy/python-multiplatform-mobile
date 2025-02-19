@@ -34,5 +34,36 @@ object Python3 {
     }
 
     //val builtins: Builtins
-
+//
+//
+//    fun checkPyError(): Boolean {
+//        if (PyErr_Occurred() != null) {
+//            PyErr_Clear();
+//            return true
+//        }
+//        return false
+//    }
+//
+//    actual fun pyLongFromLong(arg0: Long): Long {
+//        if (!isInitialized) return -1
+//        memScoped {
+//            val pyLong = PyLong_FromLong(arg0)
+//            if (pyLong == null) {
+//                throw IllegalStateException("Python long from long failed")
+//            }
+//            return pyLong.toLong()
+//        }
+//    }
+//
+//    actual fun pyLongAsLong(arg0: Long): Long {
+//        if (!isInitialized) return -1
+//        memScoped {
+//            val restoredPyObj: CValuesRef<_object>? = arg0.toCPointer()
+//            val ktLong = PyLong_AsLong(restoredPyObj)
+//            if (ktLong == -1L && PyErr_Occurred() != null) {
+//                throw IllegalStateException("Python long as long failed")
+//            }
+//            return ktLong
+//        }
+//    }
 }
