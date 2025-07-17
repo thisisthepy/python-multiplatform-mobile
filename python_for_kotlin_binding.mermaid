@@ -3,11 +3,17 @@ classDiagram
         <<singleton>>
         -isInitialized Boolean
         +initialize() void
-        +finalize() void
-        +import(name String) Any
-        +eval(code String) Any
-        +run(code String) void
-        +addPath(path String) void
+        ~finalize() void
+        +runMain(moduleName String) Int
+        +runApp(argc int, argv Array<String>) Int
+        +exec(command: String) void
+        +eval(str String, start Int, globals PyObject, locals PyObject) PyObject
+        +import(name String) PyModule
+        +version String
+        +platform String
+        +copyright String
+        +compiler String
+        +buildInfo String
     }
 
     class Context {

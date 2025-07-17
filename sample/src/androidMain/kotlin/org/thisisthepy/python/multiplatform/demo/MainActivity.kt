@@ -3,6 +3,7 @@ package org.thisisthepy.python.multiplatform.demo
 import android.content.Context
 import android.content.res.AssetManager
 import android.os.Bundle
+import android.system.Os
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -18,13 +19,13 @@ import java.io.IOException
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        Os.setenv("PYTHONHOME", filesDir.toString(), true)
+
         initPython()
 
         setContent {
-            App {
-                runOnUiThread {
-                }
-            }
+            App()
         }
     }
 
@@ -64,13 +65,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        Python3.finalize()
-        super.onDestroy()
-    }
-
     val PYTHON_DIR: String = "lib/python3.13"
-    val PYTHON_ASSET_DIR: String = currentPlatform.arch + "/lib/python3.13" // assets 내의 디렉토리명
+    val PYTHON_ASSET_DIR: String = if (currentPlatform.is64Bit && currentPlatform.isArm) {
+        "arm64-v8a"
+    } else if (currentPlatform.is64Bit && currentPlatform.isX86) {
+        "x86_64"
+    } else {
+        throw IllegalStateException("Unsupported platform: ${currentPlatform.os} ${currentPlatform.arch}")
+    } + "/" + PYTHON_DIR
 
     private fun copyPythonFromAssets(context: Context) {
         val filesDir = context.filesDir

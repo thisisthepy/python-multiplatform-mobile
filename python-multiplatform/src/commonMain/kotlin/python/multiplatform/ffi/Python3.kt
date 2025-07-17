@@ -1,12 +1,29 @@
 package python.multiplatform.ffi
 
+import python.multiplatform.ffi.types.modules.PyModule
 import python.native.ffi.*
 
 
 object Python3 {
+    /**
+     * Check if Python is initialized
+     */
     var isInitialized: Boolean = Py_IsInitialized() != 0
         private set
 
+    /**
+     * Ensure Python is initialized
+     */
+    inline fun <T : Any> withPython(block: () -> T): T {
+        if (!isInitialized) throw IllegalStateException("Python is not initialized")
+        return memScoped {
+            block()
+        }
+    }
+
+    /**
+     * Initialize Python
+     */
     fun initialize(silent: Boolean = false) {
         if (isInitialized) return
         memScoped {
@@ -20,7 +37,10 @@ object Python3 {
         }
     }
 
-    fun finalize(silent: Boolean = false) {
+    /**
+     * Finalize Python (Will not be able to re-initialize after this | Let this function be internal)
+     */
+    internal fun finalize(silent: Boolean = false) {
         if (!isInitialized) return
         memScoped {
             Py_Finalize()
@@ -33,37 +53,62 @@ object Python3 {
         }
     }
 
-    //val builtins: Builtins
-//
-//
-//    fun checkPyError(): Boolean {
-//        if (PyErr_Occurred() != null) {
-//            PyErr_Clear();
-//            return true
-//        }
-//        return false
-//    }
-//
-//    actual fun pyLongFromLong(arg0: Long): Long {
-//        if (!isInitialized) return -1
-//        memScoped {
-//            val pyLong = PyLong_FromLong(arg0)
-//            if (pyLong == null) {
-//                throw IllegalStateException("Python long from long failed")
-//            }
-//            return pyLong.toLong()
-//        }
-//    }
-//
-//    actual fun pyLongAsLong(arg0: Long): Long {
-//        if (!isInitialized) return -1
-//        memScoped {
-//            val restoredPyObj: CValuesRef<_object>? = arg0.toCPointer()
-//            val ktLong = PyLong_AsLong(restoredPyObj)
-//            if (ktLong == -1L && PyErr_Occurred() != null) {
-//                throw IllegalStateException("Python long as long failed")
-//            }
-//            return ktLong
-//        }
-//    }
+    /**
+     * Run Python main module
+     */
+    fun runMain(moduleName: String) {
+        withPython {
+            PyRun_SimpleString("import sys\nsys.argv[1] = '$moduleName'\n")
+            Py_RunMain()
+            // TODO: Add error handling
+        }
+    }
+
+    /**
+     * Run Python script as an application (Automatically initializes Python)
+     */
+    fun runApp(argv: Array<String>) {
+        Py_BytesMain(argv)
+        // TODO: Add error handling
+    }
+
+    /**
+     * Run Simple String
+     */
+    fun exec(command: String) {
+        return withPython {
+            if (PyRun_SimpleString(command) != 0) {
+                // TODO: Add error handling
+                throw IllegalStateException("Python exec failed")
+            }
+        }
+    }
+
+    /**
+     * Evaluate Python script
+     */
+    fun eval(str: String, start: Int, globals: PyObject, locals: PyObject): PyObject {
+        withPython {
+            val result = PyRun_String(str, start, globals.pointer, locals.pointer)
+            if (result == null) {
+                throw IllegalStateException("Python eval failed (result is null)")
+            } else {
+                // TODO: 레퍼런스 카운팅
+                return PyObject(result, false)
+            }
+        }
+    }
+
+    /**
+     * Import Python module
+     */
+    fun import(): PyModule {
+        return PyModule()
+    }
+
+    val version by lazy { withPython { Py_GetVersion() ?: throw IllegalStateException("Failed to get Python version") } }
+    val platform by lazy { withPython { Py_GetPlatform() ?: throw IllegalStateException("Failed to get Python platform") } }
+    val copyright by lazy { withPython { Py_GetCopyright() ?: throw IllegalStateException("Failed to get Python copyright") } }
+    val compiler by lazy { withPython { Py_GetCompiler() ?: throw IllegalStateException("Failed to get Python compiler") } }
+    val buildInfo by lazy { withPython { Py_GetBuildInfo() ?: throw IllegalStateException("Failed to get Python build info") } }
 }

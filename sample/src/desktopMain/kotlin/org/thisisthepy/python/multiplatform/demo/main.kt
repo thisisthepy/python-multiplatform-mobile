@@ -49,7 +49,7 @@ fun main() = application {
 
 
     Window(
-        onCloseRequest = { Python3.finalize(); exitApplication() },
+        onCloseRequest = { exitApplication() },
         title = "PythonMultiplatform",
     ) {
         App()

@@ -9,14 +9,16 @@ interface PyProxy<T> {
 
     fun toKotlin(): T {
         if (cachedNativeValue == null) {
-            cachedNativeValue = toKotlinInternal()
+            //cachedNativeValue = toKotlinInternal()
+            // TODO: Implement the conversion logic to Kotlin type T
         }
         return cachedNativeValue!!
     }
 
     fun toPython(): PyObject {
         if (cachedPyObjectValue == null) {
-            cachedPyObjectValue = toPythonInternal()
+            //cachedPyObjectValue = toPythonInternal()
+            // TODO: Implement the conversion logic to PyObject
         }
         return cachedPyObjectValue!!
     }
