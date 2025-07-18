@@ -68,7 +68,7 @@ object Python3 {
      * Run Python script as an application (Automatically initializes Python)
      */
     fun runApp(argv: Array<String>) {
-        Py_BytesMain(argv)
+        //Py_BytesMain(argv)
         // TODO: Add error handling
     }
 

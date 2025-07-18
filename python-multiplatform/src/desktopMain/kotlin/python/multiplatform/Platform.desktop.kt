@@ -1,29 +1,24 @@
 package python.multiplatform
 
+import python.multiplatform.JVMPlatform.os
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.util.*
+import java.util.Locale
+
+
+private val buildVersion = getBuildVersion(os)
 
 
 object JVMPlatform: Platform {
     override val os = getOperatingSystemType()
     override val arch: String = System.getProperty("os.arch")?.lowercase() ?: "unknown"
     override val version: String = System.getProperty("os.version") ?: "unknown"
-    override val versionCode: Int?
-    override val versionText: String?
+    override val versionCode: Int? = buildVersion?.toIntOrNull()
+    override val versionText: String? = if (versionCode != null) "Build $versionCode" else null
     override val platformType = PlatformType.JVM
     override val platformVersion: String? = System.getProperty("java.version")
 
-    init {
-        val buildVersion = getBuildVersion(os)
-        if (buildVersion != null) {
-            versionCode = buildVersion.toIntOrNull()
-            versionText = "Build $buildVersion"
-        } else {
-            versionCode = null
-            versionText = null
-        }
-    }
+    override val name = super.name
 
     override fun toString(): String {
         return name

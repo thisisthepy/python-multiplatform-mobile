@@ -98,7 +98,7 @@ object bindings {
             Py_GetBuildInfoHandle = lookup.find("Py_GetBuildInfo", MemoryAddress::class.java)
 
 
-            Py_RunMainHandle = lookup.find("", Integer.TYPE)  // TODO: Fix this
+            Py_RunMainHandle = lookup.find("Py_FinalizeEx", Integer.TYPE)  // TODO: Fix this
 
 
             PyErr_OccurredHandle = lookup.find("PyErr_Occurred", MemoryAddress::class.java)

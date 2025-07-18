@@ -126,7 +126,7 @@ expect inline fun Py_FinalizeEx(): Int
  *
  * Added in version 3.8.
  */
-expect inline fun Py_BytesMain(args: Array<String>): Int
+//expect inline fun Py_BytesMain(args: Array<String>): Int
 
 /**
  * Executes the main module in a fully configured CPython runtime.
