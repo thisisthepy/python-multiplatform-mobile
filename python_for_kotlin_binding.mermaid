@@ -1,0 +1,211 @@
+classDiagram
+    class Python3 {
+        <<singleton>>
+        -isInitialized Boolean
+        +initialize() void
+        ~finalize() void
+        +runMain(moduleName String) Int
+        +runApp(argc int, argv Array<String>) Int
+        +exec(command: String) void
+        +eval(str String, start Int, globals PyObject, locals PyObject) PyObject
+        +import(name String) PyModule
+        +version String
+        +platform String
+        +copyright String
+        +compiler String
+        +buildInfo String
+    }
+
+    class Context {
+        <<interface>>
+    }
+
+    class PyContext {
+        -strategy ConversionStrategy
+        +withContext(strategy ConversionStrategy, block Function) Any
+        +convertValue(obj PyObject) Any
+        -autoConvert(obj PyObject) Any
+        -proxyConvert(obj PyObject) PyValue
+        -naiveConvert(obj PyObject) PyObject
+    }
+
+    class ConversionStrategy {
+        <<enumeration>>
+        DEFAULT
+        UNMANAGED
+        RAW
+        TYPED
+        NATIVE
+    }
+
+    class PyValue {
+        -pyObj PyObject
+        -nativeValue T
+        +asNative() T
+        +asPyObject() PyObject
+    }
+
+    class Collection {
+        <<interface>>
+    }
+
+    class MutableCollection {
+        <<interface>>
+    }
+
+    class List {
+        <<interface>>
+    }
+
+    class MutableList {
+        <<interface>>
+    }
+
+    class Set {
+        <<interface>>
+    }
+
+    class MutableSet {
+        <<interface>>
+    }
+
+    class Map {
+        <<interface>>
+    }
+
+    class MutableMap {
+        <<interface>>
+    }
+
+    class Throwable {
+        <<interface>>
+    }
+
+    class PyType {
+        -name String
+        -baseType PyType
+        -mro List
+        -slots Set
+        -dict PyDict
+        +isSubtypeOf(other PyType) Boolean
+        +cast(obj PyObject) PyObject
+        +isInstance(obj PyObject) Boolean
+        +getIterator() PyIterator
+        +operator invoke(args Array) PyObject
+        +__new__() PyObject
+        +__init__(obj PyObject, args Array) void
+    }
+
+    class PyObject {
+        #pointer NativePointer
+        #type PyType
+        #incref() void
+        #decref() void
+        +getType() PyType
+        +getAttr(name String) Any
+        +setAttr(name String, value Any) void
+        +toString() String
+        +hashCode() Int
+        +equals(other Any) Boolean
+        +close() void
+        +operator invoke(args Any) Any
+    }
+
+    class PyIterable {
+        +iterator() PyIterator
+        +forEach(action Consumer) void
+        +spliterator() Spliterator
+    }
+
+    class PyIterator {
+        <<interface>>
+        +hasNext() Boolean
+        +next() PyObject
+        +remove() void
+    }
+
+    class PyMutableIterable {
+        +add(element Any) Boolean
+        +remove(element Any) Boolean
+        +clear() void
+    }
+
+    class PyList {
+        +add(index Int, element Any) void
+        +removeAt(index Int) Any
+        +set(index Int, element Any) Any
+        +sort() void
+        +reverse() void
+        +fromList(list List) PyList$
+        +toList() List
+        +companion PyType
+    }
+
+    class PyTuple {
+        +get(index Int) Any
+        +size() Int
+        +subList(fromIndex Int, toIndex Int) List
+        +fromList(list List) PyTuple$
+        +toList() List
+        +companion PyType
+    }
+
+    class PySet {
+        +add(element Any) Boolean
+        +remove(element Any) Boolean
+        +union(other PySet) PySet
+        +intersection(other PySet) PySet
+        +difference(other PySet) PySet
+        +fromSet(set Set) PySet$
+        +toSet() Set
+        +companion PyType
+    }
+
+    class PyDict {
+        +get(key Any) Any
+        +set(key Any, value Any) Any
+        +remove(key Any) Any
+        +containsKey(key Any) Boolean
+        +keys() Set
+        +values() Collection
+        +entries() Set
+        +fromMap(map Map) PyDict$
+        +toMap() Map
+        +companion PyType
+    }
+
+    class PyException {
+        +type PyType
+        +value PyObject
+        +traceback PyObject
+        +message String
+        +cause PyException
+        +context PyException
+    }
+
+    Context <|.. PyContext
+    Collection <|.. PyIterable
+    MutableCollection <|.. PyMutableIterable
+    List <|.. PyTuple
+    MutableList <|.. PyList
+    MutableSet <|.. PySet
+    MutableMap <|.. PyDict
+    Iterator <|.. PyIterator
+    Throwable <|.. PyException
+    
+    PyObject <|-- PyType
+    PyObject <|-- PyException
+    PyObject <|-- PyMutableIterable
+    PyMutableIterable <|-- PyList
+    PyMutableIterable <|-- PySet
+    PyObject <|-- PyTuple
+    PyObject <|-- PyDict
+    PyIterable <|-- PyMutableIterable
+    PyIterable <|.. PyTuple
+    
+    PyContext ..> PyValue : creates
+    PyContext ..> ConversionStrategy : uses
+    PyObject --> PyType : has type
+    PyIterator --o PyIterable : has
+    Python3 ..> PyObject : manages
+    Python3 ..> PyContext : uses

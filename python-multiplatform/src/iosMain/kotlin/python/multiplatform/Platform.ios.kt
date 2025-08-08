@@ -1,8 +1,10 @@
 package python.multiplatform
 
+import kotlinx.cinterop.*
 import platform.UIKit.UIDevice
 import platform.Foundation.NSProcessInfo
-
+import platform.posix.uname
+import platform.posix.utsname
 
 object IOSPlatform: Platform {
     override val os = OSType.IOS  // UIDevice.currentDevice.systemName()
@@ -18,15 +20,21 @@ object IOSPlatform: Platform {
     }
 }
 
+@OptIn(ExperimentalForeignApi::class)
 private fun getDeviceArch(): String {
-    val systemInfo = utsname()
-    uname(systemInfo.ptr)
-    return systemInfo.machine.toKString()
+    memScoped {
+        val systemInfo = alloc<utsname>()
+        if (uname(systemInfo.ptr) != 0) {
+            throw RuntimeException("Failed to get device arch info")
+        }
+        return systemInfo.machine.toKString()
+    }
 }
 
 private fun getBuildVersion(): Int? {
     val processInfo = NSProcessInfo.processInfo
-    return processInfo.operatingSystemVersionString.trim()?.map { it.code }?.joinToString("")?.toIntOrNull()
+    return processInfo.operatingSystemVersionString.trim().map { it.code }.joinToString("")
+        .toIntOrNull()
 }
 
 actual val currentPlatform: Platform = IOSPlatform
