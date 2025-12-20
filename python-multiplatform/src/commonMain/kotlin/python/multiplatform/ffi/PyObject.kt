@@ -1,11 +1,14 @@
 package python.multiplatform.ffi
 
 import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ref.PyAutoCloseable
 import python.native.ffi.NativePointer
 
 
-expect open class PyObject(pointer: NativePointer, borrowed: Boolean) {
-    val pointer: NativePointer
+open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoCloseable(pointer) {
+    override fun clean() {
+        TODO("Not yet implemented")
+    }
 }
 /*
     //init {
