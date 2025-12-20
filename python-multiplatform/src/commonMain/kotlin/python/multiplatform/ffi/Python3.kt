@@ -102,8 +102,20 @@ object Python3 {
     /**
      * Import Python module
      */
-    fun import(): PyModule {
-        return PyModule()
+    fun import(name: String): PyModule {
+        // TODO: 실제 모듈이 있는지 검사하는 코드 추가
+        val pyModuleDict: NativePointer? = PyImport_GetModuleDict() // 변수 이름 적절?
+        if (pyModuleDict == null) throw IllegalStateException("Failed to import module (Failed to get module dictionary)")
+
+        val pyStringFromName: NativePointer? = PyUnicode_FromString(name) // 변수 이름 적절?
+        if (pyStringFromName == null) throw IllegalStateException("Failed to import module (Failed to get module name)")
+
+        if (PyDict_Contains(pyModuleDict, pyStringFromName) == 0) throw IllegalStateException("Failed to import module (Module not found)")
+
+        val module: NativePointer? = PyImport_ImportModule(name)
+        if (module == null) throw IllegalStateException("Failed to import module")
+
+        return PyModule(module, false)
     }
 
     val version by lazy { withPython { Py_GetVersion() ?: throw IllegalStateException("Failed to get Python version") } }
