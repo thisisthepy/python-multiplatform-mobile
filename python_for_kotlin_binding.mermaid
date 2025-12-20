@@ -84,8 +84,8 @@ classDiagram
     class PyType {
         -name String
         -baseType PyType
+        -baseTypes List
         -mro List
-        -slots Set
         -dict PyDict
         +isSubtypeOf(other PyType) Boolean
         +cast(obj PyObject) PyObject
