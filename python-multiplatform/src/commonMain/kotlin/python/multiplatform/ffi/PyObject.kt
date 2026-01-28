@@ -16,7 +16,7 @@ import python.native.ffi.Py_DecRef
 import python.native.ffi.Py_IncRef
 import python.native.ffi.memScoped
 
-
+// TODO: !!IMPORTANT!! We need to check the case where the pointer is null one more time. (PyObject, PyType, PyException)
 open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoCloseable(pointer) {
 
     init {
@@ -26,66 +26,59 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         }
     }
 
-    //    protected val typePointer: NativePointer = lazy { PyType_GetType(this.pointer) } // TODO: PyType_GetType 함수 제작 | 함수 body를 어디에 작성...? 일단 EmbedAPI.kt에 작성
-    // protected val typePointer: NativePointer = lazy { PyObject_Type(this.pointer) } // TODO: PyObject_Type가 위의 PyType_GetType의 역할이 맞는지 확인 | 이 instance가 사라지면 이 변수가 가리키는 Object의 RefCount를 1 줄여주어야 함
-    protected val typePointer: NativePointer by lazy { PyObject_Type(this.pointer).let {
-        // TODO: catch python side error **Do Not cause error in kotlin**
-        if (it == null) throw NullPointerException("Failed to get type pointer")
-        else it
-    }} // TODO: Null check 하기
-//    val Type: PyType = lazy { PyType(typePointer!!) }
-    val type: PyType by lazy { PyType(typePointer) } // TODO: borrowed를 바꿀 수 있게 할지 결정
+//    @Throws(PyException::class)
+    protected val type: PyType by lazy {
+        val typePointer: NativePointer? = PyObject_Type(pointer)
+//        throw PyException("Failed to get pointer of type")
+        PyType.getInstance(typePointer!!)
+    }
 
-    fun incRef() {
-        println("hi")
-        // TODO: 예외 처리 추가
+    protected fun incRef() {
         Py_IncRef(pointer)
     }
 
-    fun decRef() {
-        println("hi")
-        // TODO: 예외 처리 추가
+    protected fun decRef() {
         Py_DecRef(pointer)
     }
 
-//    @Throws(PyException::class)
-//    fun getAttr(name: String): PyObject {
-//        val attr = PyObject_GetAttrString(pointer, name)
-//        if (attr == null) {
-//            throw PyException("Attribute '$name' not found")
-//        }
-//        return PyObject(attr, false)
-//    }
+    @Throws(PyException::class)
+    fun getAttr(name: String): PyObject {
+        val attr = PyObject_GetAttrString(pointer, name)
+        if (attr == null) {
+            throw PyException("Attribute '$name' not found")
+        }
+        return PyObject(attr, false)
+    }
 
     fun getAttrOrNull(name: String): PyObject? {
         val attr = PyObject_GetAttrString(pointer, name)
         return if (attr != null) PyObject(attr, false) else null
     }
 
-//    @Throws(PyException::class)
-//    fun setAttr(name: String, value: PyObject) {
-//        if (PyObject_SetAttrString(pointer, name, value.pointer) != 0) {
-//            throw PyException("Failed to set attribute '$name'")
-//        }
-//    }
+    @Throws(PyException::class)
+    fun setAttr(name: String, value: PyObject) {
+        if (PyObject_SetAttrString(pointer, name, value.pointer) != 0) {
+            throw PyException("Failed to set attribute '$name'")
+        }
+    }
 
     fun setAttrOrNull(name: String, value: PyObject?) {
         value?.pointer?.let { PyObject_SetAttrString(pointer, name, it) }
     }
 
-//    @Throws(PyException::class)
-//    fun delAttr(name: String) {
-//        if (PyObject_DelAttrString(pointer, name) != 0) {
-//            throw PyException("Failed to delete attribute '$name'")
-//        }
-//    }
+    @Throws(PyException::class)
+    fun delAttr(name: String) {
+        if (PyObject_DelAttrString(pointer, name) != 0) {
+            throw PyException("Failed to delete attribute '$name'")
+        }
+    }
 
     fun delAttrOrNull(name: String) {
         PyObject_DelAttrString(pointer, name)
     }
 
     override fun toString(): String {
-        // TODO: PyObject_Str, PyUnicode_AsUTF8 return value가 null인 경우 처리
+        // TODO: null check
         return PyUnicode_AsUTF8(PyObject_Str(pointer)!!)!!
 //        return PyObject_GetStr(pointer)
     }
@@ -103,7 +96,7 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
     }
 
     override fun clean() {
-        Py_DecRef(typePointer)
+        type.decRef()
     }
 
     // TODO: 밑에 세 함수 수정 (return type 불일치 등)
@@ -112,7 +105,7 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
 //    }
 //
 //    operator fun invoke(arg0: PyObject, arg1: PyObject): PyObject {
-//        return PyObject_CallObject(pointer, arg0, arg1) // TODO: PyObject_CallObject 함수 매개변수는 2개 아닌가...?
+//        return PyObject_CallObject(pointer, arg0, arg1)
 //    }
 //
 //    //...

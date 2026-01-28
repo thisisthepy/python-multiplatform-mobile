@@ -1,8 +1,12 @@
 package python.multiplatform.ffi
 
+import python.multiplatform.ffi.exceptions.PyException
 import python.multiplatform.ffi.types.collections.PyDict
 import python.multiplatform.ffi.types.iteration.PyIterator
 import python.native.ffi.NativePointer
+import python.native.ffi.PyLong_AsInt
+import python.native.ffi.PyLong_AsLongLong
+import python.native.ffi.PyObject_CallNoArgs
 import python.native.ffi.PyObject_GetAttr
 import python.native.ffi.PyObject_GetAttrString
 import python.native.ffi.PyObject_Type
@@ -13,29 +17,78 @@ import python.native.ffi.PyUnicode_AsUTF8
 import python.native.ffi.Py_DecRef
 
 
-// TODO: PyObject를 PyTypeObject 자리에 넣어도 될까?
-// TODO: 어떤 instance의 type을 알고 싶을 때 PyObject_Type 사용?
-// TODO: __slots__를 사용하는 type을 고려 할 필요가 있을까?
-class PyType(pointer: NativePointer): PyObject(pointer, false) {
+class PyType private constructor(pointer: NativePointer): PyObject(pointer, false) {
+    companion object {
+        private val cachedObjects: MutableMap<NativePointer, PyType> = mutableMapOf()
+        fun getInstance(pointer: NativePointer): PyType = cachedObjects.getOrPut(pointer) { PyType(pointer) }
+    }
+
     val name: String by lazy {
-        PyUnicode_AsUTF8(PyType_GetName(pointer)!!)!!
+        val namePtr: NativePointer? = PyType_GetName(pointer)
+        if (namePtr == null) throw PyException("Failed to get pointer of name")
+
+        val nameStr: String? = PyUnicode_AsUTF8(namePtr)
+        if (nameStr == null) throw PyException("Failed to get String of name")
+
+        nameStr
     }
 
     val baseType: PyType by lazy {
-        PyType(PyObject_GetAttrString(pointer, "__base__")!!)
-    } // TODO: 어떻게 가져올지 알아보기. 현재 직접적으로 부모 클래스에 접근하는 API는 없어보임.
-//    val baseTypes: List<PyType> // TODO: PyObject_GetAttrString로 가져오기
+        val attrPtr: NativePointer? = PyObject_GetAttrString(pointer, "__base__")
+        if (attrPtr == null) throw PyException("Failed to get __base__")
+
+        PyType(attrPtr)
+    }
+
+    private var cachedBaseTypes: List<PyType>? = null
+    private var cachedBaseTypesPointer: NativePointer? = null
+    val baseTypes: List<PyType>
+        get() {
+            // TODO: 에러 발생 여부 확인이 필요한건가?
+            val bases = PyObject_GetAttrString(pointer, "__bases__")  // tuple object
+            if (bases != null) {
+
+            } else {
+                // TODO: 에러? 아니면 항상 성공 보장?
+            }
+            val baseTypes = cachedBaseTypes
+            val baseTypesPointer = cachedBaseTypesPointer
+            if (baseTypesPointer != null && bases?.address == baseTypesPointer.address) {
+                return baseTypes ?: listOf()
+            } else {
+                // TODO: Do null check
+                val lenFunc = PyObject_GetAttrString(pointer, "__len__")
+                val lenObj = PyObject_CallNoArgs(lenFunc!!)
+                val size = PyLong_AsInt(lenObj!!)
+
+
+                val list: MutableList<PyType> = let {
+                    val temp: MutableList<PyType> = mutableListOf()
+                    for (i in 0 until size) {
+                        temp[i] = getInstance(PyTuple_GetItem(bases!!, i.toLong())!!)
+                    }
+                    temp
+                }
+
+
+                return list.toList()
+            }
+        }
+
 //    val mro: List<PyType>
-//    val dict: PyDict // TODO: PyType_GetDict 사용
+    val dict: PyDict by lazy {
+        // TODO: Add null check for PyObject_GetAttrString. And you should replace PyObject_GetAttrString to PyType_GetDict().
+        PyDict(PyObject_GetAttrString(pointer, "__dict__")!!, false)
+}
 
     init {
-        if (!isPyTypeObject()) throw IllegalArgumentException("Object is not a type")
+        if (!isPyTypeObject()) throw PyException("Object is not a type")
 
         var temp: MutableList<PyType> = mutableListOf<PyType>()
         // TODO: PyObject_GetAttrString return값이 Tuple인지도 확인 해야할까?
-        val basesPyObject: NativePointer = PyObject_GetAttrString(pointer, "__bases__").let {it ?: throw NullPointerException("Failed to get base types")}
+        val basesPyObject: NativePointer = PyObject_GetAttrString(pointer, "__bases__").let {it ?: throw PyException("Failed to get base types")}
         val basesSize: Long = PyTuple_Size(basesPyObject).let {
-            if (it == -1L) throw IllegalStateException("Failed to get base types size")
+            if (it == -1L) throw PyException("Failed to get base types size")
             else it
         }
         for (i in 0 until basesSize) {
@@ -57,7 +110,7 @@ class PyType(pointer: NativePointer): PyObject(pointer, false) {
 //    }
 //
 //    fun getIterator(): PyIterator {
-//        // TODO: 이건 무슨 함수인가?
+//
 //    }
 //
 //    operator fun invoke(args: Array<>): PyObject {
@@ -77,7 +130,7 @@ class PyType(pointer: NativePointer): PyObject(pointer, false) {
         val typeNamePyObject: NativePointer? = PyObject_GetAttrString(pointer, "__name__")
 
         if (pyTypeObject != null && typeNamePyObject != null) {
-            val typeName: String = PyUnicode_AsUTF8(typeNamePyObject).let {it ?: throw NullPointerException("Failed to get type name") }
+            val typeName: String = PyUnicode_AsUTF8(typeNamePyObject).let {it ?: throw PyException("Failed to get type name") }
             val result: Boolean = typeName == "type"
 
             Py_DecRef(typeNamePyObject)
@@ -87,5 +140,9 @@ class PyType(pointer: NativePointer): PyObject(pointer, false) {
         }
 
         return false
+    }
+
+    override fun hashCode(): Int {
+        return super.hashCode()
     }
 }
