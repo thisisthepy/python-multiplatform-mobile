@@ -1163,3 +1163,153 @@ actual fun PyEval_SaveThread(): NativePointer? = python.native.ffi.bindings.PyEv
 @CName("${namePrefix}PyEval_1RestoreThread")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PyEval_RestoreThread(tstate: NativePointer) = python.native.ffi.bindings.PyEval_RestoreThread(tstate.toPlatformPointer())
+
+
+//**************************************************
+// Shape vocabulary trampolines (see docs/downcall-design.md).
+//
+// These are NOT `actual` implementations of any `commonMain` `expect` -- there is no
+// commonMain/nativeMain expect for the shape vocabulary. On iOS and androidNative,
+// Kotlin/Native cinterop already calls each of the ~330 CPython functions directly with a
+// compile-time-known signature (the `actual fun`s above), which is optimal and needs no
+// trampoline. These 14 functions exist purely as `@CName`-exported JNI entry points so that
+// `androidMain` (running as ordinary JVM/ART bytecode, which cannot synthesize an arbitrary
+// native call at runtime) can reach an arbitrary CPython function through a fixed, pre-compiled
+// C-ABI shape: the target function's address is passed as the leading argument (`fn`) and cast
+// to a typed `CFunction` pointer before being invoked.
+//
+// This file (nativeMain) is shared between the androidNative and iOS targets, matching the
+// existing @CName block above -- every one of the ~330 existing JNI exports already lives here
+// rather than in `artMain`. iOS never calls JNI, so on iOS these exports are simply unused,
+// harmless extra symbols in the framework binary; they cost nothing at runtime and don't
+// collide with anything (checked: no other exported symbol uses this name prefix). Following
+// that precedent here keeps the two mechanisms (per-function actuals, shape trampolines)
+// side by side in one file instead of splitting shape support into artMain for no functional
+// reason.
+
+@CName("${namePrefix}downcall_1V")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcall_V(fn: Long) {
+    fn.toCPointer<CFunction<() -> Unit>>()!!.invoke()
+}
+
+@CName("${namePrefix}downcall_1I")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcall_I(fn: Long): Long =
+    fn.toCPointer<CFunction<() -> Long>>()!!.invoke()
+
+@CName("${namePrefix}downcall_1F")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcall_F(fn: Long): Double =
+    fn.toCPointer<CFunction<() -> Double>>()!!.invoke()
+
+@CName("${namePrefix}downcallI_1V")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcallI_V(fn: Long, a0: Long) {
+    fn.toCPointer<CFunction<(Long) -> Unit>>()!!.invoke(a0)
+}
+
+@CName("${namePrefix}downcallI_1I")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcallI_I(fn: Long, a0: Long): Long =
+    fn.toCPointer<CFunction<(Long) -> Long>>()!!.invoke(a0)
+
+@CName("${namePrefix}downcallI_1F")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcallI_F(fn: Long, a0: Long): Double =
+    fn.toCPointer<CFunction<(Long) -> Double>>()!!.invoke(a0)
+
+@CName("${namePrefix}downcallF_1I")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcallF_I(fn: Long, a0: Double): Long =
+    fn.toCPointer<CFunction<(Double) -> Long>>()!!.invoke(a0)
+
+@CName("${namePrefix}downcallII_1V")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcallII_V(fn: Long, a0: Long, a1: Long) {
+    fn.toCPointer<CFunction<(Long, Long) -> Unit>>()!!.invoke(a0, a1)
+}
+
+@CName("${namePrefix}downcallII_1I")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcallII_I(fn: Long, a0: Long, a1: Long): Long =
+    fn.toCPointer<CFunction<(Long, Long) -> Long>>()!!.invoke(a0, a1)
+
+@CName("${namePrefix}downcallIII_1V")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcallIII_V(fn: Long, a0: Long, a1: Long, a2: Long) {
+    fn.toCPointer<CFunction<(Long, Long, Long) -> Unit>>()!!.invoke(a0, a1, a2)
+}
+
+@CName("${namePrefix}downcallIII_1I")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcallIII_I(fn: Long, a0: Long, a1: Long, a2: Long): Long =
+    fn.toCPointer<CFunction<(Long, Long, Long) -> Long>>()!!.invoke(a0, a1, a2)
+
+@CName("${namePrefix}downcallIIII_1I")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcallIIII_I(fn: Long, a0: Long, a1: Long, a2: Long, a3: Long): Long =
+    fn.toCPointer<CFunction<(Long, Long, Long, Long) -> Long>>()!!.invoke(a0, a1, a2, a3)
+
+@CName("${namePrefix}downcallIIIII_1I")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcallIIIII_I(fn: Long, a0: Long, a1: Long, a2: Long, a3: Long, a4: Long): Long =
+    fn.toCPointer<CFunction<(Long, Long, Long, Long, Long) -> Long>>()!!.invoke(a0, a1, a2, a3, a4)
+
+@CName("${namePrefix}downcallIIIIII_1I")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun downcallIIIIII_I(fn: Long, a0: Long, a1: Long, a2: Long, a3: Long, a4: Long, a5: Long): Long =
+    fn.toCPointer<CFunction<(Long, Long, Long, Long, Long, Long) -> Long>>()!!.invoke(a0, a1, a2, a3, a4, a5)
+
+
+//**************************************************
+// Symbol lookup for the shape vocabulary.
+//
+// Resolves a CPython symbol name to its process address via `dlsym`. Our androidNative shared
+// object is linked against libpython at build time (see `build.gradle.kts`'s `linkerOpts`), so
+// its symbols are already present in the process's global symbol table by the time this runs;
+// `dlopen(null, RTLD_NOW)` hands back a handle onto that global table without loading anything
+// new. Caching is done on the JVM side (`ffiSymbol` in `jvmMain/.../ShapeDowncalls.kt`), so this
+// is deliberately an uncached, one-shot-per-call primitive.
+
+@OptIn(ExperimentalForeignApi::class)
+private val globalDlHandle: COpaquePointer? by lazy {
+    platform.posix.dlopen(null, platform.posix.RTLD_NOW)
+}
+
+@CName("${namePrefix}ffiSymbolRaw")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun ffiSymbolRaw(name: String): Long {
+    val sym = platform.posix.dlsym(globalDlHandle, name)
+    return sym?.rawValue?.toLong() ?: 0L
+}
+
+
+//**************************************************
+// UTF-8 string marshalling for the shape vocabulary.
+//
+// Buffers are allocated on `nativeHeap` (malloc/free-backed). [ffiAllocUtf8] hands back
+// ownership to the JVM-side caller, which must release it with [ffiFreeUtf8] -- see the
+// lifetime discussion in `jvmMain/.../ShapeDowncalls.kt`. [ffiReadUtf8] never frees its input;
+// it only copies bytes out.
+
+@CName("${namePrefix}ffiAllocUtf8")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun ffiAllocUtf8(str: String): Long {
+    val bytes = str.encodeToByteArray()
+    val buffer = nativeHeap.allocArray<ByteVar>(bytes.size + 1)
+    for (i in bytes.indices) buffer[i] = bytes[i]
+    buffer[bytes.size] = 0
+    return buffer.rawValue.toLong()
+}
+
+@CName("${namePrefix}ffiFreeUtf8")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun ffiFreeUtf8(ptr: Long) {
+    val p = ptr.toCPointer<ByteVar>() ?: return
+    nativeHeap.free(p)
+}
+
+@CName("${namePrefix}ffiReadUtf8")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+fun ffiReadUtf8(ptr: Long): String? = ptr.toCPointer<ByteVar>()?.toKString()

@@ -440,4 +440,38 @@ object bindings {
     external fun PyModule_GetName(module: JNIPointer): String?
     external fun PyModule_GetDict(module: JNIPointer): JNIPointer?
     external fun PyModule_GetFilenameObject(module: JNIPointer): JNIPointer?
+
+
+    //**************************************************
+    // Shape vocabulary (see docs/downcall-design.md and jvmMain/.../ShapeDowncalls.kt).
+    //
+    // These bind, via JNI, to the `@CName`-exported trampolines compiled into
+    // `libmultiplatform_python3.13.so` from `nativeMain/.../EmbedAPI.native.kt`. Unlike every
+    // other declaration in this file (one native method per CPython function), these 14 are
+    // reused across all ~330 CPython functions of a given shape -- the target function's
+    // address travels as the leading `fn` argument.
+    external fun downcall_V(fn: Long)
+    external fun downcall_I(fn: Long): Long
+    external fun downcall_F(fn: Long): Double
+    external fun downcallI_V(fn: Long, a0: Long)
+    external fun downcallI_I(fn: Long, a0: Long): Long
+    external fun downcallI_F(fn: Long, a0: Long): Double
+    external fun downcallF_I(fn: Long, a0: Double): Long
+    external fun downcallII_V(fn: Long, a0: Long, a1: Long)
+    external fun downcallII_I(fn: Long, a0: Long, a1: Long): Long
+    external fun downcallIII_V(fn: Long, a0: Long, a1: Long, a2: Long)
+    external fun downcallIII_I(fn: Long, a0: Long, a1: Long, a2: Long): Long
+    external fun downcallIIII_I(fn: Long, a0: Long, a1: Long, a2: Long, a3: Long): Long
+    external fun downcallIIIII_I(fn: Long, a0: Long, a1: Long, a2: Long, a3: Long, a4: Long): Long
+    external fun downcallIIIIII_I(fn: Long, a0: Long, a1: Long, a2: Long, a3: Long, a4: Long, a5: Long): Long
+
+    // Symbol lookup (uncached primitive -- caching happens on the jvmMain side, see ffiSymbol)
+    external fun ffiSymbolRaw(name: String): Long
+
+    // UTF-8 string marshalling. See the lifetime discussion in jvmMain/.../ShapeDowncalls.kt:
+    // ffiAllocUtf8's result must be released with ffiFreeUtf8 by the caller; ffiReadUtf8 never
+    // frees its input.
+    external fun ffiAllocUtf8(str: String): Long
+    external fun ffiFreeUtf8(ptr: Long)
+    external fun ffiReadUtf8(ptr: Long): String?
 }

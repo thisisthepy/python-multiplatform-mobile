@@ -5,6 +5,12 @@ import java.lang.invoke.MethodHandles
 import java.lang.invoke.MethodType
 
 /**
+ * The three CPython Stable ABI return kinds relevant to the shape vocabulary: no value,
+ * a `long`-sized integer/pointer, or a `double`. See `docs/downcall-design.md`.
+ */
+internal enum class ReturnKind { VOID, LONG, DOUBLE }
+
+/**
  * JDK-version-agnostic Panama FFI abstraction.
  *
  * Reaches `java.lang.foreign` (JDK 19+) or `jdk.incubator.foreign` (JDK 16-18)
@@ -34,6 +40,34 @@ internal object PanamaBackend {
     /** Look up a symbol in the loaded libraries and create a downcall handle. */
     val findSymbol: (String, Class<*>, Array<Class<*>>) -> MethodHandle
 
+    /** Resolve [name] to its raw process address without building a downcall handle around
+     *  it. Returns `0L` if the symbol is not found (does not throw). Used for the shape
+     *  vocabulary's symbol lookup (`ffiSymbolRaw` in `jvmMain`), where the caller passes
+     *  the address as the leading argument to a shape trampoline instead of binding a
+     *  dedicated handle per CPython function. */
+    val findSymbolAddress: (String) -> Long
+
+    /** Allocate a new null-terminated UTF-8 buffer backed by native `malloc`, independent
+     *  of any [java.lang.foreign.Arena]. Unlike [allocateUtf8String] (which allocates from
+     *  the global arena and is never freed -- acceptable only because the existing 305
+     *  call sites are one-shot, short-lived strings), a buffer from this function **must**
+     *  be released with [freeUtf8Address] by the caller. See `ShapeDowncalls.kt` for the
+     *  `withUtf8` helper that makes leaking one hard. */
+    val allocateUtf8Freeable: (String) -> Long
+
+    /** Release a buffer obtained from [allocateUtf8Freeable]. Passing any other address
+     *  (e.g. a CPython-owned `const char*`) is undefined behaviour, same as misusing `free()`. */
+    val freeUtf8Address: (Long) -> Unit
+
+    /** One `MethodHandle` per ABI shape, **unbound** to any specific target function: its
+     *  leading parameter is the callee's address (as a plain `long`, adapted from
+     *  `MemorySegment`/`MemoryAddress` so the handle's static Java type is exactly
+     *  `(long, long..., double...) -> long/double/void` with no boxing). Built once per
+     *  shape by the caller (`ShapeDowncalls.desktop.kt`) and reused for every CPython
+     *  function of that shape -- this is what makes `invokeExact` reachable: the call
+     *  site's static signature and the handle's type are fixed and identical. */
+    val unboundDowncallHandle: (intArgs: Int, floatArgs: Int, returnKind: ReturnKind) -> MethodHandle
+
     // ---- internals ----
 
     private enum class Backend { MODERN, INCUBATOR }
@@ -46,12 +80,20 @@ internal object PanamaBackend {
                 allocateUtf8String = data.allocateUtf8String
                 readUtf8String = data.readUtf8String
                 findSymbol = data.findSymbol
+                findSymbolAddress = data.findSymbolAddress
+                allocateUtf8Freeable = data.allocateUtf8Freeable
+                freeUtf8Address = data.freeUtf8Address
+                unboundDowncallHandle = data.unboundDowncallHandle
             }
             Backend.INCUBATOR -> {
                 val data = implData as IncubatorData
                 allocateUtf8String = data.allocateUtf8String
                 readUtf8String = data.readUtf8String
                 findSymbol = data.findSymbol
+                findSymbolAddress = data.findSymbolAddress
+                allocateUtf8Freeable = data.allocateUtf8Freeable
+                freeUtf8Address = data.freeUtf8Address
+                unboundDowncallHandle = data.unboundDowncallHandle
             }
         }
     }
@@ -61,7 +103,11 @@ internal object PanamaBackend {
     private class ModernData(
         val allocateUtf8String: (String) -> Long,
         val readUtf8String: (Long) -> String?,
-        val findSymbol: (String, Class<*>, Array<Class<*>>) -> MethodHandle
+        val findSymbol: (String, Class<*>, Array<Class<*>>) -> MethodHandle,
+        val findSymbolAddress: (String) -> Long,
+        val allocateUtf8Freeable: (String) -> Long,
+        val freeUtf8Address: (Long) -> Unit,
+        val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle
     )
 
     private fun initModern(): ModernData {
@@ -217,7 +263,72 @@ internal object PanamaBackend {
                 ofAddressMH, segmentAddressMH, nullSegment)
         }
 
-        return ModernData(allocStr, readStr, findSym)
+        // ---- Symbol address lookup (no downcall handle built) ----
+
+        val findAddr: (String) -> Long = { name ->
+            val optSeg = lookupFindMH.invoke(combinedLookup, name) as java.util.Optional<*>
+            if (optSeg.isPresent) segmentAddressMH.invoke(optSeg.get()) as Long else 0L
+        }
+
+        // ---- Freeable UTF-8 strings, backed by native malloc/free ----
+
+        val mallocHandle = findSym("malloc", POINTER_TYPE, arrayOf(POINTER_TYPE))
+        val freeHandle = findSym("free", Void.TYPE, arrayOf(POINTER_TYPE))
+        val ofArrayMethod = memorySegmentClass.getMethod("ofArray", ByteArray::class.java)
+        val copyMethod = memorySegmentClass.getMethod(
+            "copy", memorySegmentClass, Long::class.javaPrimitiveType, memorySegmentClass,
+            Long::class.javaPrimitiveType, Long::class.javaPrimitiveType
+        )
+
+        val allocFreeable: (String) -> Long = { str ->
+            val bytes = str.toByteArray(Charsets.UTF_8) + byteArrayOf(0)
+            val len = bytes.size.toLong()
+            val addr = mallocHandle.invoke(len) as Long
+            if (addr == 0L) throw OutOfMemoryError("native malloc failed for UTF-8 string of length $len")
+            val srcSeg = ofArrayMethod.invoke(null, bytes)
+            val dstSeg = reinterpretMH.invoke(ofAddressMH.invoke(null, addr), len)
+            copyMethod.invoke(null, srcSeg, 0L, dstSeg, 0L, len)
+            addr
+        }
+
+        val freeAddr: (Long) -> Unit = { addr ->
+            if (addr != 0L) {
+                freeHandle.invoke(addr)
+                Unit
+            }
+        }
+
+        // ---- Shape vocabulary: unbound downcall handles, one per (intArgs, floatArgs, returnKind) ----
+
+        val downcallHandle2Method = linkerClass.getMethod("downcallHandle", functionDescriptorClass, optionArrayType)
+
+        // Filter that converts an incoming `long` into the `MemorySegment` a raw downcall
+        // handle's leading (target-address) parameter requires. filterArguments requires the
+        // filter's return type to be identical to the target's parameter type at that
+        // position, so asType() is used to give the (Any-returning) static adapter method the
+        // exact reflectively-obtained MemorySegment return type.
+        val longToSegmentExact = lookup.findStatic(
+            PanamaBackend::class.java, "modernLongToSegment",
+            MethodType.methodType(Any::class.java, Long::class.javaPrimitiveType)
+        ).asType(MethodType.methodType(memorySegmentClass, Long::class.javaPrimitiveType))
+
+        val buildShape: (Int, Int, ReturnKind) -> MethodHandle = { intArgs, floatArgs, returnKind ->
+            val total = intArgs + floatArgs
+            val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, total)
+            for (i in 0 until intArgs) java.lang.reflect.Array.set(layoutParams, i, javaLong)
+            for (i in 0 until floatArgs) java.lang.reflect.Array.set(layoutParams, intArgs + i, javaDouble)
+
+            val fd = when (returnKind) {
+                ReturnKind.VOID -> fdOfVoidMethod.invoke(null, layoutParams)
+                ReturnKind.LONG -> fdOfMethod.invoke(null, javaLong, layoutParams)
+                ReturnKind.DOUBLE -> fdOfMethod.invoke(null, javaDouble, layoutParams)
+            }
+
+            val raw = downcallHandle2Method.invoke(linker, fd, emptyOptions) as MethodHandle
+            MethodHandles.filterArguments(raw, 0, longToSegmentExact)
+        }
+
+        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape)
     }
 
     private fun adaptModernHandle(
@@ -278,7 +389,11 @@ internal object PanamaBackend {
     private class IncubatorData(
         val allocateUtf8String: (String) -> Long,
         val readUtf8String: (Long) -> String?,
-        val findSymbol: (String, Class<*>, Array<Class<*>>) -> MethodHandle
+        val findSymbol: (String, Class<*>, Array<Class<*>>) -> MethodHandle,
+        val findSymbolAddress: (String) -> Long,
+        val allocateUtf8Freeable: (String) -> Long,
+        val freeUtf8Address: (Long) -> Unit,
+        val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle
     )
 
     private fun initIncubator(): IncubatorData {
@@ -411,7 +526,77 @@ internal object PanamaBackend {
                 ofLongMethod, toRawLongMethod)
         }
 
-        return IncubatorData(allocStr, readStr, findSym)
+        // ---- Symbol address lookup (no downcall handle built) ----
+
+        val findAddr: (String) -> Long = { name ->
+            val optSeg = lookupMethod.invoke(loaderLookup, name) as java.util.Optional<*>
+            if (optSeg.isPresent) toRawLongMethod.invoke(optSeg.get()) as Long else 0L
+        }
+
+        // ---- Freeable UTF-8 strings ----
+        //
+        // Unlike the modern (malloc/free) implementation, this reuses toCString's
+        // ResourceScope: each allocation gets its own confined scope, tracked by address so
+        // freeUtf8Address can close it (ResourceScope.close() releases the backing memory).
+        // JDK 16-18 is a legacy fallback not exercised by this repo's verification matrix
+        // (JDK 21+ always resolves the modern java.lang.foreign backend); this path is a
+        // best-effort mirror of the modern one, not independently verified.
+
+        val scopeCloseMethod = memoryScopeClass.getMethod("close")
+        val freeableScopes = java.util.concurrent.ConcurrentHashMap<Long, Any>()
+
+        val allocFreeable: (String) -> Long = { str ->
+            val scope = newScopeMethod.invoke(null)
+            val seg = toCStringMethod.invoke(null, str, scope)
+            val addr = segAddressMethod.invoke(seg)
+            val raw = toRawLongMethod.invoke(addr) as Long
+            freeableScopes[raw] = scope
+            raw
+        }
+
+        val freeAddr: (Long) -> Unit = { addr ->
+            freeableScopes.remove(addr)?.let { scopeCloseMethod.invoke(it) }
+            Unit
+        }
+
+        // ---- Shape vocabulary: unbound downcall handles ----
+
+        val downcallHandleUnboundMethod = clinkerClass.getMethod(
+            "downcallHandle", MethodType::class.java, functionDescriptorClass
+        )
+
+        val longToAddrExact = lookup.findStatic(
+            PanamaBackend::class.java, "incubatorLongToAddr",
+            MethodType.methodType(Any::class.java, Long::class.javaPrimitiveType)
+        ).asType(MethodType.methodType(memoryAddressClass, Long::class.javaPrimitiveType))
+
+        val buildShape: (Int, Int, ReturnKind) -> MethodHandle = { intArgs, floatArgs, returnKind ->
+            val total = intArgs + floatArgs
+            val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, total)
+            for (i in 0 until intArgs) java.lang.reflect.Array.set(layoutParams, i, cLongLong)
+            for (i in 0 until floatArgs) java.lang.reflect.Array.set(layoutParams, intArgs + i, cDouble)
+
+            val fd = when (returnKind) {
+                ReturnKind.VOID -> fdOfVoidMethod.invoke(null, layoutParams)
+                ReturnKind.LONG -> fdOfMethod.invoke(null, cLongLong, layoutParams)
+                ReturnKind.DOUBLE -> fdOfMethod.invoke(null, cDouble, layoutParams)
+            }
+
+            val mtParams = mutableListOf<Class<*>>()
+            repeat(intArgs) { mtParams.add(Long::class.javaPrimitiveType!!) }
+            repeat(floatArgs) { mtParams.add(Double::class.javaPrimitiveType!!) }
+            val mtRet: Class<*> = when (returnKind) {
+                ReturnKind.VOID -> Void.TYPE
+                ReturnKind.LONG -> Long::class.javaPrimitiveType!!
+                ReturnKind.DOUBLE -> Double::class.javaPrimitiveType!!
+            }
+            val mt = MethodType.methodType(mtRet, mtParams)
+
+            val raw = downcallHandleUnboundMethod.invoke(clinker, mt, fd) as MethodHandle
+            MethodHandles.filterArguments(raw, 0, longToAddrExact)
+        }
+
+        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape)
     }
 
     private fun adaptIncubatorHandle(
