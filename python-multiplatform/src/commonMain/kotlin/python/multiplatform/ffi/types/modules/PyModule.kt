@@ -18,19 +18,40 @@ open class PyModule(pointer: NativePointer, borrowed: Boolean) : PyObject(pointe
 
     /** `module.__name__`. */
     val name: String
-        get() = TODO("Not yet implemented")
+        get() = getAttr("__name__").toString()
 
     /** `module.__doc__`, or `null` if the module has none. */
     val doc: String?
-        get() = TODO("Not yet implemented")
+        get() {
+            val docObj = getAttrOrNull("__doc__") ?: return null
+            if (python.multiplatform.ffi.types.basic.PyNone.isNone(docObj)) {
+                return null
+            }
+            return docObj.toString()
+        }
 
     /** `module.__file__`, or `null` for built-in/frozen modules. */
     val file: String?
-        get() = TODO("Not yet implemented")
+        get() {
+            val fileObj = getAttrOrNull("__file__") ?: return null
+            if (python.multiplatform.ffi.types.basic.PyNone.isNone(fileObj)) {
+                return null
+            }
+            return fileObj.toString()
+        }
 
     /** `module.__dict__`: the module's namespace. */
     val dict: PyDict
-        get() = TODO("Not yet implemented")
+        get() {
+            // Attribute access for __dict__ returns a NEW reference.
+            // We fetch it via FFI directly to transfer ownership cleanly to PyDict
+            // without creating an intermediate PyObject wrapper.
+            val dictPtr = python.native.ffi.PyObject_GetAttrString(pointer, "__dict__")
+                ?: throw python.multiplatform.ffi.exceptions.PyException.fromCurrentError()
+                    ?: python.multiplatform.ffi.exceptions.PyException("Attribute '__dict__' not found")
+            // borrowed = false because we are transferring the new reference from GetAttrString
+            return PyDict(dictPtr, false)
+        }
 
     /**
      * Looks up [name] in this module's namespace, throwing [PyException] if
