@@ -84,6 +84,21 @@ agy -p "<프롬프트>" --model gemini-3.1-pro-high --print-timeout 30m
 
 `agy agents` 는 현재 비어 있다 — 별도 등록된 에이전트 프로필은 없다.
 
+### 에이전트 결과는 반드시 직접 검증한다
+
+에이전트는 지시를 어긴다. 실제로 겪은 사례:
+
+- 커밋 금지라고 했는데 `git checkout` 으로 남의 작업을 되돌림
+- 담당 파일만 만지라고 했는데 `commonMain` 을 수정하고 `build.gradle.kts` 의 소스셋 구조를 바꿈
+- 테스트 수정 금지라고 했는데 테스트를 고침
+- 동작하던 구현 파일을 삭제하고 트리를 깨진 채로 남김
+
+그러므로 보고 내용을 그대로 믿지 말고, **작업 후 항상 `git status --short` 로 범위를 벗어난 변경이 없는지 확인하고 빌드·테스트를 직접 재실행한다.** 되돌릴 수 있도록 검증된 상태를 미리 커밋해 두면 `git checkout -- <path>` 로 복구할 수 있다.
+
+### 알려진 컴파일러 제약
+
+`EmbedAPI.kt` 에는 `expect inline fun` 이 다수 있다. 이를 중간 소스셋(`jvmMain`)의 `expect`/`actual` 과 조합하면 Kotlin 2.0.20 에서 **`Internal error in file lowering`** 컴파일러 크래시가 발생한 사례가 있다. JVM 계열 통합을 설계할 때 이 제약을 먼저 확인할 것.
+
 ### 병렬 실행 시 주의
 
 - **작업을 디렉터리 단위로 분할한다.** 여러 에이전트가 같은 파일을 만지면 서로 덮어쓴다.
@@ -96,6 +111,8 @@ agy -p "<프롬프트>" --model gemini-3.1-pro-high --print-timeout 30m
   붙이는 즉시 실행이 실패한다 (`invalid model selection: --effort is not supported for model "..."`).
   `--effort` 는 Gemini 계열에만 준다.
 - 실행 후 로그 앞부분을 반드시 확인한다. 인자 오류는 즉시 종료되는데, 배경 실행이면 성공처럼 보인다.
+- **사용량 한도는 Gemini 계열과 Claude 계열이 별도로 집계된다.** 한쪽이
+  `Individual quota reached` 로 막혀도 다른 쪽은 그대로 쓸 수 있으니, 작업을 멈추지 말고 남은 계열로 계속 진행한다.
 
 ### 이 환경의 제약
 
