@@ -11,11 +11,22 @@ import java.util.concurrent.ConcurrentHashMap
 
 
 actual abstract class PyAutoCloseable actual constructor(pointer: NativePointer): AutoCloseable {
-    private val cleaner: Cleaner?
     private val cleanable: Cleaner.Cleanable?
     private var phantomRef: PhantomCleanupReference?
 
     companion object {
+        /**
+         * One Cleaner for the whole process, on the API levels that have Cleaner at all.
+         *
+         * Cleaner.create() starts a dedicated OS thread. Calling it once per instance --
+         * as this class used to -- spawns a thread per PyObject and exhausts the process
+         * thread limit ("OutOfMemoryError: unable to create native thread") after a few
+         * thousand objects. Registering with an existing Cleaner is cheap; creating one
+         * is not. The same bug was found and fixed on desktop.
+         */
+        private val sharedCleaner: Cleaner? =
+            if (SDK_INT >= Build.VERSION_CODES.TIRAMISU) Cleaner.create() else null
+
         private val referenceQueue = ReferenceQueue<PyAutoCloseable>()
         // TODO: activeReferences가 계속 커질 위험이 있음
         // TODO: 성능 오버헤드: 모든 객체마다 HashMap 엔트리 생성
@@ -44,13 +55,11 @@ actual abstract class PyAutoCloseable actual constructor(pointer: NativePointer)
 
     init {
         if (SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            cleaner = Cleaner.create()
-            cleanable = cleaner.register(this) {
+            cleanable = sharedCleaner?.register(this) {
                 clean()
             }
             phantomRef = null
         } else {
-            cleaner = null
             cleanable = null
             phantomRef = PhantomCleanupReference(this, referenceQueue).also {
                 ref -> activeReferences[ref] = { clean() }

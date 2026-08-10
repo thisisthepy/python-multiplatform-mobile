@@ -499,9 +499,13 @@ kotlin {
                 implementation(libs.kotlin.test)
             }
         }
+        val jvmTest by creating
+        jvmTest.dependsOn(commonTest)
         val desktopMain by getting {
             resources.srcDirs("src/desktopMain/resources")
         }
+        val desktopTest by getting
+        desktopTest.dependsOn(jvmTest)
         val androidMain by getting
         jvmMain.dependsOn(commonMain)
         desktopMain.dependsOn(jvmMain)
@@ -654,4 +658,45 @@ fun downloadPythonBuilds() {
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.CInteropProcess>().configureEach {
     dependsOn(downloadAllPythonBuilds)
+}
+
+val copyDesktopPythonBinariesForTests by tasks.registering(Copy::class) {
+    dependsOn(downloadAllPythonBuilds)
+    from("$downloadDir/extracted") {
+        include("macos-*/python/lib/libpython*.dylib")
+        include("linux-*/python/lib/libpython*.so*")
+        include("windows-*/python/python*.dll")
+        include("windows-*/python/vcruntime*.dll")
+        eachFile {
+            val parts = path.split("/")
+            val platform = parts[0]
+            val filename = parts.last()
+            path = "lib/$platform/$filename"
+        }
+        includeEmptyDirs = false
+    }
+    into(layout.buildDirectory.dir("desktop-test-binaries"))
+}
+
+tasks.named<Test>("desktopTest") {
+    dependsOn(copyDesktopPythonBinariesForTests)
+    classpath += files(layout.buildDirectory.dir("desktop-test-binaries"))
+    
+    javaLauncher.set(
+        javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }
+    )
+    jvmArgs("--enable-preview", "-Djava.library.path=.")
+    
+    val platform = if (System.getProperty("os.name").contains("Mac")) {
+        if (System.getProperty("os.arch") == "aarch64") "macos-aarch64" else "macos-x86_64"
+    } else if (System.getProperty("os.name").contains("Windows")) {
+        "windows-x86_64"
+    } else {
+        "linux-x86_64"
+    }
+    
+    val pythonHome = layout.buildDirectory.dir("python-standalone/extracted/$platform/python").get().asFile.absolutePath
+    environment("PYTHONHOME", pythonHome)
 }

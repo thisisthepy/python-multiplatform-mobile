@@ -137,11 +137,18 @@ internal object PanamaBackend {
         // MemorySegment.NULL
         val nullSegment = memorySegmentClass.getField("NULL").get(null)
 
-        // Arena.allocateFrom(String)
-        val allocateFromMH = lookup.findVirtual(
-            arenaClass, "allocateFrom",
-            MethodType.methodType(memorySegmentClass, String::class.java)
-        )
+        // Arena.allocateFrom(String) (JDK 22+) or allocateUtf8String (JDK 19-21)
+        val allocateFromMH = try {
+            lookup.findVirtual(
+                arenaClass, "allocateFrom",
+                MethodType.methodType(memorySegmentClass, String::class.java)
+            )
+        } catch (e: Exception) {
+            lookup.findVirtual(
+                arenaClass, "allocateUtf8String",
+                MethodType.methodType(memorySegmentClass, String::class.java)
+            )
+        }
 
         // MemorySegment.address()
         val segmentAddressMH = lookup.findVirtual(
@@ -155,11 +162,18 @@ internal object PanamaBackend {
             MethodType.methodType(memorySegmentClass, Long::class.javaPrimitiveType)
         )
 
-        // MemorySegment.getString(long)
-        val getStringMH = lookup.findVirtual(
-            memorySegmentClass, "getString",
-            MethodType.methodType(String::class.java, Long::class.javaPrimitiveType)
-        )
+        // MemorySegment.getString(long) (JDK 22+) or getUtf8String (JDK 19-21)
+        val getStringMH = try {
+            lookup.findVirtual(
+                memorySegmentClass, "getString",
+                MethodType.methodType(String::class.java, Long::class.javaPrimitiveType)
+            )
+        } catch (e: Exception) {
+            lookup.findVirtual(
+                memorySegmentClass, "getUtf8String",
+                MethodType.methodType(String::class.java, Long::class.javaPrimitiveType)
+            )
+        }
 
         // MemorySegment.ofAddress(long)
         val ofAddressMH = memorySegmentClass.getMethod("ofAddress", Long::class.javaPrimitiveType!!)
@@ -168,7 +182,7 @@ internal object PanamaBackend {
         val linker = linkerClass.getMethod("nativeLinker").invoke(null)
 
         // Linker.defaultLookup()
-        val defaultLookup = linkerClass.getMethod("defaultLookup").invoke(null)
+        val defaultLookup = linkerClass.getMethod("defaultLookup").invoke(linker)
 
         // SymbolLookup.loaderLookup()
         val loaderLookup = symbolLookupClass.getMethod("loaderLookup").invoke(null)
@@ -348,7 +362,7 @@ internal object PanamaBackend {
             val segToLong = lookup.findStatic(
                 PanamaBackend::class.java, "modernSegmentToLong",
                 MethodType.methodType(Long::class.javaPrimitiveType, Any::class.java)
-            )
+            ).asType(MethodType.methodType(Long::class.javaPrimitiveType, segmentClass))
             h = MethodHandles.filterReturnValue(h, segToLong)
         }
 
@@ -358,7 +372,7 @@ internal object PanamaBackend {
                 val longToSeg = lookup.findStatic(
                     PanamaBackend::class.java, "modernLongToSegment",
                     MethodType.methodType(Any::class.java, Long::class.javaPrimitiveType)
-                )
+                ).asType(MethodType.methodType(segmentClass, Long::class.javaPrimitiveType))
                 // The parameter index in the adapted handle: account for already-adapted params
                 h = MethodHandles.filterArguments(h, i, longToSeg)
             }
@@ -372,9 +386,13 @@ internal object PanamaBackend {
     fun modernSegmentToLong(seg: Any?): Long {
         if (seg == null) return 0L
         return try {
-            val m = seg.javaClass.getMethod("address")
+            val cls = Class.forName("java.lang.foreign.MemorySegment")
+            val m = cls.getMethod("address")
             m.invoke(seg) as Long
-        } catch (_: Exception) { 0L }
+        } catch (e: Exception) { 
+            e.printStackTrace()
+            0L 
+        }
     }
 
     @JvmStatic
@@ -635,9 +653,13 @@ internal object PanamaBackend {
     fun incubatorAddrToLong(addr: Any?): Long {
         if (addr == null) return 0L
         return try {
-            val m = addr.javaClass.getMethod("toRawLongValue")
+            val cls = Class.forName("jdk.incubator.foreign.MemoryAddress")
+            val m = cls.getMethod("toRawLongValue")
             m.invoke(addr) as Long
-        } catch (_: Exception) { 0L }
+        } catch (e: Exception) { 
+            e.printStackTrace()
+            0L 
+        }
     }
 
     @JvmStatic
