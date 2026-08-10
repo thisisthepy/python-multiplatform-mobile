@@ -59,7 +59,13 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         }
     }
 
-    protected val type: PyType by lazy {
+    /**
+     * Deliberately named `pyType` rather than `type`: a property called `type` compiles to a
+     * `getType()` accessor on JVM targets, which collides with the public [getType] below and
+     * makes every subclass fail to compile for Android and Desktop. Kotlin/Native has no such
+     * signature rule, which is why this only ever surfaced once a JVM target was built.
+     */
+    protected val pyType: PyType by lazy {
         // PyObject_Type returns a new reference; PyType.getInstance's private
         // constructor stores it via PyObject(pointer, borrowed = false), i.e.
         // it takes ownership of exactly that reference (no extra incRef).
@@ -134,7 +140,7 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
     }
 
     /** Public accessor for [type], mirroring the mermaid sketch's `getType()`. */
-    fun getType(): PyType = type
+    fun getType(): PyType = pyType
 
     /**
      * Calls this object as a Python callable: `self(*args, **kwargs)`.
