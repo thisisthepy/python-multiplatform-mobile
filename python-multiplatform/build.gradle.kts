@@ -258,6 +258,34 @@ kotlin {
     }
 }
 
+/**
+ * The iOS `Python.framework` ships only the interpreter binary and headers — it carries no
+ * standard library. `Py_Initialize()` therefore aborts the process with
+ * "Fatal Python error: Failed to import encodings module" unless PYTHONHOME points at a
+ * prefix containing `lib/python3.13`.
+ *
+ * The simulator distribution archive does contain that stdlib, so unpack it into the build
+ * directory and hand its location to the test binary.
+ */
+val extractIosSimulatorStdlib by tasks.registering(Copy::class) {
+    val archive = rootProject.file("binary/arm64-iphonesimulator.zip")
+    onlyIf { archive.exists() }
+    from(zipTree(archive)) {
+        include("arm64-iphonesimulator/lib/python3.13/**")
+        eachFile { path = path.removePrefix("arm64-iphonesimulator/") }
+    }
+    into(layout.buildDirectory.dir("python-stdlib/ios-simulator"))
+    includeEmptyDirs = false
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimulatorTest>().configureEach {
+    dependsOn(extractIosSimulatorStdlib)
+    val pythonHome = layout.buildDirectory.dir("python-stdlib/ios-simulator").get().asFile.absolutePath
+    // simctl only forwards variables into the spawned process when they carry this prefix.
+    environment("SIMCTL_CHILD_PYTHONHOME", pythonHome)
+    environment("PYTHONHOME", pythonHome)
+}
+
 android {
     namespace = "python.multiplatform"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
