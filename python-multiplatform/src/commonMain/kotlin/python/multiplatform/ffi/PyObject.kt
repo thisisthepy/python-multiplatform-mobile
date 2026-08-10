@@ -1,32 +1,44 @@
 package python.multiplatform.ffi
 
 import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ref.PyAutoCloseable
 import python.native.ffi.NativePointer
+import python.native.ffi.PyErr_Occurred
+import python.native.ffi.PyLong_AsLongLong
+import python.native.ffi.PyLong_FromLongLong
+import python.native.ffi.PyObject_DelAttrString
+import python.native.ffi.PyObject_GetAttrString
+import python.native.ffi.PyObject_SetAttrString
+import python.native.ffi.PyObject_Str
+import python.native.ffi.PyObject_Type
+import python.native.ffi.PyUnicode_AsUTF8
+import python.native.ffi.Py_DecRef
+import python.native.ffi.Py_IncRef
+import python.native.ffi.memScoped
 
+// TODO: !!IMPORTANT!! We need to check the case where the pointer is null one more time. (PyObject, PyType, PyException)
+open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoCloseable(pointer) {
 
-expect open class PyObject(pointer: NativePointer, borrowed: Boolean) {
-    val pointer: NativePointer
-}
-/*
-    //init {
-    //    if (!borrowed) {
-            //PyIncRef(pointer)
+    init {
+        if (borrowed) {
+            Py_IncRef(pointer)
             // TODO: PyIncRef을 사용하는게 적절한 선택일까?
-    //    }
-    //}
-    // TODO: Temporary commented due to the error: Expected declaration cannot have a body.
-    // TODO: Move this to the actual implementation.
-
-    val pointer: NativePointer
-    protected val typePointer: NativePointer = lazy { PyType_GetType(this.pointer) }
-    val Type: PyType = lazy { PyType(typePointer!!) }
-
-    fun incRef() {
-        println("hi")
+        }
     }
 
-    fun decRef() {
-        println("hi")
+//    @Throws(PyException::class)
+    protected val type: PyType by lazy {
+        val typePointer: NativePointer? = PyObject_Type(pointer)
+//        throw PyException("Failed to get pointer of type")
+        PyType.getInstance(typePointer!!)
+    }
+
+    protected fun incRef() {
+        Py_IncRef(pointer)
+    }
+
+    protected fun decRef() {
+        Py_DecRef(pointer)
     }
 
     @Throws(PyException::class)
@@ -51,7 +63,7 @@ expect open class PyObject(pointer: NativePointer, borrowed: Boolean) {
     }
 
     fun setAttrOrNull(name: String, value: PyObject?) {
-        PyObject_SetAttrString(pointer, name, value?.pointer)
+        value?.pointer?.let { PyObject_SetAttrString(pointer, name, it) }
     }
 
     @Throws(PyException::class)
@@ -66,7 +78,9 @@ expect open class PyObject(pointer: NativePointer, borrowed: Boolean) {
     }
 
     override fun toString(): String {
-        return PyObject_GetStr(pointer)
+        // TODO: null check
+        return PyUnicode_AsUTF8(PyObject_Str(pointer)!!)!!
+//        return PyObject_GetStr(pointer)
     }
 
     override fun hashCode(): Int {
@@ -81,23 +95,31 @@ expect open class PyObject(pointer: NativePointer, borrowed: Boolean) {
         return false
     }
 
-    operator fun invoke(arg0: PyObject): PyObject {
-        return PyObject_CallObject(pointer, arg0)
+    override fun clean() {
+        type.decRef()
     }
 
-    operator fun invoke(arg0: PyObject, arg1: PyObject): PyObject {
-        return PyObject_CallObject(pointer, arg0, arg1)
-    }
+    // TODO: 밑에 세 함수 수정 (return type 불일치 등)
+//    operator fun invoke(arg0: PyObject): PyObject {
+//        return PyObject_CallObject(pointer, arg0)
+//    }
+//
+//    operator fun invoke(arg0: PyObject, arg1: PyObject): PyObject {
+//        return PyObject_CallObject(pointer, arg0, arg1)
+//    }
+//
+//    //...
+//
+//    operator fun invoke(vararg args: PyObject): PyObject {
+//        return PyObject_CallObject(pointer, args)  // TODO: 이거는 변수 하나로 잡히던가? 아님 여러개인가?
+//        // 리스트로 들어오는 거였던가?
+//    }
 
-    //...
-
-    operator fun invoke(vararg args: PyObject): PyObject {
-        return PyObject_CallObject(pointer, args)  // TODO: 이거는 변수 하나로 잡히던가? 아님 여러개인가?
-                                                    // 리스트로 들어오는 거였던가?
-    }//    actual fun pyLongFromLong(arg0: Long): Long {
-//        if (!isInitialized) return -1
+//    actual fun pyLongFromLong(arg0: Long): Long {
+//        if (!Python3.isInitialized) return -1
 //        memScoped {
-//            val pyLong = PyLong_FromLong(arg0)
+////            val pyLong = PyLong_FromLong(arg0) // TODO: PyLong_FromLong을 PyLong_FromLongLong으로 교체
+//            val pyLong = PyLong_FromLongLong(arg0)
 //            if (pyLong == null) {
 //                throw IllegalStateException("Python long from long failed")
 //            }
@@ -106,10 +128,11 @@ expect open class PyObject(pointer: NativePointer, borrowed: Boolean) {
 //    }
 //
 //    actual fun pyLongAsLong(arg0: Long): Long {
-//        if (!isInitialized) return -1
+//        if (!Python3.isInitialized) return -1
 //        memScoped {
 //            val restoredPyObj: CValuesRef<_object>? = arg0.toCPointer()
-//            val ktLong = PyLong_AsLong(restoredPyObj)
+////            val ktLong = PyLong_AsLong(restoredPyObj) // TODO: PyLong_AsLong을 PyLong_AsLongLong으로 교체
+//            val ktLong = PyLong_AsLongLong(restoredPyObj)
 //            if (ktLong == -1L && PyErr_Occurred() != null) {
 //                throw IllegalStateException("Python long as long failed")
 //            }
@@ -117,4 +140,3 @@ expect open class PyObject(pointer: NativePointer, borrowed: Boolean) {
 //        }
 //    }
 }
-*/
