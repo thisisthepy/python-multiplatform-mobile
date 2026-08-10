@@ -118,3 +118,107 @@ Native Image 는 **FFM 다운콜을 빌드 타임에 등록**해야 한다. `ref
 
 다운콜은 전부 GIL(또는 free-threaded 빌드의 스레드 상태)을 요구한다.
 [`threading-and-abi.md`](threading-and-abi.md) 를 본다.
+
+---
+
+## 개정: Android 는 shape 트램폴린만으로 풀리지 않는다
+
+위의 shape 설계는 **Desktop 에는 유효하지만 Android 에는 그대로 적용되지 않는다.** 설계 논의에서
+드러난 사실들을 기록한다.
+
+### 확인된 버그: 현재 Android JNI 배선이 어긋나 있다
+
+`@CName` 이 만드는 C 함수는 선언한 Kotlin 인자만 받는다:
+
+```
+Java_python_native_ffi_bindings_PyList_1Size(jlong list)
+```
+
+그런데 `androidMain/bindings.kt` 는 이를 **일반 JNI 메서드**로 선언한다. 일반 JNI 메서드를 ART 는
+이렇게 호출한다:
+
+```
+Java_..._PyList_1Size(JNIEnv* env, jobject thiz, jlong list)
+```
+
+**인자가 두 칸 밀린다.** `list` 자리에 `JNIEnv*` 가 들어간다. 확인 결과 `@CName` 익스포트 중
+`JNIEnv` 를 받는 것은 0개이고, `@CriticalNative`/`@FastNative` 도 어디에도 없다.
+
+즉 **Android JVM 경로는 컴파일만 되고 런타임에 동작하지 않는다.** 실행된 적이 없어 드러나지 않았다.
+
+### ART 의 세 가지 호출 규약
+
+| | 일반 JNI | `@FastNative` | `@CriticalNative` |
+|---|---|---|---|
+| 전환 오버헤드 | 115 ns | 35 ns | 25 ns |
+| C 시그니처 | `(JNIEnv*, jobject, args…)` | 동일 | **`(args…)` 만** |
+| 객체 인자·반환 | 가능 | 가능 | **원시 타입만** |
+| 정적/인스턴스 | 둘 다 | 둘 다 | **정적만** |
+| JVM 으로 콜백 | 가능 | 가능 | **불가** |
+| 실행 중 GC | 허용 | **차단** | **차단** |
+
+shape 트램폴린은 정적이고 `Long`/`Double` 만 주고받으므로 `@CriticalNative` 에 정확히 맞는다. 그리고
+우리 `@CName` 익스포트가 `JNIEnv` 를 받지 않는다는 사실이 곧 `@CriticalNative` 규약과 일치하므로,
+**애노테이션을 붙이는 것이 성능 개선인 동시에 위 버그의 수정**이다.
+
+`@CriticalNative` 는 API 34 부터 공식 SDK 에 포함된다. minSdk 26 구간에서는 `RegisterNatives` 로
+등록해야 한다 — `RegisterNatives` 는 호출 규약이 아니라 바인딩 수단이므로 둘은 대안 관계가 아니다.
+
+### critical 계열은 업콜과 공존할 수 없다
+
+`Linker.Option.critical()` 과 `@CriticalNative` 는 제약이 같다. 짧고 블로킹하지 않아야 하며,
+**콜백으로 JVM 에 되돌아오면 안 된다.** 위반은 정의되지 않은 동작이고 런타임이 보호해 주지 않는다.
+
+이 프로젝트는 **업콜이 핵심 요구사항**이므로 이 제약이 결정적이다:
+
+| 함수 | critical |
+|---|---|
+| `PyList_Size`, `Py_IncRef`, `PyLong_FromLongLong` | 적용 가능 |
+| `PyObject_Call`, `PyRun_String`, `PyImport_ImportModule` | **불가** — Python 코드를 실행하며 Kotlin 으로 되돌아올 수 있다 |
+
+가장 뜨거운 호출들이 정확히 critical 을 못 쓰는 쪽이다. 그리고 **shape 는 이를 구분하지 못한다** —
+`downcallII_I` 하나가 `PyList_GetItem`(가능)과 `PyObject_Call`(불가)을 함께 덮는다. 시그니처가
+같아도 성격이 반대다.
+
+### Desktop Panama 와 Android Panama 는 성능이 다르다
+
+Desktop 과 Android 를 같은 방식으로 통일하려고 Android 에 FFM 을 얹어도, **API 형태만 통일되고 성능
+특성은 통일되지 않는다.**
+
+| | Desktop (HotSpot) | Android (PanamaPort 류) |
+|---|---|---|
+| 스텁 생성 | **VM 이 기계어로 생성** | ART 메서드 엔트리 포인트를 패치 |
+| JIT 가시성 | `MethodHandle` 을 C2 가 인라인·특수화 | ART JIT 는 그만큼 못 함 |
+| 중간 계층 | 없음 | `MethodHandle` + 자체 변환 계층 |
+| 인자 마샬링 | VM 생성 코드 안 | Java/Kotlin 코드 |
+| 전환 생략 | `Linker.Option.critical()` | `@CriticalNative` (대응됨) |
+
+**전환 비용 자체는 대응되지만, 그 위 계층에서 갈린다.** Desktop 의 Panama 는 런타임의 일부이고,
+Android 의 Panama 는 런타임인 척하는 라이브러리다. 같은 바닥 위에 계층이 더 있고 JIT 가 약하므로
+Android 쪽이 더 빠를 수는 없다. 다만 **얼마나 다른지는 측정된 바 없다.**
+
+우리 desktop 구현은 현재 `Linker.Option.critical()` 을 쓰지 않는다 —
+`PanamaBackend.kt` 가 `downcallHandle(..., emptyOptions)` 로 기본 경로를 탄다.
+
+### 미결정: 조립 단위의 범위
+
+경계 통과가 비싸고 뜨거운 호출에는 critical 도 못 쓰므로, **통과 횟수 자체를 줄이는 것**이 확실한
+접근이다. 원래 설계 의도가 이것이었다 — `bindings` 의 저수준 함수들을 `Python3.kt` 같은 **바인더
+레벨 연산으로 조립**해 `artMain` 에서 내보내고, `androidMain` 은 그 굵은 단위를 호출한다.
+`artMain/JniExport.kt` 의 `initialize`/`finalize`/`internalIsInitialized` 가 그 형태로 남아 있다.
+
+조립 단위는 길고 업콜 가능성이 있으므로 일반 JNI 를 쓴다. 통과가 적으면 개당 115 ns 도 감당된다.
+반대로 shape 트램폴린은 짧고 콜백이 없으므로 `@CriticalNative` 를 쓴다. **둘은 대립이 아니라 층이
+다르다** — 조립이 통과 횟수를 줄이고, critical 이 남은 통과를 싸게 한다.
+
+정해야 할 것은 **조립 단위를 어느 층위로 잡는가**이다. 지금 객체 모델(`PyObject`, `PyType`, 컬렉션)이
+`commonMain` 에 있고 그 안에서 원시 `expect` 를 호출하므로, Android 에서 조립하려면 그 연산 자체가
+플랫폼별로 갈라져야 한다. 후보:
+
+1. 바인더 API 를 `expect`/`actual` 로 올리고, Android 는 `artMain` 조립 함수를 호출하는 얇은
+   포워더가 된다 — 로직은 Kotlin/Native 에 한 벌
+2. `commonMain` 에 로직을 두되 Android 만 별도 경로 — 중복 발생
+3. 조립을 `Python3` 수준으로 한정하고 `PyObject`/컬렉션은 잘게 둔다 — 절충
+
+이 결정 전에는 `EmbedAPI.jvm.kt` 통합을 진행할 수 없다. Android 가 조립 단위를 쓰면 잘게 쪼갠 330개
+`expect` 를 구현하지 않게 되기 때문이다.
