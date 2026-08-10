@@ -44,6 +44,18 @@ class JniOverheadBenchmark {
         const val ROUNDS = 7
     }
 
+    /**
+     * Whether it is safe to CALL the name-linked @CriticalNative variant at all.
+     *
+     * Measured, not assumed: on API 26 that call aborts the ART runtime outright --
+     * "zygote64: runtime.cc:492] Runtime aborting..." -- and takes the instrumentation
+     * process with it. This is exactly the failure Google's guidance implies when it says to
+     * bind @CriticalNative through RegisterNatives before Android 12. Above 12 the call is
+     * merely slow, not fatal.
+     */
+    private val nameLinkedIsSafe: Boolean
+        get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+
     /** Kept live across the whole test so the JIT cannot fold any call away. */
     private var sink = 0L
 
@@ -67,6 +79,7 @@ class JniOverheadBenchmark {
         repeat(WARMUP) { i ->
             val x = i.toLong()
             w += kotlinEcho(x) + bindings.echo0(x) + bindings.echoFast(x) + bindings.echoNormal(x)
+            if (nameLinkedIsSafe) w += bindings.echoCriticalNamed(x)
         }
         sink += w
 
@@ -74,22 +87,32 @@ class JniOverheadBenchmark {
         var bestCritical = Double.MAX_VALUE
         var bestFast = Double.MAX_VALUE
         var bestNormal = Double.MAX_VALUE
+        var bestCriticalNamed = Double.MAX_VALUE
 
         repeat(ROUNDS) {
             timeOnce { kotlinEcho(it) }.let { if (it < bestKotlin) bestKotlin = it }
             timeOnce { bindings.echo0(it) }.let { if (it < bestCritical) bestCritical = it }
+            if (nameLinkedIsSafe) {
+                timeOnce { bindings.echoCriticalNamed(it) }.let { if (it < bestCriticalNamed) bestCriticalNamed = it }
+            }
             timeOnce { bindings.echoFast(it) }.let { if (it < bestFast) bestFast = it }
             timeOnce { bindings.echoNormal(it) }.let { if (it < bestNormal) bestNormal = it }
         }
 
         val critical = bestCritical - bestKotlin
+        val criticalNamed = bestCriticalNamed - bestKotlin
         val fast = bestFast - bestKotlin
         val normal = bestNormal - bestKotlin
 
-        Log.i(TAG, String.format("kotlin floor     %8.2f ns/call", bestKotlin))
-        Log.i(TAG, String.format("@CriticalNative  %8.2f ns/call   net %7.2f ns", bestCritical, critical))
-        Log.i(TAG, String.format("@FastNative      %8.2f ns/call   net %7.2f ns   %5.2fx critical", bestFast, fast, fast / critical))
-        Log.i(TAG, String.format("ordinary JNI     %8.2f ns/call   net %7.2f ns   %5.2fx critical", bestNormal, normal, normal / critical))
+        Log.i(TAG, String.format("kotlin floor            %8.2f ns/call", bestKotlin))
+        Log.i(TAG, String.format("@CriticalNative  (reg)  %8.2f ns/call   net %7.2f ns", bestCritical, critical))
+        if (nameLinkedIsSafe) {
+            Log.i(TAG, String.format("@CriticalNative  (name) %8.2f ns/call   net %7.2f ns", bestCriticalNamed, criticalNamed))
+        } else {
+            Log.i(TAG, "@CriticalNative  (name)   SKIPPED -- aborts the ART runtime below Android 12")
+        }
+        Log.i(TAG, String.format("@FastNative      (reg)  %8.2f ns/call   net %7.2f ns", bestFast, fast))
+        Log.i(TAG, String.format("ordinary JNI     (reg)  %8.2f ns/call   net %7.2f ns", bestNormal, normal))
         Log.i(TAG, "sink=$sink")
 
         // This test originally asserted that @CriticalNative must not be slower than ordinary
@@ -104,6 +127,9 @@ class JniOverheadBenchmark {
         assertTrue("@CriticalNative echo returned ${bindings.echo0(probe)}", bindings.echo0(probe) == probe)
         assertTrue("@FastNative echo returned ${bindings.echoFast(probe)}", bindings.echoFast(probe) == probe)
         assertTrue("ordinary JNI echo returned ${bindings.echoNormal(probe)}", bindings.echoNormal(probe) == probe)
+        if (nameLinkedIsSafe) {
+            assertTrue("name-linked critical echo returned ${bindings.echoCriticalNamed(probe)}", bindings.echoCriticalNamed(probe) == probe)
+        }
     }
 
     /**

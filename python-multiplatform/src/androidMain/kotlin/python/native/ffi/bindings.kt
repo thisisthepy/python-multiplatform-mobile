@@ -66,6 +66,12 @@ object bindings {
     @dalvik.annotation.optimization.FastNative
     external fun echoFast(x: Long): Long
 
+    // @CriticalNative reached by name-based linking, NOT via RegisterNatives -- see
+    // JNIOnLoadExporter.echoCriticalNamed. Isolates the binding method from the convention.
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
+    external fun echoCriticalNamed(x: Long): Long
+
     @JvmStatic
     @dalvik.annotation.optimization.CriticalNative
     external fun Py_IsInitialized(): Int

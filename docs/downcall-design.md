@@ -312,3 +312,52 @@ Android, which is backwards from where the users are. The fix would be to pick t
 per API level. The annotation is compile-time, so that means declaring both variants and
 dispatching on `Build.VERSION.SDK_INT` — a branch costing ~1-2ns to avoid ~22ns. Not done yet,
 because it should not be built on emulator numbers alone.
+
+### Re-measured on physical hardware — the inversion is real
+
+The section above asked for physical-device confirmation before acting. Done: Samsung
+SM-X910 (Galaxy Tab S9 Ultra), Android 16 / API 36, arm64-v8a, 8 cores. It is not an
+emulator artefact, and hardware is *worse* than the emulator was.
+
+Net of the Kotlin floor, ns/call:
+
+| convention | API 26 (emu) | API 34 (emu) | **API 36 (hardware)** |
+|---|---|---|---|
+| `@CriticalNative` via RegisterNatives | **1.83** | 24.35 | **46.68** |
+| `@CriticalNative` via name linking | **aborts the runtime** | 66.80 | 76.56 |
+| `@FastNative` | 37.80 | **1.97** | **2.52** |
+| ordinary JNI | 44.79 | 7.81 | 16.29 |
+
+Three things are now settled.
+
+**The binding method is not the cause.** The hypothesis was that explicitly-registered
+critical natives lose the fast path on modern ART while name-linked ones keep it — Google's
+advice to use RegisterNatives *before Android 12* reads as if the reverse holds after. So a
+name-linked `@CriticalNative` echo was added, identical in every other way. It is *slower*
+still: 66.80ns on API 34 and 76.56ns on API 36 against 24.35 and 46.68 for the registered
+one. Hypothesis rejected. `@CriticalNative` is simply expensive on modern ART.
+
+**Name linking is not merely slower below Android 12 — it is fatal.** On API 26 that call
+aborted the ART runtime outright (`zygote64: runtime.cc:492] Runtime aborting...`) and took
+the instrumentation process with it. Google's guidance turns out to be a hard requirement,
+not a preference. The benchmark now guards that call behind `SDK_INT >= S`.
+
+**`@FastNative` is the fast path on modern Android, and `@CriticalNative` is on old.** They
+are cleanly inverted: ~2ns vs ~38ns on API 26, ~2.5ns vs ~47ns on API 36. Whatever the
+underlying reason, the practical shape is unambiguous.
+
+### Consequence: the current implementation is on the wrong path for real users
+
+The 11 migrated functions use `@CriticalNative` via RegisterNatives. That is the best
+available choice at minSdk 26 and the *worst* on the hardware people actually carry —
+46.68ns where `@FastNative` costs 2.52ns, an 18x penalty.
+
+The annotation is resolved at compile time, so the convention cannot be switched at runtime
+for one declaration. The fix is to declare both variants and dispatch on
+`Build.VERSION.SDK_INT`, paying one predictable branch (~1-2ns) to avoid ~44ns. `@FastNative`
+still receives JNIEnv and jclass, so its exports need those leading parameters — meaning two
+export sets in artMain, not one.
+
+Not yet implemented. The crossover API level is also still unknown: it lies somewhere between
+26 and 34, and picking the threshold well needs measurements at 28/30/31/32 that have not
+been taken.
