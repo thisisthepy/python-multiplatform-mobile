@@ -1,0 +1,99 @@
+# 아키텍처
+
+전체 그림과 방향별 상세는 [`../PROJECT.md`](../PROJECT.md) 에서 시작한다. 이 문서는 소스셋 계층,
+타입 래퍼 구조, 검증 수단을 다룬다.
+
+## 소스셋 계층
+
+`python-multiplatform/build.gradle.kts` 의 `sourceSets` 블록에서 **수동으로** 구성한다. 기본 계층
+템플릿은 적용되지 않는다 (빌드 로그에 그 경고가 뜨는 이유다).
+
+```
+commonMain
+ ├── jvmMain            중간 소스셋
+ │    ├── androidMain   ART
+ │    └── desktopMain   HotSpot
+ └── nativeMain
+      ├── iosMain
+      └── artMain       androidNativeArm64 / androidNativeX64
+```
+
+`jvmMain` 은 정식 중간 소스셋이므로 **여기에 `expect` 를 두고 두 리프에서 `actual` 을 제공하는 것이
+가능하다.** 실험으로 확인했다.
+
+단, **`expect inline fun` 과 조합하면 Kotlin 2.0.20 에서 `Internal error in file lowering` 컴파일러
+크래시가 난다.** 마이그레이션 대상 함수에서 `inline` 을 떼면 해결된다. `EmbedAPI.kt` 의 `inline` 147개
+중 132개는 컴파일러가 이미 "인라인 이득 없음" 경고를 내고 있어, 떼는 데 실질적 손해가 없다.
+
+## FFI 계층
+
+```
+commonMain/kotlin/python/native/ffi/EmbedAPI.kt      expect 약 330개
+ ├── nativeMain/.../EmbedAPI.native.kt               cinterop  (iOS, androidNative)
+ ├── androidMain/.../EmbedAPI.android.kt + bindings.kt   JNI
+ └── desktopMain/.../EmbedAPI.desktop.kt + bindings.kt + PanamaBackend.kt   Panama
+```
+
+포인터는 `NativePointer` (value class, `address: Any`) 로 통일한다. 플랫폼별 실체는 `Long`(JVM),
+`CPointer<*>`(Native) 다.
+
+`Any` 래핑 때문에 변환마다 박싱이 일어난다. `@HighOverheadNativeCall` 애노테이션이 비싼 변환 지점을
+표시한다.
+
+### CPython C 매크로는 바인딩할 수 없다
+
+`PyLong_Check` 계열은 헤더의 `#define` 이라 심볼로 export 되지 않는다. `nm` 으로 확인했다. 그래서
+`ffi/PyTypeChecks.kt` 가 common Kotlin 으로 11종을 구현한다 — `PyObject_IsInstance` 와 캐시된 타입
+객체를 쓰며, `expect`/`actual` 분기가 없으므로 네 플랫폼 동작이 구조적으로 동일하다.
+
+## 타입 래퍼 계층
+
+`commonMain/kotlin/python/multiplatform/ffi/` 아래. 설계 밑그림은 저장소 루트의
+`python_for_kotlin_binding.mermaid` 이지만 **확정 스펙이 아니다.**
+
+```
+PyObject                     모든 래퍼의 기반. NativePointer 보유, PyAutoCloseable 상속
+ ├── PyType                  인스턴스 캐시 보유
+ ├── PyException             CPython 에러 인디케이터 ↔ Kotlin throwable
+ ├── 기본 타입               PyInt PyFloat PyBool PyString PyNone PyComplex
+ ├── 컬렉션                  PyList PyTuple PyDict PySet PyFrozenSet
+ ├── PyIterator / PyIterable
+ └── PyModule
+conversion/                  Context, ConversionStrategy, PyProxy, PyValue
+```
+
+### mermaid 와 어긋난 곳
+
+Kotlin 제약 때문에 다이어그램대로 갈 수 없던 지점들:
+
+- **`PyBool` 은 `PyInt` 를 상속하지 않는다.** 같은 제네릭 인터페이스(`PyProxy<T>`)를 서로 다른 타입
+  인자로 두 번 구현할 수 없다.
+- **`invoke` 오버로드 다발이 vararg 하나로 합쳐졌다.** Kotlin vararg 가 이미 그 역할을 한다.
+- **`RAW` 와 `UNMANAGED` 를 분리했다.** mermaid 는 `naiveConvert` 하나가 둘을 담당하지만 그러면 두
+  enum 값이 행동상 구분되지 않는다. 원저자가 `Strategy.kt` 에 남긴 설계 노트가 근거다.
+- `toList()`/`toMap()` 은 `toNativeList()`/`toNativeMap()` 으로 이름을 바꿨다. Kotlin 표준 확장을
+  가린다.
+
+### JVM 시그니처 충돌 주의
+
+`PyObject` 의 타입 프로퍼티는 `pyType` 이다. `type` 으로 두면 JVM 에서 `getType()` 접근자가 생겨
+공개 메서드 `getType()` 과 **같은 시그니처로 충돌**하고, 모든 서브클래스가 Android·Desktop 에서
+컴파일에 실패한다. Kotlin/Native 에는 그 규칙이 없어 JVM 타깃을 실제로 빌드하기 전까지 드러나지
+않았다.
+
+## 검증 수단
+
+| 명령 | 커버 범위 |
+|---|---|
+| `:python-multiplatform:iosSimulatorArm64Test` | commonMain + nativeMain + iosMain, **실제 CPython 구동** |
+| `:python-multiplatform:compileKotlinAndroidNativeArm64` | commonMain + nativeMain + artMain. Xcode 불필요 |
+| `:python-multiplatform:compileKotlinDesktop` | commonMain + jvmMain + desktopMain |
+| `:python-multiplatform:compileDebugKotlinAndroid` | commonMain + jvmMain + androidMain |
+
+**iOS 시뮬레이터 테스트만이 코드를 실제로 실행한다.** 나머지는 컴파일 검증이다. Desktop 코드는 아직
+단 한 줄도 실행된 적이 없다.
+
+`Python.framework` 에는 표준 라이브러리가 없어 `Py_Initialize()` 가
+`Failed to import encodings module` 로 프로세스를 죽인다. 빌드가 배포 아카이브에서 stdlib 를 풀어
+`PYTHONHOME` 을 잡아준다 (`extractIosSimulatorStdlib`). simctl 은 `SIMCTL_CHILD_` 접두사가 붙은
+환경변수만 자식 프로세스로 전달하므로 그 이름으로도 함께 내보낸다.
