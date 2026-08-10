@@ -14,6 +14,7 @@ import python.native.ffi.PyTuple_New
 import python.native.ffi.PyTuple_SetItem
 import python.native.ffi.PyTuple_Size
 import python.native.ffi.Py_IncRef
+import python.multiplatform.ffi.gilIncRef
 
 /**
  * Wrapper around a Python `tuple` object, adopting the read-only
@@ -41,12 +42,12 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
 
         /** Builds a new Python `tuple` containing (references to) [elements], in order. */
         fun fromList(elements: List<PyObject>): PyTuple {
-            val ptr = PyTuple_New(elements.size.toLong())
+            val ptr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate tuple")
             elements.forEachIndexed { i, el ->
                 // PyTuple_SetItem steals the reference to its 3rd argument -- incref first so
                 // `el`'s own, independently-managed reference stays valid afterwards.
-                Py_IncRef(el.pointer)
+                gilIncRef(el.pointer)
                 python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(ptr, i.toLong(), el.pointer) }
             }
             return PyTuple(ptr, false) // PyTuple_New already returned a new/owned reference

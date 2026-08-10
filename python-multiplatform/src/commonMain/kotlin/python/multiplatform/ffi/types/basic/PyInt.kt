@@ -30,14 +30,14 @@ open class PyInt(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, 
 
         /** Wraps [value] as a new Python `int` object (`PyLong_FromLongLong`). */
         fun from(value: Long): PyInt {
-            val ptr = PyLong_FromLongLong(value) ?: throw PyException.fromCurrentError()!!
+            val ptr = python.multiplatform.ffi.Python3.withPython { PyLong_FromLongLong(value) } ?: throw PyException.fromCurrentError()!!
             return PyInt(ptr, false)
         }
     }
 
     override var cachedNativeValue: Long?
         get() {
-            val res = PyLong_AsLongLong(pointer)
+            val res = python.multiplatform.ffi.Python3.withPython { PyLong_AsLongLong(pointer) }
             if (res == -1L && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) {
                 throw PyException.fromCurrentError()!!
             }
@@ -49,15 +49,15 @@ open class PyInt(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, 
         set(value) {}
 
     operator fun plus(other: PyInt): PyInt {
-        val res = PyNumber_Add(pointer, other.pointer) ?: throw PyException.fromCurrentError()!!
+        val res = python.multiplatform.ffi.Python3.withPython { PyNumber_Add(pointer, other.pointer) } ?: throw PyException.fromCurrentError()!!
         return PyInt(res, false)
     }
     operator fun minus(other: PyInt): PyInt {
-        val res = PyNumber_Subtract(pointer, other.pointer) ?: throw PyException.fromCurrentError()!!
+        val res = python.multiplatform.ffi.Python3.withPython { PyNumber_Subtract(pointer, other.pointer) } ?: throw PyException.fromCurrentError()!!
         return PyInt(res, false)
     }
     operator fun times(other: PyInt): PyInt {
-        val res = PyNumber_Multiply(pointer, other.pointer) ?: throw PyException.fromCurrentError()!!
+        val res = python.multiplatform.ffi.Python3.withPython { PyNumber_Multiply(pointer, other.pointer) } ?: throw PyException.fromCurrentError()!!
         return PyInt(res, false)
     }
     operator fun compareTo(other: PyInt): Int {

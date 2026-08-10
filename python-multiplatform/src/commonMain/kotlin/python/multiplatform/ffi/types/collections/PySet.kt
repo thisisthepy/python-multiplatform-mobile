@@ -19,6 +19,8 @@ import python.native.ffi.PyTuple_New
 import python.native.ffi.PyTuple_SetItem
 import python.native.ffi.Py_DecRef
 import python.native.ffi.Py_IncRef
+import python.multiplatform.ffi.gilIncRef
+import python.multiplatform.ffi.gilDecRef
 
 /**
  * Wrapper around a Python `set` object, adopting `MutableSet<PyObject>` per
@@ -41,7 +43,7 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
             val emptyTuple = python.multiplatform.ffi.Python3.withPython { PyTuple_New(0) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to build tuple() scratch buffer")
             val emptySet = python.multiplatform.ffi.Python3.withPython { PySet_New(emptyTuple) }
-            Py_DecRef(emptyTuple)
+            gilDecRef(emptyTuple)
             if (emptySet == null) throw PyException.fromCurrentError() ?: PyException("Failed to build set() to derive its type")
             deriveTypeAndRelease(emptySet)
         }
@@ -53,11 +55,11 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
             val tuplePtr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate tuple() scratch buffer")
             elements.forEachIndexed { i, el ->
-                Py_IncRef(el.pointer) // PyTuple_SetItem steals; keep `el`'s own reference valid
+                gilIncRef(el.pointer) // PyTuple_SetItem steals; keep `el`'s own reference valid
                 python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
             }
             val setPtr = python.multiplatform.ffi.Python3.withPython { PySet_New(tuplePtr) }
-            Py_DecRef(tuplePtr) // scratch tuple, no longer needed once copied into the set
+            gilDecRef(tuplePtr) // scratch tuple, no longer needed once copied into the set
             if (setPtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to build set()")
             return PySet(setPtr, false)
         }
@@ -143,7 +145,7 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
     }
 
     override fun remove(element: PyObject): Boolean {
-        val rc = PySet_Discard(pointer, element.pointer)
+        val rc = python.multiplatform.ffi.Python3.withPython { PySet_Discard(pointer, element.pointer) }
         if (rc == -1) throw PyException.fromCurrentError() ?: PyException("set.discard() failed")
         return rc == 1
     }

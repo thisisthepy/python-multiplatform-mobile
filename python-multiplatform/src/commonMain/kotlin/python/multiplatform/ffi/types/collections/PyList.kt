@@ -20,6 +20,8 @@ import python.native.ffi.PyTuple_New
 import python.native.ffi.PyTuple_SetItem
 import python.native.ffi.Py_DecRef
 import python.native.ffi.Py_IncRef
+import python.multiplatform.ffi.gilIncRef
+import python.multiplatform.ffi.gilDecRef
 
 /**
  * Wrapper around a Python `list` object, adopting `MutableList<PyObject>` per
@@ -54,7 +56,7 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
             val emptyTuple = python.multiplatform.ffi.Python3.withPython { PyTuple_New(0) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to build tuple() scratch buffer")
             val emptyList = python.multiplatform.ffi.Python3.withPython { PySequence_List(emptyTuple) }
-            Py_DecRef(emptyTuple)
+            gilDecRef(emptyTuple)
             if (emptyList == null) throw PyException.fromCurrentError() ?: PyException("Failed to build list() to derive its type")
             deriveTypeAndRelease(emptyList)
         }
@@ -66,11 +68,11 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
             elements.forEachIndexed { i, el ->
                 // PyTuple_SetItem steals the reference to its 3rd argument -- incref first so
                 // `el`'s own, independently-managed reference stays valid afterwards.
-                Py_IncRef(el.pointer)
+                gilIncRef(el.pointer)
                 python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
             }
             val listPtr = python.multiplatform.ffi.Python3.withPython { PySequence_List(tuplePtr) }
-            Py_DecRef(tuplePtr) // scratch tuple, no longer needed once copied into the list
+            gilDecRef(tuplePtr) // scratch tuple, no longer needed once copied into the list
             if (listPtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to build list()")
             return PyList(listPtr, false)
         }
@@ -101,7 +103,7 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
     override fun get(index: Int): PyObject {
         val key = indexKey(index)
         val item = python.multiplatform.ffi.Python3.withPython { PyObject_GetItem(pointer, key) }
-        Py_DecRef(key) // scratch index object, new reference, only needed for the lookup itself
+        gilDecRef(key) // scratch index object, new reference, only needed for the lookup itself
         if (item == null) throw PyException.fromCurrentError() ?: PyException("list index out of range: $index")
         return PyObject(item, false) // PyObject_GetItem ("o[key]") returns a new reference
     }
@@ -110,8 +112,8 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
         val previous = get(index)
         val key = indexKey(index)
         // PyObject_SetItem does not steal a reference to `element`.
-        val rc = PyObject_SetItem(pointer, key, element.pointer)
-        Py_DecRef(key)
+        val rc = python.multiplatform.ffi.Python3.withPython { PyObject_SetItem(pointer, key, element.pointer) }
+        gilDecRef(key)
         if (rc != 0) throw PyException.fromCurrentError() ?: PyException("Failed to set list index $index")
         return previous
     }
@@ -119,8 +121,8 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
     override fun removeAt(index: Int): PyObject {
         val previous = get(index)
         val key = indexKey(index)
-        val rc = PyObject_DelItem(pointer, key)
-        Py_DecRef(key)
+        val rc = python.multiplatform.ffi.Python3.withPython { PyObject_DelItem(pointer, key) }
+        gilDecRef(key)
         if (rc != 0) throw PyException.fromCurrentError() ?: PyException("Failed to remove list index $index")
         return previous
     }

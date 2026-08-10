@@ -62,18 +62,18 @@ class BenchmarkTest {
     fun testRawFfiCost() {
         if (!interpreterAvailable) return
 
-        val obj = PyLong_FromLongLong(42L)
+        val obj = python.multiplatform.ffi.Python3.withPython { PyLong_FromLongLong(42L) }
         if (obj == null) {
             println("SKIPPED testRawFfiCost: PyLong_FromLongLong returned null")
             return
         }
 
         Benchmark.run("Py_IncRef/Py_DecRef", iterations = 1_000_000) {
-            Py_IncRef(obj)
-            Py_DecRef(obj)
+            python.multiplatform.ffi.gilIncRef(obj)
+            python.multiplatform.ffi.gilDecRef(obj)
         }
         
-        Py_DecRef(obj)
+        python.multiplatform.ffi.gilDecRef(obj)
     }
 
     @Test
@@ -85,18 +85,18 @@ class BenchmarkTest {
             val str = "A".repeat(len)
             
             Benchmark.run("PyUnicode_FromString ($len chars)", warmupIterations = 100, iterations = 10_000) {
-                val pyStr = PyUnicode_FromString(str)
+                val pyStr = python.multiplatform.ffi.Python3.withPython { PyUnicode_FromString(str) }
                 if (pyStr != null) {
-                    Py_DecRef(pyStr)
+                    python.multiplatform.ffi.gilDecRef(pyStr)
                 }
             }
 
-            val pyStr = PyUnicode_FromString(str)
+            val pyStr = python.multiplatform.ffi.Python3.withPython { PyUnicode_FromString(str) }
             if (pyStr != null) {
                 Benchmark.run("PyUnicode_AsUTF8 ($len chars)", warmupIterations = 100, iterations = 10_000) {
-                    PyUnicode_AsUTF8(pyStr)
+                    python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(pyStr) }
                 }
-                Py_DecRef(pyStr)
+                python.multiplatform.ffi.gilDecRef(pyStr)
             }
         }
     }
@@ -106,18 +106,18 @@ class BenchmarkTest {
         if (!interpreterAvailable) return
 
         Benchmark.run("PyLong_FromLongLong", iterations = 100_000) {
-            val obj = PyLong_FromLongLong(123456789L)
+            val obj = python.multiplatform.ffi.Python3.withPython { PyLong_FromLongLong(123456789L) }
             if (obj != null) {
-                Py_DecRef(obj)
+                python.multiplatform.ffi.gilDecRef(obj)
             }
         }
 
-        val obj = PyLong_FromLongLong(123456789L)
+        val obj = python.multiplatform.ffi.Python3.withPython { PyLong_FromLongLong(123456789L) }
         if (obj != null) {
             Benchmark.run("PyLong_AsLongLong", iterations = 100_000) {
-                PyLong_AsLongLong(obj)
+                python.multiplatform.ffi.Python3.withPython { PyLong_AsLongLong(obj) }
             }
-            Py_DecRef(obj)
+            python.multiplatform.ffi.gilDecRef(obj)
         }
     }
 
@@ -126,11 +126,11 @@ class BenchmarkTest {
         if (!interpreterAvailable) return
 
         // Without machinery (just pointer)
-        val rawObj = PyLong_FromLongLong(42L)
+        val rawObj = python.multiplatform.ffi.Python3.withPython { PyLong_FromLongLong(42L) }
         if (rawObj != null) {
             Benchmark.run("Manual IncRef/DecRef", iterations = 100_000) {
-                Py_IncRef(rawObj)
-                Py_DecRef(rawObj)
+                python.multiplatform.ffi.gilIncRef(rawObj)
+                python.multiplatform.ffi.gilDecRef(rawObj)
             }
             
             Benchmark.run("PyObject wrapper creation", iterations = 100_000) {
@@ -138,7 +138,7 @@ class BenchmarkTest {
                 obj.clean()
             }
             
-            Py_DecRef(rawObj)
+            python.multiplatform.ffi.gilDecRef(rawObj)
         }
     }
 
@@ -147,11 +147,11 @@ class BenchmarkTest {
         if (!interpreterAvailable) return
         
         // Try to get a module, e.g. sys
-        val moduleName = PyUnicode_FromString("sys")
+        val moduleName = python.multiplatform.ffi.Python3.withPython { PyUnicode_FromString("sys") }
         if (moduleName == null) return
         
         val sysModule = python.native.ffi.PyImport_Import(moduleName)
-        Py_DecRef(moduleName)
+        python.multiplatform.ffi.gilDecRef(moduleName)
         
         if (sysModule == null) {
             python.native.ffi.PyErr_Clear()
@@ -160,12 +160,12 @@ class BenchmarkTest {
         }
 
         Benchmark.run("PyObject_GetAttrString", iterations = 10_000) {
-            val attr = PyObject_GetAttrString(sysModule, "version")
+            val attr = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(sysModule, "version") }
             if (attr != null) {
-                Py_DecRef(attr)
+                python.multiplatform.ffi.gilDecRef(attr)
             }
         }
         
-        Py_DecRef(sysModule)
+        python.multiplatform.ffi.gilDecRef(sysModule)
     }
 }

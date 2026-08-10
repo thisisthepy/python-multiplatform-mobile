@@ -15,6 +15,8 @@ import python.native.ffi.PyTuple_New
 import python.native.ffi.PyTuple_SetItem
 import python.native.ffi.Py_DecRef
 import python.native.ffi.Py_IncRef
+import python.multiplatform.ffi.gilIncRef
+import python.multiplatform.ffi.gilDecRef
 
 /**
  * Wrapper around a Python `frozenset` object. Not present in the mermaid
@@ -38,7 +40,7 @@ open class PyFrozenSet(pointer: NativePointer, borrowed: Boolean) :
             val emptyTuple = python.multiplatform.ffi.Python3.withPython { PyTuple_New(0) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to build tuple() scratch buffer")
             val emptyFrozenSet = python.multiplatform.ffi.Python3.withPython { PyFrozenSet_New(emptyTuple) }
-            Py_DecRef(emptyTuple)
+            gilDecRef(emptyTuple)
             if (emptyFrozenSet == null) throw PyException.fromCurrentError() ?: PyException("Failed to build frozenset() to derive its type")
             deriveTypeAndRelease(emptyFrozenSet)
         }
@@ -48,11 +50,11 @@ open class PyFrozenSet(pointer: NativePointer, borrowed: Boolean) :
             val tuplePtr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate tuple() scratch buffer")
             elements.forEachIndexed { i, el ->
-                Py_IncRef(el.pointer) // PyTuple_SetItem steals; keep `el`'s own reference valid
+                gilIncRef(el.pointer) // PyTuple_SetItem steals; keep `el`'s own reference valid
                 python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
             }
             val setPtr = python.multiplatform.ffi.Python3.withPython { PyFrozenSet_New(tuplePtr) }
-            Py_DecRef(tuplePtr) // scratch tuple, no longer needed once copied into the frozenset
+            gilDecRef(tuplePtr) // scratch tuple, no longer needed once copied into the frozenset
             if (setPtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to build frozenset()")
             return PyFrozenSet(setPtr, false)
         }

@@ -49,12 +49,28 @@ enum class PyCompareOp(val opId: Int) {
 internal fun pyErrorOrGeneric(fallback: String): PyException =
     PyException.fromCurrentError() ?: PyException(fallback)
 
+/**
+ * Reference counting needs the GIL like any other C API call, and it is reached from places that
+ * are easy to overlook — an object's `init`, and [PyAutoCloseable.clean], which runs on a cleaner
+ * thread that has never touched Python and therefore has no thread state at all.
+ *
+ * The initialisation check matters for the cleaner path specifically: objects can be collected
+ * after `Py_Finalize()`, and attaching a thread state to a finalized interpreter is invalid.
+ */
+internal fun gilIncRef(p: NativePointer) {
+    if (Python3.isInitialized) withGIL { Py_IncRef(p) }
+}
+
+internal fun gilDecRef(p: NativePointer) {
+    if (Python3.isInitialized) withGIL { Py_DecRef(p) }
+}
+
 // TODO: !!IMPORTANT!! We need to check the case where the pointer is null one more time. (PyObject, PyType, PyException)
 open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoCloseable(pointer) {
 
     init {
         if (borrowed) {
-            Py_IncRef(pointer)
+            gilIncRef(pointer)
             // TODO: PyIncRef을 사용하는게 적절한 선택일까?
         }
     }
@@ -75,11 +91,11 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
     }
 
     protected fun incRef() {
-        Py_IncRef(pointer)
+        gilIncRef(pointer)
     }
 
     protected fun decRef() {
-        Py_DecRef(pointer)
+        gilDecRef(pointer)
     }
 
     @Throws(PyException::class)
@@ -162,9 +178,9 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
             // PyTuple_SetItem steals the reference to the item it's given.
             // `arg.pointer` is owned by `arg` for the rest of its lifetime, so
             // hand the tuple a fresh +1 rather than `arg`'s own reference.
-            Py_IncRef(arg.pointer)
+            gilIncRef(arg.pointer)
             if (python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(argTuple, index.toLong(), arg.pointer) } != 0) {
-                Py_DecRef(argTuple)
+                gilDecRef(argTuple)
                 throw pyErrorOrGeneric("Failed to populate argument tuple")
             }
         }
@@ -187,10 +203,10 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
                 val result = python.multiplatform.ffi.Python3.withPython { PyObject_Call(pointer, argTuple, kwargsDict) } ?: throw pyErrorOrGeneric("Call failed")
                 return PyObject(result, false)
             } finally {
-                Py_DecRef(kwargsDict)
+                gilDecRef(kwargsDict)
             }
         } finally {
-            Py_DecRef(argTuple)
+            gilDecRef(argTuple)
         }
     }
 
@@ -209,7 +225,7 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         // PyObject_Repr: new reference on success, null + exception set on failure.
         val reprPointer = python.multiplatform.ffi.Python3.withPython { PyObject_Repr(pointer) } ?: throw pyErrorOrGeneric("Failed to compute repr()")
         val result = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(reprPointer) }
-        Py_DecRef(reprPointer)
+        gilDecRef(reprPointer)
         return result ?: throw pyErrorOrGeneric("Failed to decode repr() result")
     }
 
@@ -220,7 +236,7 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         val resultPointer = python.multiplatform.ffi.Python3.withPython { PyObject_RichCompare(pointer, other.pointer, op.opId) }
             ?: throw pyErrorOrGeneric("Comparison failed")
         val truthy = python.multiplatform.ffi.Python3.withPython { PyObject_IsTrue(resultPointer) }
-        Py_DecRef(resultPointer)
+        gilDecRef(resultPointer)
         if (truthy < 0) throw pyErrorOrGeneric("Failed to evaluate comparison result")
         return truthy != 0
     }
@@ -236,7 +252,7 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
             return "<error converting to str${message?.let { ": $it" } ?: ""}>"
         }
         val result = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(strPointer) }
-        Py_DecRef(strPointer)
+        gilDecRef(strPointer)
         return result ?: "<error decoding str>"
     }
 

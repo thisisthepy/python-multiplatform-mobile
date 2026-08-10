@@ -19,6 +19,7 @@ import python.native.ffi.PySequence_Contains
 import python.native.ffi.PyTuple_GetItem
 import python.native.ffi.PyTuple_Size
 import python.native.ffi.Py_DecRef
+import python.multiplatform.ffi.gilDecRef
 
 /**
  * Wrapper around a Python `dict` object, adopting `MutableMap<PyObject, PyObject>`
@@ -87,7 +88,7 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
         val itemsPtr = python.multiplatform.ffi.Python3.withPython { PyDict_Items(pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("PyDict_Items failed")
         val itemsTuplePtr = python.multiplatform.ffi.Python3.withPython { PyList_AsTuple(itemsPtr) }
-        Py_DecRef(itemsPtr) // list of (k, v) 2-tuples, new reference, no longer needed once copied
+        gilDecRef(itemsPtr) // list of (k, v) 2-tuples, new reference, no longer needed once copied
         if (itemsTuplePtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to snapshot dict items")
         val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(itemsTuplePtr) }
         val result = ArrayList<DictEntry>(count.toInt())
@@ -97,7 +98,7 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
             val valPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pairPtr, 1) }!! // borrowed
             result.add(DictEntry(PyObject(keyPtr, true), PyObject(valPtr, true), this))
         }
-        Py_DecRef(itemsTuplePtr)
+        gilDecRef(itemsTuplePtr)
         return result
     }
 
@@ -186,7 +187,7 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
         val valuesPtr = python.multiplatform.ffi.Python3.withPython { PyDict_Values(pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("PyDict_Values failed")
         val result = python.multiplatform.ffi.Python3.withPython { PySequence_Contains(valuesPtr, value.pointer) }
-        Py_DecRef(valuesPtr) // new reference to a list, no longer needed
+        gilDecRef(valuesPtr) // new reference to a list, no longer needed
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check dict value membership")
         return result == 1
     }
@@ -203,7 +204,7 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
     override fun put(key: PyObject, value: PyObject): PyObject? {
         val previous = get(key)
         // PyDict_SetItem does not steal references to either key or value.
-        val rc = PyDict_SetItem(pointer, key.pointer, value.pointer)
+        val rc = python.multiplatform.ffi.Python3.withPython { PyDict_SetItem(pointer, key.pointer, value.pointer) }
         if (rc != 0) throw PyException.fromCurrentError() ?: PyException("Failed to set dict item")
         return previous
     }
@@ -214,7 +215,7 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
 
     override fun remove(key: PyObject): PyObject? {
         val previous = get(key) ?: return null
-        val rc = PyDict_DelItem(pointer, key.pointer)
+        val rc = python.multiplatform.ffi.Python3.withPython { PyDict_DelItem(pointer, key.pointer) }
         if (rc != 0) throw PyException.fromCurrentError() ?: PyException("Failed to delete dict item")
         return previous
     }

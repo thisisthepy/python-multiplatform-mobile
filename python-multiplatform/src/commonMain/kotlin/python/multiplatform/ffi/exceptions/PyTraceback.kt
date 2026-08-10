@@ -8,6 +8,7 @@ import python.native.ffi.PyLong_AsInt
 import python.native.ffi.PyObject_GetAttrString
 import python.native.ffi.PyUnicode_AsUTF8
 import python.native.ffi.Py_DecRef
+import python.multiplatform.ffi.gilDecRef
 
 /**
  * Wraps a Python traceback object (`PyTracebackObject`, i.e. what
@@ -31,7 +32,7 @@ class PyTraceback(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer,
             val linenoPointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(pointer, "tb_lineno") }
                 ?: throw pyErrorOrGeneric("Failed to read tb_lineno")
             val value = python.multiplatform.ffi.Python3.withPython { PyLong_AsInt(linenoPointer) }
-            Py_DecRef(linenoPointer)
+            gilDecRef(linenoPointer)
             return value
         }
 
@@ -48,21 +49,21 @@ class PyTraceback(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer,
                 return null
             }
             val codePointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(framePointer, "f_code") }
-            Py_DecRef(framePointer)
+            gilDecRef(framePointer)
             if (codePointer == null) {
                 python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
                 return null
             }
 
             val filenamePointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(codePointer, "co_filename") }
-            Py_DecRef(codePointer)
+            gilDecRef(codePointer)
             if (filenamePointer == null) {
                 python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
                 return null
             }
 
             val name = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(filenamePointer) }
-            Py_DecRef(filenamePointer)
+            gilDecRef(filenamePointer)
             return name
         }
 
@@ -78,7 +79,7 @@ class PyTraceback(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer,
                 return null
             }
             if (nextPointer.isNoneObject()) {
-                Py_DecRef(nextPointer)
+                gilDecRef(nextPointer)
                 return null
             }
             return PyTraceback(nextPointer, false)

@@ -29,7 +29,7 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
         // PyType_GetName: new reference on success.
         val namePtr: NativePointer = python.multiplatform.ffi.Python3.withPython { PyType_GetName(pointer) } ?: throw pyErrorOrGeneric("Failed to get the type's name")
         val nameStr: String? = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(namePtr) }
-        Py_DecRef(namePtr)
+        gilDecRef(namePtr)
         nameStr ?: throw pyErrorOrGeneric("Failed to decode the type's name")
     }
 
@@ -68,12 +68,12 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
                 // types, which CPython treats as immortal.
                 val itemPointer = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(tuplePointer, i) }
                     ?: throw pyErrorOrGeneric("Failed to get $attrName[$i]")
-                Py_IncRef(itemPointer)
+                gilIncRef(itemPointer)
                 list.add(getInstance(itemPointer))
             }
             return list
         } finally {
-            Py_DecRef(tuplePointer)
+            gilDecRef(tuplePointer)
         }
     }
 
@@ -162,8 +162,8 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
         val metaTypeName: String? = metaTypeNamePointer?.let { python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(it) } }
         if (metaTypeNamePointer == null) python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
 
-        metaTypeNamePointer?.let { Py_DecRef(it) }
-        Py_DecRef(metaTypePointer)
+        metaTypeNamePointer?.let { gilDecRef(it) }
+        gilDecRef(metaTypePointer)
 
         return metaTypeName == "type"
     }

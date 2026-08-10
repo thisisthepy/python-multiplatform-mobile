@@ -14,6 +14,8 @@ import python.native.ffi.PyTuple_SetItem
 import python.native.ffi.Py_IncRef
 import python.native.ffi.Py_DecRef
 import python.native.ffi.PyErr_Occurred
+import python.multiplatform.ffi.gilIncRef
+import python.multiplatform.ffi.gilDecRef
 
 /**
  * Wrapper around a Python `complex` object.
@@ -39,14 +41,14 @@ open class PyComplex(pointer: NativePointer, borrowed: Boolean) : PyObject(point
             val realObj = PyFloat.from(real)
             val imagObj = PyFloat.from(imag)
             
-            Py_IncRef(realObj.pointer)
+            gilIncRef(realObj.pointer)
             python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(args, 0, realObj.pointer) }
             
-            Py_IncRef(imagObj.pointer)
+            gilIncRef(imagObj.pointer)
             python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(args, 1, imagObj.pointer) }
             
             val resPtr = python.multiplatform.ffi.Python3.withPython { PyObject_CallObject(complexTypePtr, args) }
-            Py_DecRef(args)
+            gilDecRef(args)
             realObj.clean()
             imagObj.clean()
             
@@ -58,7 +60,7 @@ open class PyComplex(pointer: NativePointer, borrowed: Boolean) : PyObject(point
     val real: Double
         get() {
             val realAttr = getAttr("real")
-            val res = PyFloat_AsDouble(realAttr.pointer)
+            val res = python.multiplatform.ffi.Python3.withPython { PyFloat_AsDouble(realAttr.pointer) }
             realAttr.clean()
             if (res == -1.0 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
             return res
@@ -67,7 +69,7 @@ open class PyComplex(pointer: NativePointer, borrowed: Boolean) : PyObject(point
     val imag: Double
         get() {
             val imagAttr = getAttr("imag")
-            val res = PyFloat_AsDouble(imagAttr.pointer)
+            val res = python.multiplatform.ffi.Python3.withPython { PyFloat_AsDouble(imagAttr.pointer) }
             imagAttr.clean()
             if (res == -1.0 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
             return res

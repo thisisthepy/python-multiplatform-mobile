@@ -73,10 +73,12 @@ object PythonTestFixture {
      * that need to evaluate a Python expression to obtain a real [PyObject]
      * to exercise the (still-`TODO`) typed wrappers against.
      */
-    fun mainGlobals(): PyObject {
-        val modulePtr = PyImport_AddModule("__main__") ?: error("Could not get __main__ module")
-        val dictPtr = PyObject_GetAttrString(modulePtr, "__dict__") ?: error("Could not get __main__.__dict__")
-        return PyObject(dictPtr, true)
+    fun mainGlobals(): PyObject = Python3.withPython {
+        // These reach the C API directly, so they need the GIL like any other call. The
+        // initialising thread no longer holds it — see Python3.initialize.
+        val modulePtr = python.multiplatform.ffi.Python3.withPython { PyImport_AddModule("__main__") } ?: error("Could not get __main__ module")
+        val dictPtr = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(modulePtr, "__dict__") } ?: error("Could not get __main__.__dict__")
+        PyObject(dictPtr, true)
     }
 
     /** Evaluates [expression] (e.g. `"1 + 1"`) against [mainGlobals] and returns the resulting [PyObject]. */

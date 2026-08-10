@@ -17,7 +17,7 @@ class PyIteratorTest {
     @Test
     fun iteratesOverAllElementsThenStops() = PythonTestFixture.withInterpreter {
         val listObj = PythonTestFixture.eval("[1, 2, 3]")
-        val iterPtr = PyObject_GetIter(listObj.pointer) ?: error("PyObject_GetIter returned null for a list")
+        val iterPtr = python.multiplatform.ffi.Python3.withPython { PyObject_GetIter(listObj.pointer) } ?: error("PyObject_GetIter returned null for a list")
         val iterator = PyIterator(iterPtr, false)
 
         val seen = mutableListOf<String>()
@@ -31,7 +31,7 @@ class PyIteratorTest {
     @Test
     fun emptyIterableHasNoNextImmediately() = PythonTestFixture.withInterpreter {
         val listObj = PythonTestFixture.eval("[]")
-        val iterPtr = PyObject_GetIter(listObj.pointer) ?: error("PyObject_GetIter returned null")
+        val iterPtr = python.multiplatform.ffi.Python3.withPython { PyObject_GetIter(listObj.pointer) } ?: error("PyObject_GetIter returned null")
         val iterator = PyIterator(iterPtr, false)
         assertTrue(!iterator.hasNext())
     }

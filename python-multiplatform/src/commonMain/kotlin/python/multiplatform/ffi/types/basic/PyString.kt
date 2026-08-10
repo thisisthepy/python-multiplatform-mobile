@@ -19,14 +19,14 @@ open class PyString(pointer: NativePointer, borrowed: Boolean) : PyObject(pointe
 
         /** Wraps [value] as a new Python `str` object (`PyUnicode_FromString`). */
         fun from(value: String): PyString {
-            val ptr = PyUnicode_FromString(value) ?: throw PyException.fromCurrentError()!!
+            val ptr = python.multiplatform.ffi.Python3.withPython { PyUnicode_FromString(value) } ?: throw PyException.fromCurrentError()!!
             return PyString(ptr, false)
         }
     }
 
     override var cachedNativeValue: String?
         get() {
-            val res = PyUnicode_AsUTF8(pointer)
+            val res = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(pointer) }
             if (res == null && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) {
                 throw PyException.fromCurrentError()!!
             }
@@ -42,7 +42,7 @@ open class PyString(pointer: NativePointer, borrowed: Boolean) : PyObject(pointe
         get() = toKotlin().length
 
     operator fun plus(other: PyString): PyString {
-        val res = PyUnicode_Concat(pointer, other.pointer) ?: throw PyException.fromCurrentError()!!
+        val res = python.multiplatform.ffi.Python3.withPython { PyUnicode_Concat(pointer, other.pointer) } ?: throw PyException.fromCurrentError()!!
         return PyString(res, false)
     }
     
@@ -52,7 +52,7 @@ open class PyString(pointer: NativePointer, borrowed: Boolean) : PyObject(pointe
     
     operator fun contains(substring: String): Boolean {
         val subObj = PyString.from(substring)
-        val res = PyUnicode_Contains(pointer, subObj.pointer)
+        val res = python.multiplatform.ffi.Python3.withPython { PyUnicode_Contains(pointer, subObj.pointer) }
         subObj.clean()
         if (res == -1 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
         return res == 1

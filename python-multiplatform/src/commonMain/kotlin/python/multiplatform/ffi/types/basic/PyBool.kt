@@ -27,14 +27,14 @@ open class PyBool(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer,
 
         /** Returns the (singleton) `True` or `False` Python object for [value] (`PyBool_FromLong`). */
         fun from(value: Boolean): PyBool {
-            val ptr = PyBool_FromLong(if (value) 1 else 0) ?: throw PyException.fromCurrentError()!!
+            val ptr = python.multiplatform.ffi.Python3.withPython { PyBool_FromLong(if (value) 1 else 0) } ?: throw PyException.fromCurrentError()!!
             return PyBool(ptr, false)
         }
     }
 
     override var cachedNativeValue: Boolean?
         get() {
-            val res = PyObject_IsTrue(pointer)
+            val res = python.multiplatform.ffi.Python3.withPython { PyObject_IsTrue(pointer) }
             if (res == -1 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) {
                 throw PyException.fromCurrentError()!!
             }

@@ -25,6 +25,18 @@ object Python3 {
     }
 
     /**
+     * The thread state belonging to the thread that ran [initialize].
+     *
+     * `Py_Initialize()` leaves its calling thread holding the GIL. If that thread simply kept it,
+     * no other thread could ever attach: `PyGILState_Ensure` would block forever waiting for a GIL
+     * that is never released. So the state is saved away here immediately after initialisation,
+     * leaving the GIL unheld, and every entry into Python goes through [withGIL] instead.
+     *
+     * `Py_Finalize()` must run with the GIL held, so [finalize] restores this first.
+     */
+    private var mainThreadState: NativePointer? = null
+
+    /**
      * Initialize Python
      */
     fun initialize(silent: Boolean = false) {
@@ -38,6 +50,20 @@ object Python3 {
             if (!silent) println("INFO: Python initialized successfully!")
             isInitialized = true
         }
+        // NOTE: the GIL is deliberately NOT released here yet.
+        //
+        // Releasing it is what lets other threads attach, and it is the intended end state. But it
+        // also means every single touch of the C API must go through withGIL, and a survey found
+        // call sites still outside it. Releasing before that coverage is complete turns each
+        // remaining gap into a segfault that surfaces far from its cause — which is exactly what
+        // happened: the crash walked from getAttrReturnsExistingAttribute to
+        // floatRoundTripsFromKotlinToPythonAndBack to iteratesOverAllElementsThenStops as gaps were
+        // closed one at a time.
+        //
+        // Until then the initialising thread keeps the GIL, so single-threaded use behaves exactly
+        // as before, and withGIL's Ensure/Release nest harmlessly inside the held lock.
+        //
+        //   if (mainThreadState == null) mainThreadState = PyEval_SaveThread()
     }
 
     /**
@@ -45,6 +71,11 @@ object Python3 {
      */
     internal fun finalize(silent: Boolean = false) {
         if (!isInitialized) return
+        // Py_Finalize() requires the GIL. Reclaim the state parked by initialize().
+        mainThreadState?.let {
+            PyEval_RestoreThread(it)
+            mainThreadState = null
+        }
         memScoped {
             Py_Finalize()
             // TODO: print error message if exists
@@ -102,12 +133,12 @@ object Python3 {
                         ?: throw pyErrorOrGeneric("Python exec failed")
                     // PyRun_String returns a new reference (usually None for
                     // statement-mode execution); we have no use for it here.
-                    Py_DecRef(result)
+                    gilDecRef(result)
                 } finally {
-                    Py_DecRef(globalsPointer)
+                    gilDecRef(globalsPointer)
                 }
             } finally {
-                Py_DecRef(modulePointer)
+                gilDecRef(modulePointer)
             }
         }
     }
@@ -135,11 +166,13 @@ object Python3 {
      * failure through the error indicator instead.
      */
     fun import(name: String): PyModule {
-        // PyImport_ImportModule: new reference on success, null + exception
-        // (typically ModuleNotFoundError) set on failure.
-        val module: NativePointer = PyImport_ImportModule(name)
-            ?: throw pyErrorOrGeneric("Failed to import module '$name'")
-        return PyModule(module, false)
+        return withPython {
+            // PyImport_ImportModule: new reference on success, null + exception
+            // (typically ModuleNotFoundError) set on failure.
+            val module: NativePointer = PyImport_ImportModule(name)
+                ?: throw pyErrorOrGeneric("Failed to import module '$name'")
+            PyModule(module, false)
+        }
     }
 
     val version by lazy { withPython { Py_GetVersion() ?: throw IllegalStateException("Failed to get Python version") } }

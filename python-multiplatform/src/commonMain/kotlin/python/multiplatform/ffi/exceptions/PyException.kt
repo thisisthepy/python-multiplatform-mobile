@@ -17,6 +17,8 @@ import python.native.ffi.PyType_GetName
 import python.native.ffi.PyUnicode_AsUTF8
 import python.native.ffi.Py_DecRef
 import python.native.ffi.Py_IncRef
+import python.multiplatform.ffi.gilIncRef
+import python.multiplatform.ffi.gilDecRef
 
 /**
  * `True` if [this] points at Python's `None` singleton. There is no direct
@@ -36,8 +38,8 @@ internal fun NativePointer.isNoneObject(): Boolean {
     }
     val namePointer = python.multiplatform.ffi.Python3.withPython { PyType_GetName(typePointer) }
     val name = namePointer?.let { python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(it) } }
-    namePointer?.let { Py_DecRef(it) }
-    Py_DecRef(typePointer)
+    namePointer?.let { gilDecRef(it) }
+    gilDecRef(typePointer)
     return name == "NoneType"
 }
 
@@ -138,7 +140,7 @@ open class PyException(
             val cause = when {
                 causePointer == null -> null
                 causePointer.isNoneObject() -> {
-                    Py_DecRef(causePointer)
+                    gilDecRef(causePointer)
                     null
                 }
                 else -> fromExceptionInstance(causePointer)
@@ -161,7 +163,7 @@ open class PyException(
                 return "<unprintable exception>"
             }
             val message = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(strPointer) }
-            Py_DecRef(strPointer)
+            gilDecRef(strPointer)
             return message ?: "<unprintable exception>"
         }
     }
@@ -176,7 +178,7 @@ open class PyException(
                 // argument. `value` still owns its own reference for the rest
                 // of its lifetime (released by PyObject.clean()/decRef on
                 // close), so the interpreter needs a fresh one, not that one.
-                Py_IncRef(liveValue.pointer)
+                gilIncRef(liveValue.pointer)
                 python.multiplatform.ffi.Python3.withPython { PyErr_SetRaisedException(liveValue.pointer) }
             }
             liveType != null -> {

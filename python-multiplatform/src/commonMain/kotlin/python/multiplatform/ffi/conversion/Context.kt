@@ -17,6 +17,7 @@ import python.multiplatform.ffi.types.collections.pyObjectToNative
 import python.native.ffi.NativePointer
 import python.native.ffi.PyObject_Type
 import python.native.ffi.Py_DecRef
+import python.multiplatform.ffi.gilDecRef
 
 /**
  * Marker/behavioural contract for a conversion context: something that can
@@ -148,7 +149,7 @@ class PyContext(private var strategy: ConversionStrategy = ConversionStrategy.DE
                 else -> obj
             }
         } finally {
-            Py_DecRef(typePtr) // PyObject_Type: new reference, only needed for the dispatch above
+            gilDecRef(typePtr) // PyObject_Type: new reference, only needed for the dispatch above
         }
     }
 }

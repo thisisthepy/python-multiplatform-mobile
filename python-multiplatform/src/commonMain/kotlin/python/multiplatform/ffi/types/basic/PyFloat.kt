@@ -28,14 +28,14 @@ open class PyFloat(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer
 
         /** Wraps [value] as a new Python `float` object (`PyFloat_FromDouble`). */
         fun from(value: Double): PyFloat {
-            val ptr = PyFloat_FromDouble(value) ?: throw PyException.fromCurrentError()!!
+            val ptr = python.multiplatform.ffi.Python3.withPython { PyFloat_FromDouble(value) } ?: throw PyException.fromCurrentError()!!
             return PyFloat(ptr, false)
         }
     }
 
     override var cachedNativeValue: Double?
         get() {
-            val res = PyFloat_AsDouble(pointer)
+            val res = python.multiplatform.ffi.Python3.withPython { PyFloat_AsDouble(pointer) }
             if (res == -1.0 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) {
                 throw PyException.fromCurrentError()!!
             }
@@ -47,15 +47,15 @@ open class PyFloat(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer
         set(value) {}
 
     operator fun plus(other: PyFloat): PyFloat {
-        val res = PyNumber_Add(pointer, other.pointer) ?: throw PyException.fromCurrentError()!!
+        val res = python.multiplatform.ffi.Python3.withPython { PyNumber_Add(pointer, other.pointer) } ?: throw PyException.fromCurrentError()!!
         return PyFloat(res, false)
     }
     operator fun minus(other: PyFloat): PyFloat {
-        val res = PyNumber_Subtract(pointer, other.pointer) ?: throw PyException.fromCurrentError()!!
+        val res = python.multiplatform.ffi.Python3.withPython { PyNumber_Subtract(pointer, other.pointer) } ?: throw PyException.fromCurrentError()!!
         return PyFloat(res, false)
     }
     operator fun times(other: PyFloat): PyFloat {
-        val res = PyNumber_Multiply(pointer, other.pointer) ?: throw PyException.fromCurrentError()!!
+        val res = python.multiplatform.ffi.Python3.withPython { PyNumber_Multiply(pointer, other.pointer) } ?: throw PyException.fromCurrentError()!!
         return PyFloat(res, false)
     }
     operator fun compareTo(other: PyFloat): Int {
