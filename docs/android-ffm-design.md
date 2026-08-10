@@ -83,16 +83,21 @@ Upcall stubs must outlive individual calls, effectively matching the lifetime of
 ## 6. Is LLVM Even Necessary Here?
 
 ### Downcalls
-**No.** Because the ~330 CPython functions have fixed, primitive/pointer-only signatures, we can map them directly to Java `@CriticalNative` methods. `ArtMethodUtils.registerNativeMethod` can patch the `dlsym` address directly into the Java method. 
-- **Binary size:** Drops `libLLVM.so` dependency.
+**No.** The ~330 CPython functions have a small set of fixed signature shapes. Rather than generating one `@CriticalNative` declaration per CPython function, which fails to support a unified `FfiBackend` because method patching leaves nowhere to pass the target function pointer, we will use a small set of pregenerated native trampolines. 
+
+Based on an analysis of the ~330 functions in `EmbedAPI.kt`, there are exactly 14 distinct ABI shapes across the entire Stable ABI (e.g., 123 functions use `I_I`, 87 use `II_I`). All signatures use either exclusively integer-class arguments (pointers/ints) or exclusively floating-class arguments, with no mixed-class orderings to worry about. We only need 14 pregenerated C trampolines to cover the entire Downcall API, allowing both Desktop and Android to share the same dynamic `FfiBackend` interface.
+- **Binary size:** Drops `libLLVM.so` dependency. 14 tiny C trampolines compile to almost nothing.
 - **Startup cost:** Instant (no JIT compilation).
 - **Android-version fragility:** Avoids relying on the undocumented/restricted `libLLVM.so` on Android.
 
 ### Upcalls
-**No.** CPython upcalls (callbacks) also have a small, fixed set of signature shapes (e.g., `PyCFunction`, `destructor`, `getter`). Instead of using LLVM to JIT-compile a unique C trampoline for every Java method at runtime, we can pre-generate a tiny NDK C library containing a handful of generic C trampolines. 
-These trampolines can look up the correct Java callback (e.g., using a method ID attached to the Python `self` object via a `PyCapsule`) and invoke it via JNI `CallStaticVoidMethod`.
+**No.** CPython upcalls (callbacks) also have a small set of signature shapes (e.g., `PyCFunction` is `II_I`, `destructor` is `I_V`, `getter` is `II_I`, `newfunc` is `III_I`, etc.), which collapse into just 4 distinct shapes (`I_V`, `I_I`, `II_I`, `III_I`), perfectly overlapping with the downcall trampolines. 
 
-**Hybrid viability:** A pure-Java `@CriticalNative` approach for downcalls (patched via `ArtMethodUtils`), combined with a tiny NDK-compiled C library containing 3-4 static trampolines for upcalls, is the most robust, performant, and maintainable solution.
+The real reason LLVM is unnecessary for upcalls is not just the small number of shapes, but that **routing happens through data, not through the function pointer**. Every standard callback receives enough context to identify the Kotlin target—usually the `PyObject *self` instance data (e.g., `destructor`, `reprfunc`), the `PyTypeObject *type` (e.g., `newfunc`), or the `void *closure` (e.g., `getter`, `setter`). Because the identity of the target is carried in the arguments, a handful of shared static trampolines can serve unlimited Kotlin targets. This is exactly how PyO3, JPype, and JEP work. 
+
+The ONLY case that would require runtime code generation (LLVM or similar) is handing a bare Kotlin function pointer, with no context argument, to a third-party C API (like `qsort`). CPython's object model does not do this.
+
+**Hybrid viability:** A tiny NDK-compiled C library containing ~14 static trampolines can serve both dynamic downcalls and data-routed upcalls. This is the most robust, performant, and maintainable solution, and it enables a unified multiplatform architecture.
 
 ## 7. Licensing
 
@@ -109,8 +114,8 @@ Because this project has its own `NativePointer` abstraction and does not need t
 - *Risk/Effort:* Moderate. *Verification:* Requires a real Android emulator/device to verify `ArtMethodUtils` struct offsets.
 
 **Stage 2: Downcall Generation**
-- Write a code generator to emit `@CriticalNative` Kotlin declarations for the 330 CPython functions.
-- Write the Kotlin initialization code that iterates over these methods, calls `dlsym`, and registers them using `ArtMethodUtils`.
+- Create the NDK C project containing the 14 generic C trampolines.
+- Write the Kotlin initialization code that binds these trampolines via `ArtMethodUtils` to power the shared `FfiBackend`.
 - *Risk/Effort:* Low. *Verification:* Emulator/device required.
 
 **Stage 3: Upcall Trampolines**
@@ -122,3 +127,7 @@ Because this project has its own `NativePointer` abstraction and does not need t
 - Reroute all Python calls in the Kotlin shared code to use the new `@CriticalNative` downcalls.
 - Delete the old Kotlin/Native Android JNI bridge code and Android-specific Kotlin/Native build targets.
 - *Risk/Effort:* High effort, low risk. *Verification:* Run the existing multiplatform test suite on Android.
+
+## 9. Current State
+
+Desktop's reflective Panama backend is fully implemented and `compileKotlinDesktop` now succeeds. The next step is promoting an `FfiBackend` interface into `jvmMain` so that Android can implement it using the shape-trampoline architecture designed above, unifying the JVM-side FFI.

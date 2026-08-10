@@ -92,9 +92,9 @@ agy -p "<프롬프트>" --model gemini-3.1-pro-high --print-timeout 30m
 
 ### agy 호출 시 주의
 
-- **`claude-opus-4-6-thinking` 에는 `--effort` 를 붙이면 안 된다.** 붙이면 실행 자체가 즉시 실패한다
-  (`invalid model selection: --effort is not supported for model "claude-opus-4-6-thinking"`).
-  이 모델은 자체 추론 설정을 쓴다. `--effort` 는 Gemini 계열과 `claude-sonnet-4-6` 에만 준다.
+- **Claude 계열 모델에는 `--effort` 를 붙이면 안 된다.** `claude-opus-4-6-thinking` 과 `claude-sonnet-4-6` 모두
+  붙이는 즉시 실행이 실패한다 (`invalid model selection: --effort is not supported for model "..."`).
+  `--effort` 는 Gemini 계열에만 준다.
 - 실행 후 로그 앞부분을 반드시 확인한다. 인자 오류는 즉시 종료되는데, 배경 실행이면 성공처럼 보인다.
 
 ### 이 환경의 제약
