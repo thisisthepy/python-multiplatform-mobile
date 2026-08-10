@@ -31,3 +31,9 @@ The project currently uses `python-build-standalone` (maintained by Astral). For
 *   **Python 3.13 & 3.14:** The traditional Stable ABI (`abi3`) **does not** support free-threaded (GIL-disabled) builds. If we attempt to use a free-threaded 3.14 build, our bindings relying on `abi3` will fail or crash due to opaque structural changes in `PyObject`.
 *   **Python 3.15 (PEP 803):** Python 3.15 introduces `abi3t`, a new variant of the Stable ABI specifically for free-threaded builds.
 *   **Conclusion:** We cannot use free-threaded variants with the Stable ABI in 3.14. We must wait for (or test against) 3.15 to utilize `abi3t` for our bindings.
+
+## 5. Security and Integrity Verification
+
+*   **Desktop:** `python-build-standalone` provides a `SHA256SUMS` file with every release. The build script verifies the downloaded archive against this manifest.
+*   **Android (python.org):** The official python.org distribution publishes `.sig`, `.crt`, and `.sigstore` files alongside the Android tarballs (e.g., `python-<version>-<arch>-linux-android.tar.gz.sigstore`). They do not publish a plain checksum manifest. Full Sigstore verification directly inside Gradle is unreasonable without shelling out to external tools (like `sigstore-python` or the `cosign` CLI) to verify the certificate chain and OIDC identity. Because of this, we currently lock the expected SHA-256 digest in our own repository lockfile (`python-checksums.properties`) to ensure integrity. If full Sigstore verification is desired in the future, it would require executing an external verification tool against those published `.sigstore` bundles.
+*   **iOS (BeeWare):** The `Python-Apple-support` releases do not provide any checksums or signatures. Integrity is similarly enforced via our internal lockfile.

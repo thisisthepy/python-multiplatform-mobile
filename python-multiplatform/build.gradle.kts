@@ -2,6 +2,8 @@ import com.codingfeline.buildkonfig.compiler.FieldSpec
 import java.net.URL
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.util.Properties
+import java.io.File
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType
@@ -58,6 +60,83 @@ val libPathForIOS = "$libPath/ios/Python.xcframework"
 
 val downloadDir = layout.buildDirectory.dir("python-standalone").get().asFile
 
+val checksumsFile = rootProject.file("python-checksums.properties")
+val pythonArchiveKeys = mutableMapOf<String, File>()
+
+fun verifyChecksum(key: String, archive: File) {
+    if (!checksumsFile.exists()) {
+        throw GradleException("Checksum lockfile python-checksums.properties not found! Run updatePythonChecksums to generate it.")
+    }
+    val props = Properties()
+    checksumsFile.inputStream().use { props.load(it) }
+    
+    val expectedHash = props.getProperty(key)
+    if (expectedHash == null) {
+        throw GradleException("Missing checksum for $key in python-checksums.properties. Run updatePythonChecksums task to accept the current downloaded archive as trusted.")
+    }
+        
+    val digest = MessageDigest.getInstance("SHA-256")
+    archive.inputStream().use {
+        val buffer = ByteArray(8192)
+        var bytesRead = it.read(buffer)
+        while (bytesRead != -1) {
+            digest.update(buffer, 0, bytesRead)
+            bytesRead = it.read(buffer)
+        }
+    }
+    val actualHash = digest.digest().joinToString("") { String.format("%02x", it) }
+        
+    if (expectedHash != actualHash) {
+        archive.delete()
+        throw GradleException(
+            "Checksum mismatch for $archive (key: $key) in python-checksums.properties.\n" +
+                "Expected: $expectedHash\n" +
+                "Actual:   $actualHash"
+        )
+    }
+}
+
+tasks.register("updatePythonChecksums") {
+    doLast {
+        println("Updating python-checksums.properties. This accepts currently downloaded archives as trusted.")
+        val props = Properties()
+        if (checksumsFile.exists()) {
+            checksumsFile.inputStream().use { props.load(it) }
+        }
+        var updated = false
+        val digest = MessageDigest.getInstance("SHA-256")
+        
+        pythonArchiveKeys.forEach { (key, archive) ->
+            if (archive.exists()) {
+                digest.reset()
+                archive.inputStream().use {
+                    val buffer = ByteArray(8192)
+                    var bytesRead = it.read(buffer)
+                    while (bytesRead != -1) {
+                        digest.update(buffer, 0, bytesRead)
+                        bytesRead = it.read(buffer)
+                    }
+                }
+                val hash = digest.digest().joinToString("") { String.format("%02x", it) }
+                props.setProperty(key, hash)
+                updated = true
+                println("Computed $key = $hash")
+            } else {
+                println("Skipping $key: archive not downloaded yet at ${archive.name}")
+            }
+        }
+        
+        if (updated) {
+            checksumsFile.bufferedWriter().use { writer ->
+                writer.write("# Python Multiplatform Checksums\\n")
+                props.stringPropertyNames().sorted().forEach { k ->
+                    writer.write("$k=${props.getProperty(k)}\\n")
+                }
+            }
+        }
+    }
+}
+
 val desktopTargets = mapOf(
     "macos-aarch64" to "aarch64-apple-darwin",
     "macos-x86_64" to "x86_64-apple-darwin",
@@ -71,6 +150,8 @@ val downloadTasks = desktopTargets.map { (platform, pbsTarget) ->
     val url = "https://github.com/astral-sh/python-build-standalone/releases/download/$pbsRelease/$assetName"
     val archive = file("$downloadDir/$assetName")
     val extractDir = file("$downloadDir/extracted/$platform")
+    val lockKey = "$platform-$configuredPythonVersion-$pbsRelease" + (if (pythonFreeThreaded) "-freethreaded" else "")
+    pythonArchiveKeys[lockKey] = archive
 
     val taskName = "downloadPython_${platform.replace("-", "_")}"
     tasks.register(taskName) {
@@ -99,7 +180,7 @@ val downloadTasks = desktopTargets.map { (platform, pbsTarget) ->
             }
             
             val sha256sums = shaFile.readText()
-            val expectedHash = sha256sums.lines().find { it.endsWith(assetName) }?.substringBefore(" ")
+            val astralExpectedHash = sha256sums.lines().find { it.endsWith(assetName) }?.substringBefore(" ")
                 ?: throw GradleException("Checksum for $assetName not found in SHA256SUMS")
             
             val digest = MessageDigest.getInstance("SHA-256")
@@ -111,12 +192,14 @@ val downloadTasks = desktopTargets.map { (platform, pbsTarget) ->
                     bytesRead = it.read(buffer)
                 }
             }
-            val actualHash = digest.digest().joinToString("") { String.format("%02x", it) }
+            val astralActualHash = digest.digest().joinToString("") { String.format("%02x", it) }
                 
-            if (expectedHash != actualHash) {
+            if (astralExpectedHash != astralActualHash) {
                 archive.delete()
-                throw GradleException("Checksum mismatch for $assetName. Expected $expectedHash, got $actualHash")
+                throw GradleException("Checksum mismatch for $assetName. Expected $astralExpectedHash, got $astralActualHash")
             }
+            
+            verifyChecksum(lockKey, archive)
             
             val isEmpty = extractDir.list()?.isEmpty() ?: true
             if (isEmpty) {
@@ -139,6 +222,8 @@ val androidDownloadTasks = androidTargets.map { (platform, arch) ->
     val url = "https://www.python.org/ftp/python/$configuredPythonVersion/python-$configuredPythonVersion-$arch-linux-android.tar.gz"
     val archive = file("$downloadDir/python-$configuredPythonVersion-$arch-linux-android.tar.gz")
     val extractDir = file("$downloadDir/extracted/$platform")
+    val lockKey = "$platform-$configuredPythonVersion"
+    pythonArchiveKeys[lockKey] = archive
     
     val taskName = "downloadPython_${platform.replace("-", "_")}"
     tasks.register(taskName) {
@@ -157,7 +242,8 @@ val androidDownloadTasks = androidTargets.map { (platform, arch) ->
             }
             
             // python.org provides sigstore signatures (.sig, .crt, .sigstore) but no plain SHA256SUMS.
-            // Gradle-based verification is unreasonable without external tooling, so we skip checksum verification here.
+            // Full Sigstore verification is unreasonable in pure Gradle, but we verify against our local lockfile.
+            verifyChecksum(lockKey, archive)
             
             val isEmpty = extractDir.list()?.isEmpty() ?: true
             if (isEmpty) {
@@ -174,6 +260,8 @@ val androidDownloadTasks = androidTargets.map { (platform, arch) ->
 val iosUrl = "https://github.com/beeware/Python-Apple-support/releases/download/$libVersion-$pythonAppleSupportBuild/Python-$libVersion-iOS-support.$pythonAppleSupportBuild.tar.gz"
 val iosArchive = file("$downloadDir/Python-$libVersion-iOS-support.$pythonAppleSupportBuild.tar.gz")
 val iosExtractDir = file("$downloadDir/extracted/ios")
+val iosLockKey = "ios-$libVersion-$pythonAppleSupportBuild"
+pythonArchiveKeys[iosLockKey] = iosArchive
 
 val downloadPython_ios = tasks.register("downloadPython_ios") {
     inputs.property("url", iosUrl)
@@ -190,7 +278,8 @@ val downloadPython_ios = tasks.register("downloadPython_ios") {
             }
         }
         
-        // BeeWare does not provide any checksums or signatures for iOS artifacts, so verification is skipped.
+        // BeeWare does not provide any checksums or signatures for iOS artifacts, but we verify against our local lockfile.
+        verifyChecksum(iosLockKey, iosArchive)
 
         val isEmpty = iosExtractDir.list()?.isEmpty() ?: true
         if (isEmpty) {
