@@ -1,4 +1,7 @@
 import com.codingfeline.buildkonfig.compiler.FieldSpec
+import java.net.URL
+import java.io.FileOutputStream
+import java.security.MessageDigest
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType
@@ -18,7 +21,11 @@ plugins {
 }
 
 
-val pythonVersion = project.rootProject.version.toString()
+val configuredPythonVersion = project.findProperty("pythonVersion")?.toString() ?: project.rootProject.version.toString()
+val pythonFreeThreaded = project.findProperty("pythonFreeThreaded")?.toString()?.toBoolean() ?: false
+val pbsRelease = project.findProperty("pythonBuildStandaloneRelease")?.toString() ?: "20260807"
+
+val pythonVersion = configuredPythonVersion
 val libraryVersion = "$pythonVersion-alpha01"
 version = libraryVersion
 
@@ -32,7 +39,10 @@ buildkonfig {
     }
 }
 
-val libVersion = version.toString().split('.').subList(0, 2).joinToString(".")
+val libVersion = pythonVersion.split('.').subList(0, 2).joinToString(".")
+// Mobile fallback: since python-build-standalone lacks iOS/Android, we use 3.13 for mobile
+val mobileLibVersion = "3.13"
+
 println("----------------------------------------------------------------------------------------")
 println("                   Build Configuration for Python version $libVersion                   ")
 println("----------------------------------------------------------------------------------------")
@@ -44,6 +54,84 @@ val libPath = "src/nativeInterop/cinterop/lib"
 val libPathForDesktop = "$libPath/desktop"
 val libPathForAndroid = "$libPath/android"
 val libPathForIOS = "$libPath/ios/Python.xcframework"
+
+val downloadDir = layout.buildDirectory.dir("python-standalone").get().asFile
+
+val desktopTargets = mapOf(
+    "macos-aarch64" to "aarch64-apple-darwin",
+    "macos-x86_64" to "x86_64-apple-darwin",
+    "linux-x86_64" to "x86_64-unknown-linux-gnu",
+    "windows-x86_64" to "x86_64-pc-windows-msvc"
+)
+
+val downloadTasks = desktopTargets.map { (platform, pbsTarget) ->
+    val flavour = if (pythonFreeThreaded) "freethreaded-install_only" else "install_only"
+    val assetName = "cpython-$configuredPythonVersion+$pbsRelease-$pbsTarget-$flavour.tar.gz"
+    val url = "https://github.com/astral-sh/python-build-standalone/releases/download/$pbsRelease/$assetName"
+    val archive = file("$downloadDir/$assetName")
+    val extractDir = file("$downloadDir/extracted/$platform")
+
+    val taskName = "downloadPython_${platform.replace("-", "_")}"
+    tasks.register(taskName) {
+        inputs.property("url", url)
+        outputs.dir(extractDir)
+        
+        doLast {
+            if (!archive.exists()) {
+                println("Downloading $url")
+                archive.parentFile.mkdirs()
+                URL(url).openStream().use { input ->
+                    FileOutputStream(archive).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            }
+            
+            val sha256Url = "https://github.com/astral-sh/python-build-standalone/releases/download/$pbsRelease/SHA256SUMS"
+            val shaFile = file("$downloadDir/SHA256SUMS-$pbsRelease")
+            if (!shaFile.exists()) {
+                URL(sha256Url).openStream().use { input ->
+                    FileOutputStream(shaFile).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            }
+            
+            val sha256sums = shaFile.readText()
+            val expectedHash = sha256sums.lines().find { it.endsWith(assetName) }?.substringBefore(" ")
+                ?: throw GradleException("Checksum for $assetName not found in SHA256SUMS")
+            
+            val digest = MessageDigest.getInstance("SHA-256")
+            archive.inputStream().use {
+                val buffer = ByteArray(8192)
+                var bytesRead = it.read(buffer)
+                while (bytesRead != -1) {
+                    digest.update(buffer, 0, bytesRead)
+                    bytesRead = it.read(buffer)
+                }
+            }
+            val actualHash = digest.digest().joinToString("") { String.format("%02x", it) }
+                
+            if (expectedHash != actualHash) {
+                archive.delete()
+                throw GradleException("Checksum mismatch for $assetName. Expected $expectedHash, got $actualHash")
+            }
+            
+            val isEmpty = extractDir.list()?.isEmpty() ?: true
+            if (isEmpty) {
+                println("Extracting $archive to $extractDir")
+                copy {
+                    from(tarTree(resources.gzip(archive)))
+                    into(extractDir)
+                }
+            }
+        }
+    }
+}
+
+val downloadAllPythonBuilds by tasks.registering {
+    dependsOn(downloadTasks)
+}
 
 val androidBuildDir = "$projectDir/build/android"
 
@@ -95,14 +183,14 @@ kotlin {
                 into("$androidBuildDir/assets/")
                 abiList.forEach {
                     from(includePath) {
-                        into("$it/include/python$libVersion")  // include
+                        into("$it/include/python$mobileLibVersion")  // include
                     }
                 }
                 abiList.forEach {
-                    from("$libPathForAndroid/$it/python$libVersion") {
-                        exclude("config-$libVersion-aarch64-linux-android/")
-                        exclude("config-$libVersion-x86_64-linux-android/")
-                        into("$it/lib/python$libVersion")  // python stdlib
+                    from("$libPathForAndroid/$it/python$mobileLibVersion") {
+                        exclude("config-$mobileLibVersion-aarch64-linux-android/")
+                        exclude("config-$mobileLibVersion-x86_64-linux-android/")
+                        into("$it/lib/python$mobileLibVersion")  // python stdlib
                     }
                 }
             }
@@ -135,12 +223,29 @@ kotlin {
             from(licensePath) {
                 into("META-INF/LICENSE")
             }
-            from(libPathForDesktop) {
-                // TODO: Let the script include the only files needed for the platform
-                include("windows-*/*")
-                include("linux-*/*")
-                include("macos-*/*")
-                into("lib")
+            if (configuredPythonVersion == "3.13.0" && !pythonFreeThreaded) {
+                from(libPathForDesktop) {
+                    include("windows-*/*")
+                    include("linux-*/*")
+                    include("macos-*/*")
+                    into("lib")
+                }
+            } else {
+                dependsOn(downloadAllPythonBuilds)
+                from("$downloadDir/extracted") {
+                    include("macos-*/python/lib/libpython*.dylib")
+                    include("linux-*/python/lib/libpython*.so*")
+                    include("windows-*/python/python*.dll")
+                    include("windows-*/python/vcruntime*.dll")
+                    eachFile {
+                        val parts = path.split("/")
+                        val platform = parts[0]
+                        val filename = parts.last()
+                        path = "$platform/$filename"
+                    }
+                    into("lib")
+                    includeEmptyDirs = false
+                }
             }
         }
     }
@@ -178,8 +283,8 @@ kotlin {
 
             binaries {
                 if (konanTarget.family == Family.ANDROID) {
-                    sharedLib("multiplatform_python$libVersion") {
-                        linkerOpts.addAll(listOf("-L$projectDir/$targetLibPath/$targetABI/", "-lpython$libVersion"))
+                    sharedLib("multiplatform_python$mobileLibVersion") {
+                        linkerOpts.addAll(listOf("-L$projectDir/$targetLibPath/$targetABI/", "-lpython$mobileLibVersion"))
 
                         linkTaskProvider.configure {
                             val type = if (buildType == NativeBuildType.DEBUG) "debug" else "release"
@@ -362,6 +467,5 @@ publishing {
 
 
 fun downloadPythonBuilds() {
-    // TODO: Automatically download stand-alone Python builds
-    //val downloadDir = "$projectDir/build/python/standalone/$pythonVersion"
+    // Moved to task `downloadAllPythonBuilds`
 }
