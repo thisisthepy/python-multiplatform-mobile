@@ -16,6 +16,15 @@ import python.native.ffi.Py_DecRef
 import python.native.ffi.Py_IncRef
 import python.native.ffi.memScoped
 
+
+/**
+ * Rich-comparison operators understood by `PyObject_RichCompare`
+ * (`Py_LT` .. `Py_GE`, in CPython's fixed `0..5` ordering).
+ */
+enum class PyCompareOp(val opId: Int) {
+    LT(0), LE(1), EQ(2), NE(3), GT(4), GE(5)
+}
+
 // TODO: !!IMPORTANT!! We need to check the case where the pointer is null one more time. (PyObject, PyType, PyException)
 open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoCloseable(pointer) {
 
@@ -75,6 +84,42 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
 
     fun delAttrOrNull(name: String) {
         PyObject_DelAttrString(pointer, name)
+    }
+
+    /** Public accessor for [type], mirroring the mermaid sketch's `getType()`. */
+    fun getType(): PyType = type
+
+    /**
+     * Calls this object as a Python callable: `self(*args, **kwargs)`.
+     *
+     * The mermaid sketch lists a family of `invoke(arg0)`, `invoke(arg0, arg1)`, ...,
+     * `invoke(vararg args)` overloads; those collapse into this single vararg +
+     * named-kwargs signature here since Kotlin varargs already cover the arity-specific
+     * overloads without the boilerplate.
+     */
+    @Throws(PyException::class)
+    open operator fun invoke(vararg args: PyObject, kwargs: Map<String, PyObject> = emptyMap()): PyObject {
+        TODO("Not yet implemented")
+    }
+
+    /** `callable(self)`, i.e. whether [invoke] has any chance of succeeding. */
+    open fun isCallable(): Boolean {
+        TODO("Not yet implemented")
+    }
+
+    /** `bool(self)`. */
+    open fun isTruthy(): Boolean {
+        TODO("Not yet implemented")
+    }
+
+    /** `repr(self)`. */
+    open fun repr(): String {
+        TODO("Not yet implemented")
+    }
+
+    /** `PyObject_RichCompare(self, other, op)`, i.e. the Python-level `<`, `<=`, `==`, `!=`, `>`, `>=` operators. */
+    open fun richCompare(other: PyObject, op: PyCompareOp): Boolean {
+        TODO("Not yet implemented")
     }
 
     override fun toString(): String {

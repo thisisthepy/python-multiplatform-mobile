@@ -23,3 +23,21 @@ interface PyProxy<T> {
         return cachedPyObjectValue!!
     }
 }
+
+/**
+ * Concrete [PyProxy] holding both sides of a conversion: the originating
+ * [PyObject] and, once computed, its native Kotlin projection of type [T].
+ *
+ * This is the `PyValue` from the design sketch -- [asNative]/[asPyObject]
+ * are thin aliases over [toKotlin]/[toPython] using the sketch's naming.
+ */
+class PyValue<T>(
+    pyObj: PyObject,
+    initialNativeValue: T? = null,
+) : PyProxy<T> {
+    override var cachedNativeValue: T? = initialNativeValue
+    override var cachedPyObjectValue: PyObject? = pyObj
+
+    fun asNative(): T = toKotlin()
+    fun asPyObject(): PyObject = toPython()
+}

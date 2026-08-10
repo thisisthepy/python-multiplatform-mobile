@@ -1,5 +1,6 @@
 package python.multiplatform.ffi
 
+import python.multiplatform.ffi.exceptions.PyException
 import python.multiplatform.ffi.types.modules.PyModule
 import python.native.ffi.*
 
@@ -78,8 +79,8 @@ object Python3 {
     fun exec(command: String) {
         return withPython {
             if (PyRun_SimpleString(command) != 0) {
-                // TODO: Add error handling
-                throw IllegalStateException("Python exec failed")
+                // TODO: Attach the actual Python exception (PyErr_Fetch/PyErr_GetRaisedException) via PyException.fromCurrentError()
+                throw PyException("Python exec failed")
             }
         }
     }
@@ -91,7 +92,8 @@ object Python3 {
         withPython {
             val result = PyRun_String(str, start, globals.pointer, locals.pointer)
             if (result == null) {
-                throw IllegalStateException("Python eval failed (result is null)")
+                // TODO: Attach the actual Python exception (PyErr_Fetch/PyErr_GetRaisedException) via PyException.fromCurrentError()
+                throw PyException("Python eval failed (result is null)")
             } else {
                 // TODO: 레퍼런스 카운팅
                 return PyObject(result, false)
@@ -105,15 +107,15 @@ object Python3 {
     fun import(name: String): PyModule {
         // TODO: 실제 모듈이 있는지 검사하는 코드 추가
         val pyModuleDict: NativePointer? = PyImport_GetModuleDict() // 변수 이름 적절?
-        if (pyModuleDict == null) throw IllegalStateException("Failed to import module (Failed to get module dictionary)")
+        if (pyModuleDict == null) throw PyException("Failed to import module (Failed to get module dictionary)")
 
         val pyStringFromName: NativePointer? = PyUnicode_FromString(name) // 변수 이름 적절?
-        if (pyStringFromName == null) throw IllegalStateException("Failed to import module (Failed to get module name)")
+        if (pyStringFromName == null) throw PyException("Failed to import module (Failed to get module name)")
 
-        if (PyDict_Contains(pyModuleDict, pyStringFromName) == 0) throw IllegalStateException("Failed to import module (Module not found)")
+        if (PyDict_Contains(pyModuleDict, pyStringFromName) == 0) throw PyException("Failed to import module (Module not found)")
 
         val module: NativePointer? = PyImport_ImportModule(name)
-        if (module == null) throw IllegalStateException("Failed to import module")
+        if (module == null) throw PyException("Failed to import module")
 
         return PyModule(module, false)
     }
