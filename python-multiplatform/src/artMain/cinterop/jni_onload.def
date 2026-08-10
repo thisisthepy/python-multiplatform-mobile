@@ -97,8 +97,20 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"Py_GetVersionF", "()J", (void *)&f_Py_GetVersion},
         {"PyImport_ImportModuleF", "(J)J", (void *)&f_PyImport_ImportModule},
         {"PyObject_GetAttrStringF", "(JJ)J", (void *)&f_PyObject_GetAttrString},
-        {"PyErr_OccurredF", "()J", (void *)&f_PyErr_Occurred}
+        {"PyErr_OccurredF", "()J", (void *)&f_PyErr_Occurred},
+
+        /*
+         * Ordinary-JNI registrations, reusing the same wrappers as the @FastNative set --
+         * the C signature is identical, only the Kotlin-side annotation differs. These back
+         * the functions that must never run under a GC-blocking convention.
+         */
+        {"Py_InitializeN", "()V", (void *)&f_Py_Initialize},
+        {"Py_FinalizeN", "()V", (void *)&f_Py_Finalize},
+        {"PyErr_ClearN", "()V", (void *)&f_PyErr_Clear},
+        {"PyRun_SimpleStringN", "(J)I", (void *)&f_PyRun_SimpleString},
+        {"PyImport_ImportModuleN", "(J)J", (void *)&f_PyImport_ImportModule},
+        {"PyObject_GetAttrStringN", "(JJ)J", (void *)&f_PyObject_GetAttrString}
     };
-    (*env)->RegisterNatives(env, clazz, methods, 29);
+    (*env)->RegisterNatives(env, clazz, methods, 35);
     return JNI_VERSION_1_6;
 }

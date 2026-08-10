@@ -75,12 +75,14 @@ actual inline fun PyUnicode_AsUTF8(unicode: NativePointer): String? =
 
 //**************************************************
 // Section 1
-actual inline fun Py_Initialize() = if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.Py_InitializeF() else python.native.ffi.bindings.Py_Initialize()
+// Runs site.py and other start-up Python; unbounded, so never on a GC-blocking path.
+actual inline fun Py_Initialize() = python.native.ffi.bindings.Py_InitializeN()
 actual inline fun Py_InitializeEx(initsigs: Int) = python.native.ffi.bindings.Py_InitializeEx(initsigs)
 actual inline fun Py_IsInitialized(): Int = if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.Py_IsInitializedF() else python.native.ffi.bindings.Py_IsInitialized()
 actual inline fun Py_IsFinalizing(): Int = python.native.ffi.bindings.Py_IsFinalizing()
 actual inline fun Py_FinalizeEx(): Int = python.native.ffi.bindings.Py_FinalizeEx()
-actual inline fun Py_Finalize() = if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.Py_FinalizeF() else python.native.ffi.bindings.Py_Finalize()
+// Runs atexit handlers and __del__ during teardown.
+actual inline fun Py_Finalize() = python.native.ffi.bindings.Py_FinalizeN()
 // actual inline fun Py_BytesMain(argc: Int, argv: List<String>): Int // 수동 추가
 actual inline fun Py_RunMain(): Int = python.native.ffi.bindings.Py_RunMain() // 수동 추가
 actual inline fun Py_GetVersion(): String? {
@@ -106,7 +108,8 @@ actual inline fun PyEval_RestoreThread(tstate: NativePointer) = python.native.ff
 actual inline fun PyRun_SimpleString(command: String): Int { // 수동 추가
     val ptr = python.native.ffi.bindings.ffiAllocUtf8(command)
     try {
-        return if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyRun_SimpleStringF(ptr) else python.native.ffi.bindings.PyRun_SimpleString(ptr)
+        // Executes arbitrary Python.
+        return python.native.ffi.bindings.PyRun_SimpleStringN(ptr)
     } finally {
         python.native.ffi.bindings.ffiFreeUtf8(ptr)
     }
@@ -117,7 +120,8 @@ actual fun PyEval_EvalCode(co: NativePointer, globals: NativePointer, locals: Na
 
 
 // Section 3
-actual inline fun PyErr_Clear() = if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyErr_ClearF() else python.native.ffi.bindings.PyErr_Clear()
+// Drops the last reference to the exception, which can run a Python __del__.
+actual inline fun PyErr_Clear() = python.native.ffi.bindings.PyErr_ClearN()
 actual inline fun PyErr_PrintEx(set_sys_last_vars: Int) = python.native.ffi.bindings.PyErr_PrintEx(set_sys_last_vars)
 actual inline fun PyErr_Print() = python.native.ffi.bindings.PyErr_Print()
 actual inline fun PyErr_WriteUnraisable(obj: NativePointer) = python.native.ffi.bindings.PyErr_WriteUnraisable(obj.toPlatformPointer())
@@ -198,7 +202,8 @@ actual inline fun Py_Exit(status: Int) = python.native.ffi.bindings.Py_Exit(stat
 actual fun PyImport_ImportModule(name: String): NativePointer? {
     val ptr = python.native.ffi.bindings.ffiAllocUtf8(name)
     try {
-        return (if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyImport_ImportModuleF(ptr) else python.native.ffi.bindings.PyImport_ImportModule(ptr)).toNativePointer()
+        // Runs the module's top-level code.
+        return python.native.ffi.bindings.PyImport_ImportModuleN(ptr).toNativePointer()
     } finally {
         python.native.ffi.bindings.ffiFreeUtf8(ptr)
     }
@@ -243,8 +248,8 @@ actual fun PyObject_GetAttr(o: NativePointer, attr_name: NativePointer): NativeP
 actual fun PyObject_GetAttrString(o: NativePointer, attr_name: String): NativePointer? {
     val ptr = python.native.ffi.bindings.ffiAllocUtf8(attr_name)
     try {
-        return (if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyObject_GetAttrStringF(o.toPlatformPointer(), ptr)
-                else python.native.ffi.bindings.PyObject_GetAttrString(o.toPlatformPointer(), ptr)).toNativePointer()
+        // Can dispatch to a Python __getattr__ / descriptor.
+        return python.native.ffi.bindings.PyObject_GetAttrStringN(o.toPlatformPointer(), ptr).toNativePointer()
     } finally {
         python.native.ffi.bindings.ffiFreeUtf8(ptr)
     }

@@ -408,3 +408,37 @@ Until the task dependencies are fixed, run this before any instrumented test:
 
     ./gradlew :python-multiplatform:linkAndroidNativeArm64 :python-multiplatform:linkAndroidNativeX64 \
               :python-multiplatform:copyAndroidPythonBinaries :python-multiplatform:copyAndroidPythonAssets
+
+### Final rule: the convention is a per-function decision, and correctness comes first
+
+Picking by API level is only half of it. The two fast conventions are not merely faster —
+they change what the callee is allowed to do:
+
+- Both `@FastNative` and `@CriticalNative` **stop the garbage collector** for the duration of
+  the call, so neither may wrap anything that runs for an unbounded time.
+- `@CriticalNative` additionally receives **no JNIEnv**, so nothing beneath it can re-enter the
+  runtime at all.
+
+Plenty of CPython entry points can execute arbitrary Python: a module's top-level code during
+import, a `__getattr__` or descriptor during attribute lookup, a `__del__` reached by dropping
+the last reference, `site.py` during start-up, `atexit` handlers during teardown. Those are
+unbounded in time, and once Kotlin callables are exposed to Python they re-enter the JVM —
+which is exactly what `@CriticalNative` cannot support. This is the same reason
+`Linker.Option.critical()` is a per-downcall option in Panama rather than a global switch.
+
+So each function is classified, and the classification outranks the API-level choice:
+
+| class | rule | of the 11 migrated |
+|---|---|---|
+| **leaf** — cannot execute Python | fastest convention for the API level | `Py_IsInitialized`, `PyList_Size`, `PyErr_Occurred`, `Py_GetVersion`, `PyLong_FromLongLong` |
+| **re-entrant** — may run Python, may upcall, may block | **ordinary JNI, always** | `Py_Initialize`, `Py_Finalize`, `PyErr_Clear`, `PyRun_SimpleString`, `PyImport_ImportModule`, `PyObject_GetAttrString` |
+
+`PyErr_Clear` looks like a leaf and is not: clearing the error drops the last reference to the
+exception, and that can run a Python `__del__`. `PyObject_GetAttrString` looks like a field
+read and is not, for the same kind of reason. When in doubt the call goes on the ordinary
+path — a wrong guess there costs nanoseconds, while a wrong guess the other way is a crash
+once upcalls exist.
+
+Losing the fast path on the re-entrant half is not the tragedy it appears. Those calls do real
+work — importing a module or running a statement dwarfs a 40ns transition — whereas the leaf
+calls, where the transition genuinely dominates, are exactly the ones that keep it.

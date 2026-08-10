@@ -98,6 +98,21 @@ object bindings {
     @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyObject_GetAttrStringF(o: Long, name: Long): Long
     @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyErr_OccurredF(): Long
 
+    // ---- Ordinary JNI, for calls that must NOT block GC or forbid JVM re-entry ----
+    //
+    // @CriticalNative and @FastNative both stop the collector for the duration of the call,
+    // and @CriticalNative additionally has no JNIEnv, so nothing under it can re-enter the
+    // runtime. These functions can execute arbitrary Python -- module top-level code, a
+    // __getattr__, a __del__ reached by dropping the last reference, interpreter start-up and
+    // shutdown -- which is unbounded in time and, once Kotlin callables are exposed to
+    // Python, re-enters the JVM. They stay on the ordinary path at every API level.
+    @JvmStatic external fun Py_InitializeN()
+    @JvmStatic external fun Py_FinalizeN()
+    @JvmStatic external fun PyErr_ClearN()
+    @JvmStatic external fun PyRun_SimpleStringN(command: Long): Int
+    @JvmStatic external fun PyImport_ImportModuleN(name: Long): Long
+    @JvmStatic external fun PyObject_GetAttrStringN(o: Long, name: Long): Long
+
     /**
      * Which JNI calling convention this device fast-paths.
      *
