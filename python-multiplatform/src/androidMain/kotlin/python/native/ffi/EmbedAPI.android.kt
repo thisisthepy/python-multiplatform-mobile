@@ -14,8 +14,16 @@ actual inline fun NativePointer.toRawValue(): Long = toPlatformPointer()
 inline fun NativePointer.toPlatformPointer(): JNIPointer = this.address as JNIPointer
 @HighOverheadNativeCall
 actual fun AddressValue.toNativePointer(): NativePointer = NativePointer((this as NativeAddressValue).ptr)
+/**
+ * Deliberately does not delegate to the `JNIPointer?` overload below.
+ *
+ * `JNIPointer` is a typealias for `Long`, so that overload's receiver is `Long?` and this one's is
+ * `Long`. Overload resolution prefers the more specific, non-null receiver — that is, this function
+ * itself — so writing `toNativePointer()` here recurses forever and blows the stack. On Android the
+ * platform pointer *is* the `Long`, so the conversion is written out instead.
+ */
 @HighOverheadNativeCall
-actual fun Long.toNativePointer(): NativePointer? = toNativePointer()
+actual fun Long.toNativePointer(): NativePointer? = if (this > 0) NativePointer(this) else null
 internal inline fun JNIPointer?.toNativePointer(): NativePointer? = this?.let { if (it > 0) NativePointer(it) else null }
 
 
