@@ -361,3 +361,50 @@ export sets in artMain, not one.
 Not yet implemented. The crossover API level is also still unknown: it lies somewhere between
 26 and 34, and picking the threshold well needs measurements at 28/30/31/32 that have not
 been taken.
+
+### The crossover, pinned: Android 14
+
+Measured across five API levels plus hardware. Net of the Kotlin floor, ns/call, from
+`JniOverheadBenchmark`:
+
+| API | `@CriticalNative` | `@FastNative` | ordinary JNI |
+|---|---|---|---|
+| 26 (Android 8.0) | **1.86** | 38.69 | 45.33 |
+| 30 (Android 11) | **-0.24** | 31.76 | 73.09 |
+| 31 (Android 12) | **-0.02** | 24.29 | 45.97 |
+| 33 (Android 13) | **-0.04** | 2.03 | 7.82 |
+| 34 (Android 14) | 24.35 | **1.97** | 7.81 |
+| 36 (Android 16, SM-X910 hardware) | 44.05 | **3.55** | 18.32 |
+
+`@CriticalNative` is effectively free — at or below the measurement floor — from API 26
+through 33, then collapses at 34 and stays collapsed on hardware. `@FastNative` moves the
+other way: expensive through API 31, cheap from 33 onward. Two independent ART changes, and
+they do not happen at the same release.
+
+**The boundary is Android 14, not Android 12.** Google's guidance to bind `@CriticalNative`
+through RegisterNatives *before Android 12* suggested 31 as the interesting version, and that
+turned out to be about correctness, not cost: name-linked `@CriticalNative` aborts the runtime
+below 12 and merely runs slow above it, while the registered form stays fast right through 33.
+
+A real C API call behaves the same as the empty echo. `PyList_Size` on `sys.path` costs 2.22ns
+under `@CriticalNative` on API 33 and 47.33ns on API 36, tracking the echo numbers closely.
+`PyList_Size` is an O(1) header read, so the transition dominates and the convention choice is
+not academic.
+
+**Selection rule, from measurement:** `SDK_INT >= 34` → `@FastNative`, otherwise
+`@CriticalNative`. Both are cheap at API 33, so a threshold placed there is forgiving in the
+one place the data is closest.
+
+### A build-wiring defect this work kept tripping over
+
+Three separate times, an instrumented run failed because the APK did not contain what the
+source tree said it should. `connectedDebugAndroidTest` does not reliably force
+`linkAndroidNative*` or the `copyAndroidPythonBinaries` / `copyAndroidPythonAssets` staging,
+so a changed `.def` or a cleaned `build/` produces an APK holding a stale — or entirely
+missing — `libmultiplatform_python3.14.so` and no `libpython3.14.so` beside it. The symptom is
+`UnsatisfiedLinkError`, which reads like a code error and is not one.
+
+Until the task dependencies are fixed, run this before any instrumented test:
+
+    ./gradlew :python-multiplatform:linkAndroidNativeArm64 :python-multiplatform:linkAndroidNativeX64 \
+              :python-multiplatform:copyAndroidPythonBinaries :python-multiplatform:copyAndroidPythonAssets

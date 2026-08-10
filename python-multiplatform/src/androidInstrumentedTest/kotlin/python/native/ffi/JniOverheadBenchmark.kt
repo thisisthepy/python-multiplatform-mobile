@@ -175,4 +175,52 @@ class JniOverheadBenchmark {
         Log.i(TAG, String.format("ordinary JNI     %8.2f ns/call   net %7.2f ns", n, n - k))
         Log.i(TAG, "sink=$sink")
     }
+
+    /**
+     * The same comparison on a call that does real work.
+     *
+     * Every number above measures a transition wrapped around `return x`, which makes the
+     * convention look as important as it can possibly look. What matters for this project is
+     * whether the difference survives once the callee actually does something. `PyList_Size`
+     * is close to the cheapest real C API function there is -- an O(1) read off the list
+     * header -- so it is the case where the transition still has the best chance of dominating.
+     * If the spread collapses even here, it collapses everywhere.
+     *
+     * The list under test is `sys.path`, reachable through functions already registered.
+     */
+    @Test
+    fun realCPythonCallByCallingConvention() {
+        PythonOnDevice.ensureInitialised()
+
+        val sys = PythonOnDevice.withUtf8("sys") { bindings.PyImport_ImportModule(it) }
+        assertTrue("could not import sys", sys != 0L)
+        val path = PythonOnDevice.withUtf8("path") { bindings.PyObject_GetAttrString(sys, it) }
+        assertTrue("could not read sys.path", path != 0L)
+
+        val len = bindings.PyList_Size(path)
+        assertTrue("sys.path should be a non-empty list, got len=$len", len > 0)
+        assertTrue("PyList_SizeFast disagrees: ${bindings.PyList_SizeFast(path)} vs $len", bindings.PyList_SizeFast(path) == len)
+        assertTrue("PyList_SizeNormal disagrees: ${bindings.PyList_SizeNormal(path)} vs $len", bindings.PyList_SizeNormal(path) == len)
+
+        var w = 0L
+        repeat(WARMUP) {
+            w += bindings.PyList_Size(path) + bindings.PyList_SizeFast(path) + bindings.PyList_SizeNormal(path)
+        }
+        sink += w
+
+        var bestCritical = Double.MAX_VALUE
+        var bestFast = Double.MAX_VALUE
+        var bestNormal = Double.MAX_VALUE
+        repeat(ROUNDS) {
+            timeOnce { bindings.PyList_Size(path) }.let { if (it < bestCritical) bestCritical = it }
+            timeOnce { bindings.PyList_SizeFast(path) }.let { if (it < bestFast) bestFast = it }
+            timeOnce { bindings.PyList_SizeNormal(path) }.let { if (it < bestNormal) bestNormal = it }
+        }
+
+        Log.i(TAG, "--- PyList_Size on sys.path (len=$len), a real C API call ---")
+        Log.i(TAG, String.format("@CriticalNative  %8.2f ns/call", bestCritical))
+        Log.i(TAG, String.format("@FastNative      %8.2f ns/call", bestFast))
+        Log.i(TAG, String.format("ordinary JNI     %8.2f ns/call", bestNormal))
+        Log.i(TAG, "sink=$sink")
+    }
 }

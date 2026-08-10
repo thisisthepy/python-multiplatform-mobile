@@ -72,6 +72,14 @@ object bindings {
     @dalvik.annotation.optimization.CriticalNative
     external fun echoCriticalNamed(x: Long): Long
 
+    // The same real CPython function (PyList_Size) under the other two conventions, so the
+    // comparison can be made on a call that does actual work rather than on an empty echo.
+    @JvmStatic
+    @dalvik.annotation.optimization.FastNative
+    external fun PyList_SizeFast(list: Long): Long
+    @JvmStatic
+    external fun PyList_SizeNormal(list: Long): Long
+
     @JvmStatic
     @dalvik.annotation.optimization.CriticalNative
     external fun Py_IsInitialized(): Int

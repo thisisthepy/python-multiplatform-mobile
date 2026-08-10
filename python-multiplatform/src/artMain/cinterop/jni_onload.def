@@ -29,6 +29,16 @@ jlong critical_echo2(jlong x) { return x; }
 jlong normal_echo(JNIEnv *env, jclass clazz, jlong x) { return x; }
 jlong fast_echo(JNIEnv *env, jclass clazz, jlong x) { return x; }
 
+/*
+ * The echoes above measure a transition around a body that does nothing. Real C API calls do
+ * work, and if that work dominates then the convention barely matters in practice. These wrap
+ * an actual CPython function -- PyList_Size, an O(1) struct read -- under the two conventions
+ * that need JNIEnv, so it can be compared against the @CriticalNative registration of
+ * PyList_Size itself.
+ */
+jlong pylistsize_fast(JNIEnv *env, jclass clazz, jlong l) { return PyList_Size(l); }
+jlong pylistsize_normal(JNIEnv *env, jclass clazz, jlong l) { return PyList_Size(l); }
+
 int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -53,8 +63,10 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"echo1", "(J)J", (void *)&critical_echo1},
         {"echo2", "(J)J", (void *)&critical_echo2},
         {"echoNormal", "(J)J", (void *)&normal_echo},
-        {"echoFast", "(J)J", (void *)&fast_echo}
+        {"echoFast", "(J)J", (void *)&fast_echo},
+        {"PyList_SizeFast", "(J)J", (void *)&pylistsize_fast},
+        {"PyList_SizeNormal", "(J)J", (void *)&pylistsize_normal}
     };
-    (*env)->RegisterNatives(env, clazz, methods, 16);
+    (*env)->RegisterNatives(env, clazz, methods, 18);
     return JNI_VERSION_1_6;
 }
