@@ -49,7 +49,16 @@ Gradle 출력을 `| tail`, `| grep`, `| head` 로 넘긴 뒤 종료 코드를 �
 
 ## 서브 에이전트 운용
 
-작업을 분담할 때 Claude 서브 에이전트만 쓰지 말고 **`agy` 를 함께 사용한다.** `agy` 는 Gemini 계열까지 쓸 수 있어 모델을 섞을 수 있다.
+**작업 대부분은 `agy` 에 맡긴다.** Claude 서브 에이전트는 조율이 꼭 필요한 경우로 제한하고, 기본 실행 수단은 `agy` 로 둔다.
+
+`agy` 에는 Gemini 계열뿐 아니라 **Claude 모델도 있다** (`claude-opus-4-6-thinking`, `claude-sonnet-4-6`). 모델을 작업 성격에 맞춰 고른다.
+
+| 작업 성격 | 권장 모델 |
+|---|---|
+| 까다로운 설계·리팩터링, 실수 비용이 큰 작업 | `claude-opus-4-6-thinking` |
+| 일반적인 구현 작업 | `claude-sonnet-4-6` |
+| 대량 코드 읽기·조사·분석 | `gemini-3.1-pro-high` |
+| 단순 반복 작업 | `gemini-3.6-flash-medium` |
 
 ### agy 사용법
 
@@ -80,6 +89,13 @@ agy -p "<프롬프트>" --model gemini-3.1-pro-high --print-timeout 30m
 - **작업을 디렉터리 단위로 분할한다.** 여러 에이전트가 같은 파일을 만지면 서로 덮어쓴다.
 - **동시에 도는 에이전트에게 커밋을 시키지 않는다.** git 인덱스 락이 충돌한다. 각자 작업만 하게 하고 커밋은 조율하는 쪽에서 한 번에 처리하거나, git worktree 로 격리한다.
 - Gradle 데몬은 하나를 공유하므로 동시 빌드는 직렬화되어 느려진다. 감안하고 분배한다.
+
+### agy 호출 시 주의
+
+- **`claude-opus-4-6-thinking` 에는 `--effort` 를 붙이면 안 된다.** 붙이면 실행 자체가 즉시 실패한다
+  (`invalid model selection: --effort is not supported for model "claude-opus-4-6-thinking"`).
+  이 모델은 자체 추론 설정을 쓴다. `--effort` 는 Gemini 계열과 `claude-sonnet-4-6` 에만 준다.
+- 실행 후 로그 앞부분을 반드시 확인한다. 인자 오류는 즉시 종료되는데, 배경 실행이면 성공처럼 보인다.
 
 ### 이 환경의 제약
 
