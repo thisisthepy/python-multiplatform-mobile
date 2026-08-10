@@ -19,9 +19,11 @@ The project currently uses `python-build-standalone` (maintained by Astral). For
 
 ## 3. Android and iOS Support
 
-*   **Upstream Status:** PEP 730 (iOS) and PEP 738 (Android) established these as Tier 3 supported platforms in CPython, starting from Python 3.13. Official source code now supports building for these mobile OSes.
-*   **`python-build-standalone` Status:** Despite upstream support, `python-build-standalone` **does not** publish prebuilt binaries for `android` or `ios`. 
-*   **Conclusion:** It is not currently achievable to drop the kivy toolchain (or manual prebuilt) dependency for iOS and Android by switching to `python-build-standalone`. We must continue using the existing committed assets or kivy toolchains for mobile platforms.
+*   **Android:** Prebuilt artifacts for Android are provided natively by python.org. These archives are plain NDK cross-compilations (e.g., CPython's own build tree). They can be found at `https://www.python.org/ftp/python/<version>/python-<version>-<arch>-linux-android.tar.gz`.
+*   **iOS:** Prebuilt artifacts for iOS are provided by the BeeWare project via their `Python-Apple-support` repository, which are CPython's own iOS build layouts (e.g. `prefix: iOS/Frameworks/...`). They are located at `https://github.com/beeware/Python-Apple-support/releases`. The kivy toolchains are **not** the source of these artifacts.
+*   **python-build-standalone Status:** `python-build-standalone` has moved from indygreg to Astral (`https://github.com/astral-sh/python-build-standalone`). It **does not** publish prebuilt binaries for `android` or `ios`. 
+*   **Prebuilt-cpython Status:** The `python/prebuilt-cpython` repository is currently a planning repository containing no artifacts, so it is not a source.
+*   **Conclusion:** We acquire Android artifacts directly from python.org, and iOS artifacts from BeeWare's Python-Apple-support, eliminating the need for kivy toolchain dependency.
 
 ## 4. Stable ABI Implications (PEP 803)
 

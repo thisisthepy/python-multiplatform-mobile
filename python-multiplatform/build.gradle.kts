@@ -24,6 +24,7 @@ plugins {
 val configuredPythonVersion = project.findProperty("pythonVersion")?.toString() ?: project.rootProject.version.toString()
 val pythonFreeThreaded = project.findProperty("pythonFreeThreaded")?.toString()?.toBoolean() ?: false
 val pbsRelease = project.findProperty("pythonBuildStandaloneRelease")?.toString() ?: "20260807"
+val pythonAppleSupportBuild = project.findProperty("pythonAppleSupportBuild")?.toString() ?: "b10"
 
 val pythonVersion = configuredPythonVersion
 val libraryVersion = "$pythonVersion-alpha01"
@@ -129,8 +130,83 @@ val downloadTasks = desktopTargets.map { (platform, pbsTarget) ->
     }
 }
 
+val androidTargets = mapOf(
+    "android-aarch64" to "aarch64",
+    "android-x86_64" to "x86_64"
+)
+
+val androidDownloadTasks = androidTargets.map { (platform, arch) ->
+    val url = "https://www.python.org/ftp/python/$configuredPythonVersion/python-$configuredPythonVersion-$arch-linux-android.tar.gz"
+    val archive = file("$downloadDir/python-$configuredPythonVersion-$arch-linux-android.tar.gz")
+    val extractDir = file("$downloadDir/extracted/$platform")
+    
+    val taskName = "downloadPython_${platform.replace("-", "_")}"
+    tasks.register(taskName) {
+        inputs.property("url", url)
+        outputs.dir(extractDir)
+        
+        doLast {
+            if (!archive.exists()) {
+                println("Downloading $url")
+                archive.parentFile.mkdirs()
+                URL(url).openStream().use { input ->
+                    FileOutputStream(archive).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            }
+            
+            // python.org provides sigstore signatures (.sig, .crt, .sigstore) but no plain SHA256SUMS.
+            // Gradle-based verification is unreasonable without external tooling, so we skip checksum verification here.
+            
+            val isEmpty = extractDir.list()?.isEmpty() ?: true
+            if (isEmpty) {
+                println("Extracting $archive to $extractDir")
+                copy {
+                    from(tarTree(resources.gzip(archive)))
+                    into(extractDir)
+                }
+            }
+        }
+    }
+}
+
+val iosUrl = "https://github.com/beeware/Python-Apple-support/releases/download/$libVersion-$pythonAppleSupportBuild/Python-$libVersion-iOS-support.$pythonAppleSupportBuild.tar.gz"
+val iosArchive = file("$downloadDir/Python-$libVersion-iOS-support.$pythonAppleSupportBuild.tar.gz")
+val iosExtractDir = file("$downloadDir/extracted/ios")
+
+val downloadPython_ios = tasks.register("downloadPython_ios") {
+    inputs.property("url", iosUrl)
+    outputs.dir(iosExtractDir)
+    
+    doLast {
+        if (!iosArchive.exists()) {
+            println("Downloading $iosUrl")
+            iosArchive.parentFile.mkdirs()
+            URL(iosUrl).openStream().use { input ->
+                FileOutputStream(iosArchive).use { output ->
+                    input.copyTo(output)
+                }
+            }
+        }
+        
+        // BeeWare does not provide any checksums or signatures for iOS artifacts, so verification is skipped.
+
+        val isEmpty = iosExtractDir.list()?.isEmpty() ?: true
+        if (isEmpty) {
+            println("Extracting $iosArchive to $iosExtractDir")
+            copy {
+                from(tarTree(resources.gzip(iosArchive)))
+                into(iosExtractDir)
+            }
+        }
+    }
+}
+
 val downloadAllPythonBuilds by tasks.registering {
     dependsOn(downloadTasks)
+    dependsOn(androidDownloadTasks)
+    dependsOn(downloadPython_ios)
 }
 
 val androidBuildDir = "$projectDir/build/android"
