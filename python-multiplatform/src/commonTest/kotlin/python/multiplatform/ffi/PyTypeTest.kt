@@ -1,7 +1,9 @@
 package python.multiplatform.ffi
 
+import python.multiplatform.ffi.exceptions.errors.PyTypeError
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -73,7 +75,8 @@ class PyTypeTest {
     fun castRaisesForIncompatibleObjects() = PythonTestFixture.withInterpreter {
         val intType = PythonTestFixture.eval("42").getType()
         val notAnInt = PythonTestFixture.eval("'not an int'")
-        // Expected to eventually throw PyException; currently TODO, so this documents intent for the red phase.
-        intType.cast(notAnInt)
+        assertFailsWith<PyTypeError> {
+            intType.cast(notAnInt)
+        }
     }
 }

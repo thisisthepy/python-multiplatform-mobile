@@ -2,7 +2,10 @@ package python.multiplatform.ffi.types.basic
 
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyType
+import python.multiplatform.ffi.Python3
 import python.native.ffi.NativePointer
+import python.native.ffi.Py_IncRef
+import python.native.ffi.Py_DecRef
 
 /**
  * Wrapper around Python's `None` singleton.
@@ -17,16 +20,24 @@ import python.native.ffi.NativePointer
 class PyNone private constructor(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, borrowed) {
     companion object {
         /** The `PyType` for `NoneType`. */
-        val TYPE: PyType by lazy { TODO("Not yet implemented") }
+        val TYPE: PyType by lazy { get().getType() }
+
+        private var _instance: PyNone? = null
 
         /** Returns the singleton `None` object, initialising it on first access. */
         fun get(): PyNone {
-            TODO("Not yet implemented")
+            return _instance ?: run {
+                val builtins = python.native.ffi.PyEval_GetBuiltins() ?: throw python.multiplatform.ffi.exceptions.PyException.fromCurrentError()!!
+                val nonePtr = python.native.ffi.PyDict_GetItemString(builtins, "None") ?: throw python.multiplatform.ffi.exceptions.PyException.fromCurrentError()!!
+                val pyNone = PyNone(nonePtr, true)
+                _instance = pyNone
+                pyNone
+            }
         }
 
         /** Whether [obj] is Python's `None` singleton (`Py_IsNone` / `obj is None`). */
         fun isNone(obj: PyObject): Boolean {
-            TODO("Not yet implemented")
+            return obj.pointer.address == get().pointer.address
         }
     }
 }

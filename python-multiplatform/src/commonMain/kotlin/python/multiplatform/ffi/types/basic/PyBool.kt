@@ -3,7 +3,11 @@ package python.multiplatform.ffi.types.basic
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyType
 import python.multiplatform.ffi.conversion.PyProxy
+import python.multiplatform.ffi.exceptions.PyException
 import python.native.ffi.NativePointer
+import python.native.ffi.PyBool_FromLong
+import python.native.ffi.PyErr_Occurred
+import python.native.ffi.PyObject_IsTrue
 
 /**
  * Wrapper around a Python `bool` object.
@@ -19,19 +23,26 @@ import python.native.ffi.NativePointer
 open class PyBool(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, borrowed), PyProxy<Boolean> {
     companion object {
         /** The `PyType` for `bool` (`builtins.bool`). */
-        val TYPE: PyType by lazy { TODO("Not yet implemented") }
+        val TYPE: PyType by lazy { val obj = from(false); val t = obj.getType(); obj.clean(); t }
 
         /** Returns the (singleton) `True` or `False` Python object for [value] (`PyBool_FromLong`). */
         fun from(value: Boolean): PyBool {
-            TODO("Not yet implemented")
+            val ptr = PyBool_FromLong(if (value) 1 else 0) ?: throw PyException.fromCurrentError()!!
+            return PyBool(ptr, false)
         }
     }
 
     override var cachedNativeValue: Boolean?
-        get() = TODO("Not yet implemented")
+        get() {
+            val res = PyObject_IsTrue(pointer)
+            if (res == -1 && PyErr_Occurred() != null) {
+                throw PyException.fromCurrentError()!!
+            }
+            return res == 1
+        }
         set(value) {}
     override var cachedPyObjectValue: PyObject?
-        get() = TODO("Not yet implemented")
+        get() = this
         set(value) {}
 }
 

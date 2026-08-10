@@ -1,20 +1,22 @@
 package python.multiplatform.ffi
 
 import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ffi.exceptions.errors.PyTypeError
 import python.multiplatform.ffi.types.collections.PyDict
 import python.multiplatform.ffi.types.iteration.PyIterator
 import python.native.ffi.NativePointer
-import python.native.ffi.PyLong_AsInt
-import python.native.ffi.PyLong_AsLongLong
-import python.native.ffi.PyObject_CallNoArgs
-import python.native.ffi.PyObject_GetAttr
+import python.native.ffi.PyErr_Clear
 import python.native.ffi.PyObject_GetAttrString
+import python.native.ffi.PyObject_GetIter
+import python.native.ffi.PyObject_IsInstance
 import python.native.ffi.PyObject_Type
 import python.native.ffi.PyTuple_GetItem
 import python.native.ffi.PyTuple_Size
 import python.native.ffi.PyType_GetName
+import python.native.ffi.PyType_IsSubtype
 import python.native.ffi.PyUnicode_AsUTF8
 import python.native.ffi.Py_DecRef
+import python.native.ffi.Py_IncRef
 
 
 class PyType private constructor(pointer: NativePointer): PyObject(pointer, false) {
@@ -24,60 +26,55 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
     }
 
     val name: String by lazy {
-        val namePtr: NativePointer? = PyType_GetName(pointer)
-        if (namePtr == null) throw PyException("Failed to get pointer of name")
-
+        // PyType_GetName: new reference on success.
+        val namePtr: NativePointer = PyType_GetName(pointer) ?: throw pyErrorOrGeneric("Failed to get the type's name")
         val nameStr: String? = PyUnicode_AsUTF8(namePtr)
-        if (nameStr == null) throw PyException("Failed to get String of name")
-
-        nameStr
+        Py_DecRef(namePtr)
+        nameStr ?: throw pyErrorOrGeneric("Failed to decode the type's name")
     }
 
     val baseType: PyType by lazy {
-        val attrPtr: NativePointer? = PyObject_GetAttrString(pointer, "__base__")
-        if (attrPtr == null) throw PyException("Failed to get __base__")
-
-        PyType(attrPtr)
+        // PyObject_GetAttrString: new reference; getInstance() takes ownership
+        // of it when not already cached (see the comment on `getInstance`).
+        val attrPtr: NativePointer = PyObject_GetAttrString(pointer, "__base__")
+            ?: throw pyErrorOrGeneric("Failed to get __base__")
+        getInstance(attrPtr)
     }
 
-    private var cachedBaseTypes: List<PyType>? = null
-    private var cachedBaseTypesPointer: NativePointer? = null
+    /** `type.__bases__`, i.e. the type's immediate (non-transitive) base classes. */
     val baseTypes: List<PyType>
-        get() {
-            // TODO: 에러 발생 여부 확인이 필요한건가?
-            val bases = PyObject_GetAttrString(pointer, "__bases__")  // tuple object
-            if (bases != null) {
-
-            } else {
-                // TODO: 에러? 아니면 항상 성공 보장?
-            }
-            val baseTypes = cachedBaseTypes
-            val baseTypesPointer = cachedBaseTypesPointer
-            if (baseTypesPointer != null && bases?.address == baseTypesPointer.address) {
-                return baseTypes ?: listOf()
-            } else {
-                // TODO: Do null check
-                val lenFunc = PyObject_GetAttrString(pointer, "__len__")
-                val lenObj = PyObject_CallNoArgs(lenFunc!!)
-                val size = PyLong_AsInt(lenObj!!)
-
-
-                val list: MutableList<PyType> = let {
-                    val temp: MutableList<PyType> = mutableListOf()
-                    for (i in 0 until size) {
-                        temp[i] = getInstance(PyTuple_GetItem(bases!!, i.toLong())!!)
-                    }
-                    temp
-                }
-
-
-                return list.toList()
-            }
-        }
+        get() = tupleAttrAsTypes("__bases__")
 
     /** Method Resolution Order, i.e. `type.__mro__` -- the linearised lookup order for attributes. */
     val mro: List<PyType> by lazy {
-        TODO("Not yet implemented")
+        tupleAttrAsTypes("__mro__")
+    }
+
+    /** Reads a tuple-valued attribute (e.g. `__bases__`, `__mro__`) off this type and wraps each entry as a [PyType]. */
+    private fun tupleAttrAsTypes(attrName: String): List<PyType> {
+        // PyObject_GetAttrString: new reference to the tuple.
+        val tuplePointer: NativePointer = PyObject_GetAttrString(pointer, attrName)
+            ?: throw pyErrorOrGeneric("Failed to get $attrName")
+        try {
+            val size = PyTuple_Size(tuplePointer)
+            if (size == -1L) throw pyErrorOrGeneric("Failed to get the size of $attrName")
+
+            val list = ArrayList<PyType>(size.toInt())
+            for (i in 0 until size) {
+                // PyTuple_GetItem returns a *borrowed* reference; getInstance()
+                // assumes ownership of a new reference for cache misses, so give
+                // it its own +1. When the entry is already cached, this extra
+                // reference is simply never released -- harmless for built-in
+                // types, which CPython treats as immortal.
+                val itemPointer = PyTuple_GetItem(tuplePointer, i)
+                    ?: throw pyErrorOrGeneric("Failed to get $attrName[$i]")
+                Py_IncRef(itemPointer)
+                list.add(getInstance(itemPointer))
+            }
+            return list
+        } finally {
+            Py_DecRef(tuplePointer)
+        }
     }
 
     val dict: PyDict by lazy {
@@ -87,24 +84,10 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
 
     init {
         if (!isPyTypeObject()) throw PyException("Object is not a type")
-
-        var temp: MutableList<PyType> = mutableListOf<PyType>()
-        // TODO: PyObject_GetAttrString return값이 Tuple인지도 확인 해야할까?
-        val basesPyObject: NativePointer = PyObject_GetAttrString(pointer, "__bases__").let {it ?: throw PyException("Failed to get base types")}
-        val basesSize: Long = PyTuple_Size(basesPyObject).let {
-            if (it == -1L) throw PyException("Failed to get base types size")
-            else it
-        }
-        for (i in 0 until basesSize) {
-            // TODO: type check 필요
-//            temp.add(PyType(PyTuple_GetItem(basesPyObject, i)!!, true))
-        }
     }
 
     /** `PyType_IsSubtype(this, other)`, i.e. Python's `issubclass(self, other)`. */
-    fun isSubtypeOf(other: PyType): Boolean {
-        TODO("Not yet implemented")
-    }
+    fun isSubtypeOf(other: PyType): Boolean = PyType_IsSubtype(pointer, other.pointer) != 0
 
     /**
      * Attempts to view [obj] as an instance of this type, raising [PyException]
@@ -112,50 +95,77 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
      */
     @Throws(PyException::class)
     fun cast(obj: PyObject): PyObject {
-        TODO("Not yet implemented")
+        if (!isInstance(obj)) {
+            throw PyTypeError("Object is not an instance of '$name'")
+        }
+        return obj
     }
 
     /** `PyObject_IsInstance(obj, this)`, i.e. Python's `isinstance(obj, self)`. */
     fun isInstance(obj: PyObject): Boolean {
-        TODO("Not yet implemented")
+        val result = PyObject_IsInstance(obj.pointer, pointer)
+        if (result < 0) throw pyErrorOrGeneric("isinstance() check failed")
+        return result != 0
     }
 
     /** `PyObject_GetIter` applied to an instance of this type, when this type describes an iterable. */
     fun getIterator(): PyIterator {
-        TODO("Not yet implemented")
+        // Constructs a fresh, no-argument instance of this type and returns its iterator.
+        val instance = invoke()
+        val iterPointer = PyObject_GetIter(instance.pointer)
+            ?: throw pyErrorOrGeneric("Instances of '$name' are not iterable")
+        return PyIterator(iterPointer, false)
     }
 
     /** Calls this type object, i.e. constructs a new instance: `self(*args, **kwargs)`. */
     @Throws(PyException::class)
     override operator fun invoke(vararg args: PyObject, kwargs: Map<String, PyObject>): PyObject {
-        TODO("Not yet implemented")
+        // Type objects are themselves callable (`self(*args, **kwargs)` runs
+        // `type.__call__`, i.e. `__new__` + `__init__`); reuse PyObject's
+        // generic call machinery rather than duplicating it here.
+        return super.invoke(*args, kwargs = kwargs)
     }
 
     /** `type.__new__(self)` -- allocates (but does not initialise) a new instance of this type. */
     fun __new__(): PyObject {
-        TODO("Not yet implemented")
+        // `__new__` is a static method taking the class as its first argument;
+        // there's no dedicated tp_new FFI entry point here, so go through the
+        // normal attribute + call path (`type.__new__(self)`).
+        return getAttr("__new__").invoke(this)
     }
 
     /** `type.__init__(obj, *args)` -- initialises an already-allocated [obj] in place. */
     fun __init__(obj: PyObject, vararg args: PyObject) {
-        TODO("Not yet implemented")
+        obj.getAttr("__init__").invoke(*args)
     }
 
     private fun isPyTypeObject(): Boolean {
-        val pyTypeObject: NativePointer? = PyObject_Type(pointer)
-        val typeNamePyObject: NativePointer? = PyObject_GetAttrString(pointer, "__name__")
-
-        if (pyTypeObject != null && typeNamePyObject != null) {
-            val typeName: String = PyUnicode_AsUTF8(typeNamePyObject).let {it ?: throw PyException("Failed to get type name") }
-            val result: Boolean = typeName == "type"
-
-            Py_DecRef(typeNamePyObject)
-            Py_DecRef(pyTypeObject)
-
-            return result
+        // A "type" in the CPython sense is an object whose own type ("meta-type")
+        // is `type` (or, in principle, a metaclass derived from it -- but the
+        // FFI surface here has no PyType_Check/PyType_IsSubtype-friendly handle
+        // on the builtin `type` object itself to test against, so this checks
+        // the meta-type's __name__ instead of `pointer`'s own __name__, which
+        // is the bug this fixes: reading `pointer.__name__` rejects every
+        // legitimate type, since e.g. `int.__name__` is "int", never "type").
+        val metaTypePointer: NativePointer = PyObject_Type(pointer) ?: run {
+            // PyObject_Type basically never fails (every live object has a
+            // type), but if it somehow did, it would leave the error
+            // indicator set; this method reports "not a type" rather than
+            // propagating, so the indicator must be cleared here too --
+            // otherwise it would silently poison whatever Python call runs
+            // next (see the *OrNull helpers on PyObject for the same class
+            // of bug).
+            PyErr_Clear()
+            return false
         }
+        val metaTypeNamePointer: NativePointer? = PyObject_GetAttrString(metaTypePointer, "__name__")
+        val metaTypeName: String? = metaTypeNamePointer?.let { PyUnicode_AsUTF8(it) }
+        if (metaTypeNamePointer == null) PyErr_Clear()
 
-        return false
+        metaTypeNamePointer?.let { Py_DecRef(it) }
+        Py_DecRef(metaTypePointer)
+
+        return metaTypeName == "type"
     }
 
     override fun hashCode(): Int {

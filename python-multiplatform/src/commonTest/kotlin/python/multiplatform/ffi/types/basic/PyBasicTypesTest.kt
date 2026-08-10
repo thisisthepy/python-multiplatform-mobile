@@ -48,7 +48,7 @@ class PyBasicTypesTest {
     fun stringRoundTripsFromKotlinToPythonAndBack() = PythonTestFixture.withInterpreter {
         val pyString = PyString.from("hello, python")
         assertEquals("hello, python", pyString.toKotlin())
-        assertEquals(14, pyString.length)
+        assertEquals(13, pyString.length)
     }
 
     @Test

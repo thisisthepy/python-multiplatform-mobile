@@ -2,6 +2,44 @@ package python.multiplatform.ffi.exceptions
 
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyType
+import python.native.ffi.NativePointer
+import python.native.ffi.PyErr_Clear
+import python.native.ffi.PyErr_GetRaisedException
+import python.native.ffi.PyErr_Occurred
+import python.native.ffi.PyErr_SetRaisedException
+import python.native.ffi.PyErr_SetString
+import python.native.ffi.PyException_GetCause
+import python.native.ffi.PyException_GetContext
+import python.native.ffi.PyException_GetTraceback
+import python.native.ffi.PyObject_Str
+import python.native.ffi.PyObject_Type
+import python.native.ffi.PyType_GetName
+import python.native.ffi.PyUnicode_AsUTF8
+import python.native.ffi.Py_DecRef
+import python.native.ffi.Py_IncRef
+
+/**
+ * `True` if [this] points at Python's `None` singleton. There is no direct
+ * `Py_None` accessor exposed through this project's FFI layer, so this is
+ * approximated by comparing `type(x).__name__` to `"NoneType"` -- sufficient
+ * here because the only place this is used ([PyException_GetCause] results)
+ * only ever hands back either a real exception instance or `None`.
+ *
+ * `internal` (module-wide) rather than `private` because it's shared between
+ * this file and [python.multiplatform.ffi.exceptions.PyTraceback], which is
+ * a different file in the same package.
+ */
+internal fun NativePointer.isNoneObject(): Boolean {
+    val typePointer = PyObject_Type(this) ?: run {
+        PyErr_Clear()
+        return false
+    }
+    val namePointer = PyType_GetName(typePointer)
+    val name = namePointer?.let { PyUnicode_AsUTF8(it) }
+    namePointer?.let { Py_DecRef(it) }
+    Py_DecRef(typePointer)
+    return name == "NoneType"
+}
 
 /**
  * Kotlin-side mirror of a Python exception.
@@ -30,17 +68,128 @@ open class PyException(
     companion object {
         /**
          * Builds a [PyException] from whatever CPython's error indicator
-         * currently holds (via `PyErr_GetRaisedException()` / `PyErr_Fetch()`),
-         * clearing the indicator in the process. Returns `null` if no error
-         * is currently set.
+         * currently holds (via `PyErr_GetRaisedException()`), clearing the
+         * indicator in the process. Returns `null` if no error is currently
+         * set.
+         *
+         * This is the one central bridge from "a C API call returned a null
+         * that means an exception is pending" to a proper Kotlin throwable;
+         * every other class in this module (`PyObject`, `PyType`, `Python3`)
+         * routes its null-return error paths through here (via the
+         * `pyErrorOrGeneric` helper in `PyObject.kt`) rather than raising a
+         * bare, type-less [PyException].
          */
         fun fromCurrentError(): PyException? {
-            TODO("Not yet implemented")
+            // PyErr_Occurred() is a *borrowed* reference used purely as a
+            // presence check here -- it must not be decref'd.
+            if (PyErr_Occurred() == null) return null
+
+            // PyErr_GetRaisedException() hands back a new reference to the
+            // exception *instance* and atomically clears the indicator. In
+            // CPython >= 3.12 there is no separate "type"/"traceback" triple
+            // to fetch -- the instance itself carries its type
+            // (PyObject_Type) and traceback (PyException_GetTraceback).
+            val excPointer = PyErr_GetRaisedException() ?: return null
+            return fromExceptionInstance(excPointer)
+        }
+
+        /**
+         * Builds a [PyException] from [excPointer], an *owned* (new or
+         * already-incref'd) reference to a live `BaseException` instance --
+         * either the exception just pulled off the error indicator, or one
+         * reached transitively via `__context__`/`__cause__`.
+         *
+         * Ownership of [excPointer] is transferred to the returned
+         * [PyException.value] (a plain [PyObject] wrapping it with
+         * `borrowed = false`, i.e. no extra incRef); the caller must not
+         * touch [excPointer] again after calling this.
+         */
+        private fun fromExceptionInstance(excPointer: NativePointer): PyException {
+            // New reference; PyType.getInstance() takes ownership of it (or,
+            // if this type is already cached, simply leaks this one extra
+            // incRef -- harmless, since exception types are immortal builtins
+            // or long-lived user classes).
+            val typePointer = PyObject_Type(excPointer)
+            if (typePointer == null) PyErr_Clear()
+            val type = typePointer?.let { PyType.getInstance(it) }
+
+            val message = messageOf(excPointer)
+
+            // PyObject(_, borrowed = false) takes ownership of excPointer
+            // itself -- no extra incRef, matching the "new reference" we were
+            // handed.
+            val value = PyObject(excPointer, false)
+
+            // New reference, or null if this exception was never associated
+            // with a traceback (e.g. constructed but never raised/propagated).
+            val tracebackPointer = PyException_GetTraceback(excPointer)
+            val traceback = tracebackPointer?.let { PyTraceback(it, false) }
+
+            // New reference; PyException_GetContext() itself returns null
+            // when there genuinely is no context (unlike GetCause, see below).
+            val contextPointer = PyException_GetContext(excPointer)
+            val context = contextPointer?.let { fromExceptionInstance(it) }
+
+            // New reference; unlike GetContext, PyException_GetCause() always
+            // returns *something* -- either a real exception instance, or the
+            // `None` singleton when `raise ... from ...` was never used. Only
+            // recurse for the former; release (and drop) the latter.
+            val causePointer = PyException_GetCause(excPointer)
+            val cause = when {
+                causePointer == null -> null
+                causePointer.isNoneObject() -> {
+                    Py_DecRef(causePointer)
+                    null
+                }
+                else -> fromExceptionInstance(causePointer)
+            }
+
+            return PyException(message, type, value, traceback, context, cause)
+        }
+
+        /** `str(excPointer)`, used as this [PyException]'s [errMsg]. */
+        private fun messageOf(excPointer: NativePointer): String {
+            // PyObject_Str: new reference on success. This is already deep
+            // inside error-reporting machinery, so on failure (e.g. a buggy
+            // `__str__` on a custom exception) fall back to a placeholder
+            // rather than letting a second exception escape from here --
+            // but still clear the indicator it would otherwise leave set,
+            // per the "never call back into the C API with a pending
+            // exception" contract (see the *OrNull helpers on PyObject).
+            val strPointer = PyObject_Str(excPointer) ?: run {
+                PyErr_Clear()
+                return "<unprintable exception>"
+            }
+            val message = PyUnicode_AsUTF8(strPointer)
+            Py_DecRef(strPointer)
+            return message ?: "<unprintable exception>"
         }
     }
 
     /** Re-raises this exception into the current Python error indicator (`PyErr_Restore`/`PyErr_SetObject`). */
     fun restore() {
-        TODO("Not yet implemented")
+        val liveValue = value
+        val liveType = type
+        when {
+            liveValue != null -> {
+                // PyErr_SetRaisedException() *steals* a reference to its
+                // argument. `value` still owns its own reference for the rest
+                // of its lifetime (released by PyObject.clean()/decRef on
+                // close), so the interpreter needs a fresh one, not that one.
+                Py_IncRef(liveValue.pointer)
+                PyErr_SetRaisedException(liveValue.pointer)
+            }
+            liveType != null -> {
+                // No live exception instance to hand back (e.g. this
+                // PyException was constructed by hand as
+                // `PyException(message, type = someType)`); synthesize one
+                // from the message instead. PyErr_SetString does not steal
+                // `liveType.pointer` -- CPython increfs the type internally.
+                PyErr_SetString(liveType.pointer, errMsg)
+            }
+            // else: nothing Python-level to restore (a purely Kotlin-side
+            // PyException with no captured type/value) -- there is no
+            // meaningful error indicator to set.
+        }
     }
 }

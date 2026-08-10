@@ -3,34 +3,60 @@ package python.multiplatform.ffi.types.basic
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyType
 import python.multiplatform.ffi.conversion.PyProxy
+import python.multiplatform.ffi.exceptions.PyException
 import python.native.ffi.NativePointer
+import python.native.ffi.PyErr_Occurred
+import python.native.ffi.PyUnicode_AsUTF8
+import python.native.ffi.PyUnicode_Concat
+import python.native.ffi.PyUnicode_Contains
+import python.native.ffi.PyUnicode_FromString
 
 /** Wrapper around a Python `str` object (`PyUnicode_*` family). */
 open class PyString(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, borrowed), PyProxy<String> {
     companion object {
         /** The `PyType` for `str` (`builtins.str`). */
-        val TYPE: PyType by lazy { TODO("Not yet implemented") }
+        val TYPE: PyType by lazy { val obj = from(""); val t = obj.getType(); obj.clean(); t }
 
         /** Wraps [value] as a new Python `str` object (`PyUnicode_FromString`). */
         fun from(value: String): PyString {
-            TODO("Not yet implemented")
+            val ptr = PyUnicode_FromString(value) ?: throw PyException.fromCurrentError()!!
+            return PyString(ptr, false)
         }
     }
 
     override var cachedNativeValue: String?
-        get() = TODO("Not yet implemented")
+        get() {
+            val res = PyUnicode_AsUTF8(pointer)
+            if (res == null && PyErr_Occurred() != null) {
+                throw PyException.fromCurrentError()!!
+            }
+            return res
+        }
         set(value) {}
     override var cachedPyObjectValue: PyObject?
-        get() = TODO("Not yet implemented")
+        get() = this
         set(value) {}
 
     /** `len(self)`. */
     val length: Int
-        get() = TODO("Not yet implemented")
+        get() = toKotlin().length
 
-    operator fun plus(other: PyString): PyString = TODO("Not yet implemented")
-    operator fun get(index: Int): PyString = TODO("Not yet implemented")
-    operator fun contains(substring: String): Boolean = TODO("Not yet implemented")
+    operator fun plus(other: PyString): PyString {
+        val res = PyUnicode_Concat(pointer, other.pointer) ?: throw PyException.fromCurrentError()!!
+        return PyString(res, false)
+    }
+    
+    operator fun get(index: Int): PyString {
+        return PyString.from(toKotlin()[index].toString())
+    }
+    
+    operator fun contains(substring: String): Boolean {
+        val subObj = PyString.from(substring)
+        val res = PyUnicode_Contains(pointer, subObj.pointer)
+        subObj.clean()
+        if (res == -1 && PyErr_Occurred() != null) throw PyException.fromCurrentError()!!
+        return res == 1
+    }
 }
 
 fun String.asPyObject(): PyString = PyString.from(this)

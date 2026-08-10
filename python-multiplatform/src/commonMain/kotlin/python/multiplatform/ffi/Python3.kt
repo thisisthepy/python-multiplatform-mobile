@@ -73,14 +73,39 @@ object Python3 {
         // TODO: Add error handling
     }
 
+    /** `Py_file_input`, the compiler-mode token for a sequence of statements (as opposed to a single expression). */
+    private const val PY_FILE_INPUT: Int = 257
+
     /**
      * Run Simple String
+     *
+     * Deliberately implemented on top of [PyRun_String] rather than
+     * `PyRun_SimpleString`: the latter internally calls `PyErr_Print()` on
+     * failure, which *prints and clears* the error indicator before we ever
+     * get a chance to inspect it, so [PyException.fromCurrentError] would
+     * always see nothing pending and every failure would be reported with a
+     * generic message instead of the real Python exception (type included).
      */
     fun exec(command: String) {
-        return withPython {
-            if (PyRun_SimpleString(command) != 0) {
-                // TODO: Attach the actual Python exception (PyErr_Fetch/PyErr_GetRaisedException) via PyException.fromCurrentError()
-                throw PyException("Python exec failed")
+        withPython {
+            // PyImport_AddModuleRef: new/strong reference to the __main__ module.
+            val modulePointer = PyImport_AddModuleRef("__main__")
+                ?: throw pyErrorOrGeneric("Failed to access the __main__ module")
+            try {
+                // PyObject_GetAttrString: new reference to __main__'s globals dict.
+                val globalsPointer = PyObject_GetAttrString(modulePointer, "__dict__")
+                    ?: throw pyErrorOrGeneric("Failed to access __main__.__dict__")
+                try {
+                    val result = PyRun_String(command, PY_FILE_INPUT, globalsPointer, globalsPointer)
+                        ?: throw pyErrorOrGeneric("Python exec failed")
+                    // PyRun_String returns a new reference (usually None for
+                    // statement-mode execution); we have no use for it here.
+                    Py_DecRef(result)
+                } finally {
+                    Py_DecRef(globalsPointer)
+                }
+            } finally {
+                Py_DecRef(modulePointer)
             }
         }
     }
@@ -89,34 +114,29 @@ object Python3 {
      * Evaluate Python script
      */
     fun eval(str: String, start: Int, globals: PyObject, locals: PyObject): PyObject {
-        withPython {
+        return withPython {
+            // PyRun_String: new reference on success, null + exception set on failure.
             val result = PyRun_String(str, start, globals.pointer, locals.pointer)
-            if (result == null) {
-                // TODO: Attach the actual Python exception (PyErr_Fetch/PyErr_GetRaisedException) via PyException.fromCurrentError()
-                throw PyException("Python eval failed (result is null)")
-            } else {
-                // TODO: 레퍼런스 카운팅
-                return PyObject(result, false)
-            }
+                ?: throw pyErrorOrGeneric("Python eval failed")
+            PyObject(result, false)
         }
     }
 
     /**
      * Import Python module
+     *
+     * Previously this pre-checked `name in sys.modules` and failed fast if it
+     * wasn't already present -- but `sys.modules` only holds modules that
+     * have *already* been imported, so any first-time import was rejected
+     * before [PyImport_ImportModule] (which does the actual importing) ever
+     * ran. Let CPython's own import machinery attempt the import and report
+     * failure through the error indicator instead.
      */
     fun import(name: String): PyModule {
-        // TODO: 실제 모듈이 있는지 검사하는 코드 추가
-        val pyModuleDict: NativePointer? = PyImport_GetModuleDict() // 변수 이름 적절?
-        if (pyModuleDict == null) throw PyException("Failed to import module (Failed to get module dictionary)")
-
-        val pyStringFromName: NativePointer? = PyUnicode_FromString(name) // 변수 이름 적절?
-        if (pyStringFromName == null) throw PyException("Failed to import module (Failed to get module name)")
-
-        if (PyDict_Contains(pyModuleDict, pyStringFromName) == 0) throw PyException("Failed to import module (Module not found)")
-
-        val module: NativePointer? = PyImport_ImportModule(name)
-        if (module == null) throw PyException("Failed to import module")
-
+        // PyImport_ImportModule: new reference on success, null + exception
+        // (typically ModuleNotFoundError) set on failure.
+        val module: NativePointer = PyImport_ImportModule(name)
+            ?: throw pyErrorOrGeneric("Failed to import module '$name'")
         return PyModule(module, false)
     }
 
