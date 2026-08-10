@@ -43,20 +43,14 @@ buildkonfig {
 }
 
 val libVersion = pythonVersion.split('.').subList(0, 2).joinToString(".")
-// Mobile fallback: since python-build-standalone lacks iOS/Android, we use 3.13 for mobile
-val mobileLibVersion = "3.13"
-
 println("----------------------------------------------------------------------------------------")
 println("                   Build Configuration for Python version $libVersion                   ")
 println("----------------------------------------------------------------------------------------")
 println()
 
-val includePath = "src/nativeInterop/cinterop/include"
 val licensePath = "src/nativeInterop/cinterop/license"
 val libPath = "src/nativeInterop/cinterop/lib"
 val libPathForDesktop = "$libPath/desktop"
-val libPathForAndroid = "$libPath/android"
-val libPathForIOS = "$libPath/ios/Python.xcframework"
 
 val downloadDir = layout.buildDirectory.dir("python-standalone").get().asFile
 
@@ -333,34 +327,35 @@ kotlin {
             val copyAndroidPythonBinaries by tasks.creating(Copy::class) {
                 dependsOn(
                     tasks.named("linkAndroidNativeArm64"),
-                    tasks.named("linkAndroidNativeX64")
+                    tasks.named("linkAndroidNativeX64"),
+                    downloadAllPythonBuilds
                 )
                 into("$androidBuildDir/jniLibs/")
-                abiList.forEach {
-                    from("$libPathForAndroid/$it") {
-                        include("libpython*.*.so")
+                abiList.forEach { abi ->
+                    val arch = if (abi == "arm64-v8a") "aarch64" else "x86_64"
+                    from("$downloadDir/extracted/android-$arch/prefix/lib") {
+                        include("libpython*.so")
                         include("lib*_python.so")
-                        into(it)
+                        into(abi)
                     }
                 }
             }
             val copyAndroidPythonAssets by tasks.creating(Copy::class) {
+                dependsOn(downloadAllPythonBuilds)
                 into("$androidBuildDir/assets/")
-                abiList.forEach {
-                    from(includePath) {
-                        into("$it/include/python$mobileLibVersion")  // include
+                abiList.forEach { abi ->
+                    val arch = if (abi == "arm64-v8a") "aarch64" else "x86_64"
+                    from("$downloadDir/extracted/android-$arch/prefix/include/python$libVersion") {
+                        into("$abi/include/python$libVersion")
                     }
-                }
-                abiList.forEach {
-                    from("$libPathForAndroid/$it/python$mobileLibVersion") {
-                        exclude("config-$mobileLibVersion-aarch64-linux-android/")
-                        exclude("config-$mobileLibVersion-x86_64-linux-android/")
-                        into("$it/lib/python$mobileLibVersion")  // python stdlib
+                    from("$downloadDir/extracted/android-$arch/prefix/lib/python$libVersion") {
+                        exclude("config-$libVersion-$arch-linux-android/")
+                        into("$abi/lib/python$libVersion")
                     }
                 }
             }
             tasks.whenTaskAdded {
-                if (name.startsWith("merge") && name.endsWith("JniLibFolders")) {
+                if (name.startsWith("merge") && (name.endsWith("JniLibFolders") || name.endsWith("NativeLibs"))) {
                     dependsOn(copyAndroidPythonBinaries)
                 }
                 if (name.startsWith("package") && name.endsWith("Assets")) {
@@ -431,25 +426,30 @@ kotlin {
                 IOS_SIMULATOR_ARM64 -> "ios-arm64_x86_64-simulator"
                 else -> throw RuntimeException("Unsupported ABI: $konanTarget")
             }
-            val targetLibPath = when(konanTarget.family) {
-                Family.ANDROID -> libPathForAndroid
-                Family.IOS -> libPathForIOS
+            val targetExtractDir = when(konanTarget.family) {
+                Family.ANDROID -> "$downloadDir/extracted/android-${if (targetABI == "arm64-v8a") "aarch64" else "x86_64"}/prefix"
+                Family.IOS -> "$downloadDir/extracted/ios/Python.xcframework"
+                else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
+            }
+            val targetIncludePath = when(konanTarget.family) {
+                Family.ANDROID -> "$targetExtractDir/include/python$libVersion"
+                Family.IOS -> "$targetExtractDir/$targetABI/Python.framework/Headers"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
             }
 
             compilations.getByName("main").cinterops.create("python") {
-                headers("$includePath/Python.h")
+                headers("$targetIncludePath/Python.h")
                 packageName("python.native.ffi.bindings")
-                includeDirs(includePath)
+                includeDirs(targetIncludePath)
                 if (konanTarget.family == Family.IOS) {
-                    compilerOpts("-framework", "Python", "-F$projectDir/$targetLibPath/$targetABI", "-fno-common", "-fvisibility=hidden")
+                    compilerOpts("-framework", "Python", "-F$targetExtractDir/$targetABI", "-fno-common", "-fvisibility=hidden")
                 }
             }
 
             binaries {
                 if (konanTarget.family == Family.ANDROID) {
-                    sharedLib("multiplatform_python$mobileLibVersion") {
-                        linkerOpts.addAll(listOf("-L$projectDir/$targetLibPath/$targetABI/", "-lpython$mobileLibVersion"))
+                    sharedLib("multiplatform_python$libVersion") {
+                        linkerOpts.addAll(listOf("-L$targetExtractDir/lib/", "-lpython$libVersion"))
 
                         linkTaskProvider.configure {
                             val type = if (buildType == NativeBuildType.DEBUG) "debug" else "release"
@@ -463,12 +463,17 @@ kotlin {
                             preBuild.dependsOn(linkTaskProvider)
                         }
                     }
+                    getTest(NativeBuildType.DEBUG).linkerOpts.addAll(listOf(
+                        "-L$targetExtractDir/lib/", 
+                        "-lpython$libVersion",
+                        "-Wl,--allow-shlib-undefined"
+                    ))
                 } else if (konanTarget.family == Family.IOS) {
                     framework {
                         baseName = "PythonMultiplatform"
 
                         linkerOpts.addAll(listOf(
-                            "-framework", "Python", "-F$projectDir/$targetLibPath/$targetABI", "-Objc"
+                            "-framework", "Python", "-F$targetExtractDir/$targetABI", "-Objc"
                         ))
                     }
 
@@ -478,8 +483,8 @@ kotlin {
                     // next to the test binary, so an explicit -rpath is required for dyld to
                     // find it when the test runs on the simulator.
                     getTest(NativeBuildType.DEBUG).linkerOpts.addAll(listOf(
-                        "-framework", "Python", "-F$projectDir/$targetLibPath/$targetABI",
-                        "-rpath", "$projectDir/$targetLibPath/$targetABI"
+                        "-framework", "Python", "-F$targetExtractDir/$targetABI",
+                        "-rpath", "$targetExtractDir/$targetABI"
                     ))
                 }
             }
@@ -501,6 +506,13 @@ kotlin {
         jvmMain.dependsOn(commonMain)
         desktopMain.dependsOn(jvmMain)
         androidMain.dependsOn(jvmMain)
+
+        val androidInstrumentedTest by getting {
+            dependencies {
+                implementation(libs.androidx.test.junit)
+                implementation("androidx.test:runner:1.6.2")
+            }
+        }
 
         val nativeMain by creating
         nativeMain.dependsOn(commonMain)
@@ -538,11 +550,12 @@ kotlin {
  * directory and hand its location to the test binary.
  */
 val extractIosSimulatorStdlib by tasks.registering(Copy::class) {
-    val archive = rootProject.file("binary/arm64-iphonesimulator.zip")
-    onlyIf { archive.exists() }
-    from(zipTree(archive)) {
-        include("arm64-iphonesimulator/lib/python3.13/**")
-        eachFile { path = path.removePrefix("arm64-iphonesimulator/") }
+    dependsOn(downloadAllPythonBuilds)
+    from("$downloadDir/extracted/ios/Python.xcframework/lib/python$libVersion") {
+        into("lib/python$libVersion")
+    }
+    from("$downloadDir/extracted/ios/Python.xcframework/ios-arm64_x86_64-simulator/lib-arm64/python$libVersion") {
+        into("lib/python$libVersion")
     }
     into(layout.buildDirectory.dir("python-stdlib/ios-simulator"))
     includeEmptyDirs = false
@@ -571,6 +584,10 @@ android {
         ndk {
             abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
         }
+        // Instrumented tests are the only way to exercise the Android JNI path at all: the JVM
+        // unit-test JVM cannot load the arm64 .so, and every other verification target only
+        // compiles rather than runs.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     packaging {
         resources {
@@ -633,4 +650,8 @@ publishing {
 
 fun downloadPythonBuilds() {
     // Moved to task `downloadAllPythonBuilds`
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.CInteropProcess>().configureEach {
+    dependsOn(downloadAllPythonBuilds)
 }

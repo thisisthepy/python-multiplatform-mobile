@@ -46,6 +46,7 @@ object bindings {
     // Section 1
     external fun Py_Initialize()
     external fun Py_InitializeEx(initsigs: Int)
+    external fun diagEcho(x: Long): Long
     external fun Py_IsInitialized(): Int
     external fun Py_IsFinalizing(): Int
     external fun Py_FinalizeEx(): Int

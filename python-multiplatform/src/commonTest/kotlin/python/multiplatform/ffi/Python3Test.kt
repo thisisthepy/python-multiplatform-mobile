@@ -72,8 +72,8 @@ class Python3Test {
     }
 
     @Test
-    fun versionReportsPython313() = PythonTestFixture.withInterpreter {
-        assertTrue(Python3.version.startsWith("3.13"), "expected embedded interpreter to be 3.13.x, got '${Python3.version}'")
+    fun versionReportsPython314() = PythonTestFixture.withInterpreter {
+        assertTrue(Python3.version.startsWith("3.14"), "expected embedded interpreter to be 3.14.x, got '${Python3.version}'")
     }
 
     @Test

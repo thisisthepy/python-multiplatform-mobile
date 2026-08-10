@@ -15,7 +15,7 @@ import kotlin.test.assertTrue
  * pointer-level measurements can run, and every functional test has to be skipped.
  *
  * The embedded `Python.framework` contains no standard library, so `PYTHONHOME` must point at
- * a prefix holding `lib/python3.13`. The build wires that up for simulator test runs — see
+ * a prefix holding `lib/python3.14`. The build wires that up for simulator test runs — see
  * `extractIosSimulatorStdlib` in `build.gradle.kts`.
  */
 class InterpreterAvailabilityTest {
@@ -35,8 +35,8 @@ class InterpreterAvailabilityTest {
         val version = Py_GetVersion()
         println("Embedded CPython version: $version")
         assertTrue(
-            version != null && version.startsWith("3.13"),
-            "expected a 3.13.x version string, got: $version"
+            version != null && version.startsWith("3.14"),
+            "expected a 3.14.x version string, got: $version"
         )
     }
 }
