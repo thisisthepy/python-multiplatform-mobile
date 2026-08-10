@@ -131,3 +131,53 @@ Because this project has its own `NativePointer` abstraction and does not need t
 ## 9. Current State
 
 Desktop's reflective Panama backend is fully implemented and `compileKotlinDesktop` now succeeds. The next step is promoting an `FfiBackend` interface into `jvmMain` so that Android can implement it using the shape-trampoline architecture designed above, unifying the JVM-side FFI.
+
+---
+
+## Open constraint: GraalVM Native Image
+
+A design discussion recorded in an earlier session (`JNI Free 구현`, now installed under this
+project's Claude Code sessions) establishes a target this document had not accounted for:
+**GraalVM Native Image support is a goal for the desktop side.**
+
+That has two consequences, both of which cut against work already committed here.
+
+### Runtime reflection is unavailable
+
+Native Image works under a closed-world assumption, so runtime reflection does not work unless every
+reflective access is registered at build time. This rules out the obvious way of exposing Kotlin to
+Python — walking classes reflectively at run time — and is why that discussion landed on a
+**build-time generated class/function table**, reached through a single upcall entry point.
+
+The registration policy decided there is worth carrying forward: every `public` declaration is
+exported automatically, with an explicit `@PythonInternal`-style annotation to opt *out*. Opt-in
+annotation on every exported member was considered and rejected as too noisy.
+
+Two problems from that discussion remain unresolved:
+
+- **Tree shaking.** A table that references every public function keeps all of them reachable, which
+  defeats Native Image's dead-code elimination and inflates the binary. No answer was reached.
+- **Dispatch cost.** `KFunction.call` runs about 50–100 ns because it re-checks arity and types and
+  boxes arguments on every call; `MethodHandle` is roughly 10–20 ns once the JIT has optimised it.
+  The stated target is Objective-C message dispatch, about 5–10 ns on a cache hit.
+
+### The reflective Panama backend conflicts with it
+
+`desktopMain/.../PanamaBackend.kt` reaches `java.lang.foreign` and `jdk.incubator.foreign` entirely
+through `Class.forName` plus `MethodHandles`, precisely so it compiles on any JDK. Under Native
+Image that is a problem twice over: the reflective lookups need build-time registration, and more
+fundamentally **GraalVM requires FFM downcalls themselves to be registered at compile time** —
+an unregistered one fails at run time with
+`ForeignFunctionsRuntime$UnregisteredForeignStubException: Cannot perform downcall ... as it was not
+registered at compilation time`.
+
+So "works on every JDK via reflection" and "works under Native Image" pull in opposite directions,
+and the current backend satisfies only the first.
+
+The shape-trampoline design helps here rather than hurting: the signature census found the whole
+CPython Stable ABI collapses into **14 shapes**, and registering fourteen downcalls at build time is
+entirely practical, whereas registering arbitrary runtime-constructed signatures is not.
+
+**This needs a decision before the desktop backend is built on further**: is Native Image support
+confirmed? If so, the backend has to move from runtime reflective selection to build-time
+registration of the fourteen shapes.
