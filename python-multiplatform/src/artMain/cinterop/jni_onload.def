@@ -1,0 +1,47 @@
+package = python.native.ffi.jni
+---
+#include <jni.h>
+
+extern void Py_Initialize(void);
+extern jint Py_IsInitialized(void);
+extern void Py_Finalize(void);
+extern void PyErr_Clear(void);
+extern jlong PyLong_FromLongLong(jlong);
+extern jlong PyList_Size(jlong);
+extern jint PyRun_SimpleString(const char*);
+extern const char* Py_GetVersion(void);
+extern jlong PyImport_ImportModule(const char*);
+extern jlong PyObject_GetAttrString(jlong, const char*);
+extern jlong PyErr_Occurred(void);
+
+jlong critical_echo0(jlong x) { return x; }
+jlong critical_echo1(jlong x) { return x; }
+jlong critical_echo2(jlong x) { return x; }
+
+int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
+    JNIEnv *env;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        return JNI_ERR;
+    }
+    jclass clazz = (*env)->FindClass(env, "python/native/ffi/bindings");
+    if (clazz == NULL) return JNI_ERR;
+
+    JNINativeMethod methods[] = {
+        {"Py_Initialize", "()V", (void *)&Py_Initialize},
+        {"Py_IsInitialized", "()I", (void *)&Py_IsInitialized},
+        {"Py_Finalize", "()V", (void *)&Py_Finalize},
+        {"PyErr_Clear", "()V", (void *)&PyErr_Clear},
+        {"PyLong_FromLongLong", "(J)J", (void *)&PyLong_FromLongLong},
+        {"PyList_Size", "(J)J", (void *)&PyList_Size},
+        {"PyRun_SimpleString", "(J)I", (void *)&PyRun_SimpleString},
+        {"Py_GetVersion", "()J", (void *)&Py_GetVersion},
+        {"PyImport_ImportModule", "(J)J", (void *)&PyImport_ImportModule},
+        {"PyObject_GetAttrString", "(JJ)J", (void *)&PyObject_GetAttrString},
+        {"PyErr_Occurred", "()J", (void *)&PyErr_Occurred},
+        {"echo0", "(J)J", (void *)&critical_echo0},
+        {"echo1", "(J)J", (void *)&critical_echo1},
+        {"echo2", "(J)J", (void *)&critical_echo2}
+    };
+    (*env)->RegisterNatives(env, clazz, methods, 14);
+    return JNI_VERSION_1_6;
+}

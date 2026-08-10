@@ -131,5 +131,5 @@ fun sayHello() {
  * not be the value passed in.
  */
 @CName("Java_python_native_ffi_bindings_diagEcho")
-@OptIn(ExperimentalNativeApi::class)
-fun diagEcho(x: Long): Long = x
+@kotlin.OptIn(kotlin.experimental.ExperimentalNativeApi::class, kotlinx.cinterop.ExperimentalForeignApi::class)
+fun diagEcho(env: Long, clazz: Long, x: Long): Long = x

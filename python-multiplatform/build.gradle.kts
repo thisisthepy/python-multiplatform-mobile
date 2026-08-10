@@ -358,7 +358,7 @@ kotlin {
                 if (name.startsWith("merge") && (name.endsWith("JniLibFolders") || name.endsWith("NativeLibs"))) {
                     dependsOn(copyAndroidPythonBinaries)
                 }
-                if (name.startsWith("package") && name.endsWith("Assets")) {
+                if (name.endsWith("Assets")) {
                     dependsOn(copyAndroidPythonAssets)
                 }
             }
@@ -446,10 +446,16 @@ kotlin {
                 }
             }
 
+            if (konanTarget.family == Family.ANDROID) {
+                compilations.getByName("main").cinterops.create("jni_onload") {
+                    defFile("src/artMain/cinterop/jni_onload.def")
+                }
+            }
+
             binaries {
                 if (konanTarget.family == Family.ANDROID) {
                     sharedLib("multiplatform_python$libVersion") {
-                        linkerOpts.addAll(listOf("-L$targetExtractDir/lib/", "-lpython$libVersion"))
+                        linkerOpts.addAll(listOf("-L$targetExtractDir/lib/", "-lpython$libVersion", "-u", "JNI_OnLoad"))
 
                         linkTaskProvider.configure {
                             val type = if (buildType == NativeBuildType.DEBUG) "debug" else "release"
@@ -466,7 +472,8 @@ kotlin {
                     getTest(NativeBuildType.DEBUG).linkerOpts.addAll(listOf(
                         "-L$targetExtractDir/lib/", 
                         "-lpython$libVersion",
-                        "-Wl,--allow-shlib-undefined"
+                        "-Wl,--allow-shlib-undefined",
+                        "-u", "JNI_OnLoad"
                     ))
                 } else if (konanTarget.family == Family.IOS) {
                     framework {
@@ -578,6 +585,7 @@ android {
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     sourceSets["main"].assets.srcDirs("src/androidMain/assets", "$androidBuildDir/assets")
+    sourceSets["androidTest"].assets.srcDirs("$androidBuildDir/assets")
     sourceSets["debug"].jniLibs.srcDirs("src/androidMain/jniLibs",
         "$androidBuildDir/jniLibs", "$androidBuildDir/debug/jniLibs")
     sourceSets["release"].jniLibs.srcDirs("src/androidMain/jniLibs",

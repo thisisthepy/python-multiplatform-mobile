@@ -45,7 +45,6 @@ private const val namePrefix = "Java_${packageName}_${exportClassName}_"
 
 /**
 // Section 1
-@CName("${namePrefix}Py_1Initialize")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_Initialize() {
     println("Native Python Home: ${getenv("PYTHONHOME")?.toKString()}")  // TODO: Remove Debugging line
@@ -55,10 +54,8 @@ actual inline fun Py_Initialize() {
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_InitializeEx(initsigs: Int) = python.native.ffi.bindings.Py_InitializeEx(initsigs)
 //actual fun Py_InitializeFromConfig(config) = python.native.ffi.bindings.Py_InitializeFromConfig()
-@CName("${namePrefix}Py_1IsInitialized")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_IsInitialized() = python.native.ffi.bindings.Py_IsInitialized()
-@CName("${namePrefix}Py_1Finalize")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_Finalize() = python.native.ffi.bindings.Py_Finalize()
 @CName("${namePrefix}Py_1FinalizeEx")
@@ -78,7 +75,6 @@ actual inline fun Py_BytesMain(args: Array<String>) = memScoped {
 @CName("${namePrefix}Py_1RunMain")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_RunMain() = python.native.ffi.bindings.Py_RunMain()
-@CName("${namePrefix}PyRun_1SimpleString")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PyRun_SimpleString(command: String): Int = python.native.ffi.bindings.PyRun_SimpleString(command)
 @CName("${namePrefix}PyRun_1String")
@@ -88,7 +84,6 @@ actual fun PyRun_String(
 ): NativePointer? = python.native.ffi.bindings.PyRun_String(
     str, start, globals.toPlatformPointer(), locals.toPlatformPointer()
 ).toNativePointer()
-@CName("${namePrefix}Py_1GetVersion")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_GetVersion(): String? = python.native.ffi.bindings.Py_GetVersion()?.toKString()
 @CName("${namePrefix}Py_1GetPlatform")
@@ -106,7 +101,6 @@ actual inline fun Py_GetBuildInfo(): String? = python.native.ffi.bindings.Py_Get
 
 
 // Section 2
-@CName("${namePrefix}PyErr_1Occurred")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyErr_Occurred(): NativePointer? = python.native.ffi.bindings.PyErr_Occurred().toNativePointer()
 
@@ -136,13 +130,11 @@ actual inline fun PyUnicode_AsUTF8(unicode: NativePointer): String? =
 
 //**************************************************
 // Section 1
-@CName("${namePrefix}Py_1Initialize")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_Initialize() = python.native.ffi.bindings.Py_Initialize()
 @CName("${namePrefix}Py_1InitializeEx")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_InitializeEx(initsigs: Int) = python.native.ffi.bindings.Py_InitializeEx(initsigs)
-@CName("${namePrefix}Py_1IsInitialized")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_IsInitialized(): Int = python.native.ffi.bindings.Py_IsInitialized()
 @CName("${namePrefix}Py_1IsFinalizing")
@@ -151,7 +143,6 @@ actual inline fun Py_IsFinalizing(): Int = python.native.ffi.bindings.Py_IsFinal
 @CName("${namePrefix}Py_1FinalizeEx")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_FinalizeEx(): Int = python.native.ffi.bindings.Py_FinalizeEx()
-@CName("${namePrefix}Py_1Finalize")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_Finalize() = python.native.ffi.bindings.Py_Finalize()
 //@CName("${namePrefix}Py_1BytesMain")
@@ -165,7 +156,6 @@ actual inline fun Py_Finalize() = python.native.ffi.bindings.Py_Finalize()
 @CName("${namePrefix}Py_1RunMain")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_RunMain() = python.native.ffi.bindings.Py_RunMain() // 수동 추가
-@CName("${namePrefix}Py_1GetVersion")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_GetVersion(): String? = python.native.ffi.bindings.Py_GetVersion()?.toKString()
 @CName("${namePrefix}Py_1GetPlatform")
@@ -189,7 +179,6 @@ actual fun PyThreadState_GetDict(): NativePointer? = python.native.ffi.bindings.
 
 
 // Section 2
-@CName("${namePrefix}PyRun_1SimpleString")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PyRun_SimpleString(command: String): Int = python.native.ffi.bindings.PyRun_SimpleString(command) // 수동 추가
 @CName("${namePrefix}PyRun_1String")
@@ -208,7 +197,6 @@ actual fun PyEval_EvalCode(co: NativePointer, globals: NativePointer, locals: Na
 
 
 // Section 3
-@CName("${namePrefix}PyErr_1Clear")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PyErr_Clear() = python.native.ffi.bindings.PyErr_Clear()
 @CName("${namePrefix}PyErr_1PrintEx")
@@ -268,7 +256,6 @@ actual inline fun PyErr_BadInternalCall() = python.native.ffi.bindings.PyErr_Bad
 @CName("${namePrefix}PyErr_1WarnExplicit")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PyErr_WarnExplicit(category: NativePointer, message: String, filename: String, lineno: Int, module: String, registry: NativePointer): Int = python.native.ffi.bindings.PyErr_WarnExplicit(category.toPlatformPointer(), message, filename, lineno, module, registry.toPlatformPointer())
-@CName("${namePrefix}PyErr_1Occurred")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyErr_Occurred(): NativePointer? = python.native.ffi.bindings.PyErr_Occurred().toNativePointer()
 @CName("${namePrefix}PyErr_1ExceptionMatches")
@@ -409,7 +396,6 @@ actual inline fun Py_Exit(status: Int) = python.native.ffi.bindings.Py_Exit(stat
 
 
 // Section 8
-@CName("${namePrefix}PyImport_1ImportModule")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyImport_ImportModule(name: String): NativePointer? = python.native.ffi.bindings.PyImport_ImportModule(name).toNativePointer()
 @CName("${namePrefix}PyImport_1ImportModuleNoBlock")
@@ -511,7 +497,6 @@ actual inline fun PyObject_HasAttrString(o: NativePointer, attr_name: String): I
 @CName("${namePrefix}PyObject_1GetAttr")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyObject_GetAttr(o: NativePointer, attr_name: NativePointer): NativePointer? = python.native.ffi.bindings.PyObject_GetAttr(o.toPlatformPointer(), attr_name.toPlatformPointer()).toNativePointer()
-@CName("${namePrefix}PyObject_1GetAttrString")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyObject_GetAttrString(o: NativePointer, attr_name: String): NativePointer? = python.native.ffi.bindings.PyObject_GetAttrString(o.toPlatformPointer(), attr_name).toNativePointer()
 @CName("${namePrefix}PyObject_1GenericGetAttr")
@@ -796,7 +781,6 @@ actual fun PyIter_Next(o: NativePointer): NativePointer? = python.native.ffi.bin
 
 
 // Section 16
-@CName("${namePrefix}PyLong_1FromLongLong")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyLong_FromLongLong(v: Long): NativePointer? = python.native.ffi.bindings.PyLong_FromLongLong(v).toNativePointer()
 @CName("${namePrefix}PyLong_1FromDouble")
@@ -805,7 +789,6 @@ actual fun PyLong_FromDouble(v: Double): NativePointer? = python.native.ffi.bind
 @CName("${namePrefix}PyLong_1AsInt")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PyLong_AsInt(obj: NativePointer): Int = python.native.ffi.bindings.PyLong_AsInt(obj.toPlatformPointer())
-@CName("${namePrefix}PyLong_1AsLongLong")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PyLong_AsLongLong(obj: NativePointer): Long = python.native.ffi.bindings.PyLong_AsLongLong(obj.toPlatformPointer())
 @CName("${namePrefix}PyLong_1AsDouble")
@@ -829,7 +812,6 @@ actual fun PyFloat_FromString(str: NativePointer): NativePointer? = python.nativ
 @CName("${namePrefix}PyFloat_1FromDouble")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyFloat_FromDouble(v: Double): NativePointer? = python.native.ffi.bindings.PyFloat_FromDouble(v).toNativePointer()
-@CName("${namePrefix}PyFloat_1AsDouble")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PyFloat_AsDouble(pyfloat: NativePointer): Double = python.native.ffi.bindings.PyFloat_AsDouble(pyfloat.toPlatformPointer())
 @CName("${namePrefix}PyFloat_1GetInfo")
@@ -962,7 +944,6 @@ actual fun PyUnicode_InternFromString(str: String): NativePointer? = python.nati
 @CName("${namePrefix}PyList_1New")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyList_New(len: Long): NativePointer? = python.native.ffi.bindings.PyList_New(len).toNativePointer()
-@CName("${namePrefix}PyList_1Size")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PyList_Size(list: NativePointer): Long = python.native.ffi.bindings.PyList_Size(list.toPlatformPointer())
 @CName("${namePrefix}PyList_1GetItem")
@@ -1293,7 +1274,7 @@ fun ffiSymbolRaw(name: String): Long {
 // lifetime discussion in `jvmMain/.../ShapeDowncalls.kt`. [ffiReadUtf8] never frees its input;
 // it only copies bytes out.
 
-@CName("${namePrefix}ffiAllocUtf8")
+
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 fun ffiAllocUtf8(str: String): Long {
     val bytes = str.encodeToByteArray()
@@ -1303,13 +1284,13 @@ fun ffiAllocUtf8(str: String): Long {
     return buffer.rawValue.toLong()
 }
 
-@CName("${namePrefix}ffiFreeUtf8")
+
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 fun ffiFreeUtf8(ptr: Long) {
     val p = ptr.toCPointer<ByteVar>() ?: return
     nativeHeap.free(p)
 }
 
-@CName("${namePrefix}ffiReadUtf8")
+
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 fun ffiReadUtf8(ptr: Long): String? = ptr.toCPointer<ByteVar>()?.toKString()

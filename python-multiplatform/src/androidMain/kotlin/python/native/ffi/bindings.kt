@@ -44,16 +44,32 @@ object bindings {
 
     //**************************************************
     // Section 1
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
     external fun Py_Initialize()
     external fun Py_InitializeEx(initsigs: Int)
-    external fun diagEcho(x: Long): Long
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
+    external fun echo0(x: Long): Long
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
+    external fun echo1(x: Long): Long
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
+    external fun echo2(x: Long): Long
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
     external fun Py_IsInitialized(): Int
     external fun Py_IsFinalizing(): Int
     external fun Py_FinalizeEx(): Int
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
     external fun Py_Finalize()
     // external fun Py_BytesMain(args: Array<String>): Int // 수동 추가
     external fun Py_RunMain(): Int // 수동 추가
-    external fun Py_GetVersion(): String?
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
+    external fun Py_GetVersion(): Long
     external fun Py_GetPlatform(): String?
     external fun Py_GetCopyright(): String?
     external fun Py_GetCompiler(): String?
@@ -69,13 +85,17 @@ object bindings {
 
 
     // Section 2
-    external fun PyRun_SimpleString(command: String): Int // 수동 추가
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
+    external fun PyRun_SimpleString(command: Long): Int // 수동 추가
     external fun PyRun_String(str: String, start: Int, globals: JNIPointer, locals: JNIPointer): JNIPointer? // 수동 추가
     external fun Py_CompileString(str: String, filename: String, start: Int): JNIPointer?
     external fun PyEval_EvalCode(co: JNIPointer, globals: JNIPointer, locals: JNIPointer): JNIPointer?
 
 
     // Section 3
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
     external fun PyErr_Clear()
     external fun PyErr_PrintEx(set_sys_last_vars: Int)
     external fun PyErr_Print()
@@ -96,7 +116,9 @@ object bindings {
     external fun PyErr_SyntaxLocation(filename: String, lineno: Int)
     external fun PyErr_BadInternalCall()
     external fun PyErr_WarnExplicit(category: JNIPointer, message: String, filename: String, lineno: Int, module: String, registry: JNIPointer): Int
-    external fun PyErr_Occurred(): JNIPointer?
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
+    external fun PyErr_Occurred(): Long
     external fun PyErr_ExceptionMatches(exc: JNIPointer): Int
     external fun PyErr_GivenExceptionMatches(given: JNIPointer, exc: JNIPointer): Int
     external fun PyErr_GetRaisedException(): JNIPointer?
@@ -153,7 +175,9 @@ object bindings {
 
 
     // Section 8
-    external fun PyImport_ImportModule(name: String): JNIPointer?
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
+    external fun PyImport_ImportModule(name: Long): Long
     external fun PyImport_ImportModuleNoBlock(name: String): JNIPointer?
     external fun PyImport_ImportModuleLevelObject(name: JNIPointer, globals: JNIPointer, locals: JNIPointer, fromlist: JNIPointer, level: Int): JNIPointer?
     external fun PyImport_ImportModuleLevel(name: String, globals: JNIPointer, locals: JNIPointer, fromlist: JNIPointer, level: Int): JNIPointer?
@@ -191,7 +215,9 @@ object bindings {
     external fun PyObject_HasAttr(o: JNIPointer, attr_name: JNIPointer): Int
     external fun PyObject_HasAttrString(o: JNIPointer, attr_name: String): Int
     external fun PyObject_GetAttr(o: JNIPointer, attr_name: JNIPointer): JNIPointer?
-    external fun PyObject_GetAttrString(o: JNIPointer, attr_name: String): JNIPointer?
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
+    external fun PyObject_GetAttrString(o: Long, attr_name: Long): Long
     external fun PyObject_GenericGetAttr(o: JNIPointer, name: JNIPointer): JNIPointer?
     external fun PyObject_SetAttr(o: JNIPointer, attr_name: JNIPointer, v: JNIPointer): Int
     external fun PyObject_SetAttrString(o: JNIPointer, attr_name: String, v: JNIPointer): Int
@@ -298,7 +324,9 @@ object bindings {
 
 
     // Section 16
-    external fun PyLong_FromLongLong(v: Long): JNIPointer?
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
+    external fun PyLong_FromLongLong(v: Long): Long
     external fun PyLong_FromDouble(v: Double): JNIPointer?
     external fun PyLong_AsInt(obj: JNIPointer): Int
     external fun PyLong_AsLongLong(obj: JNIPointer): Long
@@ -365,7 +393,9 @@ object bindings {
 
     // Section 22
     external fun PyList_New(len: Long): JNIPointer?
-    external fun PyList_Size(list: JNIPointer): Long
+    @JvmStatic
+    @dalvik.annotation.optimization.CriticalNative
+    external fun PyList_Size(list: Long): Long
     external fun PyList_GetItem(list: JNIPointer, index: Long): JNIPointer?
     external fun PyList_SetItem(list: JNIPointer, index: Long, item: JNIPointer): Int
     external fun PyList_Insert(list: JNIPointer, index: Long, item: JNIPointer): Int
