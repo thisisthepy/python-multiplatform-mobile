@@ -1,7 +1,7 @@
 package python.native.ffi
 
 
-actual inline fun <R : Any> memScoped(block: () -> R): R {
+actual inline fun <R> memScoped(block: () -> R): R {
     return block()
 }
 
@@ -38,6 +38,12 @@ actual inline fun Py_GetCompiler(): String? = python.native.ffi.bindings.Py_GetC
 actual inline fun Py_GetBuildInfo(): String? = python.native.ffi.bindings.Py_GetBuildInfo()
 actual inline fun PyEval_InitThreads() = python.native.ffi.bindings.PyEval_InitThreads()
 actual fun PyThreadState_GetDict(): NativePointer? = python.native.ffi.bindings.PyThreadState_GetDict().toNativePointerFromRaw()
+
+actual inline fun PyGILState_Ensure(): Int = python.native.ffi.bindings.PyGILState_Ensure()
+actual inline fun PyGILState_Release(state: Int) = python.native.ffi.bindings.PyGILState_Release(state)
+actual fun PyGILState_GetThisThreadState(): NativePointer? = python.native.ffi.bindings.PyGILState_GetThisThreadState().toNativePointerFromRaw()
+actual fun PyEval_SaveThread(): NativePointer? = python.native.ffi.bindings.PyEval_SaveThread().toNativePointerFromRaw()
+actual inline fun PyEval_RestoreThread(tstate: NativePointer) = python.native.ffi.bindings.PyEval_RestoreThread(tstate.toRawValue())
 
 
 // Section 2

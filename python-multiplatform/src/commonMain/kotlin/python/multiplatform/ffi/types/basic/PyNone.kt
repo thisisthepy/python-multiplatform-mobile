@@ -4,6 +4,8 @@ import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyType
 import python.multiplatform.ffi.Python3
 import python.native.ffi.NativePointer
+import python.native.ffi.PyDict_GetItemString
+import python.native.ffi.PyEval_GetBuiltins
 import python.native.ffi.Py_IncRef
 import python.native.ffi.Py_DecRef
 
@@ -27,8 +29,8 @@ class PyNone private constructor(pointer: NativePointer, borrowed: Boolean) : Py
         /** Returns the singleton `None` object, initialising it on first access. */
         fun get(): PyNone {
             return _instance ?: run {
-                val builtins = python.native.ffi.PyEval_GetBuiltins() ?: throw python.multiplatform.ffi.exceptions.PyException.fromCurrentError()!!
-                val nonePtr = python.native.ffi.PyDict_GetItemString(builtins, "None") ?: throw python.multiplatform.ffi.exceptions.PyException.fromCurrentError()!!
+                val builtins = python.multiplatform.ffi.Python3.withPython { PyEval_GetBuiltins() } ?: throw python.multiplatform.ffi.exceptions.PyException.fromCurrentError()!!
+                val nonePtr = python.multiplatform.ffi.Python3.withPython { PyDict_GetItemString(builtins, "None") } ?: throw python.multiplatform.ffi.exceptions.PyException.fromCurrentError()!!
                 val pyNone = PyNone(nonePtr, true)
                 _instance = pyNone
                 pyNone

@@ -69,7 +69,7 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         // PyObject_Type returns a new reference; PyType.getInstance's private
         // constructor stores it via PyObject(pointer, borrowed = false), i.e.
         // it takes ownership of exactly that reference (no extra incRef).
-        val typePointer: NativePointer = PyObject_Type(pointer)
+        val typePointer: NativePointer = python.multiplatform.ffi.Python3.withPython { PyObject_Type(pointer) }
             ?: throw pyErrorOrGeneric("Failed to get the type of this object")
         PyType.getInstance(typePointer)
     }
@@ -86,13 +86,13 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
     fun getAttr(name: String): PyObject {
         // PyObject_GetAttrString: new reference on success, null + AttributeError
         // (or similar) set on the error indicator on failure.
-        val attr = PyObject_GetAttrString(pointer, name)
+        val attr = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(pointer, name) }
             ?: throw pyErrorOrGeneric("Attribute '$name' not found")
         return PyObject(attr, false)
     }
 
     fun getAttrOrNull(name: String): PyObject? {
-        val attr = PyObject_GetAttrString(pointer, name)
+        val attr = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(pointer, name) }
         if (attr == null) {
             // A missing attribute sets the Python error indicator (typically
             // AttributeError). This is the "OrNull" variant -- the caller has
@@ -102,7 +102,7 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
             // leaving one set would silently corrupt whatever Python call
             // runs next (observed as spurious failures in unrelated,
             // logically unconnected calls further down the line).
-            PyErr_Clear()
+            python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
             return null
         }
         return PyObject(attr, false)
@@ -110,7 +110,7 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
 
     @Throws(PyException::class)
     fun setAttr(name: String, value: PyObject) {
-        if (PyObject_SetAttrString(pointer, name, value.pointer) != 0) {
+        if (python.multiplatform.ffi.Python3.withPython { PyObject_SetAttrString(pointer, name, value.pointer) } != 0) {
             throw pyErrorOrGeneric("Failed to set attribute '$name'")
         }
     }
@@ -119,14 +119,14 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         val target = value?.pointer ?: return
         // See getAttrOrNull() for why a failure here must clear the error
         // indicator rather than leave it set for whatever runs next.
-        if (PyObject_SetAttrString(pointer, name, target) != 0) {
-            PyErr_Clear()
+        if (python.multiplatform.ffi.Python3.withPython { PyObject_SetAttrString(pointer, name, target) } != 0) {
+            python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
         }
     }
 
     @Throws(PyException::class)
     fun delAttr(name: String) {
-        if (PyObject_DelAttrString(pointer, name) != 0) {
+        if (python.multiplatform.ffi.Python3.withPython { PyObject_DelAttrString(pointer, name) } != 0) {
             throw pyErrorOrGeneric("Failed to delete attribute '$name'")
         }
     }
@@ -134,8 +134,8 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
     fun delAttrOrNull(name: String) {
         // See getAttrOrNull() for why a failure here must clear the error
         // indicator rather than leave it set for whatever runs next.
-        if (PyObject_DelAttrString(pointer, name) != 0) {
-            PyErr_Clear()
+        if (python.multiplatform.ffi.Python3.withPython { PyObject_DelAttrString(pointer, name) } != 0) {
+            python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
         }
     }
 
@@ -153,17 +153,17 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
     @Throws(PyException::class)
     open operator fun invoke(vararg args: PyObject, kwargs: Map<String, PyObject> = emptyMap()): PyObject {
         if (args.isEmpty() && kwargs.isEmpty()) {
-            val result = PyObject_CallNoArgs(pointer) ?: throw pyErrorOrGeneric("Call failed")
+            val result = python.multiplatform.ffi.Python3.withPython { PyObject_CallNoArgs(pointer) } ?: throw pyErrorOrGeneric("Call failed")
             return PyObject(result, false)
         }
 
-        val argTuple = PyTuple_New(args.size.toLong()) ?: throw pyErrorOrGeneric("Failed to build argument tuple")
+        val argTuple = python.multiplatform.ffi.Python3.withPython { PyTuple_New(args.size.toLong()) } ?: throw pyErrorOrGeneric("Failed to build argument tuple")
         for ((index, arg) in args.withIndex()) {
             // PyTuple_SetItem steals the reference to the item it's given.
             // `arg.pointer` is owned by `arg` for the rest of its lifetime, so
             // hand the tuple a fresh +1 rather than `arg`'s own reference.
             Py_IncRef(arg.pointer)
-            if (PyTuple_SetItem(argTuple, index.toLong(), arg.pointer) != 0) {
+            if (python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(argTuple, index.toLong(), arg.pointer) } != 0) {
                 Py_DecRef(argTuple)
                 throw pyErrorOrGeneric("Failed to populate argument tuple")
             }
@@ -171,20 +171,20 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
 
         try {
             if (kwargs.isEmpty()) {
-                val result = PyObject_CallObject(pointer, argTuple) ?: throw pyErrorOrGeneric("Call failed")
+                val result = python.multiplatform.ffi.Python3.withPython { PyObject_CallObject(pointer, argTuple) } ?: throw pyErrorOrGeneric("Call failed")
                 return PyObject(result, false)
             }
 
-            val kwargsDict = PyDict_New() ?: throw pyErrorOrGeneric("Failed to build keyword argument dict")
+            val kwargsDict = python.multiplatform.ffi.Python3.withPython { PyDict_New() } ?: throw pyErrorOrGeneric("Failed to build keyword argument dict")
             try {
                 for ((key, value) in kwargs) {
                     // PyDict_SetItemString does NOT steal `value.pointer` -- CPython
                     // increfs it internally, so no extra incRef is needed here.
-                    if (PyDict_SetItemString(kwargsDict, key, value.pointer) != 0) {
+                    if (python.multiplatform.ffi.Python3.withPython { PyDict_SetItemString(kwargsDict, key, value.pointer) } != 0) {
                         throw pyErrorOrGeneric("Failed to populate keyword argument dict")
                     }
                 }
-                val result = PyObject_Call(pointer, argTuple, kwargsDict) ?: throw pyErrorOrGeneric("Call failed")
+                val result = python.multiplatform.ffi.Python3.withPython { PyObject_Call(pointer, argTuple, kwargsDict) } ?: throw pyErrorOrGeneric("Call failed")
                 return PyObject(result, false)
             } finally {
                 Py_DecRef(kwargsDict)
@@ -195,11 +195,11 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
     }
 
     /** `callable(self)`, i.e. whether [invoke] has any chance of succeeding. */
-    open fun isCallable(): Boolean = PyCallable_Check(pointer) != 0
+    open fun isCallable(): Boolean = python.multiplatform.ffi.Python3.withPython { PyCallable_Check(pointer) } != 0
 
     /** `bool(self)`. */
     open fun isTruthy(): Boolean {
-        val result = PyObject_IsTrue(pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PyObject_IsTrue(pointer) }
         if (result < 0) throw pyErrorOrGeneric("Failed to evaluate truthiness")
         return result != 0
     }
@@ -207,19 +207,19 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
     /** `repr(self)`. */
     open fun repr(): String {
         // PyObject_Repr: new reference on success, null + exception set on failure.
-        val reprPointer = PyObject_Repr(pointer) ?: throw pyErrorOrGeneric("Failed to compute repr()")
-        val result = PyUnicode_AsUTF8(reprPointer)
+        val reprPointer = python.multiplatform.ffi.Python3.withPython { PyObject_Repr(pointer) } ?: throw pyErrorOrGeneric("Failed to compute repr()")
+        val result = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(reprPointer) }
         Py_DecRef(reprPointer)
         return result ?: throw pyErrorOrGeneric("Failed to decode repr() result")
     }
 
-    /** `PyObject_RichCompare(self, other, op)`, i.e. the Python-level `<`, `<=`, `==`, `!=`, `>`, `>=` operators. */
+    /** `python.multiplatform.ffi.Python3.withPython { PyObject_RichCompare(self, other, op) }`, i.e. the Python-level `<`, `<=`, `==`, `!=`, `>`, `>=` operators. */
     open fun richCompare(other: PyObject, op: PyCompareOp): Boolean {
         // PyObject_RichCompare: new reference to the (usually bool) result on
         // success, null + exception set on failure.
-        val resultPointer = PyObject_RichCompare(pointer, other.pointer, op.opId)
+        val resultPointer = python.multiplatform.ffi.Python3.withPython { PyObject_RichCompare(pointer, other.pointer, op.opId) }
             ?: throw pyErrorOrGeneric("Comparison failed")
-        val truthy = PyObject_IsTrue(resultPointer)
+        val truthy = python.multiplatform.ffi.Python3.withPython { PyObject_IsTrue(resultPointer) }
         Py_DecRef(resultPointer)
         if (truthy < 0) throw pyErrorOrGeneric("Failed to evaluate comparison result")
         return truthy != 0
@@ -231,11 +231,11 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         // declared to throw, so on failure this clears whatever error
         // PyObject_Str set (via fromCurrentError()) and falls back to a
         // placeholder rather than propagating it.
-        val strPointer = PyObject_Str(pointer) ?: run {
+        val strPointer = python.multiplatform.ffi.Python3.withPython { PyObject_Str(pointer) } ?: run {
             val message = PyException.fromCurrentError()?.errMsg
             return "<error converting to str${message?.let { ": $it" } ?: ""}>"
         }
-        val result = PyUnicode_AsUTF8(strPointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(strPointer) }
         Py_DecRef(strPointer)
         return result ?: "<error decoding str>"
     }
@@ -256,31 +256,31 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         // Release *this* object's own reference. The previous `type.decRef()`
         // both released the wrong object (the meta-type, not `pointer`) and
         // forced the lazy `type` property to materialise (an extra
-        // PyObject_Type() FFI round-trip) purely as a side effect of cleanup.
+        // python.multiplatform.ffi.Python3.withPython { PyObject_Type() } FFI round-trip) purely as a side effect of cleanup.
         decRef()
     }
 
     // TODO: 밑에 세 함수 수정 (return type 불일치 등)
 //    operator fun invoke(arg0: PyObject): PyObject {
-//        return PyObject_CallObject(pointer, arg0)
+//        return python.multiplatform.ffi.Python3.withPython { PyObject_CallObject(pointer, arg0) }
 //    }
 //
 //    operator fun invoke(arg0: PyObject, arg1: PyObject): PyObject {
-//        return PyObject_CallObject(pointer, arg0, arg1)
+//        return python.multiplatform.ffi.Python3.withPython { PyObject_CallObject(pointer, arg0, arg1) }
 //    }
 //
 //    //...
 //
 //    operator fun invoke(vararg args: PyObject): PyObject {
-//        return PyObject_CallObject(pointer, args)  // TODO: 이거는 변수 하나로 잡히던가? 아님 여러개인가?
+//        return python.multiplatform.ffi.Python3.withPython { PyObject_CallObject(pointer, args) }  // TODO: 이거는 변수 하나로 잡히던가? 아님 여러개인가?
 //        // 리스트로 들어오는 거였던가?
 //    }
 
 //    actual fun pyLongFromLong(arg0: Long): Long {
 //        if (!Python3.isInitialized) return -1
 //        memScoped {
-////            val pyLong = PyLong_FromLong(arg0) // TODO: PyLong_FromLong을 PyLong_FromLongLong으로 교체
-//            val pyLong = PyLong_FromLongLong(arg0)
+////            val pyLong = python.multiplatform.ffi.Python3.withPython { PyLong_FromLong(arg0) } // TODO: PyLong_FromLong을 PyLong_FromLongLong으로 교체
+//            val pyLong = python.multiplatform.ffi.Python3.withPython { PyLong_FromLongLong(arg0) }
 //            if (pyLong == null) {
 //                throw IllegalStateException("Python long from long failed")
 //            }
@@ -292,9 +292,9 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
 //        if (!Python3.isInitialized) return -1
 //        memScoped {
 //            val restoredPyObj: CValuesRef<_object>? = arg0.toCPointer()
-////            val ktLong = PyLong_AsLong(restoredPyObj) // TODO: PyLong_AsLong을 PyLong_AsLongLong으로 교체
-//            val ktLong = PyLong_AsLongLong(restoredPyObj)
-//            if (ktLong == -1L && PyErr_Occurred() != null) {
+////            val ktLong = python.multiplatform.ffi.Python3.withPython { PyLong_AsLong(restoredPyObj) } // TODO: PyLong_AsLong을 PyLong_AsLongLong으로 교체
+//            val ktLong = python.multiplatform.ffi.Python3.withPython { PyLong_AsLongLong(restoredPyObj) }
+//            if (ktLong == -1L && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) {
 //                throw IllegalStateException("Python long as long failed")
 //            }
 //            return ktLong

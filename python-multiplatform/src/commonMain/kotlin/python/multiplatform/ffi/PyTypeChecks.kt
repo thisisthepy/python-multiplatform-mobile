@@ -17,7 +17,7 @@ import python.native.ffi.PyObject_Type
  * ### Why none of these are `expect`/`actual` bindings
  *
  * None of the macros above are real, dynamically-linkable ABI symbols.
- * `#define PyLong_Check(op) PyType_FastSubclass(Py_TYPE(op),
+ * `#define python.multiplatform.ffi.Python3.withPython { PyLong_Check(op) } PyType_FastSubclass(Py_TYPE(op),
  * Py_TPFLAGS_LONG_SUBCLASS)` and its siblings for `list`/`tuple`/`dict`/
  * `set`/`frozenset`/`str` are preprocessor macros; `PyType_Check` and
  * `PyModule_Check`'s underlying `PyObject_TypeCheck` are `static inline` C
@@ -36,7 +36,7 @@ import python.native.ffi.PyObject_Type
  *
  * ### The chosen primitive: `PyObject_IsInstance`
  *
- * `PyObject_IsInstance(obj, type)` is a genuine, exported `PyAPI_FUNC`
+ * `python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(obj, type) }` is a genuine, exported `PyAPI_FUNC`
  * (`abstract.h`), already bound as `python.native.ffi.PyObject_IsInstance`.
  * It matches the macros' own subclass-inclusive semantics: `PyLong_Check`
  * is true for `bool` (since `bool` subclasses `int` and therefore carries
@@ -49,7 +49,7 @@ import python.native.ffi.PyObject_Type
  * ### The cached type-object side
  *
  * `PyObject_IsInstance`'s second argument needs an actual type object to
- * compare against, and the `PyAPI_DATA(PyTypeObject) PyLong_Type` (etc.)
+ * compare against, and the `python.multiplatform.ffi.Python3.withPython { PyAPI_DATA(PyTypeObject) } PyLong_Type` (etc.)
  * globals this would naturally read are, like `Py_None` (see
  * [python.multiplatform.ffi.types.basic.PyNone]'s class doc), *data*
  * symbols, not functions -- pulling them in directly would mean adding
@@ -58,12 +58,12 @@ import python.native.ffi.PyObject_Type
  * instead of one portable helper, and would still need `expect`/`actual`
  * despite the checks themselves not needing it. This resolves the same
  * type objects Python itself uses, indirectly, the same way [PyNone]
- * resolves the `None` singleton: via `PyEval_GetBuiltins()` +
- * `PyDict_GetItemString()` for the ones that are builtins (`int`, `bool`,
+ * resolves the `None` singleton: via `python.multiplatform.ffi.Python3.withPython { PyEval_GetBuiltins() }` +
+ * `python.multiplatform.ffi.Python3.withPython { PyDict_GetItemString() }` for the ones that are builtins (`int`, `bool`,
  * `float`, `str`, `list`, `tuple`, `dict`, `set`, `frozenset`, `type`), and
- * via `PyObject_Type()` of the `builtins` module itself for `module`
+ * via `python.multiplatform.ffi.Python3.withPython { PyObject_Type() }` of the `builtins` module itself for `module`
  * (`types.ModuleType` is not a builtin name, but the `builtins` module
- * object -- obtained via the already-bound `PyImport_AddModule("builtins")`
+ * object -- obtained via the already-bound `python.multiplatform.ffi.Python3.withPython { PyImport_AddModule("builtins") }`
  * -- is always resolvable once the interpreter is up, and is itself an
  * instance of exactly the type this needs). All of it reuses functions
  * this ABI subset already exposes; each cache entry resolves once, lazily,
@@ -84,11 +84,11 @@ import python.native.ffi.PyObject_Type
  */
 internal object PyTypeChecks {
     private val builtins: NativePointer by lazy {
-        PyEval_GetBuiltins() ?: throw PyException.fromCurrentError() ?: PyException("Failed to get the builtins dict")
+        python.multiplatform.ffi.Python3.withPython { PyEval_GetBuiltins() } ?: throw PyException.fromCurrentError() ?: PyException("Failed to get the builtins dict")
     }
 
     private fun builtin(name: String): NativePointer =
-        PyDict_GetItemString(builtins, name)
+        python.multiplatform.ffi.Python3.withPython { PyDict_GetItemString(builtins, name) }
             ?: throw PyException.fromCurrentError() ?: PyException("Builtin '$name' not found")
 
     val intType: NativePointer by lazy { builtin("int") }
@@ -104,42 +104,42 @@ internal object PyTypeChecks {
 
     /** `types.ModuleType` -- not a builtin name, so derived from the `builtins` module's own [PyObject_Type] instead (see class doc). */
     val moduleType: NativePointer by lazy {
-        val builtinsModule = PyImport_AddModule("builtins") // borrowed reference; always resolvable once the interpreter is up
+        val builtinsModule = python.multiplatform.ffi.Python3.withPython { PyImport_AddModule("builtins") } // borrowed reference; always resolvable once the interpreter is up
             ?: throw PyException.fromCurrentError() ?: PyException("Failed to resolve the 'builtins' module")
-        PyObject_Type(builtinsModule) // new reference, intentionally never released -- immortal builtin type, see class doc
+        python.multiplatform.ffi.Python3.withPython { PyObject_Type(builtinsModule) } // new reference, intentionally never released -- immortal builtin type, see class doc
             ?: throw PyException.fromCurrentError() ?: PyException("Failed to resolve the 'module' type")
     }
 }
 
-/** `PyLong_Check(o)`: is [o] a Python `int` (or subclass, e.g. `bool`)? See [PyTypeChecks]'s class doc for the approach. */
-fun PyLong_Check(o: NativePointer): Int = PyObject_IsInstance(o, PyTypeChecks.intType)
+/** `python.multiplatform.ffi.Python3.withPython { PyLong_Check(o) }`: is [o] a Python `int` (or subclass, e.g. `bool`)? See [PyTypeChecks]'s class doc for the approach. */
+fun PyLong_Check(o: NativePointer): Int = python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(o, PyTypeChecks.intType) }
 
-/** `PyBool_Check(o)`: is [o] a Python `bool`? See [PyTypeChecks]'s class doc for the approach. */
-fun PyBool_Check(o: NativePointer): Int = PyObject_IsInstance(o, PyTypeChecks.boolType)
+/** `python.multiplatform.ffi.Python3.withPython { PyBool_Check(o) }`: is [o] a Python `bool`? See [PyTypeChecks]'s class doc for the approach. */
+fun PyBool_Check(o: NativePointer): Int = python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(o, PyTypeChecks.boolType) }
 
-/** `PyFloat_Check(o)`: is [o] a Python `float` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
-fun PyFloat_Check(o: NativePointer): Int = PyObject_IsInstance(o, PyTypeChecks.floatType)
+/** `python.multiplatform.ffi.Python3.withPython { PyFloat_Check(o) }`: is [o] a Python `float` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
+fun PyFloat_Check(o: NativePointer): Int = python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(o, PyTypeChecks.floatType) }
 
-/** `PyUnicode_Check(o)`: is [o] a Python `str` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
-fun PyUnicode_Check(o: NativePointer): Int = PyObject_IsInstance(o, PyTypeChecks.strType)
+/** `python.multiplatform.ffi.Python3.withPython { PyUnicode_Check(o) }`: is [o] a Python `str` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
+fun PyUnicode_Check(o: NativePointer): Int = python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(o, PyTypeChecks.strType) }
 
-/** `PyList_Check(o)`: is [o] a Python `list` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
-fun PyList_Check(o: NativePointer): Int = PyObject_IsInstance(o, PyTypeChecks.listType)
+/** `python.multiplatform.ffi.Python3.withPython { PyList_Check(o) }`: is [o] a Python `list` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
+fun PyList_Check(o: NativePointer): Int = python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(o, PyTypeChecks.listType) }
 
-/** `PyTuple_Check(o)`: is [o] a Python `tuple` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
-fun PyTuple_Check(o: NativePointer): Int = PyObject_IsInstance(o, PyTypeChecks.tupleType)
+/** `python.multiplatform.ffi.Python3.withPython { PyTuple_Check(o) }`: is [o] a Python `tuple` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
+fun PyTuple_Check(o: NativePointer): Int = python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(o, PyTypeChecks.tupleType) }
 
-/** `PyDict_Check(o)`: is [o] a Python `dict` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
-fun PyDict_Check(o: NativePointer): Int = PyObject_IsInstance(o, PyTypeChecks.dictType)
+/** `python.multiplatform.ffi.Python3.withPython { PyDict_Check(o) }`: is [o] a Python `dict` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
+fun PyDict_Check(o: NativePointer): Int = python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(o, PyTypeChecks.dictType) }
 
-/** `PySet_Check(o)`: is [o] a Python `set` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
-fun PySet_Check(o: NativePointer): Int = PyObject_IsInstance(o, PyTypeChecks.setType)
+/** `python.multiplatform.ffi.Python3.withPython { PySet_Check(o) }`: is [o] a Python `set` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
+fun PySet_Check(o: NativePointer): Int = python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(o, PyTypeChecks.setType) }
 
-/** `PyFrozenSet_Check(o)`: is [o] a Python `frozenset` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
-fun PyFrozenSet_Check(o: NativePointer): Int = PyObject_IsInstance(o, PyTypeChecks.frozensetType)
+/** `python.multiplatform.ffi.Python3.withPython { PyFrozenSet_Check(o) }`: is [o] a Python `frozenset` (or subclass)? See [PyTypeChecks]'s class doc for the approach. */
+fun PyFrozenSet_Check(o: NativePointer): Int = python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(o, PyTypeChecks.frozensetType) }
 
-/** `PyType_Check(o)`: is [o] itself a type object (or a metaclass instance)? See [PyTypeChecks]'s class doc for the approach. */
-fun PyType_Check(o: NativePointer): Int = PyObject_IsInstance(o, PyTypeChecks.typeType)
+/** `python.multiplatform.ffi.Python3.withPython { PyType_Check(o) }`: is [o] itself a type object (or a metaclass instance)? See [PyTypeChecks]'s class doc for the approach. */
+fun PyType_Check(o: NativePointer): Int = python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(o, PyTypeChecks.typeType) }
 
-/** `PyModule_Check(o)`: is [o] a Python module object? See [PyTypeChecks]'s class doc for the approach. */
-fun PyModule_Check(o: NativePointer): Int = PyObject_IsInstance(o, PyTypeChecks.moduleType)
+/** `python.multiplatform.ffi.Python3.withPython { PyModule_Check(o) }`: is [o] a Python module object? See [PyTypeChecks]'s class doc for the approach. */
+fun PyModule_Check(o: NativePointer): Int = python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(o, PyTypeChecks.moduleType) }

@@ -30,7 +30,7 @@ open class PyModule(pointer: NativePointer, borrowed: Boolean) : PyObject(pointe
 
     /** `module.__name__`, backed directly by `PyModule_GetName`. */
     val name: String
-        get() = PyModule_GetName(pointer)
+        get() = python.multiplatform.ffi.Python3.withPython { PyModule_GetName(pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("Failed to get the module's __name__")
 
     /** `module.__doc__`, or `null` if the module has none. */
@@ -49,8 +49,8 @@ open class PyModule(pointer: NativePointer, borrowed: Boolean) : PyObject(pointe
             // PyModule_GetFilenameObject: new reference on success; NULL + AttributeError set
             // if the module has no __file__ (e.g. built-in/frozen modules) -- that failure mode
             // is expected here, so clear the indicator rather than propagate it as an exception.
-            val filePtr = PyModule_GetFilenameObject(pointer) ?: run {
-                PyErr_Clear()
+            val filePtr = python.multiplatform.ffi.Python3.withPython { PyModule_GetFilenameObject(pointer) } ?: run {
+                python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
                 return null
             }
             val fileObj = PyObject(filePtr, false)
@@ -65,7 +65,7 @@ open class PyModule(pointer: NativePointer, borrowed: Boolean) : PyObject(pointe
         get() {
             // PyModule_GetDict returns a *borrowed* reference; borrowed = true here makes this
             // PyDict wrapper take its own, independent, incref'd reference to it.
-            val dictPtr = PyModule_GetDict(pointer)
+            val dictPtr = python.multiplatform.ffi.Python3.withPython { PyModule_GetDict(pointer) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to get the module's __dict__")
             return PyDict(dictPtr, true)
         }

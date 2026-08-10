@@ -10,7 +10,7 @@ import python.native.ffi.bindings.PyTuple_GetItem
 
 
 @OptIn(ExperimentalForeignApi::class)
-actual inline fun <R : Any> memScoped(block: () -> R): R = memScoped {
+actual inline fun <R> memScoped(block: () -> R): R = memScoped {
     return block()
 }
 
@@ -1148,3 +1148,18 @@ actual fun PyModule_GetDict(module: NativePointer): NativePointer? = python.nati
 @CName("${namePrefix}PyModule_1GetFilenameObject")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyModule_GetFilenameObject(module: NativePointer): NativePointer? = python.native.ffi.bindings.PyModule_GetFilenameObject(module.toPlatformPointer()).toNativePointer()
+@CName("${namePrefix}PyGILState_1Ensure")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+actual inline fun PyGILState_Ensure(): Int = python.native.ffi.bindings.PyGILState_Ensure().value.toInt()
+@CName("${namePrefix}PyGILState_1Release")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+actual inline fun PyGILState_Release(state: Int) = python.native.ffi.bindings.PyGILState_Release(python.native.ffi.bindings.PyGILState_STATE.byValue(state.toUInt()))
+@CName("${namePrefix}PyGILState_1GetThisThreadState")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+actual fun PyGILState_GetThisThreadState(): NativePointer? = python.native.ffi.bindings.PyGILState_GetThisThreadState()?.let { NativePointer(it) }
+@CName("${namePrefix}PyEval_1SaveThread")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+actual fun PyEval_SaveThread(): NativePointer? = python.native.ffi.bindings.PyEval_SaveThread()?.let { NativePointer(it) }
+@CName("${namePrefix}PyEval_1RestoreThread")
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+actual inline fun PyEval_RestoreThread(tstate: NativePointer) = python.native.ffi.bindings.PyEval_RestoreThread(tstate.toPlatformPointer())

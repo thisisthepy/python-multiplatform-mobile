@@ -133,7 +133,7 @@ class PyContext(private var strategy: ConversionStrategy = ConversionStrategy.DE
     private fun typedWrap(obj: PyObject): PyObject {
         if (PyNone.isNone(obj)) return PyNone.get()
 
-        val typePtr = PyObject_Type(obj.pointer) ?: throw pyErrorOrGeneric("Failed to get the type of this object")
+        val typePtr = python.multiplatform.ffi.Python3.withPython { PyObject_Type(obj.pointer) } ?: throw pyErrorOrGeneric("Failed to get the type of this object")
         try {
             return when (typePtr) {
                 PyTypeChecks.boolType -> PyBool(obj.pointer, true)

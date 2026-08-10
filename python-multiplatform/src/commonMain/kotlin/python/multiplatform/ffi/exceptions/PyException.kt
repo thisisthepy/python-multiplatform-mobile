@@ -30,12 +30,12 @@ import python.native.ffi.Py_IncRef
  * a different file in the same package.
  */
 internal fun NativePointer.isNoneObject(): Boolean {
-    val typePointer = PyObject_Type(this) ?: run {
-        PyErr_Clear()
+    val typePointer = python.multiplatform.ffi.Python3.withPython { PyObject_Type(this) } ?: run {
+        python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
         return false
     }
-    val namePointer = PyType_GetName(typePointer)
-    val name = namePointer?.let { PyUnicode_AsUTF8(it) }
+    val namePointer = python.multiplatform.ffi.Python3.withPython { PyType_GetName(typePointer) }
+    val name = namePointer?.let { python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(it) } }
     namePointer?.let { Py_DecRef(it) }
     Py_DecRef(typePointer)
     return name == "NoneType"
@@ -47,7 +47,7 @@ internal fun NativePointer.isNoneObject(): Boolean {
  * Historically this only carried a plain message (used throughout
  * [python.multiplatform.ffi.PyObject] / [python.multiplatform.ffi.PyType] for
  * FFI-level failures where no live Python error is involved). It now also
- * exposes the pieces of `PyErr_Fetch()` / `PyErr_GetRaisedException()`
+ * exposes the pieces of `python.multiplatform.ffi.Python3.withPython { PyErr_Fetch() }` / `PyErr_GetRaisedException()`
  * (type, value, traceback) so a genuine Python-level error can be surfaced
  * as a fully-populated Kotlin throwable, matching the mermaid sketch
  * (`type`, `value`, `traceback`, `message`, `cause`, `context`).
@@ -68,7 +68,7 @@ open class PyException(
     companion object {
         /**
          * Builds a [PyException] from whatever CPython's error indicator
-         * currently holds (via `PyErr_GetRaisedException()`), clearing the
+         * currently holds (via `python.multiplatform.ffi.Python3.withPython { PyErr_GetRaisedException() }`), clearing the
          * indicator in the process. Returns `null` if no error is currently
          * set.
          *
@@ -80,16 +80,16 @@ open class PyException(
          * bare, type-less [PyException].
          */
         fun fromCurrentError(): PyException? {
-            // PyErr_Occurred() is a *borrowed* reference used purely as a
+            // python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } is a *borrowed* reference used purely as a
             // presence check here -- it must not be decref'd.
-            if (PyErr_Occurred() == null) return null
+            if (python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } == null) return null
 
-            // PyErr_GetRaisedException() hands back a new reference to the
+            // python.multiplatform.ffi.Python3.withPython { PyErr_GetRaisedException() } hands back a new reference to the
             // exception *instance* and atomically clears the indicator. In
             // CPython >= 3.12 there is no separate "type"/"traceback" triple
             // to fetch -- the instance itself carries its type
             // (PyObject_Type) and traceback (PyException_GetTraceback).
-            val excPointer = PyErr_GetRaisedException() ?: return null
+            val excPointer = python.multiplatform.ffi.Python3.withPython { PyErr_GetRaisedException() } ?: return null
             return fromExceptionInstance(excPointer)
         }
 
@@ -109,8 +109,8 @@ open class PyException(
             // if this type is already cached, simply leaks this one extra
             // incRef -- harmless, since exception types are immortal builtins
             // or long-lived user classes).
-            val typePointer = PyObject_Type(excPointer)
-            if (typePointer == null) PyErr_Clear()
+            val typePointer = python.multiplatform.ffi.Python3.withPython { PyObject_Type(excPointer) }
+            if (typePointer == null) python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
             val type = typePointer?.let { PyType.getInstance(it) }
 
             val message = messageOf(excPointer)
@@ -122,19 +122,19 @@ open class PyException(
 
             // New reference, or null if this exception was never associated
             // with a traceback (e.g. constructed but never raised/propagated).
-            val tracebackPointer = PyException_GetTraceback(excPointer)
+            val tracebackPointer = python.multiplatform.ffi.Python3.withPython { PyException_GetTraceback(excPointer) }
             val traceback = tracebackPointer?.let { PyTraceback(it, false) }
 
-            // New reference; PyException_GetContext() itself returns null
+            // New reference; python.multiplatform.ffi.Python3.withPython { PyException_GetContext() } itself returns null
             // when there genuinely is no context (unlike GetCause, see below).
-            val contextPointer = PyException_GetContext(excPointer)
+            val contextPointer = python.multiplatform.ffi.Python3.withPython { PyException_GetContext(excPointer) }
             val context = contextPointer?.let { fromExceptionInstance(it) }
 
-            // New reference; unlike GetContext, PyException_GetCause() always
+            // New reference; unlike GetContext, python.multiplatform.ffi.Python3.withPython { PyException_GetCause() } always
             // returns *something* -- either a real exception instance, or the
             // `None` singleton when `raise ... from ...` was never used. Only
             // recurse for the former; release (and drop) the latter.
-            val causePointer = PyException_GetCause(excPointer)
+            val causePointer = python.multiplatform.ffi.Python3.withPython { PyException_GetCause(excPointer) }
             val cause = when {
                 causePointer == null -> null
                 causePointer.isNoneObject() -> {
@@ -156,11 +156,11 @@ open class PyException(
             // but still clear the indicator it would otherwise leave set,
             // per the "never call back into the C API with a pending
             // exception" contract (see the *OrNull helpers on PyObject).
-            val strPointer = PyObject_Str(excPointer) ?: run {
-                PyErr_Clear()
+            val strPointer = python.multiplatform.ffi.Python3.withPython { PyObject_Str(excPointer) } ?: run {
+                python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
                 return "<unprintable exception>"
             }
-            val message = PyUnicode_AsUTF8(strPointer)
+            val message = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(strPointer) }
             Py_DecRef(strPointer)
             return message ?: "<unprintable exception>"
         }
@@ -172,12 +172,12 @@ open class PyException(
         val liveType = type
         when {
             liveValue != null -> {
-                // PyErr_SetRaisedException() *steals* a reference to its
+                // python.multiplatform.ffi.Python3.withPython { PyErr_SetRaisedException() } *steals* a reference to its
                 // argument. `value` still owns its own reference for the rest
                 // of its lifetime (released by PyObject.clean()/decRef on
                 // close), so the interpreter needs a fresh one, not that one.
                 Py_IncRef(liveValue.pointer)
-                PyErr_SetRaisedException(liveValue.pointer)
+                python.multiplatform.ffi.Python3.withPython { PyErr_SetRaisedException(liveValue.pointer) }
             }
             liveType != null -> {
                 // No live exception instance to hand back (e.g. this
@@ -185,7 +185,7 @@ open class PyException(
                 // `PyException(message, type = someType)`); synthesize one
                 // from the message instead. PyErr_SetString does not steal
                 // `liveType.pointer` -- CPython increfs the type internally.
-                PyErr_SetString(liveType.pointer, errMsg)
+                python.multiplatform.ffi.Python3.withPython { PyErr_SetString(liveType.pointer, errMsg) }
             }
             // else: nothing Python-level to restore (a purely Kotlin-side
             // PyException with no captured type/value) -- there is no

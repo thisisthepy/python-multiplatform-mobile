@@ -37,6 +37,16 @@ object bindings {
     inline fun PyEval_InitThreads() = PyEval_InitThreadsHandle.invoke() as Unit
     val PyThreadState_GetDictHandle: MethodHandle
     inline fun PyThreadState_GetDict(): Long = PyThreadState_GetDictHandle.invoke() as Long
+    val PyGILState_EnsureHandle: MethodHandle
+    inline fun PyGILState_Ensure(): Int = PyGILState_EnsureHandle.invoke() as Int
+    val PyGILState_ReleaseHandle: MethodHandle
+    inline fun PyGILState_Release(state: Int) = PyGILState_ReleaseHandle.invoke(state) as Unit
+    val PyGILState_GetThisThreadStateHandle: MethodHandle
+    inline fun PyGILState_GetThisThreadState(): Long = PyGILState_GetThisThreadStateHandle.invoke() as Long
+    val PyEval_SaveThreadHandle: MethodHandle
+    inline fun PyEval_SaveThread(): Long = PyEval_SaveThreadHandle.invoke() as Long
+    val PyEval_RestoreThreadHandle: MethodHandle
+    inline fun PyEval_RestoreThread(tstate: Long) = PyEval_RestoreThreadHandle.invoke(tstate) as Unit
 
 
     // Section 2
@@ -731,6 +741,11 @@ object bindings {
         Py_GetBuildInfoHandle = find("Py_GetBuildInfo", P)
         PyEval_InitThreadsHandle = find("PyEval_InitThreads", Void.TYPE)
         PyThreadState_GetDictHandle = find("PyThreadState_GetDict", P)
+        PyGILState_EnsureHandle = find("PyGILState_Ensure", Integer.TYPE)
+        PyGILState_ReleaseHandle = find("PyGILState_Release", Void.TYPE, Integer.TYPE)
+        PyGILState_GetThisThreadStateHandle = find("PyGILState_GetThisThreadState", P)
+        PyEval_SaveThreadHandle = find("PyEval_SaveThread", P)
+        PyEval_RestoreThreadHandle = find("PyEval_RestoreThread", Void.TYPE, P)
 
 
         // Section 2

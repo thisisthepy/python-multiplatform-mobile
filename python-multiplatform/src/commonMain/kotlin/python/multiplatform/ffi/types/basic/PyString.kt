@@ -27,7 +27,7 @@ open class PyString(pointer: NativePointer, borrowed: Boolean) : PyObject(pointe
     override var cachedNativeValue: String?
         get() {
             val res = PyUnicode_AsUTF8(pointer)
-            if (res == null && PyErr_Occurred() != null) {
+            if (res == null && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) {
                 throw PyException.fromCurrentError()!!
             }
             return res
@@ -54,7 +54,7 @@ open class PyString(pointer: NativePointer, borrowed: Boolean) : PyObject(pointe
         val subObj = PyString.from(substring)
         val res = PyUnicode_Contains(pointer, subObj.pointer)
         subObj.clean()
-        if (res == -1 && PyErr_Occurred() != null) throw PyException.fromCurrentError()!!
+        if (res == -1 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
         return res == 1
     }
 }

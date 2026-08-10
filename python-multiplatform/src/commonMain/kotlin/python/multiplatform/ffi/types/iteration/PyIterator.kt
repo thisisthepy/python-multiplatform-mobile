@@ -28,12 +28,12 @@ class PyIterator(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, 
         if (exhausted) return false
         if (lookahead != null) return true
 
-        val next = PyIter_Next(pointer)
+        val next = python.multiplatform.ffi.Python3.withPython { PyIter_Next(pointer) }
         if (next == null) {
-            // PyIter_Next() returning NULL is ambiguous by itself -- it means either "exhausted"
+            // python.multiplatform.ffi.Python3.withPython { PyIter_Next() } returning NULL is ambiguous by itself -- it means either "exhausted"
             // or "an error occurred while producing the next element". Disambiguate via the
             // error indicator rather than assuming exhaustion.
-            val error = PyErr_Occurred()
+            val error = python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() }
             if (error != null) {
                 throw PyException.fromCurrentError() ?: PyException("Iterator raised an error")
             }

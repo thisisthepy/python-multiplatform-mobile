@@ -36,7 +36,7 @@ open class PyFloat(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer
     override var cachedNativeValue: Double?
         get() {
             val res = PyFloat_AsDouble(pointer)
-            if (res == -1.0 && PyErr_Occurred() != null) {
+            if (res == -1.0 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) {
                 throw PyException.fromCurrentError()!!
             }
             return res
@@ -59,12 +59,12 @@ open class PyFloat(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer
         return PyFloat(res, false)
     }
     operator fun compareTo(other: PyFloat): Int {
-        val resLT = PyObject_RichCompareBool(pointer, other.pointer, PyCompareOp.LT.opId)
-        if (resLT == -1 && PyErr_Occurred() != null) throw PyException.fromCurrentError()!!
+        val resLT = python.multiplatform.ffi.Python3.withPython { PyObject_RichCompareBool(pointer, other.pointer, PyCompareOp.LT.opId) }
+        if (resLT == -1 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
         if (resLT == 1) return -1
         
-        val resGT = PyObject_RichCompareBool(pointer, other.pointer, PyCompareOp.GT.opId)
-        if (resGT == -1 && PyErr_Occurred() != null) throw PyException.fromCurrentError()!!
+        val resGT = python.multiplatform.ffi.Python3.withPython { PyObject_RichCompareBool(pointer, other.pointer, PyCompareOp.GT.opId) }
+        if (resGT == -1 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
         if (resGT == 1) return 1
         return 0
     }

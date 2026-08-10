@@ -38,9 +38,9 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
     companion object {
         /** The `PyType` for `set` (`builtins.set`). */
         val TYPE: PyType by lazy {
-            val emptyTuple = PyTuple_New(0)
+            val emptyTuple = python.multiplatform.ffi.Python3.withPython { PyTuple_New(0) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to build tuple() scratch buffer")
-            val emptySet = PySet_New(emptyTuple)
+            val emptySet = python.multiplatform.ffi.Python3.withPython { PySet_New(emptyTuple) }
             Py_DecRef(emptyTuple)
             if (emptySet == null) throw PyException.fromCurrentError() ?: PyException("Failed to build set() to derive its type")
             deriveTypeAndRelease(emptySet)
@@ -50,13 +50,13 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
         fun fromSet(elements: Set<PyObject>): PySet {
             // PySet_New's `iterable` parameter is non-nullable here even though the empty-set
             // case is allowed at the C level -- build a scratch tuple to feed it either way.
-            val tuplePtr = PyTuple_New(elements.size.toLong())
+            val tuplePtr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate tuple() scratch buffer")
             elements.forEachIndexed { i, el ->
                 Py_IncRef(el.pointer) // PyTuple_SetItem steals; keep `el`'s own reference valid
-                PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer)
+                python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
             }
-            val setPtr = PySet_New(tuplePtr)
+            val setPtr = python.multiplatform.ffi.Python3.withPython { PySet_New(tuplePtr) }
             Py_DecRef(tuplePtr) // scratch tuple, no longer needed once copied into the set
             if (setPtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to build set()")
             return PySet(setPtr, false)
@@ -71,33 +71,33 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
 
     /** `self | other`, via `PyNumber_Or` (CPython dispatches `set.__or__` through the number protocol). */
     fun union(other: PySet): PySet {
-        val result = PyNumber_Or(pointer, other.pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PyNumber_Or(pointer, other.pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("set union failed")
         return PySet(result, false)
     }
 
     /** `self & other`, via `PyNumber_And`. */
     fun intersection(other: PySet): PySet {
-        val result = PyNumber_And(pointer, other.pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PyNumber_And(pointer, other.pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("set intersection failed")
         return PySet(result, false)
     }
 
     /** `self - other`, via `PyNumber_Subtract`. */
     fun difference(other: PySet): PySet {
-        val result = PyNumber_Subtract(pointer, other.pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PyNumber_Subtract(pointer, other.pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("set difference failed")
         return PySet(result, false)
     }
 
     /** Removes and returns an arbitrary element (`PySet_Pop`), throwing if the set is empty. */
     fun pop(): PyObject {
-        val item = PySet_Pop(pointer) ?: throw PyException.fromCurrentError() ?: PyException("pop from an empty set")
+        val item = python.multiplatform.ffi.Python3.withPython { PySet_Pop(pointer) } ?: throw PyException.fromCurrentError() ?: PyException("pop from an empty set")
         return PyObject(item, false) // PySet_Pop returns a new reference
     }
 
     override val size: Int
-        get() = PySet_Size(pointer).toInt()
+        get() = python.multiplatform.ffi.Python3.withPython { PySet_Size(pointer) }.toInt()
 
     override fun isEmpty(): Boolean = size == 0
 
@@ -122,7 +122,7 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
     }
 
     override fun contains(element: PyObject): Boolean {
-        val result = PySet_Contains(pointer, element.pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PySet_Contains(pointer, element.pointer) }
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check set membership")
         return result == 1
     }
@@ -132,7 +132,7 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
     override fun add(element: PyObject): Boolean {
         if (contains(element)) return false
         // PySet_Add does not steal a reference to `key`.
-        if (PySet_Add(pointer, element.pointer) != 0) throw PyException.fromCurrentError() ?: PyException("set.add() failed")
+        if (python.multiplatform.ffi.Python3.withPython { PySet_Add(pointer, element.pointer) } != 0) throw PyException.fromCurrentError() ?: PyException("set.add() failed")
         return true
     }
 
@@ -166,6 +166,6 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
     }
 
     override fun clear() {
-        if (PySet_Clear(pointer) != 0) throw PyException.fromCurrentError() ?: PyException("set.clear() failed")
+        if (python.multiplatform.ffi.Python3.withPython { PySet_Clear(pointer) } != 0) throw PyException.fromCurrentError() ?: PyException("set.clear() failed")
     }
 }

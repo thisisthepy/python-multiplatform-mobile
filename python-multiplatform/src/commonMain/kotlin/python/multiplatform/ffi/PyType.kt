@@ -27,8 +27,8 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
 
     val name: String by lazy {
         // PyType_GetName: new reference on success.
-        val namePtr: NativePointer = PyType_GetName(pointer) ?: throw pyErrorOrGeneric("Failed to get the type's name")
-        val nameStr: String? = PyUnicode_AsUTF8(namePtr)
+        val namePtr: NativePointer = python.multiplatform.ffi.Python3.withPython { PyType_GetName(pointer) } ?: throw pyErrorOrGeneric("Failed to get the type's name")
+        val nameStr: String? = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(namePtr) }
         Py_DecRef(namePtr)
         nameStr ?: throw pyErrorOrGeneric("Failed to decode the type's name")
     }
@@ -36,7 +36,7 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
     val baseType: PyType by lazy {
         // PyObject_GetAttrString: new reference; getInstance() takes ownership
         // of it when not already cached (see the comment on `getInstance`).
-        val attrPtr: NativePointer = PyObject_GetAttrString(pointer, "__base__")
+        val attrPtr: NativePointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(pointer, "__base__") }
             ?: throw pyErrorOrGeneric("Failed to get __base__")
         getInstance(attrPtr)
     }
@@ -53,10 +53,10 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
     /** Reads a tuple-valued attribute (e.g. `__bases__`, `__mro__`) off this type and wraps each entry as a [PyType]. */
     private fun tupleAttrAsTypes(attrName: String): List<PyType> {
         // PyObject_GetAttrString: new reference to the tuple.
-        val tuplePointer: NativePointer = PyObject_GetAttrString(pointer, attrName)
+        val tuplePointer: NativePointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(pointer, attrName) }
             ?: throw pyErrorOrGeneric("Failed to get $attrName")
         try {
-            val size = PyTuple_Size(tuplePointer)
+            val size = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(tuplePointer) }
             if (size == -1L) throw pyErrorOrGeneric("Failed to get the size of $attrName")
 
             val list = ArrayList<PyType>(size.toInt())
@@ -66,7 +66,7 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
                 // it its own +1. When the entry is already cached, this extra
                 // reference is simply never released -- harmless for built-in
                 // types, which CPython treats as immortal.
-                val itemPointer = PyTuple_GetItem(tuplePointer, i)
+                val itemPointer = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(tuplePointer, i) }
                     ?: throw pyErrorOrGeneric("Failed to get $attrName[$i]")
                 Py_IncRef(itemPointer)
                 list.add(getInstance(itemPointer))
@@ -78,16 +78,16 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
     }
 
     val dict: PyDict by lazy {
-        // TODO: Add null check for PyObject_GetAttrString. And you should replace PyObject_GetAttrString to PyType_GetDict().
-        PyDict(PyObject_GetAttrString(pointer, "__dict__")!!, false)
+        // TODO: Add null check for PyObject_GetAttrString. And you should replace PyObject_GetAttrString to python.multiplatform.ffi.Python3.withPython { PyType_GetDict() }.
+        PyDict(python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(pointer, "__dict__") }!!, false)
 }
 
     init {
         if (!isPyTypeObject()) throw PyException("Object is not a type")
     }
 
-    /** `PyType_IsSubtype(this, other)`, i.e. Python's `issubclass(self, other)`. */
-    fun isSubtypeOf(other: PyType): Boolean = PyType_IsSubtype(pointer, other.pointer) != 0
+    /** `python.multiplatform.ffi.Python3.withPython { PyType_IsSubtype(this, other) }`, i.e. Python's `issubclass(self, other)`. */
+    fun isSubtypeOf(other: PyType): Boolean = python.multiplatform.ffi.Python3.withPython { PyType_IsSubtype(pointer, other.pointer) } != 0
 
     /**
      * Attempts to view [obj] as an instance of this type, raising [PyException]
@@ -101,9 +101,9 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
         return obj
     }
 
-    /** `PyObject_IsInstance(obj, this)`, i.e. Python's `isinstance(obj, self)`. */
+    /** `python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(obj, this) }`, i.e. Python's `isinstance(obj, self)`. */
     fun isInstance(obj: PyObject): Boolean {
-        val result = PyObject_IsInstance(obj.pointer, pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PyObject_IsInstance(obj.pointer, pointer) }
         if (result < 0) throw pyErrorOrGeneric("isinstance() check failed")
         return result != 0
     }
@@ -112,7 +112,7 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
     fun getIterator(): PyIterator {
         // Constructs a fresh, no-argument instance of this type and returns its iterator.
         val instance = invoke()
-        val iterPointer = PyObject_GetIter(instance.pointer)
+        val iterPointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetIter(instance.pointer) }
             ?: throw pyErrorOrGeneric("Instances of '$name' are not iterable")
         return PyIterator(iterPointer, false)
     }
@@ -147,7 +147,7 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
         // the meta-type's __name__ instead of `pointer`'s own __name__, which
         // is the bug this fixes: reading `pointer.__name__` rejects every
         // legitimate type, since e.g. `int.__name__` is "int", never "type").
-        val metaTypePointer: NativePointer = PyObject_Type(pointer) ?: run {
+        val metaTypePointer: NativePointer = python.multiplatform.ffi.Python3.withPython { PyObject_Type(pointer) } ?: run {
             // PyObject_Type basically never fails (every live object has a
             // type), but if it somehow did, it would leave the error
             // indicator set; this method reports "not a type" rather than
@@ -155,12 +155,12 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
             // otherwise it would silently poison whatever Python call runs
             // next (see the *OrNull helpers on PyObject for the same class
             // of bug).
-            PyErr_Clear()
+            python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
             return false
         }
-        val metaTypeNamePointer: NativePointer? = PyObject_GetAttrString(metaTypePointer, "__name__")
-        val metaTypeName: String? = metaTypeNamePointer?.let { PyUnicode_AsUTF8(it) }
-        if (metaTypeNamePointer == null) PyErr_Clear()
+        val metaTypeNamePointer: NativePointer? = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(metaTypePointer, "__name__") }
+        val metaTypeName: String? = metaTypeNamePointer?.let { python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(it) } }
+        if (metaTypeNamePointer == null) python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
 
         metaTypeNamePointer?.let { Py_DecRef(it) }
         Py_DecRef(metaTypePointer)

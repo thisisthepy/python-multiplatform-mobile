@@ -51,9 +51,9 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
     companion object {
         /** The `PyType` for `list` (`builtins.list`). */
         val TYPE: PyType by lazy {
-            val emptyTuple = PyTuple_New(0)
+            val emptyTuple = python.multiplatform.ffi.Python3.withPython { PyTuple_New(0) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to build tuple() scratch buffer")
-            val emptyList = PySequence_List(emptyTuple)
+            val emptyList = python.multiplatform.ffi.Python3.withPython { PySequence_List(emptyTuple) }
             Py_DecRef(emptyTuple)
             if (emptyList == null) throw PyException.fromCurrentError() ?: PyException("Failed to build list() to derive its type")
             deriveTypeAndRelease(emptyList)
@@ -61,15 +61,15 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
 
         /** Builds a new Python `list` containing (references to) [elements], in order. */
         fun fromList(elements: List<PyObject>): PyList {
-            val tuplePtr = PyTuple_New(elements.size.toLong())
+            val tuplePtr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate tuple() scratch buffer")
             elements.forEachIndexed { i, el ->
                 // PyTuple_SetItem steals the reference to its 3rd argument -- incref first so
                 // `el`'s own, independently-managed reference stays valid afterwards.
                 Py_IncRef(el.pointer)
-                PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer)
+                python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
             }
-            val listPtr = PySequence_List(tuplePtr)
+            val listPtr = python.multiplatform.ffi.Python3.withPython { PySequence_List(tuplePtr) }
             Py_DecRef(tuplePtr) // scratch tuple, no longer needed once copied into the list
             if (listPtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to build list()")
             return PyList(listPtr, false)
@@ -84,23 +84,23 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
 
     /** `list.sort()`, backed by `PyList_Sort`. */
     fun sort() {
-        if (PyList_Sort(pointer) != 0) throw PyException.fromCurrentError() ?: PyException("list.sort() failed")
+        if (python.multiplatform.ffi.Python3.withPython { PyList_Sort(pointer) } != 0) throw PyException.fromCurrentError() ?: PyException("list.sort() failed")
     }
 
     /** `list.reverse()`, backed by `PyList_Reverse`. */
     fun reverse() {
-        if (PyList_Reverse(pointer) != 0) throw PyException.fromCurrentError() ?: PyException("list.reverse() failed")
+        if (python.multiplatform.ffi.Python3.withPython { PyList_Reverse(pointer) } != 0) throw PyException.fromCurrentError() ?: PyException("list.reverse() failed")
     }
 
     override val size: Int
-        get() = PyList_Size(pointer).toInt()
+        get() = python.multiplatform.ffi.Python3.withPython { PyList_Size(pointer) }.toInt()
 
     private fun indexKey(index: Int): NativePointer =
-        PyLong_FromLongLong(index.toLong()) ?: throw PyException.fromCurrentError() ?: PyException("Failed to build index object")
+        python.multiplatform.ffi.Python3.withPython { PyLong_FromLongLong(index.toLong()) } ?: throw PyException.fromCurrentError() ?: PyException("Failed to build index object")
 
     override fun get(index: Int): PyObject {
         val key = indexKey(index)
-        val item = PyObject_GetItem(pointer, key)
+        val item = python.multiplatform.ffi.Python3.withPython { PyObject_GetItem(pointer, key) }
         Py_DecRef(key) // scratch index object, new reference, only needed for the lookup itself
         if (item == null) throw PyException.fromCurrentError() ?: PyException("list index out of range: $index")
         return PyObject(item, false) // PyObject_GetItem ("o[key]") returns a new reference
@@ -128,7 +128,7 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
     override fun add(element: PyObject): Boolean {
         // PyList_Append does not steal a reference to `item` (it increfs internally),
         // unlike PyList_SetItem/PyTuple_SetItem.
-        if (PyList_Append(pointer, element.pointer) != 0) {
+        if (python.multiplatform.ffi.Python3.withPython { PyList_Append(pointer, element.pointer) } != 0) {
             throw PyException.fromCurrentError() ?: PyException("Failed to append to list")
         }
         return true
@@ -136,7 +136,7 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
 
     override fun add(index: Int, element: PyObject) {
         // PyList_Insert does not steal a reference to `item`, same as PyList_Append.
-        if (PyList_Insert(pointer, index.toLong(), element.pointer) != 0) {
+        if (python.multiplatform.ffi.Python3.withPython { PyList_Insert(pointer, index.toLong(), element.pointer) } != 0) {
             throw PyException.fromCurrentError() ?: PyException("list.insert($index, ...) failed")
         }
     }
@@ -190,7 +190,7 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
     }
 
     override fun contains(element: PyObject): Boolean {
-        val result = PySequence_Contains(pointer, element.pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PySequence_Contains(pointer, element.pointer) }
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check list membership")
         return result == 1
     }

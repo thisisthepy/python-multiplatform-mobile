@@ -35,9 +35,9 @@ open class PyFrozenSet(pointer: NativePointer, borrowed: Boolean) :
     companion object {
         /** The `PyType` for `frozenset` (`builtins.frozenset`). */
         val TYPE: PyType by lazy {
-            val emptyTuple = PyTuple_New(0)
+            val emptyTuple = python.multiplatform.ffi.Python3.withPython { PyTuple_New(0) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to build tuple() scratch buffer")
-            val emptyFrozenSet = PyFrozenSet_New(emptyTuple)
+            val emptyFrozenSet = python.multiplatform.ffi.Python3.withPython { PyFrozenSet_New(emptyTuple) }
             Py_DecRef(emptyTuple)
             if (emptyFrozenSet == null) throw PyException.fromCurrentError() ?: PyException("Failed to build frozenset() to derive its type")
             deriveTypeAndRelease(emptyFrozenSet)
@@ -45,13 +45,13 @@ open class PyFrozenSet(pointer: NativePointer, borrowed: Boolean) :
 
         /** Builds a new Python `frozenset` containing (references to) [elements]. */
         fun fromSet(elements: Set<PyObject>): PyFrozenSet {
-            val tuplePtr = PyTuple_New(elements.size.toLong())
+            val tuplePtr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate tuple() scratch buffer")
             elements.forEachIndexed { i, el ->
                 Py_IncRef(el.pointer) // PyTuple_SetItem steals; keep `el`'s own reference valid
-                PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer)
+                python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
             }
-            val setPtr = PyFrozenSet_New(tuplePtr)
+            val setPtr = python.multiplatform.ffi.Python3.withPython { PyFrozenSet_New(tuplePtr) }
             Py_DecRef(tuplePtr) // scratch tuple, no longer needed once copied into the frozenset
             if (setPtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to build frozenset()")
             return PyFrozenSet(setPtr, false)
@@ -66,34 +66,34 @@ open class PyFrozenSet(pointer: NativePointer, borrowed: Boolean) :
 
     /** `self | other`, via `PyNumber_Or`. */
     fun union(other: PyFrozenSet): PyFrozenSet {
-        val result = PyNumber_Or(pointer, other.pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PyNumber_Or(pointer, other.pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("frozenset union failed")
         return PyFrozenSet(result, false)
     }
 
     /** `self & other`, via `PyNumber_And`. */
     fun intersection(other: PyFrozenSet): PyFrozenSet {
-        val result = PyNumber_And(pointer, other.pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PyNumber_And(pointer, other.pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("frozenset intersection failed")
         return PyFrozenSet(result, false)
     }
 
     /** `self - other`, via `PyNumber_Subtract`. */
     fun difference(other: PyFrozenSet): PyFrozenSet {
-        val result = PyNumber_Subtract(pointer, other.pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PyNumber_Subtract(pointer, other.pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("frozenset difference failed")
         return PyFrozenSet(result, false)
     }
 
     override val size: Int
-        get() = PySet_Size(pointer).toInt()
+        get() = python.multiplatform.ffi.Python3.withPython { PySet_Size(pointer) }.toInt()
 
     override fun isEmpty(): Boolean = size == 0
 
     override fun iterator(): Iterator<PyObject> = snapshotElements(pointer).iterator()
 
     override fun contains(element: PyObject): Boolean {
-        val result = PySet_Contains(pointer, element.pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PySet_Contains(pointer, element.pointer) }
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check frozenset membership")
         return result == 1
     }

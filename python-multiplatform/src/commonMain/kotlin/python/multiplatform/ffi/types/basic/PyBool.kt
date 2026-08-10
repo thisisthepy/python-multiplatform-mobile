@@ -35,7 +35,7 @@ open class PyBool(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer,
     override var cachedNativeValue: Boolean?
         get() {
             val res = PyObject_IsTrue(pointer)
-            if (res == -1 && PyErr_Occurred() != null) {
+            if (res == -1 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) {
                 throw PyException.fromCurrentError()!!
             }
             return res == 1

@@ -34,7 +34,7 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
     companion object {
         /** The `PyType` for `tuple` (`builtins.tuple`). */
         val TYPE: PyType by lazy {
-            val emptyTuple = PyTuple_New(0)
+            val emptyTuple = python.multiplatform.ffi.Python3.withPython { PyTuple_New(0) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to build tuple() to derive its type")
             deriveTypeAndRelease(emptyTuple)
         }
@@ -47,7 +47,7 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
                 // PyTuple_SetItem steals the reference to its 3rd argument -- incref first so
                 // `el`'s own, independently-managed reference stays valid afterwards.
                 Py_IncRef(el.pointer)
-                PyTuple_SetItem(ptr, i.toLong(), el.pointer)
+                python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(ptr, i.toLong(), el.pointer) }
             }
             return PyTuple(ptr, false) // PyTuple_New already returned a new/owned reference
         }
@@ -58,22 +58,22 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
 
     /** Snapshot conversion to a plain Kotlin list, recursively converting elements ([python.multiplatform.ffi.conversion.ConversionStrategy.NATIVE]). */
     fun toNativeList(): List<Any?> {
-        val count = PyTuple_Size(pointer)
+        val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(pointer) }
         val result = ArrayList<Any?>(count.toInt())
         for (i in 0 until count) {
             // Borrowed reference, valid while `pointer` (this tuple) is alive; wrap it with its
             // own incref'd reference before handing it to the recursive converter.
-            val itemPtr = PyTuple_GetItem(pointer, i)!!
+            val itemPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pointer, i) }!!
             result.add(pyObjectToNative(PyObject(itemPtr, true)))
         }
         return result
     }
 
     override val size: Int
-        get() = PyTuple_Size(pointer).toInt()
+        get() = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(pointer) }.toInt()
 
     override fun get(index: Int): PyObject {
-        val itemPtr = PyTuple_GetItem(pointer, index.toLong())
+        val itemPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pointer, index.toLong()) }
             ?: throw PyException.fromCurrentError() ?: PyException("tuple index out of range: $index")
         // Borrowed reference -- incref so this new wrapper owns its own, independent reference.
         return PyObject(itemPtr, true)
@@ -82,13 +82,13 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
     override fun isEmpty(): Boolean = size == 0
 
     override fun iterator(): Iterator<PyObject> {
-        val iterPtr = PyObject_GetIter(pointer)
+        val iterPtr = python.multiplatform.ffi.Python3.withPython { PyObject_GetIter(pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("Failed to get iterator for tuple")
         return PyIterator(iterPtr, false) // PyObject_GetIter returns a new reference
     }
 
     override fun contains(element: PyObject): Boolean {
-        val result = PySequence_Contains(pointer, element.pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PySequence_Contains(pointer, element.pointer) }
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check tuple membership")
         return result == 1
     }
@@ -96,18 +96,18 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
     override fun containsAll(elements: Collection<PyObject>): Boolean = elements.all { contains(it) }
 
     override fun indexOf(element: PyObject): Int {
-        val count = PyTuple_Size(pointer)
+        val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(pointer) }
         for (i in 0 until count) {
-            val itemPtr = PyTuple_GetItem(pointer, i)!!
+            val itemPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pointer, i) }!!
             if (pyEquals(itemPtr, element.pointer)) return i.toInt()
         }
         return -1
     }
 
     override fun lastIndexOf(element: PyObject): Int {
-        val count = PyTuple_Size(pointer)
+        val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(pointer) }
         for (i in count - 1 downTo 0) {
-            val itemPtr = PyTuple_GetItem(pointer, i)!!
+            val itemPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pointer, i) }!!
             if (pyEquals(itemPtr, element.pointer)) return i.toInt()
         }
         return -1
@@ -133,7 +133,7 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
     override fun listIterator(index: Int): ListIterator<PyObject> = TupleIterator(index)
 
     override fun subList(fromIndex: Int, toIndex: Int): List<PyObject> {
-        val slicePtr = PyTuple_GetSlice(pointer, fromIndex.toLong(), toIndex.toLong())
+        val slicePtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetSlice(pointer, fromIndex.toLong(), toIndex.toLong()) }
             ?: throw PyException.fromCurrentError() ?: PyException("Failed to slice tuple[$fromIndex:$toIndex]")
         return PyTuple(slicePtr, false) // PyTuple_GetSlice returns a new reference
     }

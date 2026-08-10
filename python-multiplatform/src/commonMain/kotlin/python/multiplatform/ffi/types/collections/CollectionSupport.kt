@@ -28,7 +28,7 @@ import python.native.ffi.Py_DecRef
  * operations here (`indexOf`, `retainAll`, ...) work independently of that.
  */
 internal fun pyEquals(a: NativePointer, b: NativePointer): Boolean {
-    val result = PyObject_RichCompareBool(a, b, PyCompareOp.EQ.opId)
+    val result = python.multiplatform.ffi.Python3.withPython { PyObject_RichCompareBool(a, b, PyCompareOp.EQ.opId) }
     if (result == -1) throw PyException.fromCurrentError() ?: PyException("Comparison failed")
     return result == 1
 }
@@ -40,7 +40,7 @@ internal fun pyEquals(a: NativePointer, b: NativePointer): Boolean {
  * collection wrapper's `TYPE` companion property.
  */
 internal fun deriveTypeAndRelease(instancePointer: NativePointer): PyType {
-    val typePtr = PyObject_Type(instancePointer)
+    val typePtr = python.multiplatform.ffi.Python3.withPython { PyObject_Type(instancePointer) }
         ?: throw PyException.fromCurrentError() ?: PyException("Failed to get PyType of scratch instance")
     Py_DecRef(instancePointer) // only needed to read its type; release the scratch instance itself
     return PyType.getInstance(typePtr)
@@ -56,15 +56,15 @@ internal fun deriveTypeAndRelease(instancePointer: NativePointer): PyType {
  * while iterating it directly is undefined behaviour in CPython.
  */
 internal fun snapshotElements(pointer: NativePointer): List<PyObject> {
-    val tuplePtr = PySequence_Tuple(pointer)
+    val tuplePtr = python.multiplatform.ffi.Python3.withPython { PySequence_Tuple(pointer) }
         ?: throw PyException.fromCurrentError() ?: PyException("Failed to snapshot elements (PySequence_Tuple failed)")
-    val count = PyTuple_Size(tuplePtr)
+    val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(tuplePtr) }
     val result = ArrayList<PyObject>(count.toInt())
     for (i in 0 until count) {
         // Borrowed reference into tuplePtr, valid only while tuplePtr is alive -- wrap with
         // borrowed = true so each element gets its own independent, incref'd reference before
         // the scratch tuple below is released.
-        val itemPtr = PyTuple_GetItem(tuplePtr, i)!!
+        val itemPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(tuplePtr, i) }!!
         result.add(PyObject(itemPtr, true))
     }
     Py_DecRef(tuplePtr) // scratch snapshot tuple, new reference, no longer needed
@@ -97,15 +97,15 @@ internal fun snapshotElements(pointer: NativePointer): List<PyObject> {
 internal fun pyObjectToNative(obj: PyObject): Any? {
     if (PyNone.isNone(obj)) return null
 
-    val typePtr = PyObject_Type(obj.pointer)
+    val typePtr = python.multiplatform.ffi.Python3.withPython { PyObject_Type(obj.pointer) }
         ?: throw PyException.fromCurrentError() ?: PyException("Failed to get the type of this object")
     try {
         return when (typePtr) {
             // bool is a subtype of int at the C level; PyLong_AsLongLong works on it directly.
-            PyTypeChecks.boolType -> PyLong_AsLongLong(obj.pointer) != 0L
-            PyTypeChecks.intType -> PyLong_AsLongLong(obj.pointer)
-            PyTypeChecks.floatType -> PyFloat_AsDouble(obj.pointer)
-            PyTypeChecks.strType -> PyUnicode_AsUTF8(obj.pointer) ?: ""
+            PyTypeChecks.boolType -> python.multiplatform.ffi.Python3.withPython { PyLong_AsLongLong(obj.pointer) } != 0L
+            PyTypeChecks.intType -> python.multiplatform.ffi.Python3.withPython { PyLong_AsLongLong(obj.pointer) }
+            PyTypeChecks.floatType -> python.multiplatform.ffi.Python3.withPython { PyFloat_AsDouble(obj.pointer) }
+            PyTypeChecks.strType -> python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(obj.pointer) } ?: ""
             PyTypeChecks.listType -> PyList(obj.pointer, true).toNativeList()
             PyTypeChecks.tupleType -> PyTuple(obj.pointer, true).toNativeList()
             PyTypeChecks.dictType -> PyDict(obj.pointer, true).toNativeMap()

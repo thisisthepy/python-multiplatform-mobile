@@ -60,6 +60,12 @@ object bindings {
     external fun PyEval_InitThreads()
     external fun PyThreadState_GetDict(): JNIPointer?
 
+    external fun PyGILState_Ensure(): Int
+    external fun PyGILState_Release(state: Int)
+    external fun PyGILState_GetThisThreadState(): JNIPointer?
+    external fun PyEval_SaveThread(): JNIPointer?
+    external fun PyEval_RestoreThread(tstate: JNIPointer)
+
 
     // Section 2
     external fun PyRun_SimpleString(command: String): Int // 수동 추가

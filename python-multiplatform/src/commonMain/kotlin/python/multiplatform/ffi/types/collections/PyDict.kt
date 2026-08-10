@@ -39,17 +39,17 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
     companion object {
         /** The `PyType` for `dict` (`builtins.dict`). */
         val TYPE: PyType by lazy {
-            val emptyDict = PyDict_New()
+            val emptyDict = python.multiplatform.ffi.Python3.withPython { PyDict_New() }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to build dict() to derive its type")
             deriveTypeAndRelease(emptyDict)
         }
 
         /** Builds a new Python `dict` from [map], preserving key/value object identity. */
         fun fromMap(map: Map<PyObject, PyObject>): PyDict {
-            val dictPtr = PyDict_New() ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate dict")
+            val dictPtr = python.multiplatform.ffi.Python3.withPython { PyDict_New() } ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate dict")
             for ((k, v) in map) {
                 // PyDict_SetItem does not steal references to either key or value.
-                if (PyDict_SetItem(dictPtr, k.pointer, v.pointer) != 0) {
+                if (python.multiplatform.ffi.Python3.withPython { PyDict_SetItem(dictPtr, k.pointer, v.pointer) } != 0) {
                     throw PyException.fromCurrentError() ?: PyException("Failed to populate dict")
                 }
             }
@@ -84,17 +84,17 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
 
     /** One-shot, consistent `(key, value)` snapshot via `PyDict_Items` (avoids separate `Keys`/`Values` calls drifting out of sync). */
     private fun snapshotEntries(): List<DictEntry> {
-        val itemsPtr = PyDict_Items(pointer)
+        val itemsPtr = python.multiplatform.ffi.Python3.withPython { PyDict_Items(pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("PyDict_Items failed")
-        val itemsTuplePtr = PyList_AsTuple(itemsPtr)
+        val itemsTuplePtr = python.multiplatform.ffi.Python3.withPython { PyList_AsTuple(itemsPtr) }
         Py_DecRef(itemsPtr) // list of (k, v) 2-tuples, new reference, no longer needed once copied
         if (itemsTuplePtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to snapshot dict items")
-        val count = PyTuple_Size(itemsTuplePtr)
+        val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(itemsTuplePtr) }
         val result = ArrayList<DictEntry>(count.toInt())
         for (i in 0 until count) {
-            val pairPtr = PyTuple_GetItem(itemsTuplePtr, i)!! // borrowed, valid while itemsTuplePtr is alive
-            val keyPtr = PyTuple_GetItem(pairPtr, 0)!! // borrowed
-            val valPtr = PyTuple_GetItem(pairPtr, 1)!! // borrowed
+            val pairPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(itemsTuplePtr, i) }!! // borrowed, valid while itemsTuplePtr is alive
+            val keyPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pairPtr, 0) }!! // borrowed
+            val valPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pairPtr, 1) }!! // borrowed
             result.add(DictEntry(PyObject(keyPtr, true), PyObject(valPtr, true), this))
         }
         Py_DecRef(itemsTuplePtr)
@@ -170,22 +170,22 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
         }
 
     override val size: Int
-        get() = PyDict_Size(pointer).toInt()
+        get() = python.multiplatform.ffi.Python3.withPython { PyDict_Size(pointer) }.toInt()
 
     override fun clear() {
-        PyDict_Clear(pointer)
+        python.multiplatform.ffi.Python3.withPython { PyDict_Clear(pointer) }
     }
 
     override fun containsKey(key: PyObject): Boolean {
-        val result = PyDict_Contains(pointer, key.pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PyDict_Contains(pointer, key.pointer) }
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check dict key membership")
         return result == 1
     }
 
     override fun containsValue(value: PyObject): Boolean {
-        val valuesPtr = PyDict_Values(pointer)
+        val valuesPtr = python.multiplatform.ffi.Python3.withPython { PyDict_Values(pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("PyDict_Values failed")
-        val result = PySequence_Contains(valuesPtr, value.pointer)
+        val result = python.multiplatform.ffi.Python3.withPython { PySequence_Contains(valuesPtr, value.pointer) }
         Py_DecRef(valuesPtr) // new reference to a list, no longer needed
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check dict value membership")
         return result == 1
@@ -194,7 +194,7 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
     override fun get(key: PyObject): PyObject? {
         // PyDict_GetItem returns a borrowed reference (and, unusually, suppresses errors --
         // null unambiguously means "missing key" here, not "error").
-        val item = PyDict_GetItem(pointer, key.pointer) ?: return null
+        val item = python.multiplatform.ffi.Python3.withPython { PyDict_GetItem(pointer, key.pointer) } ?: return null
         return PyObject(item, true)
     }
 

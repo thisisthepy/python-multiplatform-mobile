@@ -7,7 +7,7 @@ import kotlin.jvm.JvmInline
  * Runs given [block] providing allocation of memory
  * which will be automatically disposed at the end of this scope.
  */
-expect inline fun <R : Any> memScoped(block: () -> R): R
+expect inline fun <R> memScoped(block: () -> R): R
 
 
 interface AddressValue
@@ -521,6 +521,15 @@ expect inline fun PyEval_InitThreads()
  * no current thread state is available.
  */
 expect fun PyThreadState_GetDict(): NativePointer?
+
+/**
+ * Thread-state and GIL management bindings
+ */
+expect inline fun PyGILState_Ensure(): Int
+expect inline fun PyGILState_Release(state: Int)
+expect fun PyGILState_GetThisThreadState(): NativePointer?
+expect fun PyEval_SaveThread(): NativePointer?
+expect inline fun PyEval_RestoreThread(tstate: NativePointer)
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

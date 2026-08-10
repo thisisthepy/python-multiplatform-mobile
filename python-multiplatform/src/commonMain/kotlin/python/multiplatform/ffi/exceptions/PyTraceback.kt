@@ -28,9 +28,9 @@ class PyTraceback(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer,
     /** The line number that was executing in this frame when the exception propagated through it. */
     val lineNumber: Int
         get() {
-            val linenoPointer = PyObject_GetAttrString(pointer, "tb_lineno")
+            val linenoPointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(pointer, "tb_lineno") }
                 ?: throw pyErrorOrGeneric("Failed to read tb_lineno")
-            val value = PyLong_AsInt(linenoPointer)
+            val value = python.multiplatform.ffi.Python3.withPython { PyLong_AsInt(linenoPointer) }
             Py_DecRef(linenoPointer)
             return value
         }
@@ -43,25 +43,25 @@ class PyTraceback(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer,
             // indicator the failed lookup left set (see the *OrNull helpers
             // on PyObject for the same "don't call back into the C API with
             // a pending exception" contract).
-            val framePointer = PyObject_GetAttrString(pointer, "tb_frame") ?: run {
-                PyErr_Clear()
+            val framePointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(pointer, "tb_frame") } ?: run {
+                python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
                 return null
             }
-            val codePointer = PyObject_GetAttrString(framePointer, "f_code")
+            val codePointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(framePointer, "f_code") }
             Py_DecRef(framePointer)
             if (codePointer == null) {
-                PyErr_Clear()
+                python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
                 return null
             }
 
-            val filenamePointer = PyObject_GetAttrString(codePointer, "co_filename")
+            val filenamePointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(codePointer, "co_filename") }
             Py_DecRef(codePointer)
             if (filenamePointer == null) {
-                PyErr_Clear()
+                python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
                 return null
             }
 
-            val name = PyUnicode_AsUTF8(filenamePointer)
+            val name = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(filenamePointer) }
             Py_DecRef(filenamePointer)
             return name
         }
@@ -73,8 +73,8 @@ class PyTraceback(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer,
             // of the chain; PyObject_GetAttrString hands back a new reference
             // either way, which the returned PyTraceback (borrowed = false)
             // then owns.
-            val nextPointer = PyObject_GetAttrString(pointer, "tb_next") ?: run {
-                PyErr_Clear()
+            val nextPointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(pointer, "tb_next") } ?: run {
+                python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
                 return null
             }
             if (nextPointer.isNoneObject()) {

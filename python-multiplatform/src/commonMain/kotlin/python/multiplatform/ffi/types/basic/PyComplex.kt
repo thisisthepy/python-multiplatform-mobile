@@ -5,6 +5,8 @@ import python.multiplatform.ffi.PyType
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.exceptions.PyException
 import python.native.ffi.NativePointer
+import python.native.ffi.PyDict_GetItemString
+import python.native.ffi.PyEval_GetBuiltins
 import python.native.ffi.PyFloat_AsDouble
 import python.native.ffi.PyObject_CallObject
 import python.native.ffi.PyTuple_New
@@ -30,20 +32,20 @@ open class PyComplex(pointer: NativePointer, borrowed: Boolean) : PyObject(point
 
         /** Constructs a new `complex(real, imag)` object. */
         fun from(real: Double, imag: Double): PyComplex {
-            val builtins = python.native.ffi.PyEval_GetBuiltins() ?: throw PyException.fromCurrentError()!!
-            val complexTypePtr = python.native.ffi.PyDict_GetItemString(builtins, "complex") ?: throw PyException.fromCurrentError()!!
+            val builtins = python.multiplatform.ffi.Python3.withPython { PyEval_GetBuiltins() } ?: throw PyException.fromCurrentError()!!
+            val complexTypePtr = python.multiplatform.ffi.Python3.withPython { PyDict_GetItemString(builtins, "complex") } ?: throw PyException.fromCurrentError()!!
             
-            val args = PyTuple_New(2) ?: throw PyException.fromCurrentError()!!
+            val args = python.multiplatform.ffi.Python3.withPython { PyTuple_New(2) } ?: throw PyException.fromCurrentError()!!
             val realObj = PyFloat.from(real)
             val imagObj = PyFloat.from(imag)
             
             Py_IncRef(realObj.pointer)
-            PyTuple_SetItem(args, 0, realObj.pointer)
+            python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(args, 0, realObj.pointer) }
             
             Py_IncRef(imagObj.pointer)
-            PyTuple_SetItem(args, 1, imagObj.pointer)
+            python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(args, 1, imagObj.pointer) }
             
-            val resPtr = PyObject_CallObject(complexTypePtr, args)
+            val resPtr = python.multiplatform.ffi.Python3.withPython { PyObject_CallObject(complexTypePtr, args) }
             Py_DecRef(args)
             realObj.clean()
             imagObj.clean()
@@ -58,7 +60,7 @@ open class PyComplex(pointer: NativePointer, borrowed: Boolean) : PyObject(point
             val realAttr = getAttr("real")
             val res = PyFloat_AsDouble(realAttr.pointer)
             realAttr.clean()
-            if (res == -1.0 && PyErr_Occurred() != null) throw PyException.fromCurrentError()!!
+            if (res == -1.0 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
             return res
         }
 
@@ -67,7 +69,7 @@ open class PyComplex(pointer: NativePointer, borrowed: Boolean) : PyObject(point
             val imagAttr = getAttr("imag")
             val res = PyFloat_AsDouble(imagAttr.pointer)
             imagAttr.clean()
-            if (res == -1.0 && PyErr_Occurred() != null) throw PyException.fromCurrentError()!!
+            if (res == -1.0 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
             return res
         }
 }

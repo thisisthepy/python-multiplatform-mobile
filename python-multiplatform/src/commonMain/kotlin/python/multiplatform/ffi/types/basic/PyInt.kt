@@ -38,7 +38,7 @@ open class PyInt(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, 
     override var cachedNativeValue: Long?
         get() {
             val res = PyLong_AsLongLong(pointer)
-            if (res == -1L && PyErr_Occurred() != null) {
+            if (res == -1L && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) {
                 throw PyException.fromCurrentError()!!
             }
             return res
@@ -61,12 +61,12 @@ open class PyInt(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, 
         return PyInt(res, false)
     }
     operator fun compareTo(other: PyInt): Int {
-        val resLT = PyObject_RichCompareBool(pointer, other.pointer, PyCompareOp.LT.opId)
-        if (resLT == -1 && PyErr_Occurred() != null) throw PyException.fromCurrentError()!!
+        val resLT = python.multiplatform.ffi.Python3.withPython { PyObject_RichCompareBool(pointer, other.pointer, PyCompareOp.LT.opId) }
+        if (resLT == -1 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
         if (resLT == 1) return -1
         
-        val resGT = PyObject_RichCompareBool(pointer, other.pointer, PyCompareOp.GT.opId)
-        if (resGT == -1 && PyErr_Occurred() != null) throw PyException.fromCurrentError()!!
+        val resGT = python.multiplatform.ffi.Python3.withPython { PyObject_RichCompareBool(pointer, other.pointer, PyCompareOp.GT.opId) }
+        if (resGT == -1 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
         if (resGT == 1) return 1
         return 0
     }
