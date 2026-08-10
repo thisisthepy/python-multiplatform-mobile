@@ -249,3 +249,66 @@ Android 쪽이 더 빠를 수는 없다. 다만 **얼마나 다른지는 측정�
 
 이 결정 전에는 `EmbedAPI.jvm.kt` 통합을 진행할 수 없다. Android 가 조립 단위를 쓰면 잘게 쪼갠 330개
 `expect` 를 구현하지 않게 되기 때문이다.
+
+---
+
+## Measured: what the JNI calling convention actually costs (2026-08-11)
+
+Every overhead figure in this document before this section was quoted from external
+benchmarks or inferred from source. This section is the first measurement taken in this
+project, and it contradicts the assumption the Android design was built on.
+
+### Method
+
+`echo0`, `echoFast` and `echoNormal` are the same one-line C body — `jlong f(jlong x)
+{ return x; }` — registered three times under the three conventions
+(`artMain/cinterop/jni_onload.def`). The callee work is identical and negligible, so the
+difference between them is the transition and nothing else. A pure-Kotlin identity call is
+measured alongside as the floor and subtracted.
+
+All variants are warmed up before any are timed, and rounds interleave all four, so drift
+hits them equally. Best-of-7 rounds, 2,000,000 iterations each. `JniOverheadBenchmark`.
+
+### Result — net of the Kotlin floor, ns/call
+
+| convention | API 26 (Android 8.0) | API 34 (Android 14) |
+|---|---|---|
+| `@CriticalNative` | **1.86** | **24.43** |
+| `@FastNative` | 38.58 | 1.99 |
+| ordinary JNI | 45.56 | 8.05 |
+
+The two devices are inverted. On API 26 `@CriticalNative` is ~24x cheaper than ordinary
+JNI, which is what the design predicted. On API 34 it is the *most* expensive of the three
+— 3x worse than ordinary JNI and 12x worse than `@FastNative`.
+
+### What was ruled out
+
+- **Measurement order.** An earlier version warmed and timed one variant at a time; whichever
+  native variant went first looked anomalous. Interleaving changed nothing: API 26 stayed at
+  1.86, API 34 stayed at 24.43.
+- **GC starvation from the tight loop.** A `@CriticalNative` call blocks GC, so millions of
+  them back to back could have been charging collector waits to the loop. Re-measured at
+  20,000 iterations instead of 2,000,000: API 34 critical stayed at 26.49 net. Batch size is
+  not the explanation.
+- **Registration silently failing.** `argumentsArriveUnshifted` passes on both devices, so the
+  critical convention *is* in effect on API 34 — arguments arrive unshifted. It is correct
+  there, just slow.
+
+### What is not known
+
+Why API 34 is slow has not been established. The inversion is suspiciously symmetric — each
+device looks like it honours exactly one of the two annotations on a fast path and routes the
+other through a generic trampoline that is correct but slow. That is a hypothesis, not a
+finding.
+
+These are emulators under Apple Silicon virtualisation. Absolute nanoseconds say nothing about
+real hardware, and the inversion itself may be an emulator artefact. **Before acting on this,
+measure on physical devices at both API levels.**
+
+### Consequence for the design
+
+If this holds on hardware, the current design is optimal at minSdk and worst-case on modern
+Android, which is backwards from where the users are. The fix would be to pick the convention
+per API level. The annotation is compile-time, so that means declaring both variants and
+dispatching on `Build.VERSION.SDK_INT` — a branch costing ~1-2ns to avoid ~22ns. Not done yet,
+because it should not be built on emulator numbers alone.

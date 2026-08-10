@@ -57,6 +57,15 @@ object bindings {
     @JvmStatic
     @dalvik.annotation.optimization.CriticalNative
     external fun echo2(x: Long): Long
+
+    // Same C body as echo0, bound under the other two conventions so a benchmark can
+    // isolate the transition cost. See jni_onload.def.
+    @JvmStatic
+    external fun echoNormal(x: Long): Long
+    @JvmStatic
+    @dalvik.annotation.optimization.FastNative
+    external fun echoFast(x: Long): Long
+
     @JvmStatic
     @dalvik.annotation.optimization.CriticalNative
     external fun Py_IsInitialized(): Int

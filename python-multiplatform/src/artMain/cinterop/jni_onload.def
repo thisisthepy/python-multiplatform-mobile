@@ -18,6 +18,17 @@ jlong critical_echo0(jlong x) { return x; }
 jlong critical_echo1(jlong x) { return x; }
 jlong critical_echo2(jlong x) { return x; }
 
+/*
+ * Same one-line body, three calling conventions, so a benchmark can subtract
+ * everything except the transition itself.
+ *
+ * @CriticalNative gets no JNIEnv or jclass at all; @FastNative and ordinary JNI
+ * both receive them, and differ only in whether ART performs the GC
+ * thread-state transition around the call.
+ */
+jlong normal_echo(JNIEnv *env, jclass clazz, jlong x) { return x; }
+jlong fast_echo(JNIEnv *env, jclass clazz, jlong x) { return x; }
+
 int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -40,8 +51,10 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyErr_Occurred", "()J", (void *)&PyErr_Occurred},
         {"echo0", "(J)J", (void *)&critical_echo0},
         {"echo1", "(J)J", (void *)&critical_echo1},
-        {"echo2", "(J)J", (void *)&critical_echo2}
+        {"echo2", "(J)J", (void *)&critical_echo2},
+        {"echoNormal", "(J)J", (void *)&normal_echo},
+        {"echoFast", "(J)J", (void *)&fast_echo}
     };
-    (*env)->RegisterNatives(env, clazz, methods, 14);
+    (*env)->RegisterNatives(env, clazz, methods, 16);
     return JNI_VERSION_1_6;
 }
