@@ -65,3 +65,66 @@ Currently, Kotlin/Wasm cannot dynamically link directly to an arbitrary C WebAss
 2. **Downcalls (Kotlin to Python):** Write a Kotlin `external` module that binds to `Module._Py*` functions on the Emscripten JS object. Implement `EmbedAPI.wasmJs.kt` to call these.
 3. **Upcalls (Python to Kotlin):** Use Emscripten's `addFunction` via JS interop to register 4 static Kotlin `@JsExport` trampolines, returning function pointers to hand to Python.
 4. **Pointer Optimization:** If boxing in `NativePointer(val address: Any)` proves too slow in WasmGC, consider refactoring the `expect` class to use a concrete `Long` across all platforms (which JVM/Native already use natively) to avoid allocations.
+
+---
+
+## Addendum: correcting two framing errors
+
+### Kotlin/Native once had a wasm target, and it was removed
+
+The analysis above assumed Kotlin/Wasm is the only route. That is true today, but not for a
+fundamental reason.
+
+Kotlin/Native used to ship a `wasm32` target built through LLVM, producing linear-memory
+WebAssembly with a C ABI — the same memory model an Emscripten build of CPython uses. That target
+could in principle have used `cinterop`, exactly as the iOS target does today. JetBrains
+**deprecated it in Kotlin 1.8.20 and removed it in 1.9.20**, in favour of the Kotlin/Wasm
+toolchain, which skips LLVM and is built on WasmGC.
+
+The consequence is that the JS bridge is forced by *tooling*, not by WebAssembly itself:
+
+- Kotlin/Wasm is WasmGC-based, so its memory model differs from C's linear memory.
+- Kotlin/Wasm has no `cinterop` at all. `wasmJs` offers JS interop; `wasmWasi` offers WASI syscalls.
+
+This project targets Kotlin 2.0.20, so the `wasm32` target is long gone and pinning to 1.9.10 is
+not viable — the rest of the toolchain requires 2.0.x.
+
+### The dependency is CPython's own WASM support, not Pyodide
+
+Pyodide is a downstream distribution carrying its own patches. A library that intends to be a
+standard multiplatform binding should build CPython from source for a WASM target rather than
+depend on Pyodide.
+
+Where CPython's own support actually stands:
+
+| Target | CPython 3.13 | CPython 3.14 |
+|---|---|---|
+| `wasm32-wasi` | Tier 2 (officially supported) | Tier 2 |
+| `wasm32-emscripten` | Not a PEP 11 platform | Tier 3, via PEP 776 |
+
+[PEP 776](https://peps.python.org/pep-0776/) is Active, targets 3.14, and formalises Emscripten at
+Tier 3. Three of its details bear directly on this design:
+
+1. **Only static linking is supported.** The PEP states it is only supported to statically link the
+   interpreter; dynamic linking is unsupported because `EM_JS` functions behave differently in
+   dynamic builds. CPython therefore cannot be dynamically loaded into another WebAssembly module.
+2. **The build produces an `.mjs` plus `.wasm` pair.** A JavaScript runtime layer is intrinsic to
+   the Emscripten build; it is not something an integration can route around.
+3. **No official python.org distribution is mandated** — binaries continue to come from downstream,
+   i.e. Pyodide. Avoiding Pyodide as a *dependency* therefore means building CPython from source
+   ourselves, not that an upstream binary exists to use instead.
+
+Because Kotlin/Wasm cannot statically link C code, and CPython cannot be dynamically linked into
+another module, the browser architecture is necessarily three parts: the CPython Emscripten module,
+the Kotlin/Wasm module, and JavaScript coordinating them. That holds regardless of which approach
+is taken.
+
+`wasm32-wasi` is the better-supported target on the CPython side, but there is no JavaScript host to
+act as glue, and Kotlin/Wasm's `wasmWasi` cannot link a C module. Bridging the two awaits the WASM
+Component Model.
+
+### Practical consequence
+
+Official Emscripten support arrives in **CPython 3.14**. This project is pinned to 3.13, where
+Emscripten has no PEP 11 status at all. WASM support therefore implies moving the embedded
+interpreter to 3.14 or later.
