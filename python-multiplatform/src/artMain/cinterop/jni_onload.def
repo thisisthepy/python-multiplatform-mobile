@@ -39,6 +39,26 @@ jlong fast_echo(JNIEnv *env, jclass clazz, jlong x) { return x; }
 jlong pylistsize_fast(JNIEnv *env, jclass clazz, jlong l) { return PyList_Size(l); }
 jlong pylistsize_normal(JNIEnv *env, jclass clazz, jlong l) { return PyList_Size(l); }
 
+/*
+ * @FastNative counterparts of the migrated functions.
+ *
+ * Measurement (see docs/downcall-design.md) shows @CriticalNative is effectively free up to
+ * API 33 and collapses at 34, while @FastNative is the reverse. Both are registered so the
+ * Kotlin side can pick per API level. @FastNative keeps JNIEnv and jclass, so these need the
+ * leading parameters that the critical registrations must not have.
+ */
+static void f_Py_Initialize(JNIEnv *e, jclass c) { Py_Initialize(); }
+static jint f_Py_IsInitialized(JNIEnv *e, jclass c) { return Py_IsInitialized(); }
+static void f_Py_Finalize(JNIEnv *e, jclass c) { Py_Finalize(); }
+static void f_PyErr_Clear(JNIEnv *e, jclass c) { PyErr_Clear(); }
+static jlong f_PyLong_FromLongLong(JNIEnv *e, jclass c, jlong v) { return PyLong_FromLongLong(v); }
+static jlong f_PyList_Size(JNIEnv *e, jclass c, jlong l) { return PyList_Size(l); }
+static jint f_PyRun_SimpleString(JNIEnv *e, jclass c, jlong s) { return PyRun_SimpleString((const char*)s); }
+static jlong f_Py_GetVersion(JNIEnv *e, jclass c) { return (jlong)Py_GetVersion(); }
+static jlong f_PyImport_ImportModule(JNIEnv *e, jclass c, jlong n) { return PyImport_ImportModule((const char*)n); }
+static jlong f_PyObject_GetAttrString(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_GetAttrString(o, (const char*)n); }
+static jlong f_PyErr_Occurred(JNIEnv *e, jclass c) { return PyErr_Occurred(); }
+
 int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -65,8 +85,20 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"echoNormal", "(J)J", (void *)&normal_echo},
         {"echoFast", "(J)J", (void *)&fast_echo},
         {"PyList_SizeFast", "(J)J", (void *)&pylistsize_fast},
-        {"PyList_SizeNormal", "(J)J", (void *)&pylistsize_normal}
+        {"PyList_SizeNormal", "(J)J", (void *)&pylistsize_normal},
+
+        {"Py_InitializeF", "()V", (void *)&f_Py_Initialize},
+        {"Py_IsInitializedF", "()I", (void *)&f_Py_IsInitialized},
+        {"Py_FinalizeF", "()V", (void *)&f_Py_Finalize},
+        {"PyErr_ClearF", "()V", (void *)&f_PyErr_Clear},
+        {"PyLong_FromLongLongF", "(J)J", (void *)&f_PyLong_FromLongLong},
+        {"PyList_SizeF", "(J)J", (void *)&f_PyList_Size},
+        {"PyRun_SimpleStringF", "(J)I", (void *)&f_PyRun_SimpleString},
+        {"Py_GetVersionF", "()J", (void *)&f_Py_GetVersion},
+        {"PyImport_ImportModuleF", "(J)J", (void *)&f_PyImport_ImportModule},
+        {"PyObject_GetAttrStringF", "(JJ)J", (void *)&f_PyObject_GetAttrString},
+        {"PyErr_OccurredF", "()J", (void *)&f_PyErr_Occurred}
     };
-    (*env)->RegisterNatives(env, clazz, methods, 18);
+    (*env)->RegisterNatives(env, clazz, methods, 29);
     return JNI_VERSION_1_6;
 }

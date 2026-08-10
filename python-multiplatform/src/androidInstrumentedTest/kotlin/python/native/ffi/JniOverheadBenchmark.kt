@@ -223,4 +223,54 @@ class JniOverheadBenchmark {
         Log.i(TAG, String.format("ordinary JNI     %8.2f ns/call", bestNormal))
         Log.i(TAG, "sink=$sink")
     }
+
+
+    /**
+     * Checks that [bindings.preferFastNative] actually names the faster convention here.
+     *
+     * The threshold in that flag comes from measurement on API 26/30/31/33/34/36, not from a
+     * rule ART documents, so nothing stops a future release from moving it again. Rather than
+     * trusting the constant, this measures both conventions on whatever device is running and
+     * fails if the flag disagrees with the result.
+     *
+     * A failure here does not mean the dispatch is broken -- it means the boundary moved and
+     * the threshold needs re-deriving. The margin required is deliberately wide, since the two
+     * are genuinely close around API 33 and a coin-flip there is not worth failing over.
+     */
+    @Test
+    fun dispatchPicksTheFasterConventionOnThisDevice() {
+        var w = 0L
+        repeat(WARMUP) { i -> w += bindings.echo0(i.toLong()) + bindings.echoFast(i.toLong()) }
+        sink += w
+
+        var bestCritical = Double.MAX_VALUE
+        var bestFast = Double.MAX_VALUE
+        repeat(ROUNDS) {
+            timeOnce { bindings.echo0(it) }.let { if (it < bestCritical) bestCritical = it }
+            timeOnce { bindings.echoFast(it) }.let { if (it < bestFast) bestFast = it }
+        }
+
+        val flag = bindings.preferFastNative
+        Log.i(TAG, "--- dispatch check, API ${Build.VERSION.SDK_INT} ---")
+        Log.i(TAG, String.format("preferFastNative=%s   critical %.2f ns   fast %.2f ns", flag, bestCritical, bestFast))
+        Log.i(TAG, "sink=$sink")
+
+        // Only complain when one convention is clearly ahead; a 2x gap is far below the ~10-20x
+        // separation seen on every device measured so far, and far above ordinary jitter.
+        val criticalClearlyBetter = bestCritical * 2 < bestFast
+        val fastClearlyBetter = bestFast * 2 < bestCritical
+        if (criticalClearlyBetter) {
+            assertTrue(
+                "API ${Build.VERSION.SDK_INT}: @CriticalNative measured clearly faster " +
+                    "($bestCritical vs $bestFast ns) but preferFastNative is true",
+                !flag,
+            )
+        } else if (fastClearlyBetter) {
+            assertTrue(
+                "API ${Build.VERSION.SDK_INT}: @FastNative measured clearly faster " +
+                    "($bestFast vs $bestCritical ns) but preferFastNative is false",
+                flag,
+            )
+        }
+    }
 }

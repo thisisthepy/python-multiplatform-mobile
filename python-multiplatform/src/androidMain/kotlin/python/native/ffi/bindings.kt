@@ -80,6 +80,38 @@ object bindings {
     @JvmStatic
     external fun PyList_SizeNormal(list: Long): Long
 
+    // ---- @FastNative twins of the migrated functions ----
+    //
+    // ART fast-paths @CriticalNative up to API 33 and @FastNative from 34 onward; each is
+    // roughly 20x the other on the wrong side of that line (docs/downcall-design.md). Both
+    // are declared so EmbedAPI.android.kt can select per device. @FastNative still receives
+    // JNIEnv and jclass, hence the separate C wrappers in jni_onload.def.
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun Py_InitializeF()
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun Py_IsInitializedF(): Int
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun Py_FinalizeF()
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyErr_ClearF()
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyLong_FromLongLongF(v: Long): Long
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyList_SizeF(list: Long): Long
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyRun_SimpleStringF(command: Long): Int
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun Py_GetVersionF(): Long
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyImport_ImportModuleF(name: Long): Long
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyObject_GetAttrStringF(o: Long, name: Long): Long
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyErr_OccurredF(): Long
+
+    /**
+     * Which JNI calling convention this device fast-paths.
+     *
+     * Measured, not guessed: @CriticalNative is at or below the timing floor from API 26
+     * through 33 and costs ~24ns on 34 and ~44ns on API 36 hardware, while @FastNative is
+     * ~24-39ns through API 31 and ~2ns from 33 on. Both are cheap at 33, so the threshold is
+     * placed where being off by one costs the least. See docs/downcall-design.md.
+     *
+     * Read once into a static final so the JIT folds the branch at each call site.
+     */
+    @JvmStatic
+    val preferFastNative: Boolean =
+        android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE
+
     @JvmStatic
     @dalvik.annotation.optimization.CriticalNative
     external fun Py_IsInitialized(): Int

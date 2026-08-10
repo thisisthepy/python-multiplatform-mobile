@@ -75,17 +75,17 @@ actual inline fun PyUnicode_AsUTF8(unicode: NativePointer): String? =
 
 //**************************************************
 // Section 1
-actual inline fun Py_Initialize() = python.native.ffi.bindings.Py_Initialize()
+actual inline fun Py_Initialize() = if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.Py_InitializeF() else python.native.ffi.bindings.Py_Initialize()
 actual inline fun Py_InitializeEx(initsigs: Int) = python.native.ffi.bindings.Py_InitializeEx(initsigs)
-actual inline fun Py_IsInitialized(): Int = python.native.ffi.bindings.Py_IsInitialized()
+actual inline fun Py_IsInitialized(): Int = if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.Py_IsInitializedF() else python.native.ffi.bindings.Py_IsInitialized()
 actual inline fun Py_IsFinalizing(): Int = python.native.ffi.bindings.Py_IsFinalizing()
 actual inline fun Py_FinalizeEx(): Int = python.native.ffi.bindings.Py_FinalizeEx()
-actual inline fun Py_Finalize() = python.native.ffi.bindings.Py_Finalize()
+actual inline fun Py_Finalize() = if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.Py_FinalizeF() else python.native.ffi.bindings.Py_Finalize()
 // actual inline fun Py_BytesMain(argc: Int, argv: List<String>): Int // 수동 추가
 actual inline fun Py_RunMain(): Int = python.native.ffi.bindings.Py_RunMain() // 수동 추가
 actual inline fun Py_GetVersion(): String? {
     // CPython-owned const char* return value. JVM side must NOT free it.
-    val ptr = python.native.ffi.bindings.Py_GetVersion()
+    val ptr = if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.Py_GetVersionF() else python.native.ffi.bindings.Py_GetVersion()
     return if (ptr != 0L) python.native.ffi.bindings.ffiReadUtf8(ptr) else null
 }
 actual inline fun Py_GetPlatform(): String? = python.native.ffi.bindings.Py_GetPlatform()
@@ -106,7 +106,7 @@ actual inline fun PyEval_RestoreThread(tstate: NativePointer) = python.native.ff
 actual inline fun PyRun_SimpleString(command: String): Int { // 수동 추가
     val ptr = python.native.ffi.bindings.ffiAllocUtf8(command)
     try {
-        return python.native.ffi.bindings.PyRun_SimpleString(ptr)
+        return if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyRun_SimpleStringF(ptr) else python.native.ffi.bindings.PyRun_SimpleString(ptr)
     } finally {
         python.native.ffi.bindings.ffiFreeUtf8(ptr)
     }
@@ -117,7 +117,7 @@ actual fun PyEval_EvalCode(co: NativePointer, globals: NativePointer, locals: Na
 
 
 // Section 3
-actual inline fun PyErr_Clear() = python.native.ffi.bindings.PyErr_Clear()
+actual inline fun PyErr_Clear() = if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyErr_ClearF() else python.native.ffi.bindings.PyErr_Clear()
 actual inline fun PyErr_PrintEx(set_sys_last_vars: Int) = python.native.ffi.bindings.PyErr_PrintEx(set_sys_last_vars)
 actual inline fun PyErr_Print() = python.native.ffi.bindings.PyErr_Print()
 actual inline fun PyErr_WriteUnraisable(obj: NativePointer) = python.native.ffi.bindings.PyErr_WriteUnraisable(obj.toPlatformPointer())
@@ -137,7 +137,8 @@ actual inline fun PyErr_SyntaxLocationEx(filename: String, lineno: Int, col_offs
 actual inline fun PyErr_SyntaxLocation(filename: String, lineno: Int) = python.native.ffi.bindings.PyErr_SyntaxLocation(filename, lineno)
 actual inline fun PyErr_BadInternalCall() = python.native.ffi.bindings.PyErr_BadInternalCall()
 actual inline fun PyErr_WarnExplicit(category: NativePointer, message: String, filename: String, lineno: Int, module: String, registry: NativePointer): Int = python.native.ffi.bindings.PyErr_WarnExplicit(category.toPlatformPointer(), message, filename, lineno, module, registry.toPlatformPointer())
-actual fun PyErr_Occurred(): NativePointer? = python.native.ffi.bindings.PyErr_Occurred().toNativePointer()
+actual fun PyErr_Occurred(): NativePointer? =
+    (if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyErr_OccurredF() else python.native.ffi.bindings.PyErr_Occurred()).toNativePointer()
 actual inline fun PyErr_ExceptionMatches(exc: NativePointer): Int = python.native.ffi.bindings.PyErr_ExceptionMatches(exc.toPlatformPointer())
 actual inline fun PyErr_GivenExceptionMatches(given: NativePointer, exc: NativePointer): Int = python.native.ffi.bindings.PyErr_GivenExceptionMatches(given.toPlatformPointer(), exc.toPlatformPointer())
 actual fun PyErr_GetRaisedException(): NativePointer? = python.native.ffi.bindings.PyErr_GetRaisedException().toNativePointer()
@@ -197,7 +198,7 @@ actual inline fun Py_Exit(status: Int) = python.native.ffi.bindings.Py_Exit(stat
 actual fun PyImport_ImportModule(name: String): NativePointer? {
     val ptr = python.native.ffi.bindings.ffiAllocUtf8(name)
     try {
-        return python.native.ffi.bindings.PyImport_ImportModule(ptr).toNativePointer()
+        return (if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyImport_ImportModuleF(ptr) else python.native.ffi.bindings.PyImport_ImportModule(ptr)).toNativePointer()
     } finally {
         python.native.ffi.bindings.ffiFreeUtf8(ptr)
     }
@@ -242,7 +243,8 @@ actual fun PyObject_GetAttr(o: NativePointer, attr_name: NativePointer): NativeP
 actual fun PyObject_GetAttrString(o: NativePointer, attr_name: String): NativePointer? {
     val ptr = python.native.ffi.bindings.ffiAllocUtf8(attr_name)
     try {
-        return python.native.ffi.bindings.PyObject_GetAttrString(o.toPlatformPointer(), ptr).toNativePointer()
+        return (if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyObject_GetAttrStringF(o.toPlatformPointer(), ptr)
+                else python.native.ffi.bindings.PyObject_GetAttrString(o.toPlatformPointer(), ptr)).toNativePointer()
     } finally {
         python.native.ffi.bindings.ffiFreeUtf8(ptr)
     }
@@ -353,7 +355,8 @@ actual fun PyIter_Next(o: NativePointer): NativePointer? = python.native.ffi.bin
 
 
 // Section 16
-actual fun PyLong_FromLongLong(v: Long): NativePointer? = python.native.ffi.bindings.PyLong_FromLongLong(v).toNativePointer()
+actual fun PyLong_FromLongLong(v: Long): NativePointer? =
+    (if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyLong_FromLongLongF(v) else python.native.ffi.bindings.PyLong_FromLongLong(v)).toNativePointer()
 actual fun PyLong_FromDouble(v: Double): NativePointer? = python.native.ffi.bindings.PyLong_FromDouble(v).toNativePointer()
 actual inline fun PyLong_AsInt(obj: NativePointer): Int = python.native.ffi.bindings.PyLong_AsInt(obj.toPlatformPointer())
 actual inline fun PyLong_AsLongLong(obj: NativePointer): Long = python.native.ffi.bindings.PyLong_AsLongLong(obj.toPlatformPointer())
@@ -420,7 +423,9 @@ actual fun PyUnicode_InternFromString(str: String): NativePointer? = python.nati
 
 // Section 22
 actual fun PyList_New(len: Long): NativePointer? = python.native.ffi.bindings.PyList_New(len).toNativePointer()
-actual inline fun PyList_Size(list: NativePointer): Long = python.native.ffi.bindings.PyList_Size(list.toPlatformPointer())
+actual inline fun PyList_Size(list: NativePointer): Long =
+    if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyList_SizeF(list.toPlatformPointer())
+    else python.native.ffi.bindings.PyList_Size(list.toPlatformPointer())
 actual fun PyList_GetItem(list: NativePointer, index: Long): NativePointer? = python.native.ffi.bindings.PyList_GetItem(list.toPlatformPointer(), index).toNativePointer()
 actual inline fun PyList_SetItem(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_SetItem(list.toPlatformPointer(), index, item.toPlatformPointer())
 actual inline fun PyList_Insert(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_Insert(list.toPlatformPointer(), index, item.toPlatformPointer())
