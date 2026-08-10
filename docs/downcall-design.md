@@ -71,9 +71,36 @@ fun downcallJ_J(fn: Long, a0: Long): Long =
 바꾼다. `@CriticalNative` 는 `JNIEnv` 도 `jclass` 도 GC 스레드 상태 전환도 없어 ART 에서 가장 빠른
 네이티브 규약이다.
 
-**LLVM JIT 은 필요 없다.** 참조 구현(PanamaPort)조차 단순 시그니처에는 스텁을 만들지 않고 직접
-패치하는 경로를 탄다 (`BulkLinker.requireNativeStub` 이 `false` 를 반환). LLVM 스텁은 구조체 값
-전달·가변인자처럼 레지스터 배치를 손봐야 할 때만 필요한데, 우리 시그니처엔 둘 다 0개다.
+**LLVM JIT 은 필요 없다 — 다만 근거는 아래와 같다.**
+
+ART 에는 FFM 을 위한 VM 지원이 없다. HotSpot 은 `downcallHandle` 호출 시 VM 이 스텁을 기계어로
+생성해 주지만, ART 는 해 주지 않는다. 그래서 임의의 `FunctionDescriptor` 에 대해 인자를 레지스터에
+배치하고 대상을 호출하는 기계어를 **누군가는 만들어야 한다.** PanamaPort 는 그것을 런타임에
+`libLLVM.so` 로 만든다 — `_AndroidLinkerImpl.generateNativeDowncallStub`(292행)이 다운콜 경로에서
+**조건 없이** 호출되며(938행), 업콜도 `generateNativeUpcallStub`(954행)으로 같다.
+
+주목할 점은 그 생성 스텁도 **대상 함수 포인터를 첫 인자로 받는다**는 것이다:
+
+```java
+// _AndroidLinkerImpl.java:935
+stub_descriptor = stub_descriptor.insertArgumentLayouts(0, WORD);  // leading function pointer
+```
+
+우리 `downcallII_I(fn, a0, a1)` 과 같은 구조다. 차이는 **생성 시점**뿐이다:
+
+| | PanamaPort | 이 프로젝트 |
+|---|---|---|
+| 스텁 생성 | 런타임 (LLVM JIT) | **빌드 타임 (미리 컴파일)** |
+| 커버 범위 | 임의 시그니처 | shape 14종 |
+| `libLLVM.so` 의존 | 필요 | 불필요 |
+
+즉 LLVM 이 필요 없는 이유는 "참조 구현도 안 쓰기 때문"이 아니라 **"시그니처를 14종으로 열거해 빌드
+타임에 만들어 두기 때문"**이다.
+
+(이전 판에서 `BulkLinker.requireNativeStub` 이 `false` 를 반환하므로 참조 구현도 스텁 없이 직접
+패치한다고 서술했으나 이는 오독이었다. `BulkLinker` 는 `Unsafe` 모듈에 있는 PanamaPort 자체
+부트스트랩 수단이며 — LLVM API 같은 내부 네이티브 함수를 바인딩한다 — `Core` 의 Linker 경로에서는
+쓰이지 않는다.)
 
 ## JVM 통합 — Desktop + Android 를 한 벌로
 
