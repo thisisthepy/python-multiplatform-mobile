@@ -12,6 +12,7 @@ import python.native.ffi.PyDict_GetItem
 import python.native.ffi.PyDict_Items
 import python.native.ffi.PyDict_New
 import python.native.ffi.PyDict_SetItem
+import python.native.ffi.PyDict_Size
 import python.native.ffi.PyDict_Values
 import python.native.ffi.PyList_AsTuple
 import python.native.ffi.PySequence_Contains
@@ -24,9 +25,8 @@ import python.native.ffi.Py_DecRef
  * per the mermaid sketch (`MutableMap <|.. PyDict`).
  *
  * Backed by `PyDict_New`/`PyDict_GetItem`/`PyDict_SetItem`/`PyDict_DelItem`/
- * `PyDict_Contains`/`PyDict_Keys`/`PyDict_Values`/`PyDict_Items`/`PyDict_Clear`.
- * There is no `PyDict_Size` in this ABI subset either, so [size] goes
- * through the generic `__len__` protocol like the other collections here.
+ * `PyDict_Contains`/`PyDict_Keys`/`PyDict_Values`/`PyDict_Items`/`PyDict_Clear`/
+ * `PyDict_Size` (the last backs [size] directly).
  *
  * Note: the previous stub declared `PyProxy<Boolean>`, which was almost
  * certainly copy-pasted from [python.multiplatform.ffi.types.basic.PyBool]
@@ -170,7 +170,7 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
         }
 
     override val size: Int
-        get() = pyLen(pointer)
+        get() = PyDict_Size(pointer).toInt()
 
     override fun clear() {
         PyDict_Clear(pointer)

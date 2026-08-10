@@ -203,6 +203,8 @@ object bindings {
     external fun PyObject_IsTrue(o: JNIPointer): Int
     external fun PyObject_Not(o: JNIPointer): Int
     external fun PyObject_Type(o: JNIPointer): JNIPointer?
+    external fun PyObject_Size(o: JNIPointer): Long
+    external fun PyObject_Length(o: JNIPointer): Long
     external fun PyObject_GetItem(o: JNIPointer, key: JNIPointer): JNIPointer?
     external fun PyObject_SetItem(o: JNIPointer, key: JNIPointer, v: JNIPointer): Int
     external fun PyObject_DelItem(o: JNIPointer, key: JNIPointer): Int
@@ -355,6 +357,11 @@ object bindings {
 
 
     // Section 22
+    external fun PyList_New(len: Long): JNIPointer?
+    external fun PyList_Size(list: JNIPointer): Long
+    external fun PyList_GetItem(list: JNIPointer, index: Long): JNIPointer?
+    external fun PyList_SetItem(list: JNIPointer, index: Long, item: JNIPointer): Int
+    external fun PyList_Insert(list: JNIPointer, index: Long, item: JNIPointer): Int
     external fun PyList_Append(list: JNIPointer, item: JNIPointer): Int
     external fun PyList_Sort(list: JNIPointer): Int
     external fun PyList_Reverse(list: JNIPointer): Int
@@ -363,6 +370,7 @@ object bindings {
 
     // Section 23
     external fun PyDict_New(): JNIPointer?
+    external fun PyDict_Size(p: JNIPointer): Long
     external fun PyDictProxy_New(mapping: JNIPointer): JNIPointer?
     external fun PyDict_Clear(p: JNIPointer)
     external fun PyDict_Contains(p: JNIPointer, key: JNIPointer): Int
@@ -386,6 +394,7 @@ object bindings {
     external fun PySet_New(iterable: JNIPointer): JNIPointer?
     external fun PyFrozenSet_New(iterable: JNIPointer): JNIPointer?
     external fun PySet_Contains(anyset: JNIPointer, key: JNIPointer): Int
+    external fun PySet_Size(anyset: JNIPointer): Long
     external fun PySet_Add(set: JNIPointer, key: JNIPointer): Int
     external fun PySet_Discard(set: JNIPointer, key: JNIPointer): Int
     external fun PySet_Pop(set: JNIPointer): JNIPointer?
@@ -419,4 +428,10 @@ object bindings {
     external fun PyTuple_GetItem(p: JNIPointer, pos: Long): JNIPointer?
     external fun PyTuple_GetSlice(p: JNIPointer, low: Long, high: Long): JNIPointer?
     external fun PyTuple_SetItem(p: JNIPointer, pos: Long, o: JNIPointer): Int
+
+
+    // Section 29
+    external fun PyModule_GetName(module: JNIPointer): String?
+    external fun PyModule_GetDict(module: JNIPointer): JNIPointer?
+    external fun PyModule_GetFilenameObject(module: JNIPointer): JNIPointer?
 }

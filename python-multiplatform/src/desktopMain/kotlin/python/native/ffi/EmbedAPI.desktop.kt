@@ -233,6 +233,8 @@ actual inline fun PyObject_IsInstance(inst: NativePointer, cls: NativePointer): 
 actual inline fun PyObject_IsTrue(o: NativePointer): Int = python.native.ffi.bindings.PyObject_IsTrue(o.toPlatformPointer())
 actual inline fun PyObject_Not(o: NativePointer): Int = python.native.ffi.bindings.PyObject_Not(o.toPlatformPointer())
 actual fun PyObject_Type(o: NativePointer): NativePointer? = python.native.ffi.bindings.PyObject_Type(o.toPlatformPointer()).toNativePointer()
+actual inline fun PyObject_Size(o: NativePointer): Long = python.native.ffi.bindings.PyObject_Size(o.toPlatformPointer())
+actual inline fun PyObject_Length(o: NativePointer): Long = python.native.ffi.bindings.PyObject_Length(o.toPlatformPointer())
 actual fun PyObject_GetItem(o: NativePointer, key: NativePointer): NativePointer? = python.native.ffi.bindings.PyObject_GetItem(o.toPlatformPointer(), key.toPlatformPointer()).toNativePointer()
 actual inline fun PyObject_SetItem(o: NativePointer, key: NativePointer, v: NativePointer): Int = python.native.ffi.bindings.PyObject_SetItem(o.toPlatformPointer(), key.toPlatformPointer(), v.toPlatformPointer())
 actual inline fun PyObject_DelItem(o: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PyObject_DelItem(o.toPlatformPointer(), key.toPlatformPointer())
@@ -385,6 +387,11 @@ actual fun PyUnicode_InternFromString(str: String): NativePointer? = python.nati
 
 
 // Section 22
+actual fun PyList_New(len: Long): NativePointer? = python.native.ffi.bindings.PyList_New(len).toNativePointer()
+actual inline fun PyList_Size(list: NativePointer): Long = python.native.ffi.bindings.PyList_Size(list.toPlatformPointer())
+actual fun PyList_GetItem(list: NativePointer, index: Long): NativePointer? = python.native.ffi.bindings.PyList_GetItem(list.toPlatformPointer(), index).toNativePointer()
+actual inline fun PyList_SetItem(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_SetItem(list.toPlatformPointer(), index, item.toPlatformPointer())
+actual inline fun PyList_Insert(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_Insert(list.toPlatformPointer(), index, item.toPlatformPointer())
 actual inline fun PyList_Append(list: NativePointer, item: NativePointer): Int = python.native.ffi.bindings.PyList_Append(list.toPlatformPointer(), item.toPlatformPointer())
 actual inline fun PyList_Sort(list: NativePointer): Int = python.native.ffi.bindings.PyList_Sort(list.toPlatformPointer())
 actual inline fun PyList_Reverse(list: NativePointer): Int = python.native.ffi.bindings.PyList_Reverse(list.toPlatformPointer())
@@ -393,6 +400,7 @@ actual fun PyList_AsTuple(list: NativePointer): NativePointer? = python.native.f
 
 // Section 23
 actual fun PyDict_New(): NativePointer? = python.native.ffi.bindings.PyDict_New().toNativePointer()
+actual inline fun PyDict_Size(p: NativePointer): Long = python.native.ffi.bindings.PyDict_Size(p.toPlatformPointer())
 actual fun PyDictProxy_New(mapping: NativePointer): NativePointer? = python.native.ffi.bindings.PyDictProxy_New(mapping.toPlatformPointer()).toNativePointer()
 actual inline fun PyDict_Clear(p: NativePointer) = python.native.ffi.bindings.PyDict_Clear(p.toPlatformPointer())
 actual inline fun PyDict_Contains(p: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PyDict_Contains(p.toPlatformPointer(), key.toPlatformPointer())
@@ -416,6 +424,7 @@ actual inline fun PyDict_MergeFromSeq2(a: NativePointer, seq2: NativePointer, ov
 actual fun PySet_New(iterable: NativePointer): NativePointer? = python.native.ffi.bindings.PySet_New(iterable.toPlatformPointer()).toNativePointer()
 actual fun PyFrozenSet_New(iterable: NativePointer): NativePointer? = python.native.ffi.bindings.PyFrozenSet_New(iterable.toPlatformPointer()).toNativePointer()
 actual inline fun PySet_Contains(anyset: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PySet_Contains(anyset.toPlatformPointer(), key.toPlatformPointer())
+actual inline fun PySet_Size(anyset: NativePointer): Long = python.native.ffi.bindings.PySet_Size(anyset.toPlatformPointer())
 actual inline fun PySet_Add(set: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PySet_Add(set.toPlatformPointer(), key.toPlatformPointer())
 actual inline fun PySet_Discard(set: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PySet_Discard(set.toPlatformPointer(), key.toPlatformPointer())
 actual fun PySet_Pop(set: NativePointer): NativePointer? = python.native.ffi.bindings.PySet_Pop(set.toPlatformPointer()).toNativePointer()
@@ -449,3 +458,9 @@ actual inline fun PyTuple_Size(p: NativePointer): Long = python.native.ffi.bindi
 actual fun PyTuple_GetItem(p: NativePointer, pos: Long): NativePointer? = python.native.ffi.bindings.PyTuple_GetItem(p.toPlatformPointer(), pos).toNativePointer()
 actual fun PyTuple_GetSlice(p: NativePointer, low: Long, high: Long): NativePointer? = python.native.ffi.bindings.PyTuple_GetSlice(p.toPlatformPointer(), low, high).toNativePointer()
 actual inline fun PyTuple_SetItem(p: NativePointer, pos: Long, o: NativePointer): Int = python.native.ffi.bindings.PyTuple_SetItem(p.toPlatformPointer(), pos, o.toPlatformPointer())
+
+
+// Section 29
+actual inline fun PyModule_GetName(module: NativePointer): String? = python.native.ffi.bindings.PyModule_GetName(module.toPlatformPointer())
+actual fun PyModule_GetDict(module: NativePointer): NativePointer? = python.native.ffi.bindings.PyModule_GetDict(module.toPlatformPointer()).toNativePointer()
+actual fun PyModule_GetFilenameObject(module: NativePointer): NativePointer? = python.native.ffi.bindings.PyModule_GetFilenameObject(module.toPlatformPointer()).toNativePointer()

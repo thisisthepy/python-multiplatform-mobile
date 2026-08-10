@@ -1,6 +1,8 @@
 package python.multiplatform.ffi.conversion
 
 import python.multiplatform.ffi.PyObject
+import python.multiplatform.ffi.PyTypeChecks
+import python.multiplatform.ffi.pyErrorOrGeneric
 import python.multiplatform.ffi.types.basic.PyBool
 import python.multiplatform.ffi.types.basic.PyFloat
 import python.multiplatform.ffi.types.basic.PyInt
@@ -13,6 +15,8 @@ import python.multiplatform.ffi.types.collections.PySet
 import python.multiplatform.ffi.types.collections.PyTuple
 import python.multiplatform.ffi.types.collections.pyObjectToNative
 import python.native.ffi.NativePointer
+import python.native.ffi.PyObject_Type
+import python.native.ffi.Py_DecRef
 
 /**
  * Marker/behavioural contract for a conversion context: something that can
@@ -115,26 +119,36 @@ class PyContext(private var strategy: ConversionStrategy = ConversionStrategy.DE
      * library has no dedicated wrapper for (arbitrary user-defined objects) --
      * TYPED cannot go further than that (see the [ConversionStrategy] doc).
      *
-     * Dispatches on [python.multiplatform.ffi.PyType.name] for the same
-     * reason `CollectionSupport.kt`'s helpers do: this ABI subset has no
-     * `PyLong_Check`/`PyDict_Check`/... family to type-switch on directly.
+     * Dispatches the same way [python.multiplatform.ffi.types.collections.pyObjectToNative]
+     * does (see its doc for the full rationale): `None` first, via the
+     * zero-FFI-call [PyNone.isNone]; everything else via a single
+     * `PyObject_Type` call compared against [PyTypeChecks]'s cached builtin
+     * type pointers, rather than [python.multiplatform.ffi.PyType.name]
+     * string dispatch (three FFI crossings and a UTF-8 decode per call, just
+     * to read a name well enough to compare).
      * New reference ownership: [PyObject.pointer] is still owned by [obj]
      * afterwards, so each typed wrapper below is built with `borrowed = true`
      * to take its own independent, incref'd reference to the same pointer.
      */
     private fun typedWrap(obj: PyObject): PyObject {
-        return when (obj.getType().name) {
-            "NoneType" -> PyNone.get()
-            "bool" -> PyBool(obj.pointer, true)
-            "int" -> PyInt(obj.pointer, true)
-            "float" -> PyFloat(obj.pointer, true)
-            "str" -> PyString(obj.pointer, true)
-            "list" -> PyList(obj.pointer, true)
-            "tuple" -> PyTuple(obj.pointer, true)
-            "dict" -> PyDict(obj.pointer, true)
-            "set" -> PySet(obj.pointer, true)
-            "frozenset" -> PyFrozenSet(obj.pointer, true)
-            else -> obj
+        if (PyNone.isNone(obj)) return PyNone.get()
+
+        val typePtr = PyObject_Type(obj.pointer) ?: throw pyErrorOrGeneric("Failed to get the type of this object")
+        try {
+            return when (typePtr) {
+                PyTypeChecks.boolType -> PyBool(obj.pointer, true)
+                PyTypeChecks.intType -> PyInt(obj.pointer, true)
+                PyTypeChecks.floatType -> PyFloat(obj.pointer, true)
+                PyTypeChecks.strType -> PyString(obj.pointer, true)
+                PyTypeChecks.listType -> PyList(obj.pointer, true)
+                PyTypeChecks.tupleType -> PyTuple(obj.pointer, true)
+                PyTypeChecks.dictType -> PyDict(obj.pointer, true)
+                PyTypeChecks.setType -> PySet(obj.pointer, true)
+                PyTypeChecks.frozensetType -> PyFrozenSet(obj.pointer, true)
+                else -> obj
+            }
+        } finally {
+            Py_DecRef(typePtr) // PyObject_Type: new reference, only needed for the dispatch above
         }
     }
 }

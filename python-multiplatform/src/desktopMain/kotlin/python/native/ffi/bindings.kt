@@ -369,6 +369,10 @@ object bindings {
     inline fun PyObject_Not(o: MemoryAddress): Int = PyObject_NotHandle.invoke(o) as Int
     val PyObject_TypeHandle: MethodHandle
     inline fun PyObject_Type(o: MemoryAddress): MemoryAddress? = PyObject_TypeHandle.invoke(o) as MemoryAddress?
+    val PyObject_SizeHandle: MethodHandle
+    inline fun PyObject_Size(o: MemoryAddress): Long = PyObject_SizeHandle.invoke(o) as Long
+    val PyObject_LengthHandle: MethodHandle
+    inline fun PyObject_Length(o: MemoryAddress): Long = PyObject_LengthHandle.invoke(o) as Long
     val PyObject_GetItemHandle: MethodHandle
     inline fun PyObject_GetItem(o: MemoryAddress, key: MemoryAddress): MemoryAddress? = PyObject_GetItemHandle.invoke(o, key) as MemoryAddress?
     val PyObject_SetItemHandle: MethodHandle
@@ -637,6 +641,16 @@ object bindings {
 
 
     // Section 22
+    val PyList_NewHandle: MethodHandle
+    fun PyList_New(len: Long): MemoryAddress? = PyList_NewHandle.invoke(len) as MemoryAddress?
+    val PyList_SizeHandle: MethodHandle
+    inline fun PyList_Size(list: MemoryAddress): Long = PyList_SizeHandle.invoke(list) as Long
+    val PyList_GetItemHandle: MethodHandle
+    fun PyList_GetItem(list: MemoryAddress, index: Long): MemoryAddress? = PyList_GetItemHandle.invoke(list, index) as MemoryAddress?
+    val PyList_SetItemHandle: MethodHandle
+    inline fun PyList_SetItem(list: MemoryAddress, index: Long, item: MemoryAddress): Int = PyList_SetItemHandle.invoke(list, index, item) as Int
+    val PyList_InsertHandle: MethodHandle
+    inline fun PyList_Insert(list: MemoryAddress, index: Long, item: MemoryAddress): Int = PyList_InsertHandle.invoke(list, index, item) as Int
     val PyList_AppendHandle: MethodHandle
     inline fun PyList_Append(list: MemoryAddress, item: MemoryAddress): Int = PyList_AppendHandle.invoke(list, item) as Int
     val PyList_SortHandle: MethodHandle
@@ -650,6 +664,8 @@ object bindings {
     // Section 23
     val PyDict_NewHandle: MethodHandle
     inline fun PyDict_New(): MemoryAddress? = PyDict_NewHandle.invoke() as MemoryAddress?
+    val PyDict_SizeHandle: MethodHandle
+    inline fun PyDict_Size(p: MemoryAddress): Long = PyDict_SizeHandle.invoke(p) as Long
     val PyDictProxy_NewHandle: MethodHandle
     inline fun PyDictProxy_New(mapping: MemoryAddress): MemoryAddress? = PyDictProxy_NewHandle.invoke(mapping) as MemoryAddress?
     val PyDict_ClearHandle: MethodHandle
@@ -693,6 +709,8 @@ object bindings {
     inline fun PyFrozenSet_New(iterable: MemoryAddress): MemoryAddress? = PyFrozenSet_NewHandle.invoke(iterable) as MemoryAddress?
     val PySet_ContainsHandle: MethodHandle
     inline fun PySet_Contains(anyset: MemoryAddress, key: MemoryAddress): Int = PySet_ContainsHandle.invoke(anyset, key) as Int
+    val PySet_SizeHandle: MethodHandle
+    inline fun PySet_Size(anyset: MemoryAddress): Long = PySet_SizeHandle.invoke(anyset) as Long
     val PySet_AddHandle: MethodHandle
     inline fun PySet_Add(set: MemoryAddress, key: MemoryAddress): Int = PySet_AddHandle.invoke(set, key) as Int
     val PySet_DiscardHandle: MethodHandle
@@ -747,6 +765,15 @@ object bindings {
     fun PyTuple_GetSlice(p: MemoryAddress, low: Long, high: Long): MemoryAddress? = PyTuple_GetSliceHandle.invoke(p, low, high) as MemoryAddress?
     val PyTuple_SetItemHandle: MethodHandle
     inline fun PyTuple_SetItem(p: MemoryAddress, pos: Long, o: MemoryAddress): Int = PyTuple_SetItemHandle.invoke(p, pos, o) as Int
+
+
+    // Section 29
+    val PyModule_GetNameHandle: MethodHandle
+    inline fun PyModule_GetName(module: MemoryAddress): String? = CLinker.toJavaString(PyModule_GetNameHandle.invoke(module) as MemoryAddress?)
+    val PyModule_GetDictHandle: MethodHandle
+    fun PyModule_GetDict(module: MemoryAddress): MemoryAddress? = PyModule_GetDictHandle.invoke(module) as MemoryAddress?
+    val PyModule_GetFilenameObjectHandle: MethodHandle
+    fun PyModule_GetFilenameObject(module: MemoryAddress): MemoryAddress? = PyModule_GetFilenameObjectHandle.invoke(module) as MemoryAddress?
 
     init {
         ResourceScope.newConfinedScope().run {
@@ -947,6 +974,8 @@ object bindings {
             PyObject_IsTrueHandle = lookup.find("PyObject_IsTrue", Integer.TYPE, MemoryAddress::class.java)
             PyObject_NotHandle = lookup.find("PyObject_Not", Integer.TYPE, MemoryAddress::class.java)
             PyObject_TypeHandle = lookup.find("PyObject_Type", MemoryAddress::class.java, MemoryAddress::class.java)
+            PyObject_SizeHandle = lookup.find("PyObject_Size", LongLong.TYPE, MemoryAddress::class.java)
+            PyObject_LengthHandle = lookup.find("PyObject_Length", LongLong.TYPE, MemoryAddress::class.java)
             PyObject_GetItemHandle = lookup.find("PyObject_GetItem", MemoryAddress::class.java, MemoryAddress::class.java, MemoryAddress::class.java)
             PyObject_SetItemHandle = lookup.find("PyObject_SetItem", Integer.TYPE, MemoryAddress::class.java, MemoryAddress::class.java, MemoryAddress::class.java)
             PyObject_DelItemHandle = lookup.find("PyObject_DelItem", Integer.TYPE, MemoryAddress::class.java, MemoryAddress::class.java)
@@ -1099,6 +1128,11 @@ object bindings {
 
 
             // Section 22
+            PyList_NewHandle = lookup.find("PyList_New", MemoryAddress::class.java, LongLong.TYPE)
+            PyList_SizeHandle = lookup.find("PyList_Size", LongLong.TYPE, MemoryAddress::class.java)
+            PyList_GetItemHandle = lookup.find("PyList_GetItem", MemoryAddress::class.java, MemoryAddress::class.java, LongLong.TYPE)
+            PyList_SetItemHandle = lookup.find("PyList_SetItem", Integer.TYPE, MemoryAddress::class.java, LongLong.TYPE, MemoryAddress::class.java)
+            PyList_InsertHandle = lookup.find("PyList_Insert", Integer.TYPE, MemoryAddress::class.java, LongLong.TYPE, MemoryAddress::class.java)
             PyList_AppendHandle = lookup.find("PyList_Append", Integer.TYPE, MemoryAddress::class.java, MemoryAddress::class.java)
             PyList_SortHandle = lookup.find("PyList_Sort", Integer.TYPE, MemoryAddress::class.java)
             PyList_ReverseHandle = lookup.find("PyList_Reverse", Integer.TYPE, MemoryAddress::class.java)
@@ -1107,6 +1141,7 @@ object bindings {
 
             // Section 23
             PyDict_NewHandle = lookup.find("PyDict_New", MemoryAddress::class.java)
+            PyDict_SizeHandle = lookup.find("PyDict_Size", LongLong.TYPE, MemoryAddress::class.java)
             PyDictProxy_NewHandle = lookup.find("PyDictProxy_New", MemoryAddress::class.java, MemoryAddress::class.java)
             PyDict_ClearHandle = lookup.find("PyDict_Clear", Void.TYPE, MemoryAddress::class.java)
             PyDict_ContainsHandle = lookup.find("PyDict_Contains", Integer.TYPE, MemoryAddress::class.java, MemoryAddress::class.java)
@@ -1130,6 +1165,7 @@ object bindings {
             PySet_NewHandle = lookup.find("PySet_New", MemoryAddress::class.java, MemoryAddress::class.java)
             PyFrozenSet_NewHandle = lookup.find("PyFrozenSet_New", MemoryAddress::class.java, MemoryAddress::class.java)
             PySet_ContainsHandle = lookup.find("PySet_Contains", Integer.TYPE, MemoryAddress::class.java, MemoryAddress::class.java)
+            PySet_SizeHandle = lookup.find("PySet_Size", LongLong.TYPE, MemoryAddress::class.java)
             PySet_AddHandle = lookup.find("PySet_Add", Integer.TYPE, MemoryAddress::class.java, MemoryAddress::class.java)
             PySet_DiscardHandle = lookup.find("PySet_Discard", Integer.TYPE, MemoryAddress::class.java, MemoryAddress::class.java)
             PySet_PopHandle = lookup.find("PySet_Pop", MemoryAddress::class.java, MemoryAddress::class.java)
@@ -1163,6 +1199,12 @@ object bindings {
             PyTuple_GetItemHandle = lookup.find("PyTuple_GetItem", MemoryAddress::class.java, MemoryAddress::class.java, LongLong.TYPE)
             PyTuple_GetSliceHandle = lookup.find("PyTuple_GetSlice", MemoryAddress::class.java, MemoryAddress::class.java, LongLong.TYPE, LongLong.TYPE)
             PyTuple_SetItemHandle = lookup.find("PyTuple_SetItem", Integer.TYPE, MemoryAddress::class.java, LongLong.TYPE, MemoryAddress::class.java)
+
+
+            // Section 29
+            PyModule_GetNameHandle = lookup.find("PyModule_GetName", MemoryAddress::class.java, MemoryAddress::class.java)
+            PyModule_GetDictHandle = lookup.find("PyModule_GetDict", MemoryAddress::class.java, MemoryAddress::class.java)
+            PyModule_GetFilenameObjectHandle = lookup.find("PyModule_GetFilenameObject", MemoryAddress::class.java, MemoryAddress::class.java)
         }
     }
 }

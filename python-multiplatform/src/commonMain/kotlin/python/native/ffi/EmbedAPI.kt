@@ -2173,6 +2173,31 @@ expect inline fun PyObject_Not(o: NativePointer): Int
 expect fun PyObject_Type(o: NativePointer): NativePointer?
 
 /**
+ *  *Part of the Stable ABI.*
+ *
+ * Return the length of object *o*.  If the object *o* provides
+ * both sequence and mapping protocols, the sequence length is
+ * returned. On error, "-1" is returned.  This is the equivalent
+ * to the Python expression "len(o)".
+ *
+ * Note: replaces the `__len__` protocol bridge (`GetAttrString("__len__")`
+ * + `CallNoArgs`) this project used before this binding existed --
+ * one FFI crossing instead of two, with no bound-method object to
+ * allocate and release.
+ */
+expect inline fun PyObject_Size(o: NativePointer): Long
+
+/**
+ *  *Part of the Stable ABI.*
+ *
+ * A synonym for "PyObject_Size()", kept for source compatibility
+ * with older CPython versions that used this name instead. A
+ * distinct exported symbol at the C level, but behaviourally
+ * identical to "PyObject_Size()".
+ */
+expect inline fun PyObject_Length(o: NativePointer): Long
+
+/**
  *  *Return value: New reference.*
  *  *Part of the Stable ABI.*
  *
@@ -3568,6 +3593,73 @@ expect fun PyUnicode_InternFromString(str: String): NativePointer?
 // List Objects
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /**
+ *  *Return value: New reference.*
+ *  *Part of the Stable ABI.*
+ *
+ * Return a new list of length *len* on success, or "NULL" on
+ * failure.
+ *
+ * Note:
+ *
+ *   If *len* is greater than zero, the returned list object's items
+ *   are set to "NULL".  Thus you cannot use abstract API functions
+ *   such as "PySequence_SetItem()" or expose the object to
+ *   Python code before setting all items to a real object with
+ *   "PyList_SetItem()".
+ */
+expect fun PyList_New(len: Long): NativePointer?
+
+/**
+ *  *Part of the Stable ABI.*
+ *
+ * Return the length of the list object in *list*; this is the
+ * equivalent of "len(list)" on a list object.
+ *
+ * Note: a bad argument (i.e. *list* is not a list) is undefined
+ * behaviour at the C level; use "PySequence_Size()"/[PyObject_Size]
+ * for arbitrary, not-necessarily-list objects.
+ */
+expect inline fun PyList_Size(list: NativePointer): Long
+
+/**
+ *  *Return value: Borrowed reference.*
+ *  *Part of the Stable ABI.*
+ *
+ * Return the object at position *index* in the list *list*.  The
+ * position must be non-negative; indexing from the end of the list
+ * is not supported.  If *index* is out of bounds, return "NULL" and
+ * set an "IndexError" exception.
+ */
+expect fun PyList_GetItem(list: NativePointer, index: Long): NativePointer?
+
+/**
+ *  *Part of the Stable ABI.*
+ *
+ * Set the item at index *index* in list *list* to *item*.  Return
+ * "0" on success. If *index* is out of bounds, return "-1" and set
+ * an "IndexError" exception.
+ *
+ * Note:
+ *
+ *   This function "steals" a reference to *item* and discards a
+ *   reference to an item already in the list at the affected
+ *   position.
+ */
+expect inline fun PyList_SetItem(list: NativePointer, index: Long, item: NativePointer): Int
+
+/**
+ *  *Part of the Stable ABI.*
+ *
+ * Insert the item *item* into list *list* in front of index
+ * *index*.  Return "0" if successful; return "-1" and set an
+ * exception if unsuccessful.  Analogous to "list.insert(index, item)".
+ *
+ * Unlike "PyList_SetItem()", this function *does not* steal a
+ * reference to *item*.
+ */
+expect inline fun PyList_Insert(list: NativePointer, index: Long, item: NativePointer): Int
+
+/**
  *  *Part of the Stable ABI.*
  *
  * Append the object *item* at the end of list *list*. Return "0" if
@@ -3612,6 +3704,14 @@ expect fun PyList_AsTuple(list: NativePointer): NativePointer?
  * Return a new empty dictionary, or "NULL" on failure.
  */
 expect fun PyDict_New(): NativePointer?
+
+/**
+ *  *Part of the Stable ABI.*
+ *
+ * Return the number of items in the dictionary. This is equivalent
+ * to "len(p)" on a dictionary.
+ */
+expect inline fun PyDict_Size(p: NativePointer): Long
 
 /**
  *  *Return value: New reference.*
@@ -3839,6 +3939,15 @@ expect fun PyFrozenSet_New(iterable: NativePointer): NativePointer?
  * "frozenset", or an instance of a subtype.
  */
 expect inline fun PySet_Contains(anyset: NativePointer, key: NativePointer): Int
+
+/**
+ *  *Part of the Stable ABI.*
+ *
+ * Return the length of a "set" or "frozenset" object. Equivalent to
+ * "len(anyset)".  Raise a "PyExc_SystemError" if *anyset* is not a
+ * "set", "frozenset", or an instance of a subtype.
+ */
+expect inline fun PySet_Size(anyset: NativePointer): Long
 
 /**
  *  *Part of the Stable ABI.*
@@ -4082,6 +4191,48 @@ expect inline fun PyTuple_Size(p: NativePointer): Long
 expect fun PyTuple_GetItem(p: NativePointer, pos: Long): NativePointer?
 expect fun PyTuple_GetSlice(p: NativePointer, low: Long, high: Long): NativePointer?
 expect inline fun PyTuple_SetItem(p: NativePointer, pos: Long, o: NativePointer): Int
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Section 29
+// Module Objects
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// TODO: Section 29 was previously entirely absent (see Section 27/28's note above on ad-hoc ordering).
+/**
+ *  *Part of the Stable ABI.*
+ *
+ * Return *module*'s "__name__" value.  This is equivalent to
+ * "module.__name__" and, unlike "PyModule_GetNameObject()", returns
+ * the value already decoded as a UTF-8 encoded "const char*" rather
+ * than a "PyObject*" -- so, unlike most of this ABI subset's string
+ * accessors, decoding it costs no separate `PyUnicode_AsUTF8()` call.
+ * "NULL" on failure (e.g. if *module* is not a module object).
+ */
+expect inline fun PyModule_GetName(module: NativePointer): String?
+
+/**
+ *  *Return value: Borrowed reference.*
+ *  *Part of the Stable ABI.*
+ *
+ * Return the dictionary object that implements *module*'s namespace;
+ * this object is the same as the "__dict__" attribute of the module
+ * object.  Raises a "SystemError" and returns "NULL" if *module* is
+ * not a module object.
+ */
+expect fun PyModule_GetDict(module: NativePointer): NativePointer?
+
+/**
+ *  *Return value: New reference.*
+ *  *Part of the Stable ABI.*
+ *
+ * Return the name of the file from which *module* was loaded using
+ * *module*'s "__file__" attribute, as a "PyObject*".  Raise
+ * "SystemError" and return "NULL" if *module* is not a module
+ * object; raise "AttributeError" and return "NULL" if the module
+ * has no "__file__" attribute (typically a built-in or frozen
+ * module).
+ */
+expect fun PyModule_GetFilenameObject(module: NativePointer): NativePointer?
 
 
 //

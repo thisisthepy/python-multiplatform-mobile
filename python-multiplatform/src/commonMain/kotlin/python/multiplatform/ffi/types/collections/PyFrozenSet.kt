@@ -10,6 +10,7 @@ import python.native.ffi.PyNumber_And
 import python.native.ffi.PyNumber_Or
 import python.native.ffi.PyNumber_Subtract
 import python.native.ffi.PySet_Contains
+import python.native.ffi.PySet_Size
 import python.native.ffi.PyTuple_New
 import python.native.ffi.PyTuple_SetItem
 import python.native.ffi.Py_DecRef
@@ -22,8 +23,9 @@ import python.native.ffi.Py_IncRef
  * `MutableSet<PyObject>`), matching how `frozenset` relates to `set` in
  * Python itself.
  *
- * Backed by `PyFrozenSet_New`/`PySet_Contains` (the read-only query
- * functions are shared between `set` and `frozenset` in the C API), plus
+ * Backed by `PyFrozenSet_New`/`PySet_Contains`/`PySet_Size` (these read-only
+ * query functions are shared between `set` and `frozenset` in the C API,
+ * `PySet_Size` taking an "anyset" for exactly that reason), plus
  * `PyNumber_Or`/`And`/`Subtract` for the set-algebra operations, same as
  * [PySet].
  */
@@ -84,7 +86,7 @@ open class PyFrozenSet(pointer: NativePointer, borrowed: Boolean) :
     }
 
     override val size: Int
-        get() = pyLen(pointer)
+        get() = PySet_Size(pointer).toInt()
 
     override fun isEmpty(): Boolean = size == 0
 

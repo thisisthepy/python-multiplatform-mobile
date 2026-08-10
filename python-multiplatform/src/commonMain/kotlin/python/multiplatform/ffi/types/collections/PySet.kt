@@ -14,6 +14,7 @@ import python.native.ffi.PySet_Contains
 import python.native.ffi.PySet_Discard
 import python.native.ffi.PySet_New
 import python.native.ffi.PySet_Pop
+import python.native.ffi.PySet_Size
 import python.native.ffi.PyTuple_New
 import python.native.ffi.PyTuple_SetItem
 import python.native.ffi.Py_DecRef
@@ -25,7 +26,8 @@ import python.native.ffi.Py_IncRef
  * does not also implement `PyIterable`.
  *
  * Backed by `PySet_New`/`PySet_Add`/`PySet_Discard`/`PySet_Contains`/
- * `PySet_Pop`/`PySet_Clear`, plus `PyNumber_Or`/`And`/`Subtract` for the
+ * `PySet_Pop`/`PySet_Clear`/`PySet_Size` (the last backs [size] directly),
+ * plus `PyNumber_Or`/`And`/`Subtract` for the
  * set-algebra operations (CPython dispatches `|`/`&`/`-` on `set` through
  * the generic number protocol) and `PySequence_Tuple` (via
  * [snapshotElements]) for iteration, since sets have no indexed access.
@@ -95,7 +97,7 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
     }
 
     override val size: Int
-        get() = pyLen(pointer)
+        get() = PySet_Size(pointer).toInt()
 
     override fun isEmpty(): Boolean = size == 0
 

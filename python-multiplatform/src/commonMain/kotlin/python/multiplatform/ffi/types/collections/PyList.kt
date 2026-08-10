@@ -6,12 +6,12 @@ import python.multiplatform.ffi.conversion.PyProxy
 import python.multiplatform.ffi.exceptions.PyException
 import python.native.ffi.NativePointer
 import python.native.ffi.PyList_Append
+import python.native.ffi.PyList_Insert
 import python.native.ffi.PyList_Reverse
+import python.native.ffi.PyList_Size
 import python.native.ffi.PyList_Sort
 import python.native.ffi.PyLong_FromLongLong
-import python.native.ffi.PyObject_CallObject
 import python.native.ffi.PyObject_DelItem
-import python.native.ffi.PyObject_GetAttrString
 import python.native.ffi.PyObject_GetItem
 import python.native.ffi.PyObject_SetItem
 import python.native.ffi.PySequence_Contains
@@ -35,15 +35,15 @@ import python.native.ffi.Py_IncRef
  * into the collection types; it is reserved for wrappers around Python
  * objects that are iterable but are not already a Kotlin collection type.
  *
- * `EmbedAPI`'s Stable ABI subset has no `PyList_New`/`PyList_GetItem`/
- * `PyList_SetItem`/`PyList_Size` -- only `PyList_Append`, `PyList_Sort` and
- * `PyList_Reverse` are exposed directly. The rest of this interface (element
- * access, length, construction) is implemented via the generic
- * sequence/object protocol (`PyObject_GetItem`/`SetItem`/`DelItem` with an
- * integer index, `PySequence_List`/`PyTuple_New` for construction, the
- * `__len__` protocol for [size], and a `PyObject_GetAttrString` +
- * `PyObject_CallObject` bridge for the one mutator with no abstract-protocol
- * equivalent at all, `list.insert`).
+ * [size] and [add] (`list.insert`) are backed directly by `PyList_Size` and
+ * `PyList_Insert`. Element access/mutation (`get`/`set`/`removeAt`) still
+ * goes through the generic sequence/object protocol
+ * (`PyObject_GetItem`/`SetItem`/`DelItem` with an integer index) rather than
+ * `PyList_GetItem`/`SetItem` -- those two are C-array-index-only (no
+ * negative-index support) and `PyList_SetItem` steals the reference it is
+ * given, which would need different reference-counting discipline here for
+ * no behavioural gain, since every index this class ever passes is already
+ * validated non-negative.
  */
 open class PyList(pointer: NativePointer, borrowed: Boolean) :
     PyObject(pointer, borrowed), PyProxy<List<Any?>>, MutableList<PyObject> {
@@ -93,7 +93,7 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
     }
 
     override val size: Int
-        get() = pyLen(pointer)
+        get() = PyList_Size(pointer).toInt()
 
     private fun indexKey(index: Int): NativePointer =
         PyLong_FromLongLong(index.toLong()) ?: throw PyException.fromCurrentError() ?: PyException("Failed to build index object")
@@ -134,31 +134,11 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
         return true
     }
 
-    /** Calls a bound method by name via the generic `GetAttrString` + `CallObject` bridge (no `PyObject_CallMethod` in this ABI subset). */
-    private fun callMethod(name: String, args: List<NativePointer>): NativePointer? {
-        val method = PyObject_GetAttrString(pointer, name)
-            ?: throw PyException.fromCurrentError() ?: PyException("No such method '$name'")
-        val argsTuple = PyTuple_New(args.size.toLong())
-            ?: throw PyException.fromCurrentError() ?: PyException("Failed to build args tuple for '$name'")
-        args.forEachIndexed { i, arg ->
-            // PyTuple_SetItem steals -- incref first so the caller's own reference to `arg`
-            // (which may be a scratch value we still need to release ourselves) stays valid.
-            Py_IncRef(arg)
-            PyTuple_SetItem(argsTuple, i.toLong(), arg)
-        }
-        val result = PyObject_CallObject(method, argsTuple)
-        Py_DecRef(argsTuple) // new reference, no longer needed after the call
-        Py_DecRef(method) // bound method object, new reference from PyObject_GetAttrString
-        return result
-    }
-
     override fun add(index: Int, element: PyObject) {
-        // No PyList_Insert in this ABI subset; bridge to the bound `list.insert` method.
-        val key = indexKey(index)
-        val result = callMethod("insert", listOf(key, element.pointer))
-        Py_DecRef(key)
-        if (result == null) throw PyException.fromCurrentError() ?: PyException("list.insert($index, ...) failed")
-        Py_DecRef(result) // insert() returns None; release this new reference to it
+        // PyList_Insert does not steal a reference to `item`, same as PyList_Append.
+        if (PyList_Insert(pointer, index.toLong(), element.pointer) != 0) {
+            throw PyException.fromCurrentError() ?: PyException("list.insert($index, ...) failed")
+        }
     }
 
     override fun addAll(index: Int, elements: Collection<PyObject>): Boolean {

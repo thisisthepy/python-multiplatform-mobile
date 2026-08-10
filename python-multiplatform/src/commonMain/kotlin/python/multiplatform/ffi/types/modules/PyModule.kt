@@ -2,8 +2,13 @@ package python.multiplatform.ffi.types.modules
 
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ffi.types.basic.PyNone
 import python.multiplatform.ffi.types.collections.PyDict
 import python.native.ffi.NativePointer
+import python.native.ffi.PyErr_Clear
+import python.native.ffi.PyModule_GetDict
+import python.native.ffi.PyModule_GetFilenameObject
+import python.native.ffi.PyModule_GetName
 
 /**
  * Wrapper around a Python module object (whatever
@@ -11,20 +16,28 @@ import python.native.ffi.NativePointer
  * returns).
  *
  * Attribute access (`module.attr`) is already covered by the inherited
- * [PyObject.getAttr]/[PyObject.setAttr]; what this adds is the
- * module-specific metadata (`__name__`, `__dict__`, `__doc__`, `__file__`).
+ * [PyObject.getAttr]/[PyObject.setAttr]; `name`/`dict`/`file` are instead
+ * backed directly by `PyModule_GetName`/`PyModule_GetDict`/
+ * `PyModule_GetFilenameObject` -- one FFI crossing each (`PyModule_GetName`
+ * needs none at all beyond that, since it hands back an already-decoded
+ * `const char*` rather than a `PyObject*` requiring a further
+ * `PyUnicode_AsUTF8` call) instead of the two-crossing generic attribute
+ * path (`PyObject_GetAttrString` + a `PyUnicode_AsUTF8`/`toString()` decode).
+ * `doc` still goes through `getAttrOrNull("__doc__")`: there is no
+ * `PyModule_GetDoc`-equivalent direct accessor in this ABI subset.
  */
 open class PyModule(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, borrowed) {
 
-    /** `module.__name__`. */
+    /** `module.__name__`, backed directly by `PyModule_GetName`. */
     val name: String
-        get() = getAttr("__name__").toString()
+        get() = PyModule_GetName(pointer)
+            ?: throw PyException.fromCurrentError() ?: PyException("Failed to get the module's __name__")
 
     /** `module.__doc__`, or `null` if the module has none. */
     val doc: String?
         get() {
             val docObj = getAttrOrNull("__doc__") ?: return null
-            if (python.multiplatform.ffi.types.basic.PyNone.isNone(docObj)) {
+            if (PyNone.isNone(docObj)) {
                 return null
             }
             return docObj.toString()
@@ -33,24 +46,28 @@ open class PyModule(pointer: NativePointer, borrowed: Boolean) : PyObject(pointe
     /** `module.__file__`, or `null` for built-in/frozen modules. */
     val file: String?
         get() {
-            val fileObj = getAttrOrNull("__file__") ?: return null
-            if (python.multiplatform.ffi.types.basic.PyNone.isNone(fileObj)) {
+            // PyModule_GetFilenameObject: new reference on success; NULL + AttributeError set
+            // if the module has no __file__ (e.g. built-in/frozen modules) -- that failure mode
+            // is expected here, so clear the indicator rather than propagate it as an exception.
+            val filePtr = PyModule_GetFilenameObject(pointer) ?: run {
+                PyErr_Clear()
+                return null
+            }
+            val fileObj = PyObject(filePtr, false)
+            if (PyNone.isNone(fileObj)) {
                 return null
             }
             return fileObj.toString()
         }
 
-    /** `module.__dict__`: the module's namespace. */
+    /** `module.__dict__`: the module's namespace, backed directly by `PyModule_GetDict`. */
     val dict: PyDict
         get() {
-            // Attribute access for __dict__ returns a NEW reference.
-            // We fetch it via FFI directly to transfer ownership cleanly to PyDict
-            // without creating an intermediate PyObject wrapper.
-            val dictPtr = python.native.ffi.PyObject_GetAttrString(pointer, "__dict__")
-                ?: throw python.multiplatform.ffi.exceptions.PyException.fromCurrentError()
-                    ?: python.multiplatform.ffi.exceptions.PyException("Attribute '__dict__' not found")
-            // borrowed = false because we are transferring the new reference from GetAttrString
-            return PyDict(dictPtr, false)
+            // PyModule_GetDict returns a *borrowed* reference; borrowed = true here makes this
+            // PyDict wrapper take its own, independent, incref'd reference to it.
+            val dictPtr = PyModule_GetDict(pointer)
+                ?: throw PyException.fromCurrentError() ?: PyException("Failed to get the module's __dict__")
+            return PyDict(dictPtr, true)
         }
 
     /**
