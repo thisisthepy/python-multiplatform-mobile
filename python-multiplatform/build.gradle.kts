@@ -201,6 +201,16 @@ kotlin {
                             "-framework", "Python", "-F$projectDir/$targetLibPath/$targetABI", "-Objc"
                         ))
                     }
+
+                    // The test executable is a separate binary from the framework above,
+                    // so it needs its own linker flags to resolve the embedded CPython symbols.
+                    // Python.framework has an @rpath-relative install name and is not copied
+                    // next to the test binary, so an explicit -rpath is required for dyld to
+                    // find it when the test runs on the simulator.
+                    getTest(NativeBuildType.DEBUG).linkerOpts.addAll(listOf(
+                        "-framework", "Python", "-F$projectDir/$targetLibPath/$targetABI",
+                        "-rpath", "$projectDir/$targetLibPath/$targetABI"
+                    ))
                 }
             }
         }
@@ -209,6 +219,11 @@ kotlin {
     sourceSets {
         val jvmMain by creating
         val commonMain by getting
+        val commonTest by getting {
+            dependencies {
+                implementation(libs.kotlin.test)
+            }
+        }
         val desktopMain by getting {
             resources.srcDirs("src/desktopMain/resources")
         }
