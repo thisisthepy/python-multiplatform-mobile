@@ -27,21 +27,21 @@ class PyDictTest {
     @Test
     fun getReturnsTheValueForAnExistingKey() = PythonTestFixture.withInterpreter {
         val obj = PythonTestFixture.eval("{'x': 10, 'y': 20}")
-        val dict = PyDict(obj.pointer, false)
+        val dict = PyDict(obj.pointer, true)
         assertEquals("10", dict[PythonTestFixture.eval("'x'")]?.toString())
     }
 
     @Test
     fun getReturnsNullForAMissingKey() = PythonTestFixture.withInterpreter {
         val obj = PythonTestFixture.eval("{'x': 10}")
-        val dict = PyDict(obj.pointer, false)
+        val dict = PyDict(obj.pointer, true)
         assertNull(dict[PythonTestFixture.eval("'missing'")])
     }
 
     @Test
     fun putInsertsANewEntry() = PythonTestFixture.withInterpreter {
         val obj = PythonTestFixture.eval("{}")
-        val dict = PyDict(obj.pointer, false)
+        val dict = PyDict(obj.pointer, true)
         dict.put(PythonTestFixture.eval("'new_key'"), PythonTestFixture.eval("42"))
         assertEquals(1, dict.size)
     }
@@ -49,7 +49,7 @@ class PyDictTest {
     @Test
     fun removeDeletesAnEntry() = PythonTestFixture.withInterpreter {
         val obj = PythonTestFixture.eval("{'x': 1}")
-        val dict = PyDict(obj.pointer, false)
+        val dict = PyDict(obj.pointer, true)
         dict.remove(PythonTestFixture.eval("'x'"))
         assertTrue(dict.isEmpty())
     }
@@ -57,7 +57,7 @@ class PyDictTest {
     @Test
     fun containsKeyReflectsMembership() = PythonTestFixture.withInterpreter {
         val obj = PythonTestFixture.eval("{'present': 1}")
-        val dict = PyDict(obj.pointer, false)
+        val dict = PyDict(obj.pointer, true)
         assertTrue(dict.containsKey(PythonTestFixture.eval("'present'")))
         assertTrue(!dict.containsKey(PythonTestFixture.eval("'absent'")))
     }

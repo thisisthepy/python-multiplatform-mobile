@@ -26,7 +26,7 @@ class PyBasicTypesTest {
     @Test
     fun intWrapsAnExistingPythonObject() = PythonTestFixture.withInterpreter {
         val obj = PythonTestFixture.eval("6 * 7")
-        val pyInt = PyInt(obj.pointer, false)
+        val pyInt = PyInt(obj.pointer, true)
         assertEquals(42L, pyInt.toKotlin())
     }
 
@@ -54,7 +54,7 @@ class PyBasicTypesTest {
     @Test
     fun stringWrapsAnExistingPythonObject() = PythonTestFixture.withInterpreter {
         val obj = PythonTestFixture.eval("'wrapped'")
-        val pyString = PyString(obj.pointer, false)
+        val pyString = PyString(obj.pointer, true)
         assertEquals("wrapped", pyString.toKotlin())
     }
 

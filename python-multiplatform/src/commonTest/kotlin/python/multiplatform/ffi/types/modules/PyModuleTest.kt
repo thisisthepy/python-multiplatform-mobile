@@ -37,7 +37,7 @@ class PyModuleTest {
     fun docCanBeNullForUndocumentedModules() = PythonTestFixture.withInterpreter {
         Python3.exec("import types\n_undocumented_module_for_test = types.ModuleType('_undocumented_module_for_test')")
         val module = PythonTestFixture.eval("_undocumented_module_for_test")
-        val wrapped = PyModule(module.pointer, false)
+        val wrapped = PyModule(module.pointer, true)
         assertNull(wrapped.doc)
     }
 }

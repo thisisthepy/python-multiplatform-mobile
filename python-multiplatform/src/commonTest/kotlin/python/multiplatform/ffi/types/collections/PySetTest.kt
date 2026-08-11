@@ -25,7 +25,7 @@ class PySetTest {
     @Test
     fun addInsertsANewElement() = PythonTestFixture.withInterpreter {
         val obj = PythonTestFixture.eval("{1, 2}")
-        val set = PySet(obj.pointer, false)
+        val set = PySet(obj.pointer, true)
         set.add(PythonTestFixture.eval("3"))
         assertEquals(3, set.size)
     }
@@ -33,29 +33,29 @@ class PySetTest {
     @Test
     fun containsReflectsMembership() = PythonTestFixture.withInterpreter {
         val obj = PythonTestFixture.eval("{1, 2, 3}")
-        val set = PySet(obj.pointer, false)
+        val set = PySet(obj.pointer, true)
         assertTrue(set.contains(PythonTestFixture.eval("2")))
     }
 
     @Test
     fun unionCombinesBothSets() = PythonTestFixture.withInterpreter {
-        val a = PySet(PythonTestFixture.eval("{1, 2}").pointer, false)
-        val b = PySet(PythonTestFixture.eval("{2, 3}").pointer, false)
+        val a = PySet(PythonTestFixture.eval("{1, 2}").pointer, true)
+        val b = PySet(PythonTestFixture.eval("{2, 3}").pointer, true)
         val union = a.union(b)
         assertEquals(setOf(1L, 2L, 3L), union.toNativeSet())
     }
 
     @Test
     fun intersectionKeepsOnlyCommonElements() = PythonTestFixture.withInterpreter {
-        val a = PySet(PythonTestFixture.eval("{1, 2, 3}").pointer, false)
-        val b = PySet(PythonTestFixture.eval("{2, 3, 4}").pointer, false)
+        val a = PySet(PythonTestFixture.eval("{1, 2, 3}").pointer, true)
+        val b = PySet(PythonTestFixture.eval("{2, 3, 4}").pointer, true)
         assertEquals(setOf(2L, 3L), a.intersection(b).toNativeSet())
     }
 
     @Test
     fun differenceRemovesElementsPresentInOther() = PythonTestFixture.withInterpreter {
-        val a = PySet(PythonTestFixture.eval("{1, 2, 3}").pointer, false)
-        val b = PySet(PythonTestFixture.eval("{2}").pointer, false)
+        val a = PySet(PythonTestFixture.eval("{1, 2, 3}").pointer, true)
+        val b = PySet(PythonTestFixture.eval("{2}").pointer, true)
         assertEquals(setOf(1L, 3L), a.difference(b).toNativeSet())
     }
 
