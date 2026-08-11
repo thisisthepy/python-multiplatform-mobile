@@ -27,7 +27,7 @@ object UpcallTarget {
      */
     @JvmStatic
     fun upcallResolveHandle(nameAddr: Long): Long {
-        val name = PanamaBackend.readUtf8String(nameAddr) ?: return CallableHandle.NONE.raw
+        val name = Panama.readUtf8String(nameAddr) ?: return CallableHandle.NONE.raw
         return UpcallTable.resolve(name).raw
     }
 
@@ -61,13 +61,13 @@ object UpcallStub {
     val resolveHandleStubAddr: Long by lazy {
         val method = UpcallTarget::class.java.methods.first { it.name == "upcallResolveHandle" }
         val handle = MethodHandles.lookup().unreflect(method)
-        PanamaBackend.createUpcallStubLongToLong(handle)
+        Panama.createUpcallStubLongToLong(handle)
     }
 
     /** `Python's ctypes.CFUNCTYPE(c_long, c_long)` target: handle -> result. */
     val invokeHandleStubAddr: Long by lazy {
         val method = UpcallTarget::class.java.methods.first { it.name == "upcallInvokeHandle" }
         val handle = MethodHandles.lookup().unreflect(method)
-        PanamaBackend.createUpcallStubLongToLong(handle)
+        Panama.createUpcallStubLongToLong(handle)
     }
 }
