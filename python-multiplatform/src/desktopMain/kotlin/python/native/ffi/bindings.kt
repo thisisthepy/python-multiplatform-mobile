@@ -872,6 +872,12 @@ inline fun PyDict_GetItemString(p: Long, key: String): Long {
     val PyModule_GetFilenameObjectHandle: MethodHandle
     fun PyModule_GetFilenameObject(module: Long): Long = PyModule_GetFilenameObjectHandle.invokeExact(module) as Long
 
+    val PyType_FromSpecHandle: MethodHandle
+    fun PyType_FromSpec(spec: Long): Long = PyType_FromSpecHandle.invokeExact(spec) as Long
+    
+    val PyObject_GetTypeDataHandle: MethodHandle
+    fun PyObject_GetTypeData(obj: Long, type: Long): Long = PyObject_GetTypeDataHandle.invokeExact(obj, type) as Long
+
     init {
         val P = Panama.POINTER_TYPE  // Long.TYPE — represents a native pointer
 
@@ -1279,5 +1285,7 @@ inline fun PyDict_GetItemString(p: Long, key: String): Long {
         PyModule_GetNameHandle = find("PyModule_GetName", P, P)
         PyModule_GetDictHandle = find("PyModule_GetDict", P, P)
         PyModule_GetFilenameObjectHandle = find("PyModule_GetFilenameObject", P, P)
+        PyType_FromSpecHandle = find("PyType_FromSpec", P, P)
+        PyObject_GetTypeDataHandle = find("PyObject_GetTypeData", P, P, P)
     }
 }
