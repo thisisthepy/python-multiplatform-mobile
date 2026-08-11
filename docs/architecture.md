@@ -97,3 +97,100 @@ Kotlin 제약 때문에 다이어그램대로 갈 수 없던 지점들:
 `Failed to import encodings module` 로 프로세스를 죽인다. 빌드가 배포 아카이브에서 stdlib 를 풀어
 `PYTHONHOME` 을 잡아준다 (`extractIosSimulatorStdlib`). simctl 은 `SIMCTL_CHILD_` 접두사가 붙은
 환경변수만 자식 프로세스로 전달하므로 그 이름으로도 함께 내보낸다.
+
+## Layering and what may reference what
+
+Four layers, and the arrows only point downward. This is a hard rule, not a preference.
+
+```
+python.multiplatform.ffi        PyObject, PyType, collections, conversion  -- the object model
+        |  may call
+        v
+python.native.ffi               EmbedAPI: expect/actual over the C API
+        |  may call (platform implementations only)
+        v
+python.native.ffi.bindings      JNI externals (Android) / Panama handles (desktop)
+        |
+        v
+libpython3.14
+```
+
+**The object model must never reference `bindings`.** `PyObject` and friends call the EmbedAPI
+functions in `python.native.ffi` and nothing below them. `bindings` is an implementation
+detail that only `EmbedAPI.<platform>.kt` is allowed to know about — it does not even exist on
+the native targets, which reach CPython through cinterop instead.
+
+Concretely, this is correct:
+
+```kotlin
+// commonMain/ffi/PyObject.kt
+import python.native.ffi.PyObject_GetAttrString
+
+fun getAttr(name: String): PyObject { ... PyObject_GetAttrString(pointer, name) ... }
+```
+
+and this is not, even though it compiles on the JVM targets:
+
+```kotlin
+// WRONG -- the object model reaching into a platform-internal surface
+fun getAttr(name: String) = PyObject(bindings.asmGetAttr(pointer.raw(), name))
+```
+
+### Consequence for composed operations
+
+A composed call — one that does a whole binder operation natively and crosses the boundary
+once — is still a platform implementation difference, so it belongs in the FFI layer, not in
+the object model:
+
+```kotlin
+// commonMain/native/ffi/EmbedAPI.kt
+expect fun PyObject_GetAttrComposed(o: NativePointer, name: String): NativePointer?
+
+// androidMain -- composed: one crossing
+actual fun PyObject_GetAttrComposed(o: NativePointer, name: String) =
+    bindings.asmGetAttr(o.toPlatformPointer(), name).toNativePointer()
+
+// nativeMain -- already in-process, nothing to compose
+actual fun PyObject_GetAttrComposed(o: NativePointer, name: String) =
+    PyObject_GetAttrString(o, name)
+```
+
+The object model then stays common and stays within its layer. Composition does not require
+reopening `PyObject` as `expect`/`actual`.
+
+## What the PyAutoCloseable split actually changed
+
+Commit `0fae961a` (2025-12-20) is often described as de-duplicating `PyObject`. It did not:
+there was no duplication to remove.
+
+Before it, `PyObject` was `expect`/`actual`, but every `actual` was a placeholder. The whole
+desktop implementation was one line:
+
+```kotlin
+actual open class PyObject actual constructor(...): PyObjectAutoCloseable(pointer, borrowed)
+```
+
+and the Android one carried a single commented `//actual external fun incRef()`. The real
+logic — `getAttr`, `setAttr`, `delAttr`, `toString` — sat in a **comment block** in
+`commonMain`, above a note reading *"Temporary commented due to the error: Expected
+declaration cannot have a body. TODO: Move this to the actual implementation."*
+
+So the problem being solved was that an `expect` declaration cannot have a body, which left
+the logic with nowhere to live. Moving lifetime management out into its own
+`expect`/`actual` `PyAutoCloseable` freed `PyObject` to become an ordinary common class with
+real method bodies, and the commented logic finally became code.
+
+The split itself is sound and should stay. Lifetime management genuinely differs per platform:
+
+| platform | mechanism |
+|---|---|
+| Kotlin/Native | explicit `close()` |
+| Android API 33+ | `java.lang.ref.Cleaner` |
+| Android API 26-32 | `PhantomReference` + `ReferenceQueue` + a daemon thread (`Cleaner` does not exist) |
+| Desktop | `java.lang.ref.Cleaner` |
+
+What was lost was incidental: `PyObject.android.kt` had been the only place an
+`actual external fun` could go, and that was the hook for routing an operation through a
+single composed JNI call. Measurement later put a number on it — 5.5x on a single `getAttr`,
+11x on a 1000-element list conversion. Recovering it does not mean reverting that commit; it
+means expressing composed operations in the FFI layer, as above.
