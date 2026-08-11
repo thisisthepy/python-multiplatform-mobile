@@ -16,6 +16,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.jetpack.compose)
     alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.graalvm.native)
 }
 
 kotlin {
@@ -155,9 +156,12 @@ tasks.withType<JavaCompile>().configureEach {  // Compiler Settings
 }
 
 tasks.withType<JavaExec>().configureEach {  // JVM Execution Settings
+    // `jdk.incubator.foreign` only exists on JDK 16-18; on the JDK 21 this project actually
+    // targets (see python-multiplatform's desktopTest javaLauncher), `--add-modules` naming a
+    // module that does not exist aborts the JVM before main() runs at all. java.lang.foreign
+    // is a preview API on 21 and needs only `--enable-preview`.
     jvmArgs(
         "--enable-preview",
-        "--add-modules=jdk.incubator.foreign",
         "--enable-native-access=ALL-UNNAMED"
     )
 }
@@ -168,4 +172,102 @@ tasks.withType<Test>().configureEach {  // Test Settings
         "--add-modules=jdk.incubator.foreign",
         "--enable-native-access=ALL-UNNAMED"
     )
+}
+
+// Runs NativeImageMain.kt on the plain JVM -- the sanity check that has to pass before the same
+// entry point is worth pointing native-image at.
+val desktopMainCompilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
+val pythonMultiplatformDesktopJar = project(":python-multiplatform").tasks.named("desktopJar")
+
+// python-multiplatform's own desktopTest task derives this the same way; kept as a single
+// definition here so the JVM sanity-check task and the native-image binary agree on it.
+val hostPlatform = when {
+    System.getProperty("os.name").contains("Mac") ->
+        if (System.getProperty("os.arch") == "aarch64") "macos-aarch64" else "macos-x86_64"
+    System.getProperty("os.name").contains("Windows") -> "windows-x86_64"
+    else -> "linux-x86_64"
+}
+val pythonHomeForHost = project(":python-multiplatform").layout.buildDirectory
+    .dir("python-standalone/extracted/$hostPlatform/python")
+
+tasks.register<JavaExec>("runNativeImageUpcallDemo") {
+    group = "verification"
+    description = "Runs the upcall verification entry point on the plain JVM (pre native-image sanity check)"
+    dependsOn(desktopMainCompilation.compileTaskProvider, pythonMultiplatformDesktopJar)
+    mainClass.set("org.thisisthepy.python.multiplatform.demo.NativeImageMainKt")
+    // libpython is packaged as a resource only by python-multiplatform's `desktopJar` task (see
+    // its Jar block copying `lib/<platform>/libpython*`); the project dependency's default
+    // runtime variant resolves to raw class/resource directories that never went through that
+    // packaging step, so manager.kt's classpath resource lookup fails without the jar itself.
+    classpath = files(
+        desktopMainCompilation.output.allOutputs,
+        pythonMultiplatformDesktopJar,
+        desktopMainCompilation.runtimeDependencyFiles,
+    )
+    // Py_Initialize() aborts with "Failed to import encodings module" unless PYTHONHOME points
+    // at a prefix with a `lib/python3.14` stdlib -- the standalone build embeds the path from the
+    // machine that built it, not this one. Mirrors python-multiplatform's own desktopTest task.
+    environment("PYTHONHOME", pythonHomeForHost.get().asFile.absolutePath)
+}
+
+// ---------------------------------------------------------------------------------------------
+// GraalVM native-image (ROADMAP §7's "does the upcall path survive a closed-world binary"
+// question). Wiring lineage traced from /Volumes/macMini/thisisthepy/compose-graal-hello, which
+// is a plain `kotlin("jvm")` project.
+//
+// The `org.graalvm.buildtools.native` plugin (applied above via `libs.plugins.graalvm.native`)
+// is kept for its `javaToolchains`-based toolchain resolution, but its automatic task wiring
+// (`nativeCompile`, `nativeRun`, ...) never appears here: that wiring is registered only when the
+// `java`/`application` plugin's `sourceSets.main` exists, and a Kotlin Multiplatform `jvm()`
+// target does not create one -- confirmed by `graalvmNative.binaries.create("main") { ... }`
+// configuring successfully (the `NativeImageOptions` DSL itself has no such dependency) while no
+// `nativeCompile`/`nativeRun`/`nativeBuild` task is ever registered by the plugin to consume it.
+// This is a wiring gap in the plugin's Kotlin-Multiplatform support, not a limitation of
+// native-image itself, so the build calls `native-image` directly instead of going through the
+// plugin's lifecycle tasks. Points only at NativeImageMain.kt, not at MainKt's Compose/AWT window
+// -- see NativeImageMain.kt for why those are deliberately different entry points.
+// ---------------------------------------------------------------------------------------------
+
+val nativeImageJavaLauncher = javaToolchains.launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(25))
+}
+
+val nativeImageOutputDir = layout.buildDirectory.dir("native/nativeCompile")
+
+val nativeCompile by tasks.registering(Exec::class) {
+    group = "native"
+    description = "Builds upcall-native-demo with GraalVM native-image from NativeImageMain.kt"
+    dependsOn(desktopMainCompilation.compileTaskProvider, pythonMultiplatformDesktopJar)
+
+    val classpathProvider = files(
+        desktopMainCompilation.output.allOutputs,
+        pythonMultiplatformDesktopJar,
+        desktopMainCompilation.runtimeDependencyFiles,
+    )
+    val outDir = nativeImageOutputDir
+    val launcher = nativeImageJavaLauncher
+
+    inputs.files(classpathProvider)
+    outputs.dir(outDir)
+
+    doFirst {
+        outDir.get().asFile.mkdirs()
+    }
+
+    executable = launcher.get().metadata.installationPath.asFile.resolve("bin/native-image").absolutePath
+    args(
+        "-cp", classpathProvider.asPath,
+        "--no-fallback",
+        "--enable-native-access=ALL-UNNAMED",
+        "-o", outDir.get().asFile.resolve("upcall-native-demo").absolutePath,
+        "org.thisisthepy.python.multiplatform.demo.NativeImageMainKt",
+    )
+}
+
+tasks.register<Exec>("runNativeUpcallDemo") {
+    group = "verification"
+    description = "Runs the native-image binary built by nativeCompile and checks the upcall path"
+    dependsOn(nativeCompile)
+    executable = nativeImageOutputDir.get().asFile.resolve("upcall-native-demo").absolutePath
+    environment("PYTHONHOME", pythonHomeForHost.get().asFile.absolutePath)
 }

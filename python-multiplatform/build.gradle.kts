@@ -398,10 +398,16 @@ kotlin {
                     include("windows-*/python/python*.dll")
                     include("windows-*/python/vcruntime*.dll")
                     eachFile {
+                        // `path` here is already destination-relative -- `into("lib")` below is
+                        // applied before eachFile sees the file, so the leading segment is "lib",
+                        // not the platform directory from the `from(...)` source tree. Indexing
+                        // parts[0] silently dropped the platform and collapsed every platform's
+                        // library onto the same jar entry (DuplicatesStrategy.WARN then kept only
+                        // the last one copied, breaking every platform but that one).
                         val parts = path.split("/")
-                        val platform = parts[0]
+                        val platform = parts[1]
                         val filename = parts.last()
-                        path = "$platform/$filename"
+                        path = "lib/$platform/$filename"
                     }
                     into("lib")
                     includeEmptyDirs = false
