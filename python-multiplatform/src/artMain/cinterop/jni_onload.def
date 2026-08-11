@@ -126,6 +126,18 @@ static jint asm_exec(JNIEnv *e, jclass c, jstring code) {
     return rc;
 }
 
+/*
+ * Address of a DirectByteBuffer's off-heap storage.
+ *
+ * Called once per scratch buffer, not per string. The point is that everything after it --
+ * encoding the string and copying the bytes in -- happens inside the JVM with no crossing at
+ * all, which is what Panama does on desktop and what makes desktop's marshalling ~12x cheaper
+ * than ffiAllocUtf8's JNI round trip.
+ */
+static jlong ffi_direct_addr(JNIEnv *e, jclass c, jobject buf) {
+    return (jlong)(*e)->GetDirectBufferAddress(e, buf);
+}
+
 int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -166,6 +178,7 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyObject_GetAttrStringF", "(JJ)J", (void *)&f_PyObject_GetAttrString},
         {"PyErr_OccurredF", "()J", (void *)&f_PyErr_Occurred},
         {"PyList_GetItemRaw", "(JJ)J", (void *)&PyList_GetItem},
+        {"ffiDirectBufferAddress", "(Ljava/nio/ByteBuffer;)J", (void *)&ffi_direct_addr},
         {"asmExec", "(Ljava/lang/String;)I", (void *)&asm_exec},
         {"asmGetAttr", "(JLjava/lang/String;)J", (void *)&asm_getattr},
         {"asmListToArray", "(J[J)I", (void *)&asm_list_to_array},
@@ -182,6 +195,6 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyImport_ImportModuleN", "(J)J", (void *)&f_PyImport_ImportModule},
         {"PyObject_GetAttrStringN", "(JJ)J", (void *)&f_PyObject_GetAttrString}
     };
-    (*env)->RegisterNatives(env, clazz, methods, 39);
+    (*env)->RegisterNatives(env, clazz, methods, 40);
     return JNI_VERSION_1_6;
 }

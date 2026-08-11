@@ -152,4 +152,62 @@ class CompositionBenchmark {
         Log.i(TAG, String.format("per-call  %9.2f ns   composed %9.2f ns   %.2fx", perCall, composed, perCall / composed))
         Log.i(TAG, "sink=$sink")
     }
+
+
+    /**
+     * Whether the composition win can be had without composing.
+     *
+     * Every composed-versus-per-call result so far turned out to be about string marshalling
+     * rather than crossing count: the per-call figures were identical on API 26 and API 36
+     * despite a 20x difference in per-crossing cost. Desktop pays ~200 ns per string where
+     * Android pays ~2500 ns, and the difference is that Panama allocates off-heap inside the
+     * JVM while `ffiAllocUtf8` makes a JNI round trip to malloc and copy.
+     *
+     * A DirectByteBuffer allocates off-heap from Java too. Take its address once, and every
+     * call afterwards is encode-and-copy inside the JVM followed by passing a long. If that
+     * lands near the composed number, the marshalling is the whole story and composition is
+     * only needed where crossing count genuinely dominates -- bulk iteration.
+     */
+    @Test
+    fun directBufferMarshallingVersusComposition() {
+        PythonOnDevice.ensureInitialised()
+
+        val main = PythonOnDevice.withUtf8("__main__") { bindings.PyImport_ImportModule(it) }
+        assertTrue("could not import __main__", main != 0L)
+        PythonOnDevice.withUtf8("_bench_list = list(range(8))") { bindings.PyRun_SimpleString(it) }
+
+        val name = "_bench_list"
+
+        val perCall = best(ITERS) {
+            val p = bindings.ffiAllocUtf8(name)
+            try { bindings.PyObject_GetAttrStringN(main, p) } finally { bindings.ffiFreeUtf8(p) }
+        }
+
+        val composed = best(ITERS) { bindings.asmGetAttr(main, name) }
+
+        // One buffer, one address lookup. Everything per-call after this stays inside the JVM.
+        val scratch = java.nio.ByteBuffer.allocateDirect(256)
+        val scratchAddr = bindings.ffiDirectBufferAddress(scratch)
+        assertTrue("GetDirectBufferAddress returned 0", scratchAddr != 0L)
+
+        val direct = best(ITERS) {
+            val bytes = name.toByteArray(Charsets.UTF_8)
+            scratch.clear()
+            scratch.put(bytes)
+            scratch.put(0)
+            bindings.PyObject_GetAttrStringN(main, scratchAddr)
+        }
+
+        assertTrue("direct-buffer path returned 0", run {
+            val bytes = name.toByteArray(Charsets.UTF_8)
+            scratch.clear(); scratch.put(bytes); scratch.put(0)
+            bindings.PyObject_GetAttrStringN(main, scratchAddr) != 0L
+        })
+
+        Log.i(TAG, "--- getAttr: can marshalling alone close the gap? (API ${Build.VERSION.SDK_INT}) ---")
+        Log.i(TAG, String.format("per-call (ffiAllocUtf8) %9.2f ns", perCall))
+        Log.i(TAG, String.format("composed (asmGetAttr)   %9.2f ns   %.2fx vs per-call", composed, perCall / composed))
+        Log.i(TAG, String.format("direct buffer, no comp  %9.2f ns   %.2fx vs per-call", direct, perCall / direct))
+        Log.i(TAG, "sink=$sink")
+    }
 }

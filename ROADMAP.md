@@ -140,6 +140,35 @@ a JNI call plus `GetStringUTFChars` plus malloc plus copy plus free.
 Which means composition is worth extending past the object model, and that **string-carrying
 operations are the ones to compose first**, regardless of how much real work they do.
 
+### Most of it can be had without composing at all
+
+`getAttr`, measured three ways on the same device:
+
+| | API 36 | API 26 |
+|---|---|---|
+| per-call (`ffiAllocUtf8`) | 2238.25 ns | 2488.62 ns |
+| composed (`asmGetAttr`) | 463.60 ns — 4.83x | 243.08 ns — 10.24x |
+| **direct buffer, no composition** | **425.90 ns — 5.26x** | 656.81 ns — 3.79x |
+
+On modern Android the marshalling fix alone **beats** composition, and it needs none of the
+machinery: no `artMain` export, no per-operation composed function, no JVM-side wiring. One
+`DirectByteBuffer` per thread, its address taken once, and every call afterwards is encode-and-
+copy inside the JVM followed by passing a `long`. It applies to every string-carrying operation
+automatically rather than one at a time.
+
+This is the same thing Panama does on desktop, which is why desktop's marshalling is ~200 ns
+per string against Android's ~2500 ns. PanamaPort would have brought it too — its
+`allocateFrom(String)` runs through `AndroidUnsafe.allocateMemory` → `sun.misc.Unsafe`, a JVM
+intrinsic with no crossing. The earlier decision to skip PanamaPort was argued on downcall stubs
+alone and missed that its memory model was the part that mattered here.
+
+API 26 still favours composing, by roughly 2.7x. But `@CriticalNative` is already free at that
+level, so old devices were never the ones paying for crossings, and they are a shrinking share.
+
+**So §5 shrinks.** Composition stays justified only where crossing count genuinely dominates —
+bulk iteration, which scales with N (11x at 1000 elements). For single string-carrying calls,
+fix the marshalling instead.
+
 ## 6. Composition on desktop — measured, and the answer is no
 
 **Measured.** The same question Android answered at 1.8x, asked on desktop without building a
