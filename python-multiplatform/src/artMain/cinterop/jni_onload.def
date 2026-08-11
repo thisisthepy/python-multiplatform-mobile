@@ -14,6 +14,9 @@ extern jlong PyImport_ImportModule(const char*);
 extern jlong PyObject_GetAttrString(jlong, const char*);
 extern jlong PyErr_Occurred(void);
 extern jlong PyList_GetItem(jlong, jlong);
+extern jlong PyImport_AddModuleRef(const char*);
+extern jlong PyRun_String(const char*, jint, jlong, jlong);
+extern void Py_DecRef(jlong);
 extern void PyErr_Clear(void);
 
 jlong critical_echo0(jlong x) { return x; }
@@ -92,6 +95,37 @@ static jint asm_list_to_array(JNIEnv *e, jclass c, jlong list, jlongArray out) {
     return n;
 }
 
+/*
+ * Python3.exec composed into one crossing.
+ *
+ * The Kotlin version crosses roughly eleven times: three C strings each needing an alloc and a
+ * free around the call that uses them, plus AddModuleRef, GetAttrString, RunString and the
+ * DecRefs. This is the same sequence with the boundary crossed once, so the difference between
+ * them is everything the boundary costs -- crossings and string marshalling both.
+ *
+ * Unlike the echo probes this runs real Python, so the parse/compile/execute work is in both
+ * numbers and the ratio shows what fraction of a realistic binder call the boundary actually is.
+ */
+#define PMP_FILE_INPUT 257
+
+static jint asm_exec(JNIEnv *e, jclass c, jstring code) {
+    const char *src = (*e)->GetStringUTFChars(e, code, NULL);
+    if (src == NULL) return -1;
+    jint rc = -1;
+    jlong mod = PyImport_AddModuleRef("__main__");
+    if (mod != 0) {
+        jlong globals = PyObject_GetAttrString(mod, "__dict__");
+        if (globals != 0) {
+            jlong result = PyRun_String(src, PMP_FILE_INPUT, globals, globals);
+            if (result != 0) { Py_DecRef(result); rc = 0; } else { PyErr_Clear(); }
+            Py_DecRef(globals);
+        }
+        Py_DecRef(mod);
+    }
+    (*e)->ReleaseStringUTFChars(e, code, src);
+    return rc;
+}
+
 int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -132,6 +166,7 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyObject_GetAttrStringF", "(JJ)J", (void *)&f_PyObject_GetAttrString},
         {"PyErr_OccurredF", "()J", (void *)&f_PyErr_Occurred},
         {"PyList_GetItemRaw", "(JJ)J", (void *)&PyList_GetItem},
+        {"asmExec", "(Ljava/lang/String;)I", (void *)&asm_exec},
         {"asmGetAttr", "(JLjava/lang/String;)J", (void *)&asm_getattr},
         {"asmListToArray", "(J[J)I", (void *)&asm_list_to_array},
 
@@ -147,6 +182,6 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyImport_ImportModuleN", "(J)J", (void *)&f_PyImport_ImportModule},
         {"PyObject_GetAttrStringN", "(JJ)J", (void *)&f_PyObject_GetAttrString}
     };
-    (*env)->RegisterNatives(env, clazz, methods, 38);
+    (*env)->RegisterNatives(env, clazz, methods, 39);
     return JNI_VERSION_1_6;
 }

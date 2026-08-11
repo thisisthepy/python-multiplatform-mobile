@@ -15,7 +15,7 @@ import python.native.ffi.PyUnicode_FromString
 open class PyString(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, borrowed), PyProxy<String> {
     companion object {
         /** The `PyType` for `str` (`builtins.str`). */
-        val TYPE: PyType by lazy { val obj = from(""); val t = obj.Type; obj.clean(); t }
+        val TYPE: PyType by lazy { val obj = from(""); val t = obj.Type; obj.close(); t }
 
         /** Wraps [value] as a new Python `str` object (`PyUnicode_FromString`). */
         fun from(value: String): PyString {
@@ -53,7 +53,7 @@ open class PyString(pointer: NativePointer, borrowed: Boolean) : PyObject(pointe
     operator fun contains(substring: String): Boolean {
         val subObj = PyString.from(substring)
         val res = python.multiplatform.ffi.Python3.withPython { PyUnicode_Contains(pointer, subObj.pointer) }
-        subObj.clean()
+        subObj.close()
         if (res == -1 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
         return res == 1
     }

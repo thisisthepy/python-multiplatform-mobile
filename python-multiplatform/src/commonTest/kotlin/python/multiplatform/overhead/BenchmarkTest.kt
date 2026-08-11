@@ -19,7 +19,7 @@ class BenchmarkTest {
             initialized = true
             // Py_Initialize() causes a fatal crash (abort) due to missing 'encodings'
             // module inside the test binary environment.
-            interpreterAvailable = Py_IsInitialized() != 0
+            interpreterAvailable = python.multiplatform.ffi.Python3.isInitialized
             if (!interpreterAvailable) {
                 println("SKIPPED: Python interpreter unavailable (cannot initialize safely). Tests requiring the interpreter will be skipped.")
             }
@@ -135,7 +135,7 @@ class BenchmarkTest {
             
             Benchmark.run("PyObject wrapper creation", iterations = 100_000) {
                 val obj = PyObject(rawObj, borrowed = true)
-                obj.clean()
+                obj.close()
             }
             
             python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(rawObj) }
@@ -150,11 +150,13 @@ class BenchmarkTest {
         val moduleName = python.multiplatform.ffi.Python3.withPython { PyUnicode_FromString("sys") }
         if (moduleName == null) return
         
-        val sysModule = python.native.ffi.PyImport_Import(moduleName)
+        // Every C API call needs the GIL, this one included. It was outside a scope and
+        // segfaulted the moment initialize() started parking the main thread state.
+        val sysModule = python.multiplatform.ffi.Python3.withPython { python.native.ffi.PyImport_Import(moduleName) }
         python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(moduleName) }
         
         if (sysModule == null) {
-            python.native.ffi.PyErr_Clear()
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.PyErr_Clear() }
             println("SKIPPED testAttributeAccess: Could not import sys")
             return
         }

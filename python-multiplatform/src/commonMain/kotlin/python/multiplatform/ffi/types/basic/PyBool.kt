@@ -23,7 +23,7 @@ import python.native.ffi.PyObject_IsTrue
 open class PyBool(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, borrowed), PyProxy<Boolean> {
     companion object {
         /** The `PyType` for `bool` (`builtins.bool`). */
-        val TYPE: PyType by lazy { val obj = from(false); val t = obj.Type; obj.clean(); t }
+        val TYPE: PyType by lazy { val obj = from(false); val t = obj.Type; obj.close(); t }
 
         /** Returns the (singleton) `True` or `False` Python object for [value] (`PyBool_FromLong`). */
         fun from(value: Boolean): PyBool {

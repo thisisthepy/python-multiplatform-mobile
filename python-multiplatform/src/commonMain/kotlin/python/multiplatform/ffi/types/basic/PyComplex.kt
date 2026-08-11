@@ -28,7 +28,7 @@ import python.native.ffi.PyErr_Occurred
 open class PyComplex(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, borrowed) {
     companion object {
         /** The `PyType` for `complex` (`builtins.complex`). */
-        val TYPE: PyType by lazy { val obj = from(0.0, 0.0); val t = obj.Type; obj.clean(); t }
+        val TYPE: PyType by lazy { val obj = from(0.0, 0.0); val t = obj.Type; obj.close(); t }
 
         /** Constructs a new `complex(real, imag)` object. */
         fun from(real: Double, imag: Double): PyComplex {
@@ -47,8 +47,8 @@ open class PyComplex(pointer: NativePointer, borrowed: Boolean) : PyObject(point
             
             val resPtr = python.multiplatform.ffi.Python3.withPython { PyObject_CallObject(complexTypePtr, args) }
             python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(args) }
-            realObj.clean()
-            imagObj.clean()
+            realObj.close()
+            imagObj.close()
             
             if (resPtr == null) throw PyException.fromCurrentError()!!
             return PyComplex(resPtr, false)
@@ -59,7 +59,7 @@ open class PyComplex(pointer: NativePointer, borrowed: Boolean) : PyObject(point
         get() {
             val realAttr = getAttr("real")
             val res = python.multiplatform.ffi.Python3.withPython { PyFloat_AsDouble(realAttr.pointer) }
-            realAttr.clean()
+            realAttr.close()
             if (res == -1.0 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
             return res
         }
@@ -68,7 +68,7 @@ open class PyComplex(pointer: NativePointer, borrowed: Boolean) : PyObject(point
         get() {
             val imagAttr = getAttr("imag")
             val res = python.multiplatform.ffi.Python3.withPython { PyFloat_AsDouble(imagAttr.pointer) }
-            imagAttr.clean()
+            imagAttr.close()
             if (res == -1.0 && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) throw PyException.fromCurrentError()!!
             return res
         }

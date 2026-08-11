@@ -97,4 +97,59 @@ class CompositionBenchmark {
             LIST_SIZE + 1, perCallList, composedList, perCallList / composedList))
         Log.i(TAG, "sink=$sink")
     }
+
+
+    /**
+     * The same comparison on a call that does real Python work.
+     *
+     * The probes above wrap trivial callees, which shows the boundary at its most flattering.
+     * `Python3.exec` is a realistic binder operation: it crosses about eleven times -- three C
+     * strings each needing an alloc and a free, plus AddModuleRef, GetAttrString, RunString and
+     * three DecRefs -- but it also parses, compiles and executes Python, and that work appears
+     * in both numbers. Whatever ratio survives here is what composing is actually worth on a
+     * call people make.
+     */
+    @Test
+    fun composedVersusPerCallOnRealWork() {
+        PythonOnDevice.ensureInitialised()
+
+        val code = "x = 1 + 1"
+        val iters = 20_000
+
+        // Per-call: the sequence Python3.exec runs, one crossing at a time.
+        val perCall = best(iters) {
+            var rc = -1L
+            val mainName = bindings.ffiAllocUtf8("__main__")
+            try {
+                val mod = bindings.PyImport_ImportModuleN(mainName)
+                if (mod != 0L) {
+                    val dictName = bindings.ffiAllocUtf8("__dict__")
+                    try {
+                        val globals = bindings.PyObject_GetAttrStringN(mod, dictName)
+                        if (globals != 0L) {
+                            val src = bindings.ffiAllocUtf8(code)
+                            try {
+                                rc = bindings.PyRun_SimpleStringN(src).toLong()
+                            } finally {
+                                bindings.ffiFreeUtf8(src)
+                            }
+                        }
+                    } finally {
+                        bindings.ffiFreeUtf8(dictName)
+                    }
+                }
+            } finally {
+                bindings.ffiFreeUtf8(mainName)
+            }
+            rc
+        }
+
+        val composed = best(iters) { bindings.asmExec(code).toLong() }
+
+        assertEquals("composed exec reported failure", 0, bindings.asmExec(code))
+
+        Log.i(TAG, "--- Python3.exec(\"$code\"), real Python work in both ---")
+        Log.i(TAG, String.format("per-call  %9.2f ns   composed %9.2f ns   %.2fx", perCall, composed, perCall / composed))
+        Log.i(TAG, "sink=$sink")
+    }
 }

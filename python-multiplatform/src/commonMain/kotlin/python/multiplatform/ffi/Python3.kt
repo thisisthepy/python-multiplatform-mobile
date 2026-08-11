@@ -50,18 +50,21 @@ object Python3 {
             if (!silent) println("INFO: Python initialized successfully!")
             isInitialized = true
         }
-        // NOTE: the GIL is deliberately NOT released here yet.
+        // The GIL is still NOT released here, and that is now a known, measured blocker rather
+        // than a deferred nicety.
         //
-        // Releasing it is what lets other threads attach, and it is the intended end state. But it
-        // also means every single touch of the C API must go through withGIL, and a survey found
-        // call sites still outside it. Releasing before that coverage is complete turns each
-        // remaining gap into a segfault that surfaces far from its cause — which is exactly what
-        // happened: the crash walked from getAttrReturnsExistingAttribute to
-        // floatRoundTripsFromKotlinToPythonAndBack to iteratesOverAllElementsThenStops as gaps were
-        // closed one at a time.
+        // Releasing it is what lets any other thread attach. Without it a cleaner thread calling
+        // PyGILState_Ensure blocks forever, which is exactly what GCLeakTest observes: the first
+        // cleanup action starts, never reaches Py_DecRef, and the cleaner thread stops processing
+        // anything further (ReleaseCounter reports ran=1, released=0). So reference counting is
+        // structurally unable to release on any platform until this line is enabled.
         //
-        // Until then the initialising thread keeps the GIL, so single-threaded use behaves exactly
-        // as before, and withGIL's Ensure/Release nest harmlessly inside the held lock.
+        // Enabling it was attempted and reverted. Every C API call still outside withGIL becomes a
+        // segfault far from its cause: closing the gap in BenchmarkTest.testAttributeAccess
+        // (PyImport_Import) moved the crash from PyImport_Import to _PyObject_Malloc with no Java
+        // frame identifying the new site. Finishing this needs a dedicated pass over every call
+        // site, not a one-line change -- ReleaseCounter and the 101-test suite make that pass
+        // cheaper than the last attempt.
         //
         //   if (mainThreadState == null) mainThreadState = PyEval_SaveThread()
     }
@@ -76,14 +79,24 @@ object Python3 {
             PyEval_RestoreThread(it)
             mainThreadState = null
         }
+        // Lowered BEFORE Py_Finalize(), not after. Cleaner threads consult this flag to decide
+        // whether releasing a reference is still legal, and finalization is exactly the window
+        // where it stops being legal -- leaving the flag up until afterwards let a cleaner pass
+        // the check and call Py_DecRef while Py_Finalize() was tearing the interpreter down,
+        // which crashed the process inside _PyObject_ClearFreeLists.
+        //
+        // With the flag down first, a cleaner arriving from here on returns without touching the
+        // C API at all. One already inside its GIL scope still holds the GIL, and Py_Finalize()
+        // waits for it, so that case finishes safely before teardown begins.
+        isInitialized = false
         memScoped {
             Py_Finalize()
             // TODO: print error message if exists
             if (Py_IsInitialized() != 0) {
+                isInitialized = true
                 throw IllegalStateException("Python finalization failed")
             }
             if (!silent) println("INFO: Python finalized successfully!")
-            isInitialized = false
         }
     }
 

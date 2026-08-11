@@ -50,8 +50,40 @@ internal fun pyErrorOrGeneric(fallback: String): PyException =
     PyException.fromCurrentError() ?: PyException(fallback)
 
 
+/**
+ * Releases one reference, from wherever the cleaner happens to run.
+ *
+ * A top-level function on purpose: registered as the cleanup action it must close over the
+ * pointer value and nothing else. Anything that reached back to the wrapper would keep that
+ * wrapper strongly reachable through the Cleanable, and the cleaner would then never run --
+ * which is precisely the bug this replaced.
+ *
+ * The check is made twice. Once before touching anything, so a cleaner firing after shutdown
+ * returns without entering the C API; and once more inside the GIL scope, because between the
+ * two the interpreter may have started finalizing. [Python3.finalize] lowers the flag before
+ * calling Py_Finalize() so this ordering actually holds.
+ */
+/** Diagnostic: how many times a cleanup action has actually run. Test-visible. */
+internal object ReleaseCounter {
+    var ran: Int = 0
+    var released: Int = 0
+}
+
+private fun topLevelDecRefAction(ptr: NativePointer) {
+    ReleaseCounter.ran++
+    if (!python.multiplatform.ffi.Python3.isInitialized) return
+    python.multiplatform.ffi.withGIL {
+        if (!python.multiplatform.ffi.Python3.isInitialized) return@withGIL
+        python.native.ffi.Py_DecRef(ptr)
+        ReleaseCounter.released++
+    }
+}
+
 // TODO: !!IMPORTANT!! We need to check the case where the pointer is null one more time. (PyObject, PyType, PyException)
-open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoCloseable(pointer) {
+open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoCloseable(
+    pointer,
+    ::topLevelDecRefAction
+) {
 
     init {
         if (borrowed) {
@@ -333,13 +365,6 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         return false
     }
 
-    override fun clean() {
-        // Release *this* object's own reference. The previous `type.decRef()`
-        // both released the wrong object (the meta-type, not `pointer`) and
-        // forced the lazy `type` property to materialise (an extra
-        // python.multiplatform.ffi.Python3.withPython { PyObject_Type() } FFI round-trip) purely as a side effect of cleanup.
-        decRef()
-    }
 
     // TODO: 밑에 세 함수 수정 (return type 불일치 등)
 //    operator fun invoke(arg0: PyObject): PyObject {

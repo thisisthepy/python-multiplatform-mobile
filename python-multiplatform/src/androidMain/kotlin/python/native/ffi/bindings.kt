@@ -119,6 +119,8 @@ object bindings {
     // and returning how many elements it wrote.
     // Borrowed reference, leaf: pure index into the list's item array.
     @JvmStatic @dalvik.annotation.optimization.CriticalNative external fun PyList_GetItemRaw(list: Long, i: Long): Long
+    // Python3.exec composed into one crossing -- see jni_onload.def.
+    @JvmStatic external fun asmExec(code: String): Int
     @JvmStatic external fun asmGetAttr(obj: Long, name: String): Long
     @JvmStatic external fun asmListToArray(list: Long, out: LongArray): Int
 
