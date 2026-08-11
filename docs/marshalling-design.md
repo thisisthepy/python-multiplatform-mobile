@@ -25,7 +25,7 @@ inside the JVM and never crosses.
 
 | ns | API 36 | API 26 |
 |---|---|---|
-| current (`ffiAllocUtf8` per call) | 2238.25 | 2488.62 |
+| was current (`ffiAllocUtf8` per call) | 2238.25 | 2488.62 |
 | composed natively (`asmGetAttr`) | 528.85 | 255.19 |
 | direct buffer + `toByteArray` | 694.03 | 800.96 |
 | direct buffer + ASCII fast path | 373.18 | 248.94 |
@@ -37,6 +37,34 @@ differs by 2x between the same two devices. It is 3.3x better than composing on 
 
 Attribute names, module names and method names are repeated literals, so encoding them again
 on every call is pure waste. CPython interns its own strings for the same reason.
+
+### Status: adopted on Android, not on desktop
+
+The first row is labelled "was current" because it no longer describes Android. `internedUtf8`
+and `encodeScratchUtf8` are implemented on both JVM platforms, and Android's call path uses them
+— `EmbedAPI.android.kt`'s `PyObject_GetAttrString` goes through `internedUtf8`, so the live cost
+is the bottom row, not the top one. Quoting 2238 ns as Android's current `getAttr` cost is wrong,
+and it has been quoted that way.
+
+**Desktop has the primitives and does not use them.** `bindings.kt` has 59 `withUtf8` call sites
+and zero `internedUtf8` ones, so every desktop call still allocates and frees a C string. That
+went unnoticed because desktop was already at ~150 ns per string — Panama allocates off-heap
+without crossing a boundary, which is the whole reason Android needed interning to catch up
+rather than the other way round. Wiring it on desktop would take the repeated names down to a
+map lookup plus a 2.65 ns crossing.
+
+This is cheaper to adopt than it looks and cheaper than composition, which ROADMAP §6 closed on
+desktop: the primitives already exist and only the call sites change.
+
+**Do not swap all 59 blindly.** The two primitives exist for different lifetimes:
+
+| | for | lifetime |
+|---|---|---|
+| `internedUtf8` | repeated identifiers — attribute, module, method names | kept, bounded at 4096 entries |
+| `encodeScratchUtf8` | arbitrary content — `exec` source, user strings | thread-local scratch, freed on the next call |
+
+Interning an `exec` source string would blow the cache. Android's actual interns only where the
+argument is a name, which is the rule to follow.
 
 ## The design
 
