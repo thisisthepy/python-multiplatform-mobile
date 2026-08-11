@@ -355,3 +355,103 @@ backend, and [pydantic publishes Emscripten wheels to PyPI under it](https://pyd
 The exact flag list for `pyemscripten_2026_0` — Emscripten version above all — has not been read
 off Pyodide's ABI page; it returned 403 to automated fetching and needs a manual read before the
 build script is written. Until then, treat "we can match the platform" as a plan, not a fact.
+
+---
+
+## Correction: the JS layer is not mandatory
+
+Everything above assumes Kotlin/Wasm can only reach CPython through JavaScript — that crossings
+cost a JS hop and that string data must be copied by JS between two isolated memories. Reading
+the Kotlin compiler shows both halves of that are wrong on the `wasmJs` target. This section
+records what was checked and where it stops.
+
+### 1. Kotlin can call another wasm module's exports directly
+
+`@WasmImport(module, name)` and `@WasmExport(name)` exist in the stdlib
+(`libraries/stdlib/wasm/src/kotlin/wasm/Annotations.kt`), gated behind
+`@ExperimentalWasmInterop` since 2.2. The annotation doc says the function is imported "without
+type adapters". The compiler's own codegen test `callingWasmDirectly.kt` states the intent
+outright:
+
+> Here we pass export of another Wasm module to our import directly without JS layer.
+> This enables strict type check without JS conversions.
+
+So `pmp_getattr(i32, i32) -> i32` can be a direct wasm-to-wasm call. JS is still involved in
+*instantiating* the modules and wiring the import, but not in the call. This is exactly the
+narrow integer interface the shape above already proposes — it just costs less than assumed.
+
+The constraint is the one that makes it work: no type adapters means wasm primitive types only.
+No strings, no objects. Which is what the composed shim signature already looks like.
+
+### 2. On `wasmJs`, Kotlin *imports* its linear memory
+
+`WasmCompiledModuleFragment.createAndExportMemory` branches on a flag that
+`wasmCompiler.kt` sets as `importWasmMemoryInsteadOfExport = isWasmJsTarget`:
+
+| target | what the module does with its memory |
+|---|---|
+| `wasmWasi` | **defines and exports** it — `WasmExport.Memory("memory", …)`, and the source comments that the name is a WASI ABI convention |
+| `wasmJs` | **imports** it, as `WasmImportDescriptor("intrinsics", "memory")`, declared with 0 initial pages |
+
+That inverts the premise. A `wasmJs` module does not own a memory it defines; the host hands one
+in. And `kotlin.wasm.unsafe.Pointer` is an `i32` into precisely that memory.
+
+So the question "can Kotlin read CPython's `char*`" reduces to "can the host supply Emscripten's
+memory as that import" — at the wasm level, both are just a `WebAssembly.Memory` in an import
+object, and Emscripten exposes its own as `Module.wasmMemory`. **If that works, string
+marshalling does not merely get cheaper, it disappears** — which matters more here than anywhere
+else, because every measurement on Android and desktop found marshalling, not crossings, to be
+the dominant cost.
+
+### 3. The blocker is the allocator, not the memory
+
+`kotlin/wasm/unsafe/MemoryAllocation.kt` creates the top-level allocator as
+`ScopedMemoryAllocator(0, parent = null)` and extends it with `wasm_memory_grow`. **It starts at
+address 0 and assumes it owns everything.** In Kotlin's own memory that is correct. In a memory
+shared with Emscripten, address 0 is the null page and the low region holds Emscripten's static
+data, so `withScopedMemoryAllocator` would hand out addresses CPython already owns and corrupt
+the heap.
+
+This does not sink the idea, but it bounds it:
+
+- **Reading and writing CPython-owned buffers** — addresses that CPython allocated and handed
+  back as `i32` — is safe.
+- **Allocating from Kotlin inside the shared memory** is not, unless the allocator can be given
+  a base address it does not currently accept.
+
+Whether a `Pointer` can be constructed from an arbitrary `Int` returned by the shim, rather than
+only from `allocate()`, has not been checked and decides whether the safe half is usable at all.
+
+### 4. The impossible direction stays impossible, and is already handled
+
+None of this changes that a WasmGC reference cannot be stored in linear memory — that is a
+spec-level guarantee, not a maturity gap, so CPython can never hold a Kotlin object pointer in a
+`PyObject` field. The answer there remains an index into a Kotlin-side table, which is what
+`docs/object-lifetime.md` already specifies for Python→Kotlin. Kotlin/Wasm even blesses the
+mechanism: `JsReference<T>` passes a Kotlin object as an opaque reference.
+
+### What this changes
+
+| | as recorded above | after reading the compiler |
+|---|---|---|
+| Kotlin → CPython call | JS hop | **direct wasm call** (`@WasmImport`) |
+| string marshalling | JS copies between two memories | **possibly none** — if the memory is shared |
+| Kotlin allocating in that memory | assumed fine | **unsafe** — allocator starts at 0 |
+| CPython holding a Kotlin object | impossible | impossible (unchanged) |
+
+The composed-shim design does not change shape. What changes is its cost, and the reason to build
+it: composition was proposed here to amortise JS hops, and if the hops are gone it has to justify
+itself on crossing count alone — the same argument that closed desktop composition in ROADMAP §6.
+
+### Unverified, in the order that decides the design
+
+1. Can the host supply Emscripten's `wasmMemory` as Kotlin's `("intrinsics", "memory")` import?
+   The generated JS glue builds that import object; whether it can be overridden is unknown.
+2. Can `Pointer` be constructed from an arbitrary `Int`? If not, the read-only half is unusable
+   and only `@WasmImport` survives.
+3. Is `("intrinsics", "memory")` stable? It is an internal name, not public API.
+4. Does `@WasmImport` work when the exporting module is an Emscripten `MAIN_MODULE`, whose
+   exports are ordinary wasm functions but whose instantiation Emscripten's own glue controls?
+
+None of these needs code in this repo to answer; all four are answerable with a small standalone
+experiment, and together they decide whether WASM looks like iOS or like the JS-bridge design.
