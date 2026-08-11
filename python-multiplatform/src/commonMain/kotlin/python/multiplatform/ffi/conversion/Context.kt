@@ -109,46 +109,56 @@ class PyContext(private var strategy: ConversionStrategy = ConversionStrategy.DE
         return obj
     }
 
-    /**
-     * Re-wraps [obj] as the most specific [PyObject] subclass its Python-level
-     * type corresponds to (e.g. a Python `int` becomes a [PyInt]), matching
-     * what [python.multiplatform.ffi.types.collections.pyObjectToNative] does
-     * for [ConversionStrategy.NATIVE] one level up (recursively, all the way
-     * to native Kotlin values) but stopping one level short here, at the typed
-     * wrapper itself. Falls back to [obj] unchanged for any Python type this
-     * library has no dedicated wrapper for (arbitrary user-defined objects) --
-     * TYPED cannot go further than that (see the [ConversionStrategy] doc).
-     *
-     * Dispatches the same way [python.multiplatform.ffi.types.collections.pyObjectToNative]
-     * does (see its doc for the full rationale): `None` first, via the
-     * zero-FFI-call [PyNone.isNone]; everything else via a single
-     * `PyObject_Type` call compared against [PyTypeChecks]'s cached builtin
-     * type pointers, rather than [python.multiplatform.ffi.PyType.name]
-     * string dispatch (three FFI crossings and a UTF-8 decode per call, just
-     * to read a name well enough to compare).
-     * New reference ownership: [PyObject.pointer] is still owned by [obj]
-     * afterwards, so each typed wrapper below is built with `borrowed = true`
-     * to take its own independent, incref'd reference to the same pointer.
-     */
-    private fun typedWrap(obj: PyObject): PyObject {
-        if (PyNone.isNone(obj)) return PyNone.get()
+}
 
-        val typePtr = python.multiplatform.ffi.Python3.withPython { PyObject_Type(obj.pointer) } ?: throw pyErrorOrGeneric("Failed to get the type of this object")
-        try {
-            return when (typePtr) {
-                PyTypeChecks.boolType -> PyBool(obj.pointer, true)
-                PyTypeChecks.intType -> PyInt(obj.pointer, true)
-                PyTypeChecks.floatType -> PyFloat(obj.pointer, true)
-                PyTypeChecks.strType -> PyString(obj.pointer, true)
-                PyTypeChecks.listType -> PyList(obj.pointer, true)
-                PyTypeChecks.tupleType -> PyTuple(obj.pointer, true)
-                PyTypeChecks.dictType -> PyDict(obj.pointer, true)
-                PyTypeChecks.setType -> PySet(obj.pointer, true)
-                PyTypeChecks.frozensetType -> PyFrozenSet(obj.pointer, true)
-                else -> obj
-            }
-        } finally {
-            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(typePtr) } // PyObject_Type: new reference, only needed for the dispatch above
+/**
+ * Re-wraps [obj] as the most specific [PyObject] subclass its Python-level
+ * type corresponds to (e.g. a Python `int` becomes a [PyInt]), matching
+ * what [python.multiplatform.ffi.types.collections.pyObjectToNative] does
+ * for [ConversionStrategy.NATIVE] one level up (recursively, all the way
+ * to native Kotlin values) but stopping one level short here, at the typed
+ * wrapper itself. Falls back to [obj] unchanged for any Python type this
+ * library has no dedicated wrapper for (arbitrary user-defined objects) --
+ * TYPED cannot go further than that (see the [ConversionStrategy] doc).
+ *
+ * That fallback is *identity*, deliberately: returning the same instance is
+ * what lets a caller ask "does this type have a wrapper at all?" by comparing
+ * references, which is how [PyProxy] decides whether a native projection
+ * exists without keeping a second copy of the table below.
+ *
+ * Dispatches the same way [python.multiplatform.ffi.types.collections.pyObjectToNative]
+ * does (see its doc for the full rationale): `None` first, via the
+ * zero-FFI-call [PyNone.isNone]; everything else via a single
+ * `PyObject_Type` call compared against [PyTypeChecks]'s cached builtin
+ * type pointers, rather than [python.multiplatform.ffi.PyType.name]
+ * string dispatch (three FFI crossings and a UTF-8 decode per call, just
+ * to read a name well enough to compare).
+ * New reference ownership: [PyObject.pointer] is still owned by [obj]
+ * afterwards, so each typed wrapper below is built with `borrowed = true`
+ * to take its own independent, incref'd reference to the same pointer.
+ *
+ * Top-level and `internal` rather than private to [PyContext] because
+ * [PyProxy]'s lazy conversion needs exactly this dispatch too; duplicating it
+ * there would be the third copy of the same table.
+ */
+internal fun typedWrap(obj: PyObject): PyObject {
+    if (PyNone.isNone(obj)) return PyNone.get()
+
+    val typePtr = python.multiplatform.ffi.Python3.withPython { PyObject_Type(obj.pointer) } ?: throw pyErrorOrGeneric("Failed to get the type of this object")
+    try {
+        return when (typePtr) {
+            PyTypeChecks.boolType -> PyBool(obj.pointer, true)
+            PyTypeChecks.intType -> PyInt(obj.pointer, true)
+            PyTypeChecks.floatType -> PyFloat(obj.pointer, true)
+            PyTypeChecks.strType -> PyString(obj.pointer, true)
+            PyTypeChecks.listType -> PyList(obj.pointer, true)
+            PyTypeChecks.tupleType -> PyTuple(obj.pointer, true)
+            PyTypeChecks.dictType -> PyDict(obj.pointer, true)
+            PyTypeChecks.setType -> PySet(obj.pointer, true)
+            PyTypeChecks.frozensetType -> PyFrozenSet(obj.pointer, true)
+            else -> obj
         }
+    } finally {
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(typePtr) } // PyObject_Type: new reference, only needed for the dispatch above
     }
 }

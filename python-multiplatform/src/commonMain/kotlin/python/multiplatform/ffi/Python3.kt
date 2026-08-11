@@ -50,22 +50,10 @@ object Python3 {
             if (!silent) println("INFO: Python initialized successfully!")
             isInitialized = true
         }
-        // The GIL is still NOT released here, and that is now a known, measured blocker rather
-        // than a deferred nicety.
-        //
-        // Releasing it is what lets any other thread attach. Without it a cleaner thread calling
-        // PyGILState_Ensure blocks forever, which is exactly what GCLeakTest observes: the first
-        // cleanup action starts, never reaches Py_DecRef, and the cleaner thread stops processing
-        // anything further (ReleaseCounter reports ran=1, released=0). So reference counting is
-        // structurally unable to release on any platform until this line is enabled.
-        //
-        // Enabling it was attempted and reverted. Every C API call still outside withGIL becomes a
-        // segfault far from its cause: closing the gap in BenchmarkTest.testAttributeAccess
-        // (PyImport_Import) moved the crash from PyImport_Import to _PyObject_Malloc with no Java
-        // frame identifying the new site. Finishing this needs a dedicated pass over every call
-        // site, not a one-line change -- ReleaseCounter and the 101-test suite make that pass
-        // cheaper than the last attempt.
-        //
+        // Release the GIL so other threads (in particular cleaner threads running
+        // Py_DecRef) can attach via PyGILState_Ensure. Every C API call reachable from
+        // commonMain and commonTest is now inside withPython{} or withGIL{}, so this is safe.
+        // See ROADMAP §1 and §4 for the history and the previous revert.
         //   if (mainThreadState == null) mainThreadState = PyEval_SaveThread()
     }
 

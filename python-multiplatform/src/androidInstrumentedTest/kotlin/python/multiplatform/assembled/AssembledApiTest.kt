@@ -36,7 +36,6 @@ import python.native.ffi.PythonOnDevice
  * is usable on Android; until they do, it is not.
  */
 @RunWith(AndroidJUnit4::class)
-@Ignore("Blocked on ROADMAP §2 -- Python3.exec crashes on its first call; see the file comment")
 class AssembledApiTest {
 
     @Test

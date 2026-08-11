@@ -21,7 +21,7 @@ object bindings {
     external fun Py_BytesMain(args: Array<String>): Int
     external fun Py_RunMain(): Int
     external fun PyRun_SimpleString(command: String): Int
-    external fun PyRun_String(str: String, start: Int, globals: JNIPointer, locals: JNIPointer): JNIPointer?
+    // external fun PyRun_String(str: String, start: Int, globals: JNIPointer, locals: JNIPointer): JNIPointer?
     external fun Py_GetVersion(): String?
     external fun Py_GetPlatform(): String?
     external fun Py_GetCopyright(): String?
@@ -37,8 +37,8 @@ object bindings {
     external fun PyLong_AsLongLong(p: JNIPointer): Long
     external fun PyLong_AsInt(p: JNIPointer): Int
 
-    external fun PyUnicode_FromString(str: String): JNIPointer?
-    external fun PyUnicode_AsUTF8(unicode: JNIPointer): String?
+    // external fun PyUnicode_FromString(str: String): JNIPointer?
+    // external fun PyUnicode_AsUTF8(unicode: JNIPointer): String?
     */
 
 
@@ -163,21 +163,21 @@ object bindings {
     external fun Py_GetCopyright(): String?
     external fun Py_GetCompiler(): String?
     external fun Py_GetBuildInfo(): String?
-    external fun PyEval_InitThreads()
-    external fun PyThreadState_GetDict(): JNIPointer?
+    // external fun PyEval_InitThreads()
+    // external fun PyThreadState_GetDict(): JNIPointer?
 
-    external fun PyGILState_Ensure(): Int
-    external fun PyGILState_Release(state: Int)
-    external fun PyGILState_GetThisThreadState(): JNIPointer?
-    external fun PyEval_SaveThread(): JNIPointer?
-    external fun PyEval_RestoreThread(tstate: JNIPointer)
+    // external fun PyGILState_Ensure(): Int
+    // external fun PyGILState_Release(state: Int)
+    // external fun PyGILState_GetThisThreadState(): JNIPointer?
+    // external fun PyEval_SaveThread(): JNIPointer?
+    // external fun PyEval_RestoreThread(tstate: JNIPointer)
 
 
     // Section 2
     @JvmStatic
     @dalvik.annotation.optimization.CriticalNative
     external fun PyRun_SimpleString(command: Long): Int // 수동 추가
-    external fun PyRun_String(str: String, start: Int, globals: JNIPointer, locals: JNIPointer): JNIPointer? // 수동 추가
+    // external fun PyRun_String(str: String, start: Int, globals: JNIPointer, locals: JNIPointer): JNIPointer? // 수동 추가
     external fun Py_CompileString(str: String, filename: String, start: Int): JNIPointer?
     external fun PyEval_EvalCode(co: JNIPointer, globals: JNIPointer, locals: JNIPointer): JNIPointer?
 
@@ -240,10 +240,10 @@ object bindings {
 
 
     // Section 4
-    external fun Py_NewRef(o: JNIPointer): JNIPointer?
-    external fun Py_XNewRef(o: JNIPointer): JNIPointer?
-    external fun Py_IncRef(o: JNIPointer)
-    external fun Py_DecRef(o: JNIPointer)
+    // external fun Py_NewRef(o: JNIPointer): JNIPointer?
+    // external fun Py_XNewRef(o: JNIPointer): JNIPointer?
+    // external fun Py_IncRef(o: JNIPointer)
+    // external fun Py_DecRef(o: JNIPointer)
 
 
     // Section 5
@@ -272,7 +272,7 @@ object bindings {
     external fun PyImport_ImportModuleLevel(name: String, globals: JNIPointer, locals: JNIPointer, fromlist: JNIPointer, level: Int): JNIPointer?
     external fun PyImport_Import(name: JNIPointer): JNIPointer?
     external fun PyImport_ReloadModule(m: JNIPointer): JNIPointer?
-    external fun PyImport_AddModuleRef(name: String): JNIPointer?
+    // external fun PyImport_AddModuleRef(name: String): JNIPointer?
     external fun PyImport_AddModuleObject(name: JNIPointer): JNIPointer?
     external fun PyImport_AddModule(name: String): JNIPointer?
     external fun PyImport_ExecCodeModule(name: String, co: JNIPointer): JNIPointer?
@@ -318,11 +318,11 @@ object bindings {
     external fun PyObject_Format(obj: JNIPointer, format_spec: JNIPointer): JNIPointer?
     external fun PyObject_Repr(o: JNIPointer): JNIPointer?
     external fun PyObject_ASCII(o: JNIPointer): JNIPointer?
-    external fun PyObject_Str(o: JNIPointer): JNIPointer?
+    // external fun PyObject_Str(o: JNIPointer): JNIPointer?
     external fun PyObject_Bytes(o: JNIPointer): JNIPointer?
     external fun PyObject_IsSubclass(derived: JNIPointer, cls: JNIPointer): Int
     external fun PyObject_IsInstance(inst: JNIPointer, cls: JNIPointer): Int
-    external fun PyObject_IsTrue(o: JNIPointer): Int
+    // external fun PyObject_IsTrue(o: JNIPointer): Int
     external fun PyObject_Not(o: JNIPointer): Int
     external fun PyObject_Type(o: JNIPointer): JNIPointer?
     external fun PyObject_Size(o: JNIPointer): Long
@@ -338,8 +338,8 @@ object bindings {
     // Section 11
     external fun PyVectorcall_Call(callable: JNIPointer, tuple: JNIPointer, dict: JNIPointer): JNIPointer?
     external fun PyObject_Call(callable: JNIPointer, args: JNIPointer, kwargs: JNIPointer): JNIPointer?
-    external fun PyObject_CallNoArgs(callable: JNIPointer): JNIPointer?
-    external fun PyObject_CallObject(callable: JNIPointer, args: JNIPointer): JNIPointer?
+    // external fun PyObject_CallNoArgs(callable: JNIPointer): JNIPointer?
+    // external fun PyObject_CallObject(callable: JNIPointer, args: JNIPointer): JNIPointer?
     external fun PyCallable_Check(o: JNIPointer): Int
 
 
@@ -450,7 +450,7 @@ object bindings {
 
     // Section 21
     external fun PyUnicode_IsIdentifier(unicode: JNIPointer): Int
-    external fun PyUnicode_FromString(str: String): JNIPointer?
+    // external fun PyUnicode_FromString(str: String): JNIPointer?
     external fun PyUnicode_FromObject(obj: JNIPointer): JNIPointer?
     external fun PyUnicode_FromEncodedObject(obj: JNIPointer, encoding: String, errors: String): JNIPointer?
     external fun PyUnicode_DecodeLocale(str: String, errors: String): JNIPointer?
@@ -459,7 +459,7 @@ object bindings {
     external fun PyUnicode_EncodeFSDefault(unicode: JNIPointer): JNIPointer?
     external fun PyUnicode_AsEncodedString(unicode: JNIPointer, encoding: String, errors: String): JNIPointer?
     external fun PyUnicode_AsUTF8String(unicode: JNIPointer): JNIPointer?
-    external fun PyUnicode_AsUTF8(unicode: JNIPointer): String? // 수동 추가
+    // external fun PyUnicode_AsUTF8(unicode: JNIPointer): String? // 수동 추가
     external fun PyUnicode_AsUTF32String(unicode: JNIPointer): JNIPointer?
     external fun PyUnicode_AsUTF16String(unicode: JNIPointer): JNIPointer?
     external fun PyUnicode_AsUnicodeEscapeString(unicode: JNIPointer): JNIPointer?
@@ -495,19 +495,19 @@ object bindings {
 
 
     // Section 23
-    external fun PyDict_New(): JNIPointer?
+    // external fun PyDict_New(): JNIPointer?
     external fun PyDict_Size(p: JNIPointer): Long
     external fun PyDictProxy_New(mapping: JNIPointer): JNIPointer?
     external fun PyDict_Clear(p: JNIPointer)
     external fun PyDict_Contains(p: JNIPointer, key: JNIPointer): Int
     external fun PyDict_Copy(p: JNIPointer): JNIPointer?
-    external fun PyDict_SetItem(p: JNIPointer, key: JNIPointer, v: JNIPointer): Int
-    external fun PyDict_SetItemString(p: JNIPointer, key: String, v: JNIPointer): Int
+    // external fun PyDict_SetItem(p: JNIPointer, key: JNIPointer, v: JNIPointer): Int
+    // external fun PyDict_SetItemString(p: JNIPointer, key: String, v: JNIPointer): Int
     external fun PyDict_DelItem(p: JNIPointer, key: JNIPointer): Int
     external fun PyDict_DelItemString(p: JNIPointer, key: String): Int
     external fun PyDict_GetItem(p: JNIPointer, key: JNIPointer): JNIPointer?
     external fun PyDict_GetItemWithError(p: JNIPointer, key: JNIPointer): JNIPointer?
-    external fun PyDict_GetItemString(p: JNIPointer, key: String): JNIPointer?
+    // external fun PyDict_GetItemString(p: JNIPointer, key: String): JNIPointer?
     external fun PyDict_Items(p: JNIPointer): JNIPointer?
     external fun PyDict_Keys(p: JNIPointer): JNIPointer?
     external fun PyDict_Values(p: JNIPointer): JNIPointer?
@@ -549,11 +549,11 @@ object bindings {
 
 
     // Section 28
-    external fun PyTuple_New(len: Long): JNIPointer?
+    // external fun PyTuple_New(len: Long): JNIPointer?
     external fun PyTuple_Size(p: JNIPointer): Long
     external fun PyTuple_GetItem(p: JNIPointer, pos: Long): JNIPointer?
     external fun PyTuple_GetSlice(p: JNIPointer, low: Long, high: Long): JNIPointer?
-    external fun PyTuple_SetItem(p: JNIPointer, pos: Long, o: JNIPointer): Int
+    // external fun PyTuple_SetItem(p: JNIPointer, pos: Long, o: JNIPointer): Int
 
 
     // Section 29
@@ -594,4 +594,36 @@ object bindings {
     external fun ffiAllocUtf8(str: String): Long
     external fun ffiFreeUtf8(ptr: Long)
     external fun ffiReadUtf8(ptr: Long): String?
+
+    @JvmStatic @dalvik.annotation.optimization.CriticalNative external fun PyUnicode_AsUTF8(unicode: Long): Long
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyUnicode_AsUTF8F(unicode: Long): Long
+    @JvmStatic @dalvik.annotation.optimization.CriticalNative external fun PyUnicode_FromString(str: Long): Long
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyUnicode_FromStringF(str: Long): Long
+
+    @JvmStatic external fun PyImport_AddModuleRefN(name: Long): Long
+    @JvmStatic external fun PyRun_StringN(str: Long, start: Int, globals: Long, locals: Long): Long
+    @JvmStatic external fun PyObject_StrN(o: Long): Long
+    @JvmStatic external fun PyObject_IsTrueN(o: Long): Int
+    @JvmStatic external fun PyObject_CallNoArgsN(callable: Long): Long
+    @JvmStatic external fun PyObject_CallObjectN(callable: Long, args: Long): Long
+
+
+    @JvmStatic external fun Py_DecRefN(o: Long)
+    @JvmStatic external fun Py_IncRefN(o: Long)
+    @JvmStatic external fun Py_NewRefN(o: Long): Long
+    @JvmStatic external fun Py_XNewRefN(o: Long): Long
+    @JvmStatic external fun PyGILState_EnsureN(): Int
+    @JvmStatic external fun PyGILState_ReleaseN(state: Int)
+    @JvmStatic external fun PyGILState_GetThisThreadStateN(): Long
+    @JvmStatic external fun PyEval_SaveThreadN(): Long
+    @JvmStatic external fun PyEval_RestoreThreadN(tstate: Long)
+    @JvmStatic external fun PyEval_InitThreadsN()
+    @JvmStatic external fun PyThreadState_GetDictN(): Long
+    @JvmStatic external fun PyTuple_NewN(len: Long): Long
+    @JvmStatic external fun PyTuple_SetItemN(p: Long, pos: Long, o: Long): Int
+    @JvmStatic external fun PyDict_NewN(): Long
+    @JvmStatic external fun PyDict_SetItemStringN(p: Long, key: Long, v: Long): Int
+    @JvmStatic external fun PyDict_SetItemN(p: Long, key: Long, v: Long): Int
+    @JvmStatic external fun PyDict_GetItemStringN(p: Long, key: Long): Long
+
 }

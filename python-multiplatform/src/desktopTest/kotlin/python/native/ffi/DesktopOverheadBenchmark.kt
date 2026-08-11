@@ -45,25 +45,30 @@ class DesktopOverheadBenchmark {
 
     @Test
     fun panamaTransitionCost() {
-        if (Py_IsInitialized() == 0) Py_Initialize()
+        // Every C API call needs the GIL. These were bare, and stayed harmless only while
+        // initialize() kept the GIL for itself -- the moment it started parking the main thread
+        // state, this benchmark segfaulted the whole suite.
+        check(python.multiplatform.ffi.PythonTestFixture.available) {
+            "CPython could not be initialized: ${python.multiplatform.ffi.PythonTestFixture.failureReason}"
+        }
 
-        val sys = PyImport_ImportModule("sys")
+        val sys = python.multiplatform.ffi.Python3.withPython { PyImport_ImportModule("sys") }
         assertTrue(sys != null, "could not import sys")
-        val path = PyObject_GetAttrString(sys!!, "path")
+        val path = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(sys!!, "path") }
         assertTrue(path != null, "could not read sys.path")
 
-        val len = PyList_Size(path!!)
+        val len = python.multiplatform.ffi.Python3.withPython { PyList_Size(path!!) }
         assertTrue(len > 0, "sys.path should be a non-empty list, got $len")
 
         var w = 0L
-        repeat(WARMUP) { i -> w += kotlinEcho(i.toLong()) + PyList_Size(path) }
+        repeat(WARMUP) { i -> w += kotlinEcho(i.toLong()) + python.multiplatform.ffi.Python3.withPython { PyList_Size(path) } }
         sink += w
 
         var bestKotlin = Double.MAX_VALUE
         var bestPanama = Double.MAX_VALUE
         repeat(ROUNDS) {
             timeOnce { kotlinEcho(it) }.let { if (it < bestKotlin) bestKotlin = it }
-            timeOnce { PyList_Size(path) }.let { if (it < bestPanama) bestPanama = it }
+            timeOnce { python.multiplatform.ffi.Python3.withPython { PyList_Size(path) } }.let { if (it < bestPanama) bestPanama = it }
         }
 
         val net = bestPanama - bestKotlin
@@ -104,7 +109,9 @@ class DesktopOverheadBenchmark {
     @Ignore
     @Test
     fun stringMarshallingShareOfARealisticCall() {
-        if (Py_IsInitialized() == 0) Py_Initialize()
+        check(python.multiplatform.ffi.PythonTestFixture.available) {
+            "CPython could not be initialized: ${python.multiplatform.ffi.PythonTestFixture.failureReason}"
+        }
 
         val code = "x = 1 + 1"
         val fileInput = 257

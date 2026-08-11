@@ -3,7 +3,6 @@ package python.multiplatform.ffi.conversion
 import python.multiplatform.ffi.PythonTestFixture
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 
 /**
@@ -32,13 +31,15 @@ class ConversionTest {
     }
 
     @Test
-    fun pyValueThrowsWhenNoNativeValueWasEverComputed() = PythonTestFixture.withInterpreter {
+    fun pyValueDerivesTheNativeValueWhenNoneWasSupplied() = PythonTestFixture.withInterpreter {
         val obj = PythonTestFixture.eval("123")
         val value = PyValue<Long>(obj)
-        // No native value was supplied and PyProxy's lazy conversion is not implemented yet.
-        assertFailsWith<Throwable> {
-            value.asNative()
-        }
+        // Red phase: this asserted a throw, because PyProxy's lazy conversion was a TODO stub
+        // that ended in `cachedNativeValue!!`. Green phase: the lazy path is implemented, so the
+        // conversion is what must hold. The genuine failure case the old assertion stood in for
+        // -- a Python value with no native Kotlin counterpart -- is asserted properly in
+        // PyValueLazyConversionTest, along with the rest of the lazy path.
+        assertEquals(123L, value.asNative())
     }
 
     @Test

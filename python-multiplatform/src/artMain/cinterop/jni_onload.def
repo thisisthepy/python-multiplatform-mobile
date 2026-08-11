@@ -6,6 +6,33 @@ extern void Py_Initialize(void);
 extern jint Py_IsInitialized(void);
 extern void Py_Finalize(void);
 extern void PyErr_Clear(void);
+
+extern void Py_DecRef(jlong);
+extern void Py_IncRef(jlong);
+extern jlong Py_NewRef(jlong);
+extern jlong Py_XNewRef(jlong);
+extern jint PyGILState_Ensure(void);
+extern void PyGILState_Release(jint);
+extern jlong PyGILState_GetThisThreadState(void);
+extern jlong PyEval_SaveThread(void);
+extern void PyEval_RestoreThread(jlong);
+extern void PyEval_InitThreads(void);
+extern jlong PyThreadState_GetDict(void);
+extern jlong PyTuple_New(jlong);
+extern jint PyTuple_SetItem(jlong, jlong, jlong);
+extern jlong PyDict_New(void);
+extern jint PyDict_SetItemString(jlong, const char*, jlong);
+extern jint PyDict_SetItem(jlong, jlong, jlong);
+extern jlong PyDict_GetItemString(jlong, const char*);
+
+
+extern jlong PyObject_Str(jlong);
+extern jint PyObject_IsTrue(jlong);
+extern jlong PyObject_CallNoArgs(jlong);
+extern jlong PyObject_CallObject(jlong, jlong);
+extern const char* PyUnicode_AsUTF8(jlong);
+extern jlong PyUnicode_FromString(const char*);
+
 extern jlong PyLong_FromLongLong(jlong);
 extern jlong PyList_Size(jlong);
 extern jint PyRun_SimpleString(const char*);
@@ -18,6 +45,33 @@ extern jlong PyImport_AddModuleRef(const char*);
 extern jlong PyRun_String(const char*, jint, jlong, jlong);
 extern void Py_DecRef(jlong);
 extern void PyErr_Clear(void);
+
+extern void Py_DecRef(jlong);
+extern void Py_IncRef(jlong);
+extern jlong Py_NewRef(jlong);
+extern jlong Py_XNewRef(jlong);
+extern jint PyGILState_Ensure(void);
+extern void PyGILState_Release(jint);
+extern jlong PyGILState_GetThisThreadState(void);
+extern jlong PyEval_SaveThread(void);
+extern void PyEval_RestoreThread(jlong);
+extern void PyEval_InitThreads(void);
+extern jlong PyThreadState_GetDict(void);
+extern jlong PyTuple_New(jlong);
+extern jint PyTuple_SetItem(jlong, jlong, jlong);
+extern jlong PyDict_New(void);
+extern jint PyDict_SetItemString(jlong, const char*, jlong);
+extern jint PyDict_SetItem(jlong, jlong, jlong);
+extern jlong PyDict_GetItemString(jlong, const char*);
+
+
+extern jlong PyObject_Str(jlong);
+extern jint PyObject_IsTrue(jlong);
+extern jlong PyObject_CallNoArgs(jlong);
+extern jlong PyObject_CallObject(jlong, jlong);
+extern const char* PyUnicode_AsUTF8(jlong);
+extern jlong PyUnicode_FromString(const char*);
+
 
 jlong critical_echo0(jlong x) { return x; }
 jlong critical_echo1(jlong x) { return x; }
@@ -63,6 +117,35 @@ static jlong f_Py_GetVersion(JNIEnv *e, jclass c) { return (jlong)Py_GetVersion(
 static jlong f_PyImport_ImportModule(JNIEnv *e, jclass c, jlong n) { return PyImport_ImportModule((const char*)n); }
 static jlong f_PyObject_GetAttrString(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_GetAttrString(o, (const char*)n); }
 static jlong f_PyErr_Occurred(JNIEnv *e, jclass c) { return PyErr_Occurred(); }
+
+static void f_Py_DecRefN(JNIEnv *e, jclass c, jlong o) { Py_DecRef((jlong)o); }
+static void f_Py_IncRefN(JNIEnv *e, jclass c, jlong o) { Py_IncRef((jlong)o); }
+static jlong f_Py_NewRefN(JNIEnv *e, jclass c, jlong o) { return Py_NewRef((jlong)o); }
+static jlong f_Py_XNewRefN(JNIEnv *e, jclass c, jlong o) { return Py_XNewRef((jlong)o); }
+static jint f_PyGILState_EnsureN(JNIEnv *e, jclass c) { return PyGILState_Ensure(); }
+static void f_PyGILState_ReleaseN(JNIEnv *e, jclass c, jint s) { PyGILState_Release(s); }
+static jlong f_PyGILState_GetThisThreadStateN(JNIEnv *e, jclass c) { return PyGILState_GetThisThreadState(); }
+static jlong f_PyEval_SaveThreadN(JNIEnv *e, jclass c) { return PyEval_SaveThread(); }
+static void f_PyEval_RestoreThreadN(JNIEnv *e, jclass c, jlong t) { PyEval_RestoreThread(t); }
+static void f_PyEval_InitThreadsN(JNIEnv *e, jclass c) { PyEval_InitThreads(); }
+static jlong f_PyThreadState_GetDictN(JNIEnv *e, jclass c) { return PyThreadState_GetDict(); }
+static jlong f_PyTuple_NewN(JNIEnv *e, jclass c, jlong len) { return PyTuple_New(len); }
+static jint f_PyTuple_SetItemN(JNIEnv *e, jclass c, jlong p, jlong pos, jlong o) { return PyTuple_SetItem(p, pos, o); }
+static jlong f_PyDict_NewN(JNIEnv *e, jclass c) { return PyDict_New(); }
+static jint f_PyDict_SetItemStringN(JNIEnv *e, jclass c, jlong p, jlong k, jlong v) { return PyDict_SetItemString(p, (const char*)k, v); }
+static jint f_PyDict_SetItemN(JNIEnv *e, jclass c, jlong p, jlong k, jlong v) { return PyDict_SetItem(p, k, v); }
+static jlong f_PyDict_GetItemStringN(JNIEnv *e, jclass c, jlong p, jlong k) { return PyDict_GetItemString(p, (const char*)k); }
+
+
+static jlong f_PyImport_AddModuleRefN(JNIEnv *e, jclass c, jlong n) { return PyImport_AddModuleRef((const char*)n); }
+static jlong f_PyRun_StringN(JNIEnv *e, jclass c, jlong str, jint start, jlong globals, jlong locals) { return PyRun_String((const char*)str, start, globals, locals); }
+static jlong f_PyObject_StrN(JNIEnv *e, jclass c, jlong o) { return PyObject_Str(o); }
+static jint f_PyObject_IsTrueN(JNIEnv *e, jclass c, jlong o) { return PyObject_IsTrue(o); }
+static jlong f_PyObject_CallNoArgsN(JNIEnv *e, jclass c, jlong callable) { return PyObject_CallNoArgs(callable); }
+static jlong f_PyObject_CallObjectN(JNIEnv *e, jclass c, jlong callable, jlong args) { return PyObject_CallObject(callable, args); }
+static jlong f_PyUnicode_AsUTF8(JNIEnv *e, jclass c, jlong unicode) { return (jlong)PyUnicode_AsUTF8(unicode); }
+static jlong f_PyUnicode_FromString(JNIEnv *e, jclass c, jlong str) { return PyUnicode_FromString((const char*)str); }
+
 
 /*
  * Composition probes.
@@ -253,11 +336,43 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyImport_ImportModuleN", "(J)J", (void *)&f_PyImport_ImportModule},
         {"PyObject_GetAttrStringN", "(JJ)J", (void *)&f_PyObject_GetAttrString},
 
+        {"Py_DecRefN", "(J)V", (void *)&f_Py_DecRefN},
+        {"Py_IncRefN", "(J)V", (void *)&f_Py_IncRefN},
+        {"Py_NewRefN", "(J)J", (void *)&f_Py_NewRefN},
+        {"Py_XNewRefN", "(J)J", (void *)&f_Py_XNewRefN},
+        {"PyGILState_EnsureN", "()I", (void *)&f_PyGILState_EnsureN},
+        {"PyGILState_ReleaseN", "(I)V", (void *)&f_PyGILState_ReleaseN},
+        {"PyGILState_GetThisThreadStateN", "()J", (void *)&f_PyGILState_GetThisThreadStateN},
+        {"PyEval_SaveThreadN", "()J", (void *)&f_PyEval_SaveThreadN},
+        {"PyEval_RestoreThreadN", "(J)V", (void *)&f_PyEval_RestoreThreadN},
+        {"PyEval_InitThreadsN", "()V", (void *)&f_PyEval_InitThreadsN},
+        {"PyThreadState_GetDictN", "()J", (void *)&f_PyThreadState_GetDictN},
+        {"PyTuple_NewN", "(J)J", (void *)&f_PyTuple_NewN},
+        {"PyTuple_SetItemN", "(JJJ)I", (void *)&f_PyTuple_SetItemN},
+        {"PyDict_NewN", "()J", (void *)&f_PyDict_NewN},
+        {"PyDict_SetItemStringN", "(JJJ)I", (void *)&f_PyDict_SetItemStringN},
+        {"PyDict_SetItemN", "(JJJ)I", (void *)&f_PyDict_SetItemN},
+        {"PyDict_GetItemStringN", "(JJ)J", (void *)&f_PyDict_GetItemStringN},
+
+
+        {"PyUnicode_AsUTF8", "(J)J", (void *)&PyUnicode_AsUTF8},
+        {"PyUnicode_AsUTF8F", "(J)J", (void *)&f_PyUnicode_AsUTF8},
+        {"PyUnicode_FromString", "(J)J", (void *)&PyUnicode_FromString},
+        {"PyUnicode_FromStringF", "(J)J", (void *)&f_PyUnicode_FromString},
+
+        {"PyImport_AddModuleRefN", "(J)J", (void *)&f_PyImport_AddModuleRefN},
+        {"PyRun_StringN", "(JIJJ)J", (void *)&f_PyRun_StringN},
+        {"PyObject_StrN", "(J)J", (void *)&f_PyObject_StrN},
+        {"PyObject_IsTrueN", "(J)I", (void *)&f_PyObject_IsTrueN},
+        {"PyObject_CallNoArgsN", "(J)J", (void *)&f_PyObject_CallNoArgsN},
+        {"PyObject_CallObjectN", "(JJ)J", (void *)&f_PyObject_CallObjectN},
+
+
         {"testUpcallPrimitive", "(J)J", (void *)&test_upcall_primitive},
         {"testUpcallString", "(Ljava/lang/String;)J", (void *)&test_upcall_string},
         {"testUpcallUnattached", "(J)J", (void *)&test_upcall_unattached},
         {"testThreadCreateFloor", "(J)J", (void *)&test_thread_create_floor}
     };
-    (*env)->RegisterNatives(env, clazz, methods, 44);
+    (*env)->RegisterNatives(env, clazz, methods, 71);
     return JNI_VERSION_1_6;
 }
