@@ -45,3 +45,6 @@ google-services.json
 
 # Android Profiling
 *.hprof
+wasm-experiment/build/
+wasm-experiment/.gradle/
+wasm-experiment/kotlin-js-store/

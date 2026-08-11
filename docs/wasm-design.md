@@ -455,3 +455,86 @@ itself on crossing count alone — the same argument that closed desktop composi
 
 None of these needs code in this repo to answer; all four are answerable with a small standalone
 experiment, and together they decide whether WASM looks like iOS or like the JS-bridge design.
+
+---
+
+## Measured: what the released toolchain actually does
+
+The section above was written from the Kotlin compiler at master and got one thing wrong in a way
+that matters. `wasm-experiment/` builds a trivial `wasmJs` module on Kotlin 2.4.10, runs it, and
+parses the emitted binary. Findings, in the order they change the design.
+
+### The memory import is master-only; the released direction is the opposite
+
+`importWasmMemoryInsteadOfExport = isWasmJsTarget` is in the compiler source but **not in any
+released version**. Parsing the 2.4.10 output: the only length-prefixed `intrinsics` import is
+`intrinsics.tag` (the exception tag), there is no memory import, and the export section contains
+`memory`. Same on 2.2.20.
+
+So Kotlin does not import a memory today. It exports one.
+
+**That inverts the plan, and the inverted plan is better** — because it needs nothing unreleased
+on either side. Emscripten has `-sIMPORTED_MEMORY`, which makes the CPython module import
+`env.memory` rather than define it. Instantiate Kotlin first, take `exports.memory`, grow it to
+Emscripten's initial size, hand it over as `env.memory`. Both halves are shipped features.
+
+### Kotlin's linear memory is empty, and stays empty
+
+This is what makes handing it over safe, and it is measured rather than assumed:
+
+```
+pages at startup                 0
+pages after string interop       0
+pages after collections          0
+pages after exception            0
+pages after explicit allocate    2   (allocated at 0x0)
+```
+
+The module declares `min_pages = 0`, and all 40 of its data segments are **passive** — they
+initialise WasmGC arrays through `array.new_data` and are never placed in linear memory. String
+interop was the obvious suspect for a hidden consumer and it is not one; Kotlin strings are
+WasmGC arrays and cross to JS as `externref`.
+
+So a `wasmJs` module's linear memory is unused space that happens to be attached to it. Giving it
+to Emscripten costs Kotlin nothing.
+
+### The allocator hazard is real but avoidable
+
+The last probe line confirms the source reading: `withScopedMemoryAllocator` grew the memory and
+allocated at **address 0**, exactly on top of where Emscripten keeps its static data. In a shared
+memory this corrupts the heap on first use.
+
+The mitigation is not a workaround, it is the natural design: **CPython allocates, Kotlin only
+reads.** `Pointer(addr)` has a public constructor and its `loadInt`/`storeByte` members compile to
+plain `i32.load`/`i32.store` with no allocator involvement — confirmed by compiling and running
+it. Every address we would ever dereference comes back from a C call.
+
+`withScopedMemoryAllocator` must therefore never appear in `wasmJsMain`. That belongs in the
+source-set README as a hard rule, in the same category as desktop's "always `invokeExact`".
+
+### What the picture looks like now
+
+| | earlier draft | measured |
+|---|---|---|
+| Kotlin → CPython call | JS hop | direct wasm call (`@WasmImport`) |
+| who owns the shared memory | CPython, imported by Kotlin (master-only) | **Kotlin exports it, Emscripten imports it** |
+| Kotlin reading `char*` | impossible | `Pointer(addr).loadByte()`, no JS, no allocator |
+| string marshalling | dominant cost | **none, if the memory is shared** |
+| CPython holding a Kotlin object | impossible | impossible (unchanged — handle index) |
+
+If this holds end to end, WASM stops being the outlier and lands close to the iOS shape: no
+boundary for data, a direct call for control, and a handle table for the one direction WasmGC
+forbids. The composition argument weakens accordingly — it was proposed here to amortise JS hops,
+and without them it must justify itself on crossing count alone, which is what closed desktop
+composition in ROADMAP §6.
+
+### Still unverified
+
+1. **Does `@WasmImport` bind to an Emscripten module's export?** The mechanism is proven by the
+   compiler's own `callingWasmDirectly.kt` codegen test, but against a hand-built module, not one
+   whose instantiation Emscripten's glue controls. Needs `emsdk`, which is not installed here.
+2. **Does Emscripten accept a memory that starts at 0 pages and is grown by JS before
+   instantiation?** `-sIMPORTED_MEMORY` normally pairs with a memory JS created at the right size.
+3. **Does anything in a larger Kotlin program touch linear memory?** The probe covers strings,
+   collections and exceptions on a trivial module. Coroutines, `ByteArray` interop and the JS
+   `ArrayBuffer` bridges are untested.
