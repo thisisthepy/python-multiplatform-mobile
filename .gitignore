@@ -48,3 +48,5 @@ google-services.json
 wasm-experiment/build/
 wasm-experiment/.gradle/
 wasm-experiment/kotlin-js-store/
+wasm-experiment/native/probeA.*
+wasm-experiment/native/probeB.*

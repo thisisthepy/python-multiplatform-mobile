@@ -538,3 +538,99 @@ composition in ROADMAP §6.
 3. **Does anything in a larger Kotlin program touch linear memory?** The probe covers strings,
    collections and exceptions on a trivial module. Coroutines, `ByteArray` interop and the JS
    `ArrayBuffer` bridges are untested.
+
+---
+
+## Proven end to end: Kotlin and CPython-side C can share one memory
+
+The section above listed three unverified items and said the first needed `emsdk`. It is
+installed, both experiments are built and run, and both pass. `wasm-experiment/` reproduces them.
+
+### Test A — `@WasmImport` binds to an Emscripten export
+
+Kotlin called `add_two` compiled by `emcc` and got 42. The compiler emits a real wasm import,
+`(import "./probeA-wrapper.mjs" "add_two" (func …))`, and wires the ES module into the import
+object. The value supplied prints as `function 2() { [native code] }` — a raw wasm export, not a
+JS wrapper — so the call is wasm-to-wasm with no JS frame, which is what the compiler's own
+`callingWasmDirectly.kt` test intends.
+
+### Test B — Emscripten imports the memory Kotlin exports
+
+```
+C: get_static_message() -> 0x400
+Kotlin: readCStringAt(same address) -> "hello-from-the-cpython-side"      PASS
+C: alloc_message() -> 0x10628
+Kotlin: writeCStringAt(addr, "written-by-kotlin")
+C: str_len(addr) -> 17, UTF8ToString(addr) -> "written-by-kotlin"         PASS
+```
+
+Both directions, static data and `malloc`'d heap. **No copying and no JS in the data path.**
+Kotlin dereferences a C address with `Pointer(addr)` and gets the bytes C put there.
+
+### The single blocker, and it is one value
+
+Emscripten refused Kotlin's memory at first:
+
+```
+LinkError: memory import has no maximum limit, expected at most 4294967295
+```
+
+Kotlin emits `WasmLimits(0, null)` — no maximum — and wasm requires a supplied memory's limits to
+sit inside the importer's, so an unbounded memory can never satisfy any Emscripten import.
+Patching section 5 to `{min: 0, max: 32768}` made everything link and both directions work.
+Nothing else about the pairing needed changing.
+
+**That is a compiler-chosen constant, not a design problem.** It is worth a YouTrack issue; a
+`-Xwasm-memory-maximum`-style knob, or simply emitting the wasm32 ceiling, would remove the need
+to post-process the binary. Until then a build step can patch it, which is ugly but bounded — the
+memory section is six bytes and nothing in the format holds an absolute offset.
+
+### The constraint that shapes the design
+
+A and B cannot be combined in one instantiation graph while Kotlin owns the memory:
+
+```
+Kotlin      @WasmImport          needs Emscripten's exports at instantiation time
+Emscripten  -sIMPORTED_MEMORY    needs Kotlin's memory before that
+```
+
+Wasm imports are supplied up front, so that is a cycle. Three ways out:
+
+1. **Kotlin imports the memory instead of exporting it.** No cycle — Emscripten instantiates
+   first, then Kotlin receives both the memory and the functions. This is
+   `importWasmMemoryInsteadOfExport = isWasmJsTarget`, present at master and in no release. It is
+   the configuration this design wants, and the second reason to talk to JetBrains.
+2. **JS trampolines for calls, shared memory for data.** Available today. Costs a JS hop per
+   call and keeps the data path free — and the data path is the half that dominated every
+   measurement on Android and desktop, so this captures most of the win.
+3. Copy through JS, as originally designed.
+
+### What §10 looks like now
+
+| | original design | proven |
+|---|---|---|
+| control path | JS hop per call | direct wasm call, **or** JS trampoline if sharing memory |
+| data path | JS copies between two memories | **none — one memory** |
+| string marshalling | dominant cost, needs interning | **absent** |
+| composition | needed to amortise JS hops | **weakly motivated** — same argument that closed §6 |
+| CPython holding a Kotlin object | impossible | impossible — handle index, per `object-lifetime.md` |
+
+WASM stops being the outlier. With option 2 it is roughly Android's shape with a cheaper data
+path; with option 1 it is close to iOS.
+
+### Rules this produces for `wasmJsMain`
+
+- **`withScopedMemoryAllocator` must never be called.** It allocates at address 0, on top of
+  Emscripten's static data. Measured: the probe grew the memory to 2 pages and handed back `0x0`.
+  CPython allocates; Kotlin only dereferences addresses it was given.
+- `Pointer(addr)` is the only way in, and its public constructor plus raw `i32.load`/`i32.store`
+  members make that free.
+
+### Still open
+
+- Whether a larger Kotlin program leaves linear memory alone. The probe covers strings,
+  collections and exceptions; coroutines and `ByteArray`/`ArrayBuffer` bridges are untested, and
+  any one of them touching linear memory would break sharing.
+- The cost of option 2's JS trampoline, unmeasured.
+- Upcalls. `addFunction` still routes through JS to re-enter WasmGC, and nothing here changes
+  that; §7 still needs measuring before `wasmJsMain` is written.
