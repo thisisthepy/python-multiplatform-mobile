@@ -51,15 +51,15 @@ class CompositionBenchmark {
     fun composedVersusPerCallCrossings() {
         PythonOnDevice.ensureInitialised()
 
-        val main = PythonOnDevice.withUtf8("__main__") { bindings.PyImport_ImportModule(it) }
+        val main = PythonOnDevice.withUtf8("__main__") { bindings.PyImport_ImportModuleN(it) }
         assertTrue("could not import __main__", main != 0L)
 
         val setup = "_bench_list = list(range($LIST_SIZE))"
-        assertEquals(0, PythonOnDevice.withUtf8(setup) { bindings.PyRun_SimpleString(it) })
+        assertEquals(0, PythonOnDevice.withUtf8(setup) { bindings.PyRun_SimpleStringN(it).toInt() })
 
-        val list = PythonOnDevice.withUtf8("_bench_list") { bindings.PyObject_GetAttrString(main, it) }
+        val list = PythonOnDevice.withUtf8("_bench_list") { bindings.PyObject_GetAttrStringN(main, it) }
         assertTrue("could not read _bench_list", list != 0L)
-        assertEquals(LIST_SIZE.toLong(), bindings.PyList_Size(list))
+        assertEquals(LIST_SIZE.toLong(), bindings.PyList_SizeNormal(list))
 
         // --- getAttr: 4 crossings vs 1 ---
         val perCallAttr = best(ITERS) {
@@ -80,7 +80,7 @@ class CompositionBenchmark {
         val out = LongArray(LIST_SIZE)
         val small = 200
         val perCallList = best(small) {
-            val n = bindings.PyList_Size(list).toInt()
+            val n = bindings.PyList_SizeNormal(list).toInt()
             var acc = 0L
             for (i in 0 until n) acc += bindings.PyList_GetItemRaw(list, i.toLong())
             acc
@@ -172,9 +172,9 @@ class CompositionBenchmark {
     fun directBufferMarshallingVersusComposition() {
         PythonOnDevice.ensureInitialised()
 
-        val main = PythonOnDevice.withUtf8("__main__") { bindings.PyImport_ImportModule(it) }
+        val main = PythonOnDevice.withUtf8("__main__") { bindings.PyImport_ImportModuleN(it) }
         assertTrue("could not import __main__", main != 0L)
-        PythonOnDevice.withUtf8("_bench_list = list(range(8))") { bindings.PyRun_SimpleString(it) }
+        PythonOnDevice.withUtf8("_bench_list = list(range(8))") { bindings.PyRun_SimpleStringN(it) }
 
         val name = "_bench_list"
 
@@ -234,9 +234,9 @@ class CompositionBenchmark {
     fun cheaperMarshallingForOldArt() {
         PythonOnDevice.ensureInitialised()
 
-        val main = PythonOnDevice.withUtf8("__main__") { bindings.PyImport_ImportModule(it) }
+        val main = PythonOnDevice.withUtf8("__main__") { bindings.PyImport_ImportModuleN(it) }
         assertTrue("could not import __main__", main != 0L)
-        PythonOnDevice.withUtf8("_bench_list = list(range(8))") { bindings.PyRun_SimpleString(it) }
+        PythonOnDevice.withUtf8("_bench_list = list(range(8))") { bindings.PyRun_SimpleStringN(it) }
 
         val name = "_bench_list"
         val scratch = java.nio.ByteBuffer.allocateDirect(256)

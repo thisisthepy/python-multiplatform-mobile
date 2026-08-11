@@ -85,6 +85,8 @@ extern jlong PyList_AsTuple(jlong);
 extern jint PyList_Insert(jlong, jlong, jlong);
 extern jint PyList_Reverse(jlong);
 extern jint PyList_Sort(jlong);
+extern jlong PyList_New(jlong);
+extern jint PyList_SetItem(jlong, jlong, jlong);
 extern jlong PyTuple_GetItem(jlong, jlong);
 extern jlong PyTuple_GetSlice(jlong, jlong, jlong);
 extern jlong PyTuple_Size(jlong);
@@ -268,6 +270,8 @@ static jlong f_PyList_AsTupleN(JNIEnv *e, jclass c, jlong list) { return PyList_
 static jint f_PyList_InsertN(JNIEnv *e, jclass c, jlong list, jlong index, jlong item) { return PyList_Insert(list, index, item); }
 static jint f_PyList_ReverseN(JNIEnv *e, jclass c, jlong list) { return PyList_Reverse(list); }
 static jint f_PyList_SortN(JNIEnv *e, jclass c, jlong list) { return PyList_Sort(list); }
+static jlong f_PyList_NewN(JNIEnv *e, jclass c, jlong len) { return PyList_New(len); }
+static jint f_PyList_SetItemN(JNIEnv *e, jclass c, jlong list, jlong index, jlong item) { return PyList_SetItem(list, index, item); }
 static jlong f_PyTuple_GetItemN(JNIEnv *e, jclass c, jlong p, jlong pos) { return PyTuple_GetItem(p, pos); }
 static jlong f_PyTuple_GetSliceN(JNIEnv *e, jclass c, jlong p, jlong low, jlong high) { return PyTuple_GetSlice(p, low, high); }
 static jlong f_PyTuple_SizeN(JNIEnv *e, jclass c, jlong p) { return PyTuple_Size(p); }
@@ -562,6 +566,8 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyList_InsertN", "(JJJ)I", (void *)&f_PyList_InsertN},
         {"PyList_ReverseN", "(J)I", (void *)&f_PyList_ReverseN},
         {"PyList_SortN", "(J)I", (void *)&f_PyList_SortN},
+        {"PyList_NewN", "(J)J", (void *)&f_PyList_NewN},
+        {"PyList_SetItemN", "(JJJ)I", (void *)&f_PyList_SetItemN},
         {"PyTuple_GetItemN", "(JJ)J", (void *)&f_PyTuple_GetItemN},
         {"PyTuple_GetSliceN", "(JJJ)J", (void *)&f_PyTuple_GetSliceN},
         {"PyTuple_SizeN", "(J)J", (void *)&f_PyTuple_SizeN},
@@ -603,6 +609,6 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"testUpcallUnattached", "(J)J", (void *)&test_upcall_unattached},
         {"testThreadCreateFloor", "(J)J", (void *)&test_thread_create_floor}
     };
-    (*env)->RegisterNatives(env, clazz, methods, 138);
+    (*env)->RegisterNatives(env, clazz, methods, sizeof(methods) / sizeof(methods[0]));
     return JNI_VERSION_1_6;
 }

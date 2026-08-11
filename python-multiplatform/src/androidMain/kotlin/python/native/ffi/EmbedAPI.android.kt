@@ -449,12 +449,12 @@ actual fun PyUnicode_InternFromString(str: String): NativePointer? = python.nati
 
 
 // Section 22
-actual fun PyList_New(len: Long): NativePointer? = python.native.ffi.bindings.PyList_New(len).toNativePointer()
+actual fun PyList_New(len: Long): NativePointer? = python.native.ffi.bindings.PyList_NewN(len).toNativePointer()
 actual inline fun PyList_Size(list: NativePointer): Long =
     if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyList_SizeF(list.toPlatformPointer())
     else python.native.ffi.bindings.PyList_Size(list.toPlatformPointer())
-actual fun PyList_GetItem(list: NativePointer, index: Long): NativePointer? = python.native.ffi.bindings.PyList_GetItem(list.toPlatformPointer(), index).toNativePointer()
-actual inline fun PyList_SetItem(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_SetItem(list.toPlatformPointer(), index, item.toPlatformPointer())
+actual fun PyList_GetItem(list: NativePointer, index: Long): NativePointer? = python.native.ffi.bindings.PyList_GetItemRaw(list.toPlatformPointer(), index).toNativePointer()
+actual inline fun PyList_SetItem(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_SetItemN(list.toPlatformPointer(), index, item.toPlatformPointer())
 actual inline fun PyList_Insert(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_InsertN(list.toPlatformPointer(), index, item.toPlatformPointer())
 actual inline fun PyList_Append(list: NativePointer, item: NativePointer): Int = python.native.ffi.bindings.PyList_AppendN(list.toPlatformPointer(), item.toPlatformPointer())
 actual inline fun PyList_Sort(list: NativePointer): Int = python.native.ffi.bindings.PyList_SortN(list.toPlatformPointer())
