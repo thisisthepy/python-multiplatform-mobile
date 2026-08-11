@@ -237,3 +237,50 @@ over waiting indefinitely.
 Not now. `wasmJsMain`'s `actual`s cannot be written until it is settled what they implement —
 §1/§4 (GIL and automatic release) and §7 (upcall shape) are both in flight, and building against
 them now means building twice.
+
+## Packaging: a side module, against our own CPython
+
+Two independent choices, easily conflated:
+
+1. **How our C code is packaged** — statically linked into CPython, or a side module loaded by
+   `dlopen` at import time.
+2. **Where CPython comes from** — built by us with Emscripten, or Pyodide's distribution.
+
+### Side module, on both counts of its own
+
+| | statically linked | **side module** |
+|---|---|---|
+| changing one binding | rebuild all of CPython | rebuild our module |
+| release cadence | tied to CPython's | independent |
+| shape | a CPython fork, effectively | an ordinary extension module (`PyInit_*`) |
+| runtime | no indirection | dynamic-link indirection (small) |
+
+Having to rebuild the interpreter to change a binding is the same trap this project already hit
+elsewhere — a `.def` edit needing a forced link and staging pass before it reached a device. An
+extension module is what CPython already has a mechanism for; we are not doing anything unusual.
+
+### Our own CPython, and no attempt at Pyodide compatibility
+
+The earlier draft argued for keeping Pyodide compatibility in reach, on the grounds that Pyodide
+*is* the package ecosystem on the web. That argument does not survive contact with how Pyodide
+wheels are tagged: `cp312-cp312-pyodide_2024_0_wasm32` pins the Python version, the Emscripten
+version **and** Pyodide's own ABI together. What you get is not "the Python ecosystem" but
+"packages someone built for exactly this Pyodide release".
+
+So the choice is not ecosystem-versus-no-ecosystem. It is whose tag to be locked to, and
+targeting Pyodide would mean the web platform tracking their release cadence while every other
+platform is pinned to 3.14 from source. That is a real cost for a conditional benefit.
+
+The loss from building our own is narrower than it first appears:
+
+| | on our own build |
+|---|---|
+| pure-Python wheels (`py3-none-any`) — no ABI tag | work unchanged |
+| C extensions (numpy, pandas, lxml, cryptography) | must be built for our ABI |
+
+And the second row is true of Pyodide too, for anything outside the list they happen to have
+built. Pyodide's advantage is a prebuilt catalogue, not a different rule.
+
+**Decision: our own Emscripten build of CPython 3.14, packaged against by a side module.**
+Compiled third-party extensions are a known limitation on this platform, recorded rather than
+solved.
