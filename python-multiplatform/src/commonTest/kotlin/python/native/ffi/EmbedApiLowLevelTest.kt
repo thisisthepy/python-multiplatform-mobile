@@ -86,7 +86,7 @@ class EmbedApiLowLevelTest {
     fun importReturnsANewReferenceAndMissingModulesReportFailure() {
         ready()
         val sys = Python3.withPython { PyImport_ImportModule("sys") }
-        assertNotNull(sys, "importing sys returned null")
+        if (sys == null) Python3.withPython { PyErr_Print() }; assertNotNull(sys, "importing sys returned null")
         Python3.withPython { Py_DecRef(sys) }
 
         val missing = Python3.withPython { PyImport_ImportModule("definitely_not_a_real_module_xyz") }
@@ -120,7 +120,7 @@ class EmbedApiLowLevelTest {
     fun listSizeMatchesWhatWasPutIn() {
         ready()
         val list = Python3.withPython { PyList_New(3) }
-        assertNotNull(list, "PyList_New returned null")
+        if (list == null) Python3.withPython { PyErr_Print() }; assertNotNull(list, "PyList_New returned null")
         try {
             assertEquals(3L, Python3.withPython { PyList_Size(list) })
         } finally {
