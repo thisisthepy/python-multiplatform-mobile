@@ -142,3 +142,28 @@ iOS 는 Python 과 Kotlin/Native 가 같은 바이너리에 **정적 링킹**되
 
 업콜은 Python 스레드에서 Kotlin 으로 들어오므로, 반대 방향의 스레드 상태 문제가 있다.
 [`threading-and-abi.md`](threading-and-abi.md) 를 본다.
+
+---
+
+## Cycle collection is part of the table's job
+
+Settled after the fact, and it changes what the generator emits.
+
+A Python proxy holding a Kotlin object that holds a Python object forms a cycle neither
+collector can break on its own: CPython's traversal stops at the opaque handle, and the JVM sees
+the handle map as a live root. Reference counting cannot help — it never frees cycles in any
+language, which is why CPython carries a cyclic collector at all.
+
+The fix is to make the Kotlin side's Python references visible to `tp_traverse`, so the proxy's
+traverse reaches through the handle and enumerates the `PyObject`-typed fields of the Kotlin
+object. KSP already walks every exposed class to build the call table and knows those field
+types at that point, so a traverse function per class is one more generated entry rather than a
+new mechanism.
+
+This is why the reflection-free, build-time table matters beyond dispatch cost: a
+reflection-based binding cannot afford this, which is why mature ones document "do not create
+cycles" instead of solving it.
+
+Full mechanism, and the three parts that remain hard — traverse running during collection,
+`tp_clear` having to mutate Kotlin state, and cycles that close on the Kotlin side — are in
+`docs/object-lifetime.md`.

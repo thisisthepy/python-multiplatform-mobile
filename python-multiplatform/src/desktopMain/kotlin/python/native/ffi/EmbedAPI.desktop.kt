@@ -47,7 +47,10 @@ actual inline fun PyEval_RestoreThread(tstate: NativePointer) = python.native.ff
 
 
 // Section 2
-actual inline fun PyRun_SimpleString(command: String): Int = python.native.ffi.bindings.PyRun_SimpleString(command)
+actual inline fun PyRun_SimpleString(command: String): Int {
+    val ptr = encodeScratchUtf8(command)
+    return python.native.ffi.bindings.PyRun_SimpleStringHandle.invokeExact(ptr) as Int
+}
 actual fun PyRun_String(str: String, start: Int, globals: NativePointer, locals: NativePointer): NativePointer? = python.native.ffi.bindings.PyRun_String(str, start, globals.toPlatformPointer(), locals.toPlatformPointer()).toNativePointerFromRaw()
 actual fun Py_CompileString(str: String, filename: String, start: Int): NativePointer? = python.native.ffi.bindings.Py_CompileString(str, filename, start).toNativePointerFromRaw()
 actual fun PyEval_EvalCode(co: NativePointer, globals: NativePointer, locals: NativePointer): NativePointer? = python.native.ffi.bindings.PyEval_EvalCode(co.toPlatformPointer(), globals.toPlatformPointer(), locals.toPlatformPointer()).toNativePointerFromRaw()
@@ -131,7 +134,10 @@ actual inline fun Py_Exit(status: Int) = python.native.ffi.bindings.Py_Exit(stat
 
 
 // Section 8
-actual fun PyImport_ImportModule(name: String): NativePointer? = python.native.ffi.bindings.PyImport_ImportModule(name).toNativePointerFromRaw()
+actual fun PyImport_ImportModule(name: String): NativePointer? {
+    val ptr = internedUtf8(name)
+    return (python.native.ffi.bindings.PyImport_ImportModuleHandle.invokeExact(ptr) as Long).toNativePointerFromRaw()
+}
 actual fun PyImport_ImportModuleNoBlock(name: String): NativePointer? = python.native.ffi.bindings.PyImport_ImportModuleNoBlock(name).toNativePointerFromRaw()
 actual fun PyImport_ImportModuleLevelObject(name: NativePointer, globals: NativePointer, locals: NativePointer, fromlist: NativePointer, level: Int): NativePointer? = python.native.ffi.bindings.PyImport_ImportModuleLevelObject(name.toPlatformPointer(), globals.toPlatformPointer(), locals.toPlatformPointer(), fromlist.toPlatformPointer(), level).toNativePointerFromRaw()
 actual fun PyImport_ImportModuleLevel(name: String, globals: NativePointer, locals: NativePointer, fromlist: NativePointer, level: Int): NativePointer? = python.native.ffi.bindings.PyImport_ImportModuleLevel(name, globals.toPlatformPointer(), locals.toPlatformPointer(), fromlist.toPlatformPointer(), level).toNativePointerFromRaw()
@@ -169,7 +175,10 @@ actual inline fun PyObject_HasAttrStringWithError(o: NativePointer, attr_name: S
 actual inline fun PyObject_HasAttr(o: NativePointer, attr_name: NativePointer): Int = python.native.ffi.bindings.PyObject_HasAttr(o.toPlatformPointer(), attr_name.toPlatformPointer())
 actual inline fun PyObject_HasAttrString(o: NativePointer, attr_name: String): Int = python.native.ffi.bindings.PyObject_HasAttrString(o.toPlatformPointer(), attr_name)
 actual fun PyObject_GetAttr(o: NativePointer, attr_name: NativePointer): NativePointer? = python.native.ffi.bindings.PyObject_GetAttr(o.toPlatformPointer(), attr_name.toPlatformPointer()).toNativePointerFromRaw()
-actual fun PyObject_GetAttrString(o: NativePointer, attr_name: String): NativePointer? = python.native.ffi.bindings.PyObject_GetAttrString(o.toPlatformPointer(), attr_name).toNativePointerFromRaw()
+actual fun PyObject_GetAttrString(o: NativePointer, attr_name: String): NativePointer? {
+    val ptr = internedUtf8(attr_name)
+    return (python.native.ffi.bindings.PyObject_GetAttrStringHandle.invokeExact(o.toPlatformPointer(), ptr) as Long).toNativePointerFromRaw()
+}
 actual fun PyObject_GenericGetAttr(o: NativePointer, name: NativePointer): NativePointer? = python.native.ffi.bindings.PyObject_GenericGetAttr(o.toPlatformPointer(), name.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyObject_SetAttr(o: NativePointer, attr_name: NativePointer, v: NativePointer): Int = python.native.ffi.bindings.PyObject_SetAttr(o.toPlatformPointer(), attr_name.toPlatformPointer(), v.toPlatformPointer())
 actual inline fun PyObject_SetAttrString(o: NativePointer, attr_name: String, v: NativePointer): Int = python.native.ffi.bindings.PyObject_SetAttrString(o.toPlatformPointer(), attr_name, v.toPlatformPointer())

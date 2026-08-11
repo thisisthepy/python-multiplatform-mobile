@@ -127,6 +127,11 @@ object bindings {
     @JvmStatic external fun asmGetAttr(obj: Long, name: String): Long
     @JvmStatic external fun asmListToArray(list: Long, out: LongArray): Int
 
+    @JvmStatic external fun testUpcallPrimitive(x: Long): Long
+    @JvmStatic external fun testUpcallString(s: String): Long
+    @JvmStatic external fun testUpcallUnattached(x: Long): Long
+    @JvmStatic external fun testThreadCreateFloor(x: Long): Long
+
     /**
      * Which JNI calling convention this device fast-paths.
      *

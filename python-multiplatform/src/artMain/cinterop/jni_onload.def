@@ -138,6 +138,56 @@ static jlong ffi_direct_addr(JNIEnv *e, jclass c, jobject buf) {
     return (jlong)(*e)->GetDirectBufferAddress(e, buf);
 }
 
+#include <pthread.h>
+
+static JavaVM *g_vm = NULL;
+static jclass g_upcallClass = NULL;
+static jmethodID g_upcallPrimitive = NULL;
+static jmethodID g_upcallString = NULL;
+
+static jlong test_upcall_primitive(JNIEnv *env, jclass clazz, jlong x) {
+    return (*env)->CallStaticLongMethod(env, g_upcallClass, g_upcallPrimitive, x);
+}
+
+static jlong test_upcall_string(JNIEnv *env, jclass clazz, jstring s) {
+    const char *cstr = (*env)->GetStringUTFChars(env, s, NULL);
+    if (!cstr) return 0;
+    jstring jstr = (*env)->NewStringUTF(env, cstr);
+    jlong res = (*env)->CallStaticLongMethod(env, g_upcallClass, g_upcallString, jstr);
+    (*env)->DeleteLocalRef(env, jstr);
+    (*env)->ReleaseStringUTFChars(env, s, cstr);
+    return res;
+}
+
+struct UnattachedData { jlong x; jlong res; };
+
+static void* unattached_thread_func(void* arg) {
+    struct UnattachedData* d = (struct UnattachedData*)arg;
+    JNIEnv *env = NULL;
+    if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) == JNI_OK) {
+        d->res = (*env)->CallStaticLongMethod(env, g_upcallClass, g_upcallPrimitive, d->x);
+        (*g_vm)->DetachCurrentThread(g_vm);
+    }
+    return NULL;
+}
+
+static jlong test_upcall_unattached(JNIEnv *env, jclass clazz, jlong x) {
+    struct UnattachedData d = {x, -1};
+    pthread_t t;
+    pthread_create(&t, NULL, unattached_thread_func, &d);
+    pthread_join(t, NULL);
+    return d.res;
+}
+
+static void* empty_thread_func(void* arg) { return NULL; }
+
+static jlong test_thread_create_floor(JNIEnv *env, jclass clazz, jlong x) {
+    pthread_t t;
+    pthread_create(&t, NULL, empty_thread_func, NULL);
+    pthread_join(t, NULL);
+    return x;
+}
+
 int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -145,6 +195,14 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     }
     jclass clazz = (*env)->FindClass(env, "python/native/ffi/bindings");
     if (clazz == NULL) return JNI_ERR;
+
+    g_vm = vm;
+    jclass upcallClazz = (*env)->FindClass(env, "python/native/ffi/UpcallTarget");
+    if (upcallClazz != NULL) {
+        g_upcallClass = (jclass)(*env)->NewGlobalRef(env, upcallClazz);
+        g_upcallPrimitive = (*env)->GetStaticMethodID(env, g_upcallClass, "upcallPrimitive", "(J)J");
+        g_upcallString = (*env)->GetStaticMethodID(env, g_upcallClass, "upcallString", "(Ljava/lang/String;)J");
+    }
 
     JNINativeMethod methods[] = {
         {"Py_Initialize", "()V", (void *)&Py_Initialize},
@@ -193,8 +251,13 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyErr_ClearN", "()V", (void *)&f_PyErr_Clear},
         {"PyRun_SimpleStringN", "(J)I", (void *)&f_PyRun_SimpleString},
         {"PyImport_ImportModuleN", "(J)J", (void *)&f_PyImport_ImportModule},
-        {"PyObject_GetAttrStringN", "(JJ)J", (void *)&f_PyObject_GetAttrString}
+        {"PyObject_GetAttrStringN", "(JJ)J", (void *)&f_PyObject_GetAttrString},
+
+        {"testUpcallPrimitive", "(J)J", (void *)&test_upcall_primitive},
+        {"testUpcallString", "(Ljava/lang/String;)J", (void *)&test_upcall_string},
+        {"testUpcallUnattached", "(J)J", (void *)&test_upcall_unattached},
+        {"testThreadCreateFloor", "(J)J", (void *)&test_thread_create_floor}
     };
-    (*env)->RegisterNatives(env, clazz, methods, 40);
+    (*env)->RegisterNatives(env, clazz, methods, 44);
     return JNI_VERSION_1_6;
 }

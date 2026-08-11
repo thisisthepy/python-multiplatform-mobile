@@ -251,17 +251,45 @@ reflection is impossible on Kotlin/Native and under GraalVM's closed world), bla
 (all `public`, minus an opt-out annotation), name resolved once with the handle cached in the
 Python proxy's instance data, KSP running in user modules too.
 
-Two things are unresolved:
+**Module fragment collection is settled** and demonstrated, not inferred. Library modules
+generate fragments into a well-known package; the app module's KSP finds them with
+`getDeclarationsFromPackage` and emits an aggregator holding explicit references. No
+`ServiceLoader`, no reflection, no `@EagerInitialization`. A three-module experiment under
+`ksp-experiment/` compiles and runs, discovering fragments across a module boundary. Two caveats
+carried over: `.klib` discovery on a Native target is inferred rather than tested, and
+`getDeclarationsFromPackage` is `@KspExperimental`, so keep that step swappable. See
+`docs/upcall-table-design.md`.
 
-- **Module fragment collection on Kotlin/Native.** There is no `ServiceLoader`, and a top-level
-  `object` nobody references is never initialised, so generated per-module tables would not
-  register themselves. An aggregator generated in the final app module is the likely answer.
-- **Tree shaking.** A table referencing every `public` declaration defeats dead-code
-  elimination.
+**Tree shaking is not solved.** A table referencing every `public` declaration does defeat
+dead-code elimination, and that is inherent to blacklist exposure plus static linking. Five
+mitigations were evaluated and none removes the problem without changing the exposure model. The
+recommendation is to measure the cost before optimising it — which has not been done.
+
+**Cycle collection is now in scope.** `tp_traverse` on the Python proxy must reach through the
+handle into the Kotlin object's `PyObject`-typed fields, which means the generator emits a
+traverse function per exposed class alongside the call entries. That is cheap here only because
+the table is generated at build time; see `docs/object-lifetime.md` for the mechanism and for
+the three parts that are still hard.
 
 Cost is not yet measured. The table lookup is an array index and is not the expense; the
 boundary is. Note that iOS and androidNative have no boundary here at all — Python and Kotlin
 share one binary — so this is a JVM-only cost.
+
+## 7b. Finish `PyValue`
+
+**State:** `PyContext` is complete — `withContext` restores the strategy even on throw, and all
+five `ConversionStrategy` variants dispatch. `PyValue`/`PyProxy` is not: `toKotlin()` and
+`toPython()` are TODO stubs that end in `cachedNativeValue!!`, so a cache miss is an NPE.
+
+It works today only because the basic types bypass it. `PyInt`, `PyFloat` and the rest convert
+inside their own `cachedNativeValue` accessors and never reach the stub, so `TYPED` conversion
+of a builtin succeeds while anything without a dedicated wrapper would fail. `ConversionTest`
+covers strategy switching and the `RAW`/`NATIVE` shape difference, and does not exercise the
+lazy path at all.
+
+Filling it in also needs a lifetime rule stated per type: caching a converted native value
+while releasing its source is fine, caching one that still points into Python-owned memory is
+not. See `docs/object-lifetime.md`.
 
 ## 8. `jvmMain` unification
 

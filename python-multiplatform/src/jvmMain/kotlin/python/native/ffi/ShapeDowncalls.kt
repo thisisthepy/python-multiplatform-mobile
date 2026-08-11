@@ -95,15 +95,13 @@ internal fun ffiSymbol(name: String): Long =
  * and [ffiFreeUtf8] directly: it frees the buffer in a `finally` block, so an exception
  * thrown by the downcall (or by argument/result marshalling around it) can't leak it.
  */
-internal expect fun ffiAllocUtf8(str: String): Long
-internal expect fun ffiFreeUtf8(ptr: Long)
+@PublishedApi internal expect fun internedUtf8(s: String): Long
+@PublishedApi internal expect fun encodeScratchUtf8(s: String): Long
+@PublishedApi internal expect fun freeUtf8(address: Long)
 internal expect fun ffiReadUtf8(ptr: Long): String?
 
-internal inline fun <R> withUtf8(str: String, block: (Long) -> R): R {
-    val ptr = ffiAllocUtf8(str)
-    try {
-        return block(ptr)
-    } finally {
-        ffiFreeUtf8(ptr)
-    }
+@PublishedApi internal inline fun <R> withUtf8(str: String, block: (Long) -> R): R {
+    // We can just use the scratch buffer for withUtf8 since it's synchronous and only valid during the block.
+    val ptr = encodeScratchUtf8(str)
+    return block(ptr)
 }

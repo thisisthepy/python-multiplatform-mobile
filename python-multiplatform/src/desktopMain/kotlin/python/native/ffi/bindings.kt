@@ -7,14 +7,6 @@ import java.lang.Double as Double
 
 object bindings {
 
-    inline fun <R> withUtf8(s: String, block: (Long) -> R): R {
-        val ptr = PanamaBackend.allocateUtf8Freeable(s)
-        try {
-            return block(ptr)
-        } finally {
-            PanamaBackend.freeUtf8Address(ptr)
-        }
-    }
 
     //**************************************************
     // Section 1

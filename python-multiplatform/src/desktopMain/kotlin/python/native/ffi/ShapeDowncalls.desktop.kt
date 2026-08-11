@@ -1,4 +1,7 @@
 package python.native.ffi
+import java.util.concurrent.ConcurrentHashMap
+
+
 
 /**
  * Desktop (Panama) actuals for the shape vocabulary declared in `jvmMain/.../ShapeDowncalls.kt`.
@@ -81,10 +84,41 @@ internal actual fun downcallIIIIII_I(fn: Long, a0: Long, a1: Long, a2: Long, a3:
 
 internal actual fun ffiSymbolRaw(name: String): Long = PanamaBackend.findSymbolAddress(name)
 
-// ---- String marshalling ----
+private val internCache = ConcurrentHashMap<String, Long>()
+private const val CACHE_MAX_ENTRIES = 4096
 
-internal actual fun ffiAllocUtf8(str: String): Long = PanamaBackend.allocateUtf8Freeable(str)
+private val scratchThreadLocal = object : ThreadLocal<Long>() {
+    override fun initialValue() = 0L
+}
 
-internal actual fun ffiFreeUtf8(ptr: Long) = PanamaBackend.freeUtf8Address(ptr)
+@PublishedApi internal actual fun internedUtf8(s: String): Long {
+    val cached = internCache[s]
+    if (cached != null) return cached
+
+    if (internCache.size >= CACHE_MAX_ENTRIES) {
+        return encodeScratchUtf8(s)
+    }
+
+    val addr = PanamaBackend.allocateUtf8Freeable(s)
+    val existing = internCache.putIfAbsent(s, addr)
+    if (existing != null) {
+        PanamaBackend.freeUtf8Address(addr)
+        return existing
+    }
+    return addr
+}
+
+@PublishedApi internal actual fun encodeScratchUtf8(s: String): Long {
+    val old = scratchThreadLocal.get()
+    if (old != 0L) {
+        PanamaBackend.freeUtf8Address(old)
+    }
+    val newAddr = PanamaBackend.allocateUtf8Freeable(s)
+    scratchThreadLocal.set(newAddr)
+    return newAddr
+}
+
+@PublishedApi internal actual fun freeUtf8(address: Long) = PanamaBackend.freeUtf8Address(address)
 
 internal actual fun ffiReadUtf8(ptr: Long): String? = PanamaBackend.readUtf8String(ptr)
+

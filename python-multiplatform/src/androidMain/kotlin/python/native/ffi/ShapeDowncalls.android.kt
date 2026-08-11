@@ -1,4 +1,6 @@
 package python.native.ffi
+import java.util.concurrent.ConcurrentHashMap
+import java.nio.ByteBuffer
 
 /**
  * Android (ART) actuals for the shape vocabulary declared in `jvmMain/.../ShapeDowncalls.kt`.
@@ -36,10 +38,74 @@ internal actual fun downcallIIIIII_I(fn: Long, a0: Long, a1: Long, a2: Long, a3:
 
 internal actual fun ffiSymbolRaw(name: String): Long = bindings.ffiSymbolRaw(name)
 
-// ---- String marshalling ----
 
-internal actual fun ffiAllocUtf8(str: String): Long = bindings.ffiAllocUtf8(str)
 
-internal actual fun ffiFreeUtf8(ptr: Long) = bindings.ffiFreeUtf8(ptr)
+
+private val internCache = ConcurrentHashMap<String, Long>()
+// We cap at 4096. Python's own standard library and likely app code has many literals,
+// but 4096 string pointers is very little memory and covers virtually all attribute accesses.
+private const val CACHE_MAX_ENTRIES = 4096
+
+private class ScratchBuffer {
+    var buf: ByteBuffer = ByteBuffer.allocateDirect(1024)
+    var addr: Long = bindings.ffiDirectBufferAddress(buf)
+}
+private val scratchThreadLocal = object : ThreadLocal<ScratchBuffer>() {
+    override fun initialValue() = ScratchBuffer()
+}
+
+private fun encodeInto(s: String, buf: ByteBuffer) {
+    buf.clear()
+    var ascii = true
+    for (i in 0 until s.length) {
+        val c = s[i]
+        if (c.code > 0x7F) {
+            ascii = false
+            break
+        }
+        buf.put(c.code.toByte())
+    }
+    if (ascii) {
+        buf.put(0)
+        return
+    }
+    // fallback for non-ASCII
+    val bytes = s.toByteArray(Charsets.UTF_8)
+    buf.clear()
+    buf.put(bytes)
+    buf.put(0)
+}
+
+@PublishedApi internal actual fun internedUtf8(s: String): Long {
+    val cached = internCache[s]
+    if (cached != null) return cached
+
+    if (internCache.size >= CACHE_MAX_ENTRIES) {
+        return encodeScratchUtf8(s)
+    }
+
+    val maxLen = s.length * 3 + 1
+    val buf = ByteBuffer.allocateDirect(maxLen)
+    encodeInto(s, buf)
+    val addr = bindings.ffiDirectBufferAddress(buf)
+    internCache.putIfAbsent(s, addr)?.let { return it }
+    return addr
+}
+
+@PublishedApi internal actual fun encodeScratchUtf8(s: String): Long {
+    val maxLen = s.length * 3 + 1
+    val sb = scratchThreadLocal.get()!!
+    if (sb.buf.capacity() < maxLen) {
+        var newCap = sb.buf.capacity() * 2
+        while (newCap < maxLen) newCap *= 2
+        sb.buf = ByteBuffer.allocateDirect(newCap)
+        sb.addr = bindings.ffiDirectBufferAddress(sb.buf)
+    }
+    encodeInto(s, sb.buf)
+    return sb.addr
+}
+
+@PublishedApi internal actual fun freeUtf8(address: Long) = bindings.ffiFreeUtf8(address)
 
 internal actual fun ffiReadUtf8(ptr: Long): String? = bindings.ffiReadUtf8(ptr)
+

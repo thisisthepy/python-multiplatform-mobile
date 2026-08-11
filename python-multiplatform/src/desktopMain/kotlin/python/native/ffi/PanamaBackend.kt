@@ -68,6 +68,9 @@ internal object PanamaBackend {
      *  site's static signature and the handle's type are fixed and identical. */
     val unboundDowncallHandle: (intArgs: Int, floatArgs: Int, returnKind: ReturnKind) -> MethodHandle
 
+    /** Create a Panama upcall stub for a (Long) -> Long MethodHandle */
+    val createUpcallStubLongToLong: (MethodHandle) -> Long
+
     // ---- internals ----
 
     private enum class Backend { MODERN, INCUBATOR }
@@ -84,6 +87,7 @@ internal object PanamaBackend {
                 allocateUtf8Freeable = data.allocateUtf8Freeable
                 freeUtf8Address = data.freeUtf8Address
                 unboundDowncallHandle = data.unboundDowncallHandle
+                createUpcallStubLongToLong = data.createUpcallStubLongToLong
             }
             Backend.INCUBATOR -> {
                 val data = implData as IncubatorData
@@ -94,6 +98,7 @@ internal object PanamaBackend {
                 allocateUtf8Freeable = data.allocateUtf8Freeable
                 freeUtf8Address = data.freeUtf8Address
                 unboundDowncallHandle = data.unboundDowncallHandle
+                createUpcallStubLongToLong = data.createUpcallStubLongToLong
             }
         }
     }
@@ -107,7 +112,8 @@ internal object PanamaBackend {
         val findSymbolAddress: (String) -> Long,
         val allocateUtf8Freeable: (String) -> Long,
         val freeUtf8Address: (Long) -> Unit,
-        val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle
+        val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle,
+        val createUpcallStubLongToLong: (MethodHandle) -> Long
     )
 
     private fun initModern(): ModernData {
@@ -336,7 +342,22 @@ internal object PanamaBackend {
             MethodHandles.filterArguments(raw, 0, longToSegmentExact)
         }
 
-        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape)
+        val upcallStubMethod = linkerClass.getMethod("upcallStub", MethodHandle::class.java, functionDescriptorClass, arenaClass, optionArrayType)
+        val buildUpcallStub: (MethodHandle) -> Long = { handle ->
+            val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 1)
+            java.lang.reflect.Array.set(layoutParams, 0, javaLong)
+            val fd = fdOfMethod.invoke(null, javaLong, layoutParams)
+            
+            // The handle expects a long, but upcall stub will pass a MemorySegment (in JDK 22+).
+            // Actually, in JDK 22+, if fd specifies JAVA_LONG, the method handle must take a long!
+            // Wait, in Panama, primitive types in fd map directly to primitives in MethodHandle.
+            // So if fd is JAVA_LONG -> JAVA_LONG, the MethodHandle MUST have type (long)long.
+            // No adaptation is needed!
+            val stub = upcallStubMethod.invoke(linker, handle, fd, globalArena, emptyOptions)
+            segmentAddressMH.invoke(stub) as Long
+        }
+
+        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape, buildUpcallStub)
     }
 
     private fun adaptModernHandle(
@@ -405,7 +426,8 @@ internal object PanamaBackend {
         val findSymbolAddress: (String) -> Long,
         val allocateUtf8Freeable: (String) -> Long,
         val freeUtf8Address: (Long) -> Unit,
-        val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle
+        val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle,
+        val createUpcallStubLongToLong: (MethodHandle) -> Long
     )
 
     private fun initIncubator(): IncubatorData {
@@ -606,7 +628,17 @@ internal object PanamaBackend {
             MethodHandles.filterArguments(raw, 0, longToAddrExact)
         }
 
-        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape)
+        val upcallStubMethod = clinkerClass.getMethod("upcallStub", MethodHandle::class.java, functionDescriptorClass)
+        val buildUpcallStub: (MethodHandle) -> Long = { handle ->
+            val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 1)
+            java.lang.reflect.Array.set(layoutParams, 0, cLongLong)
+            val fd = fdOfMethod.invoke(null, cLongLong, layoutParams)
+            
+            val stub = upcallStubMethod.invoke(clinker, handle, fd)
+            toRawLongMethod.invoke(segAddressMethod.invoke(stub)) as Long
+        }
+
+        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape, buildUpcallStub)
     }
 
     private fun adaptIncubatorHandle(
