@@ -35,3 +35,6 @@ rootProject.name = "PythonMultiplatformMobile"
 
 include(":sample")
 include(":python-multiplatform")
+include(":python-multiplatform-ksp")
+include(":ksp-fixtures:library")
+include(":ksp-fixtures:app")

@@ -11,13 +11,16 @@ This document resolves the two open questions from
 
 | Claim | Basis |
 |---|---|
-| KSP in app module sees generated code from library modules | **Demonstrated.** See `ksp-experiment/` |
+| KSP in app module sees generated code from library modules | **Demonstrated.** See `ksp-experiment/`, then the real processor at `python-multiplatform-ksp/` |
 | `getDeclarationsFromPackage` is the discovery API | **Demonstrated** |
 | Two-round processing lets the app discover its own fragment too | **Demonstrated** |
-| Kotlin/Native LLVM DCE operates at function-level granularity | Web research; not measured in this project |
+| `.klib` fragment discovery works on a real Kotlin/Native target | **Demonstrated.** `ksp-fixtures/{library,app}` on `androidNativeArm64`: `AppProcessor` round 2 found `Fragment_ksp_fixture_library` from the library's compiled `.klib`, `FunctionTable` compiled, and a real test binary linked (`linkDebugTestAndroidNativeArm64`). Compiled and linked only -- not run, since `androidNativeArm64` targets a device this workspace does not execute tests against |
+| A KSP-generated table passes the same runtime API a hand-written one does | **Demonstrated.** `ksp-fixtures/app`'s `GeneratedTableTest` (11 tests, desktop) runs `UpcallTableTest`'s exact scenarios -- constructor/method/getter/setter round trip through `HandleTable`, `@PythonInternal` exclusion, narrow-`Int`/`Float` boundary widening, `tp_traverse` field detection -- against a table KSP generated, not a hand-written fragment |
+| Kotlin/Native LLVM DCE operates at function-level granularity | Web research; not measured directly. What *was* measured is the net effect (next row), which is consistent with it but does not isolate the mechanism |
 | Lambda references are eliminated when unreachable | Web research (LLVM `GlobalDCE`); not measured |
-| Binary-size cost of a full table on K/N | **Not measured** |
+| Binary-size cost of a full table on K/N | **Measured**, §4 below: ~1.84 KB/entry (stripped) for 200 trivial exposed functions |
 | `@EagerInitialization` is deprecated and should not be used | Confirmed (deprecated, slated for removal) |
+| A fragment object can be `internal` as sketched below | **Wrong.** `internal` is enforced per Kotlin module; the app module's generated code referencing a library's fragment is a different module even inside one Gradle build, and fails with "cannot access ... it is internal". Fragments must be `public`. See §1's implementation note |
 
 ---
 
@@ -495,6 +498,30 @@ The reasoning:
    product decision, not a technical one. The document noted in the user request
    says this is not to be re-litigated, so it stays as Option A for now.
 
+### Measured
+
+`ksp-fixtures/library` got 200 synthetic top-level functions (`fun bulkN(x: Long): Long
+= x + N`), and `ksp-fixtures/app`'s `androidNativeArm64` debug test binary was linked
+before and after (`linkDebugTestAndroidNativeArm64`), then stripped with the NDK's
+`aarch64-linux-android-strip` from the same toolchain Kotlin/Native already downloads:
+
+| | bytes | delta |
+|---|---|---|
+| baseline (unstripped) | 7,578,480 | |
+| +200 entries (unstripped) | 8,343,184 | 764,704 (≈3.8 KB/entry) |
+| baseline (stripped) | 3,264,056 | |
+| +200 entries (stripped) | 3,632,696 | 368,640 (**≈1.84 KB/entry**) |
+
+Read this as a floor, not a typical case: each synthetic function is a one-line
+arithmetic expression, so almost the entire 1.84 KB/entry is the `ExposedCallable`
+object, its lambda, its name string, and Kotlin/Native's per-function metadata --
+not the function body. A real library's functions would add their own body size on
+top of this floor. For a 200-function library that floor alone is ~360 KB against a
+~3.26 MB stripped baseline (≈11%) — noticeable, in line with Option A's prediction,
+and not disqualifying for a mobile/desktop target. This closes the "measurement
+needed" item; whether ~11% for 200 entries is acceptable for a *real* library (whose
+function bodies dominate the delta) is still a product judgement, not resettled here.
+
 ---
 
 ## 5  Detailed flow: from `ksp(...)` to Python `import`
@@ -726,29 +753,40 @@ directly, without generating source files. More powerful but:
 
 ## 11  Open questions for implementation
 
-1. **Measure binary-size impact on Kotlin/Native.** Build a release binary with
-   and without a 200-entry table. If the delta is under 100 KB, close the tree-shaking
-   item.
+Numbers 1, 2, 3, 4 and 6 are resolved; the resolution is recorded next to each so the
+reasoning survives without the implementation session. 5 is still open.
 
-2. **Verify `.klib` discovery.** Run the aggregator experiment on a KMP project with
-   a Native target to confirm `getDeclarationsFromPackage` works with `.klib`
-   dependencies.
+1. **~~Measure binary-size impact on Kotlin/Native.~~ Resolved.** ≈1.84 KB/entry
+   stripped, §4 above. Over the 100 KB guess for a 200-entry table (368,640 bytes
+   measured) but the guess was for a *typical* function; the measured entries were
+   deliberately trivial one-liners to isolate the table's own floor cost from
+   whatever a real function body adds on top.
 
-3. **Decide annotation name.** The user request says `@PythonHidden`;
-   [`binding-policy.md`](binding-policy.md) says `@PythonInternal`. Pick one before
-   implementation.
+2. **~~Verify `.klib` discovery.~~ Resolved: it works.** `ksp-fixtures/{library,app}`
+   on `androidNativeArm64` -- round 2's `getDeclarationsFromPackage` found the
+   library's fragment from its compiled `.klib`, and the app's generated
+   `FunctionTable` compiled *and linked* into a real test binary. Not run (no
+   device), but the mechanism up through linking is confirmed, not inferred.
 
-4. **Handle `main()`.** The experiment's aggregator picked up `main()` as a public
-   function. The processor should exclude entry points (functions named `main` with
-   no parameters or `Array<String>` parameter).
+3. **~~Decide annotation name.~~ Resolved: `@PythonInternal`,** matching
+   `binding-policy.md` (the "`@PythonHidden`" alternative from an earlier
+   conversation was not carried into that document and there is nothing to
+   reconcile).
 
-5. **Incremental KSP.** The aggregator generates `FunctionTable` with
-   `Dependencies(false)` (no dependencies tracked). This means any change to any
-   source file triggers re-aggregation. This is correct but potentially slow.
-   Investigate whether tracking fragment files as dependencies enables incremental
-   aggregation.
+4. **~~Handle `main()`.~~ Resolved.** `BindingPolicy.isExposedTopLevelFunction`
+   excludes a function named `main` with zero parameters or a single `Array<...>`
+   parameter.
 
-6. **KSP for KMP.** On Kotlin Multiplatform, KSP must be applied per target
-   (e.g., `kspIosArm64`, `kspAndroid`). The Gradle plugin (§7) should handle this
-   automatically. Also, generating into `commonMain` requires `kspCommonMainMetadata`
-   configuration, which has known quirks with single-target projects.
+5. **Incremental KSP.** Still open, and turned out slightly different from how this
+   was framed: the aggregator now uses `Dependencies.ALL_FILES` rather than
+   `Dependencies(false)` -- the earlier phrasing had the failure mode backwards.
+   `Dependencies(false)` (no files, not aggregating) means "never regenerate this
+   file", which would leave a newly-added fragment undiscovered; `ALL_FILES` is
+   correct but reprocesses on every change. Because discovery reads the whole
+   classpath rather than a fixed file set, there is no obviously-correct narrower
+   dependency list to hand it instead; still unaddressed.
+
+6. **~~KSP for KMP.~~ Resolved for the targets this project applies it to.** Per-target
+   configurations (`add("kspDesktop", ...)`, `add("kspAndroidNativeArm64", ...)`) work
+   as documented; `ksp { arg(...) }` applies shared options to all of them. A Gradle
+   convenience plugin to apply this automatically (§7) remains unbuilt.
