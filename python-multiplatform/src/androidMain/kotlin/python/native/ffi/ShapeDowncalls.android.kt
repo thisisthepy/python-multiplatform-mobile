@@ -41,7 +41,8 @@ internal actual fun ffiSymbolRaw(name: String): Long = bindings.ffiSymbolRaw(nam
 
 
 
-private val internCache = ConcurrentHashMap<String, Long>()
+private class InternedString(val addr: Long, val buf: ByteBuffer)
+private val internCache = ConcurrentHashMap<String, InternedString>()
 // We cap at 4096. Python's own standard library and likely app code has many literals,
 // but 4096 string pointers is very little memory and covers virtually all attribute accesses.
 private const val CACHE_MAX_ENTRIES = 4096
@@ -78,7 +79,7 @@ private fun encodeInto(s: String, buf: ByteBuffer) {
 
 @PublishedApi internal actual fun internedUtf8(s: String): Long {
     val cached = internCache[s]
-    if (cached != null) return cached
+    if (cached != null) return cached.addr
 
     if (internCache.size >= CACHE_MAX_ENTRIES) {
         return encodeScratchUtf8(s)
@@ -88,7 +89,8 @@ private fun encodeInto(s: String, buf: ByteBuffer) {
     val buf = ByteBuffer.allocateDirect(maxLen)
     encodeInto(s, buf)
     val addr = bindings.ffiDirectBufferAddress(buf)
-    internCache.putIfAbsent(s, addr)?.let { return it }
+    val interned = InternedString(addr, buf)
+    internCache.putIfAbsent(s, interned)?.let { return it.addr }
     return addr
 }
 

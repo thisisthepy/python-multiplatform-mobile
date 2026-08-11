@@ -38,13 +38,89 @@ extern jlong PyList_Size(jlong);
 extern jint PyRun_SimpleString(const char*);
 extern const char* Py_GetVersion(void);
 extern jlong PyImport_ImportModule(const char*);
+extern jlong PyImport_Import(jlong);
 extern jlong PyObject_GetAttrString(jlong, const char*);
 extern jlong PyErr_Occurred(void);
 extern jlong PyList_GetItem(jlong, jlong);
 extern jlong PyImport_AddModuleRef(const char*);
+extern jlong PyImport_AddModule(const char*);
+extern void PyErr_SetString(jlong, const char*);
+extern jint PyObject_SetAttrString(jlong, const char*, jlong);
+extern jint PyObject_DelAttrString(jlong, const char*);
 extern jlong PyRun_String(const char*, jint, jlong, jlong);
 extern void Py_DecRef(jlong);
 extern void PyErr_Clear(void);
+extern void PyErr_Print(void);
+extern jlong PyErr_GetRaisedException(void);
+extern void PyErr_SetRaisedException(jlong);
+extern jlong PyException_GetTraceback(jlong);
+extern jlong PyException_GetContext(jlong);
+extern jlong PyException_GetCause(jlong);
+
+extern jlong PyObject_Type(jlong);
+extern jint PyObject_IsInstance(jlong, jlong);
+extern jlong PyObject_Repr(jlong);
+extern jlong PyObject_RichCompare(jlong, jlong, jint);
+extern jint PyObject_RichCompareBool(jlong, jlong, jint);
+extern jlong PyObject_GetIter(jlong);
+extern jlong PyObject_GetItem(jlong, jlong);
+extern jint PyObject_SetItem(jlong, jlong, jlong);
+extern jint PyObject_DelItem(jlong, jlong);
+extern jlong PyObject_Call(jlong, jlong, jlong);
+extern const char* PyType_GetName(jlong);
+extern jint PyType_IsSubtype(jlong, jlong);
+extern jlong PyModule_GetDict(jlong);
+extern jlong PyModule_GetFilenameObject(jlong);
+extern const char* PyModule_GetName(jlong);
+
+extern void PyDict_Clear(jlong);
+extern jint PyDict_Contains(jlong, jlong);
+extern jint PyDict_DelItem(jlong, jlong);
+extern jlong PyDict_GetItem(jlong, jlong);
+extern jlong PyDict_Items(jlong);
+extern jlong PyDict_Size(jlong);
+extern jlong PyDict_Values(jlong);
+extern jint PyList_Append(jlong, jlong);
+extern jlong PyList_AsTuple(jlong);
+extern jint PyList_Insert(jlong, jlong, jlong);
+extern jint PyList_Reverse(jlong);
+extern jint PyList_Sort(jlong);
+extern jlong PyTuple_GetItem(jlong, jlong);
+extern jlong PyTuple_GetSlice(jlong, jlong, jlong);
+extern jlong PyTuple_Size(jlong);
+
+extern jint PySet_Add(jlong, jlong);
+extern jint PySet_Clear(jlong);
+extern jint PySet_Contains(jlong, jlong);
+extern jint PySet_Discard(jlong, jlong);
+extern jlong PySet_New(jlong);
+extern jlong PySet_Pop(jlong);
+extern jlong PySet_Size(jlong);
+extern jlong PyFrozenSet_New(jlong);
+extern jint PySequence_Contains(jlong, jlong);
+extern jlong PySequence_List(jlong);
+extern jlong PySequence_Tuple(jlong);
+
+extern jlong PyNumber_Add(jlong, jlong);
+extern jlong PyNumber_And(jlong, jlong);
+extern jlong PyNumber_Multiply(jlong, jlong);
+extern jlong PyNumber_Or(jlong, jlong);
+extern jlong PyNumber_Subtract(jlong, jlong);
+extern double PyFloat_AsDouble(jlong);
+extern jlong PyFloat_FromDouble(double);
+extern jint PyLong_AsInt(jlong);
+extern jlong PyLong_AsLongLong(jlong);
+extern jlong PyBool_FromLong(jlong);
+extern jlong PyUnicode_Concat(jlong, jlong);
+extern jint PyUnicode_Contains(jlong, jlong);
+extern jint PyCallable_Check(jlong);
+extern jlong PyEval_GetBuiltins(void);
+extern jlong PyIter_Next(jlong);
+extern const char* Py_GetBuildInfo(void);
+extern const char* Py_GetCompiler(void);
+extern const char* Py_GetCopyright(void);
+extern const char* Py_GetPlatform(void);
+extern jint Py_RunMain(void);
 
 extern void Py_DecRef(jlong);
 extern void Py_IncRef(jlong);
@@ -115,6 +191,7 @@ static jlong f_PyList_Size(JNIEnv *e, jclass c, jlong l) { return PyList_Size(l)
 static jint f_PyRun_SimpleString(JNIEnv *e, jclass c, jlong s) { return PyRun_SimpleString((const char*)s); }
 static jlong f_Py_GetVersion(JNIEnv *e, jclass c) { return (jlong)Py_GetVersion(); }
 static jlong f_PyImport_ImportModule(JNIEnv *e, jclass c, jlong n) { return PyImport_ImportModule((const char*)n); }
+static jlong f_PyImport_ImportN(JNIEnv *e, jclass c, jlong n) { return PyImport_Import(n); }
 static jlong f_PyObject_GetAttrString(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_GetAttrString(o, (const char*)n); }
 static jlong f_PyErr_Occurred(JNIEnv *e, jclass c) { return PyErr_Occurred(); }
 
@@ -138,6 +215,19 @@ static jlong f_PyDict_GetItemStringN(JNIEnv *e, jclass c, jlong p, jlong k) { re
 
 
 static jlong f_PyImport_AddModuleRefN(JNIEnv *e, jclass c, jlong n) { return PyImport_AddModuleRef((const char*)n); }
+
+/*
+ * Reached from PythonTestFixture.mainGlobals, and before these were registered the second
+ * object-model test on Android died with SIGSEGV at fault address 0xc24110e8 -- a truncated
+ * pointer, the signature of the name-linked @CName fallback described in ROADMAP §2.
+ *
+ * PyImport_AddModule returns a BORROWED reference where PyImport_AddModuleRef returns a new one.
+ * The two are not interchangeable at the call site and the Kotlin actual keeps that distinction.
+ */
+static jlong f_PyImport_AddModuleN(JNIEnv *e, jclass c, jlong n) { return PyImport_AddModule((const char*)n); }
+static void f_PyErr_SetStringN(JNIEnv *e, jclass c, jlong t, jlong m) { PyErr_SetString(t, (const char*)m); }
+static jint f_PyObject_SetAttrStringN(JNIEnv *e, jclass c, jlong o, jlong n, jlong v) { return PyObject_SetAttrString(o, (const char*)n, v); }
+static jint f_PyObject_DelAttrStringN(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_DelAttrString(o, (const char*)n); }
 static jlong f_PyRun_StringN(JNIEnv *e, jclass c, jlong str, jint start, jlong globals, jlong locals) { return PyRun_String((const char*)str, start, globals, locals); }
 static jlong f_PyObject_StrN(JNIEnv *e, jclass c, jlong o) { return PyObject_Str(o); }
 static jint f_PyObject_IsTrueN(JNIEnv *e, jclass c, jlong o) { return PyObject_IsTrue(o); }
@@ -145,6 +235,73 @@ static jlong f_PyObject_CallNoArgsN(JNIEnv *e, jclass c, jlong callable) { retur
 static jlong f_PyObject_CallObjectN(JNIEnv *e, jclass c, jlong callable, jlong args) { return PyObject_CallObject(callable, args); }
 static jlong f_PyUnicode_AsUTF8(JNIEnv *e, jclass c, jlong unicode) { return (jlong)PyUnicode_AsUTF8(unicode); }
 static jlong f_PyUnicode_FromString(JNIEnv *e, jclass c, jlong str) { return PyUnicode_FromString((const char*)str); }
+static void f_PyErr_PrintN(JNIEnv *e, jclass c) { PyErr_Print(); }
+static jlong f_PyErr_GetRaisedExceptionN(JNIEnv *e, jclass c) { return PyErr_GetRaisedException(); }
+static void f_PyErr_SetRaisedExceptionN(JNIEnv *e, jclass c, jlong exc) { PyErr_SetRaisedException(exc); }
+static jlong f_PyException_GetTracebackN(JNIEnv *e, jclass c, jlong ex) { return PyException_GetTraceback(ex); }
+static jlong f_PyException_GetContextN(JNIEnv *e, jclass c, jlong ex) { return PyException_GetContext(ex); }
+static jlong f_PyException_GetCauseN(JNIEnv *e, jclass c, jlong ex) { return PyException_GetCause(ex); }
+static jlong f_PyObject_TypeN(JNIEnv *e, jclass c, jlong o) { return PyObject_Type(o); }
+static jint f_PyObject_IsInstanceN(JNIEnv *e, jclass c, jlong inst, jlong cls) { return PyObject_IsInstance(inst, cls); }
+static jlong f_PyObject_ReprN(JNIEnv *e, jclass c, jlong o) { return PyObject_Repr(o); }
+static jlong f_PyObject_RichCompareN(JNIEnv *e, jclass c, jlong o1, jlong o2, jint opid) { return PyObject_RichCompare(o1, o2, opid); }
+static jint f_PyObject_RichCompareBoolN(JNIEnv *e, jclass c, jlong o1, jlong o2, jint opid) { return PyObject_RichCompareBool(o1, o2, opid); }
+static jlong f_PyObject_GetIterN(JNIEnv *e, jclass c, jlong o) { return PyObject_GetIter(o); }
+static jlong f_PyObject_GetItemN(JNIEnv *e, jclass c, jlong o, jlong key) { return PyObject_GetItem(o, key); }
+static jint f_PyObject_SetItemN(JNIEnv *e, jclass c, jlong o, jlong key, jlong v) { return PyObject_SetItem(o, key, v); }
+static jint f_PyObject_DelItemN(JNIEnv *e, jclass c, jlong o, jlong key) { return PyObject_DelItem(o, key); }
+static jlong f_PyObject_CallN(JNIEnv *e, jclass c, jlong callable, jlong args, jlong kwargs) { return PyObject_Call(callable, args, kwargs); }
+static jlong f_PyType_GetNameN(JNIEnv *e, jclass c, jlong type) { return (jlong)PyType_GetName(type); }
+static jint f_PyType_IsSubtypeN(JNIEnv *e, jclass c, jlong a, jlong b) { return PyType_IsSubtype(a, b); }
+static jlong f_PyModule_GetDictN(JNIEnv *e, jclass c, jlong module) { return PyModule_GetDict(module); }
+static jlong f_PyModule_GetFilenameObjectN(JNIEnv *e, jclass c, jlong module) { return PyModule_GetFilenameObject(module); }
+static jlong f_PyModule_GetNameN(JNIEnv *e, jclass c, jlong module) { return (jlong)PyModule_GetName(module); }
+static void f_PyDict_ClearN(JNIEnv *e, jclass c, jlong p) { PyDict_Clear(p); }
+static jint f_PyDict_ContainsN(JNIEnv *e, jclass c, jlong p, jlong key) { return PyDict_Contains(p, key); }
+static jint f_PyDict_DelItemN(JNIEnv *e, jclass c, jlong p, jlong key) { return PyDict_DelItem(p, key); }
+static jlong f_PyDict_GetItemN(JNIEnv *e, jclass c, jlong p, jlong key) { return PyDict_GetItem(p, key); }
+static jlong f_PyDict_ItemsN(JNIEnv *e, jclass c, jlong p) { return PyDict_Items(p); }
+static jlong f_PyDict_SizeN(JNIEnv *e, jclass c, jlong p) { return PyDict_Size(p); }
+static jlong f_PyDict_ValuesN(JNIEnv *e, jclass c, jlong p) { return PyDict_Values(p); }
+static jint f_PyList_AppendN(JNIEnv *e, jclass c, jlong list, jlong item) { return PyList_Append(list, item); }
+static jlong f_PyList_AsTupleN(JNIEnv *e, jclass c, jlong list) { return PyList_AsTuple(list); }
+static jint f_PyList_InsertN(JNIEnv *e, jclass c, jlong list, jlong index, jlong item) { return PyList_Insert(list, index, item); }
+static jint f_PyList_ReverseN(JNIEnv *e, jclass c, jlong list) { return PyList_Reverse(list); }
+static jint f_PyList_SortN(JNIEnv *e, jclass c, jlong list) { return PyList_Sort(list); }
+static jlong f_PyTuple_GetItemN(JNIEnv *e, jclass c, jlong p, jlong pos) { return PyTuple_GetItem(p, pos); }
+static jlong f_PyTuple_GetSliceN(JNIEnv *e, jclass c, jlong p, jlong low, jlong high) { return PyTuple_GetSlice(p, low, high); }
+static jlong f_PyTuple_SizeN(JNIEnv *e, jclass c, jlong p) { return PyTuple_Size(p); }
+static jint f_PySet_AddN(JNIEnv *e, jclass c, jlong set, jlong key) { return PySet_Add(set, key); }
+static jint f_PySet_ClearN(JNIEnv *e, jclass c, jlong set) { return PySet_Clear(set); }
+static jint f_PySet_ContainsN(JNIEnv *e, jclass c, jlong anyset, jlong key) { return PySet_Contains(anyset, key); }
+static jint f_PySet_DiscardN(JNIEnv *e, jclass c, jlong set, jlong key) { return PySet_Discard(set, key); }
+static jlong f_PySet_NewN(JNIEnv *e, jclass c, jlong iterable) { return PySet_New(iterable); }
+static jlong f_PySet_PopN(JNIEnv *e, jclass c, jlong set) { return PySet_Pop(set); }
+static jlong f_PySet_SizeN(JNIEnv *e, jclass c, jlong anyset) { return PySet_Size(anyset); }
+static jlong f_PyFrozenSet_NewN(JNIEnv *e, jclass c, jlong iterable) { return PyFrozenSet_New(iterable); }
+static jint f_PySequence_ContainsN(JNIEnv *e, jclass c, jlong seq, jlong ob) { return PySequence_Contains(seq, ob); }
+static jlong f_PySequence_ListN(JNIEnv *e, jclass c, jlong o) { return PySequence_List(o); }
+static jlong f_PySequence_TupleN(JNIEnv *e, jclass c, jlong o) { return PySequence_Tuple(o); }
+static jlong f_PyNumber_AddN(JNIEnv *e, jclass c, jlong o1, jlong o2) { return PyNumber_Add(o1, o2); }
+static jlong f_PyNumber_AndN(JNIEnv *e, jclass c, jlong o1, jlong o2) { return PyNumber_And(o1, o2); }
+static jlong f_PyNumber_MultiplyN(JNIEnv *e, jclass c, jlong o1, jlong o2) { return PyNumber_Multiply(o1, o2); }
+static jlong f_PyNumber_OrN(JNIEnv *e, jclass c, jlong o1, jlong o2) { return PyNumber_Or(o1, o2); }
+static jlong f_PyNumber_SubtractN(JNIEnv *e, jclass c, jlong o1, jlong o2) { return PyNumber_Subtract(o1, o2); }
+static jdouble f_PyFloat_AsDoubleN(JNIEnv *e, jclass c, jlong f) { return PyFloat_AsDouble(f); }
+static jlong f_PyFloat_FromDoubleN(JNIEnv *e, jclass c, jdouble v) { return PyFloat_FromDouble(v); }
+static jint f_PyLong_AsIntN(JNIEnv *e, jclass c, jlong l) { return PyLong_AsInt(l); }
+static jlong f_PyLong_AsLongLongN(JNIEnv *e, jclass c, jlong l) { return PyLong_AsLongLong(l); }
+static jlong f_PyBool_FromLongN(JNIEnv *e, jclass c, jlong v) { return PyBool_FromLong(v); }
+static jlong f_PyUnicode_ConcatN(JNIEnv *e, jclass c, jlong left, jlong right) { return PyUnicode_Concat(left, right); }
+static jint f_PyUnicode_ContainsN(JNIEnv *e, jclass c, jlong container, jlong element) { return PyUnicode_Contains(container, element); }
+static jint f_PyCallable_CheckN(JNIEnv *e, jclass c, jlong o) { return PyCallable_Check(o); }
+static jlong f_PyEval_GetBuiltinsN(JNIEnv *e, jclass c) { return PyEval_GetBuiltins(); }
+static jlong f_PyIter_NextN(JNIEnv *e, jclass c, jlong i) { return PyIter_Next(i); }
+static jlong f_Py_GetBuildInfoN(JNIEnv *e, jclass c) { return (jlong)Py_GetBuildInfo(); }
+static jlong f_Py_GetCompilerN(JNIEnv *e, jclass c) { return (jlong)Py_GetCompiler(); }
+static jlong f_Py_GetCopyrightN(JNIEnv *e, jclass c) { return (jlong)Py_GetCopyright(); }
+static jlong f_Py_GetPlatformN(JNIEnv *e, jclass c) { return (jlong)Py_GetPlatform(); }
+static jint f_Py_RunMainN(JNIEnv *e, jclass c) { return Py_RunMain(); }
 
 
 /*
@@ -189,6 +346,7 @@ static jint asm_list_to_array(JNIEnv *e, jclass c, jlong list, jlongArray out) {
  * Unlike the echo probes this runs real Python, so the parse/compile/execute work is in both
  * numbers and the ratio shows what fraction of a realistic binder call the boundary actually is.
  */
+#define NUM_METHODS 127
 #define PMP_FILE_INPUT 257
 
 static jint asm_exec(JNIEnv *e, jclass c, jstring code) {
@@ -334,6 +492,7 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyErr_ClearN", "()V", (void *)&f_PyErr_Clear},
         {"PyRun_SimpleStringN", "(J)I", (void *)&f_PyRun_SimpleString},
         {"PyImport_ImportModuleN", "(J)J", (void *)&f_PyImport_ImportModule},
+        {"PyImport_ImportN", "(J)J", (void *)&f_PyImport_ImportN},
         {"PyObject_GetAttrStringN", "(JJ)J", (void *)&f_PyObject_GetAttrString},
 
         {"Py_DecRefN", "(J)V", (void *)&f_Py_DecRefN},
@@ -361,11 +520,82 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyUnicode_FromStringF", "(J)J", (void *)&f_PyUnicode_FromString},
 
         {"PyImport_AddModuleRefN", "(J)J", (void *)&f_PyImport_AddModuleRefN},
+        {"PyImport_AddModuleN", "(J)J", (void *)&f_PyImport_AddModuleN},
+        {"PyErr_SetStringN", "(JJ)V", (void *)&f_PyErr_SetStringN},
+        {"PyObject_SetAttrStringN", "(JJJ)I", (void *)&f_PyObject_SetAttrStringN},
+        {"PyObject_DelAttrStringN", "(JJ)I", (void *)&f_PyObject_DelAttrStringN},
         {"PyRun_StringN", "(JIJJ)J", (void *)&f_PyRun_StringN},
         {"PyObject_StrN", "(J)J", (void *)&f_PyObject_StrN},
         {"PyObject_IsTrueN", "(J)I", (void *)&f_PyObject_IsTrueN},
         {"PyObject_CallNoArgsN", "(J)J", (void *)&f_PyObject_CallNoArgsN},
         {"PyObject_CallObjectN", "(JJ)J", (void *)&f_PyObject_CallObjectN},
+        {"PyErr_PrintN", "()V", (void *)&f_PyErr_PrintN},
+        {"PyErr_GetRaisedExceptionN", "()J", (void *)&f_PyErr_GetRaisedExceptionN},
+        {"PyErr_SetRaisedExceptionN", "(J)V", (void *)&f_PyErr_SetRaisedExceptionN},
+        {"PyException_GetTracebackN", "(J)J", (void *)&f_PyException_GetTracebackN},
+        {"PyException_GetContextN", "(J)J", (void *)&f_PyException_GetContextN},
+        {"PyException_GetCauseN", "(J)J", (void *)&f_PyException_GetCauseN},
+        {"PyObject_TypeN", "(J)J", (void *)&f_PyObject_TypeN},
+        {"PyObject_IsInstanceN", "(JJ)I", (void *)&f_PyObject_IsInstanceN},
+        {"PyObject_ReprN", "(J)J", (void *)&f_PyObject_ReprN},
+        {"PyObject_RichCompareN", "(JJI)J", (void *)&f_PyObject_RichCompareN},
+        {"PyObject_RichCompareBoolN", "(JJI)I", (void *)&f_PyObject_RichCompareBoolN},
+        {"PyObject_GetIterN", "(J)J", (void *)&f_PyObject_GetIterN},
+        {"PyObject_GetItemN", "(JJ)J", (void *)&f_PyObject_GetItemN},
+        {"PyObject_SetItemN", "(JJJ)I", (void *)&f_PyObject_SetItemN},
+        {"PyObject_DelItemN", "(JJ)I", (void *)&f_PyObject_DelItemN},
+        {"PyObject_CallN", "(JJJ)J", (void *)&f_PyObject_CallN},
+        {"PyType_GetNameN", "(J)J", (void *)&f_PyType_GetNameN},
+        {"PyType_IsSubtypeN", "(JJ)I", (void *)&f_PyType_IsSubtypeN},
+        {"PyModule_GetDictN", "(J)J", (void *)&f_PyModule_GetDictN},
+        {"PyModule_GetFilenameObjectN", "(J)J", (void *)&f_PyModule_GetFilenameObjectN},
+        {"PyModule_GetNameN", "(J)J", (void *)&f_PyModule_GetNameN},
+        {"PyDict_ClearN", "(J)V", (void *)&f_PyDict_ClearN},
+        {"PyDict_ContainsN", "(JJ)I", (void *)&f_PyDict_ContainsN},
+        {"PyDict_DelItemN", "(JJ)I", (void *)&f_PyDict_DelItemN},
+        {"PyDict_GetItemN", "(JJ)J", (void *)&f_PyDict_GetItemN},
+        {"PyDict_ItemsN", "(J)J", (void *)&f_PyDict_ItemsN},
+        {"PyDict_SizeN", "(J)J", (void *)&f_PyDict_SizeN},
+        {"PyDict_ValuesN", "(J)J", (void *)&f_PyDict_ValuesN},
+        {"PyList_AppendN", "(JJ)I", (void *)&f_PyList_AppendN},
+        {"PyList_AsTupleN", "(J)J", (void *)&f_PyList_AsTupleN},
+        {"PyList_InsertN", "(JJJ)I", (void *)&f_PyList_InsertN},
+        {"PyList_ReverseN", "(J)I", (void *)&f_PyList_ReverseN},
+        {"PyList_SortN", "(J)I", (void *)&f_PyList_SortN},
+        {"PyTuple_GetItemN", "(JJ)J", (void *)&f_PyTuple_GetItemN},
+        {"PyTuple_GetSliceN", "(JJJ)J", (void *)&f_PyTuple_GetSliceN},
+        {"PyTuple_SizeN", "(J)J", (void *)&f_PyTuple_SizeN},
+        {"PySet_AddN", "(JJ)I", (void *)&f_PySet_AddN},
+        {"PySet_ClearN", "(J)I", (void *)&f_PySet_ClearN},
+        {"PySet_ContainsN", "(JJ)I", (void *)&f_PySet_ContainsN},
+        {"PySet_DiscardN", "(JJ)I", (void *)&f_PySet_DiscardN},
+        {"PySet_NewN", "(J)J", (void *)&f_PySet_NewN},
+        {"PySet_PopN", "(J)J", (void *)&f_PySet_PopN},
+        {"PySet_SizeN", "(J)J", (void *)&f_PySet_SizeN},
+        {"PyFrozenSet_NewN", "(J)J", (void *)&f_PyFrozenSet_NewN},
+        {"PySequence_ContainsN", "(JJ)I", (void *)&f_PySequence_ContainsN},
+        {"PySequence_ListN", "(J)J", (void *)&f_PySequence_ListN},
+        {"PySequence_TupleN", "(J)J", (void *)&f_PySequence_TupleN},
+        {"PyNumber_AddN", "(JJ)J", (void *)&f_PyNumber_AddN},
+        {"PyNumber_AndN", "(JJ)J", (void *)&f_PyNumber_AndN},
+        {"PyNumber_MultiplyN", "(JJ)J", (void *)&f_PyNumber_MultiplyN},
+        {"PyNumber_OrN", "(JJ)J", (void *)&f_PyNumber_OrN},
+        {"PyNumber_SubtractN", "(JJ)J", (void *)&f_PyNumber_SubtractN},
+        {"PyFloat_AsDoubleN", "(J)D", (void *)&f_PyFloat_AsDoubleN},
+        {"PyFloat_FromDoubleN", "(D)J", (void *)&f_PyFloat_FromDoubleN},
+        {"PyLong_AsIntN", "(J)I", (void *)&f_PyLong_AsIntN},
+        {"PyLong_AsLongLongN", "(J)J", (void *)&f_PyLong_AsLongLongN},
+        {"PyBool_FromLongN", "(J)J", (void *)&f_PyBool_FromLongN},
+        {"PyUnicode_ConcatN", "(JJ)J", (void *)&f_PyUnicode_ConcatN},
+        {"PyUnicode_ContainsN", "(JJ)I", (void *)&f_PyUnicode_ContainsN},
+        {"PyCallable_CheckN", "(J)I", (void *)&f_PyCallable_CheckN},
+        {"PyEval_GetBuiltinsN", "()J", (void *)&f_PyEval_GetBuiltinsN},
+        {"PyIter_NextN", "(J)J", (void *)&f_PyIter_NextN},
+        {"Py_GetBuildInfoN", "()J", (void *)&f_Py_GetBuildInfoN},
+        {"Py_GetCompilerN", "()J", (void *)&f_Py_GetCompilerN},
+        {"Py_GetCopyrightN", "()J", (void *)&f_Py_GetCopyrightN},
+        {"Py_GetPlatformN", "()J", (void *)&f_Py_GetPlatformN},
+        {"Py_RunMainN", "()I", (void *)&f_Py_RunMainN},
 
 
         {"testUpcallPrimitive", "(J)J", (void *)&test_upcall_primitive},
@@ -373,6 +603,6 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"testUpcallUnattached", "(J)J", (void *)&test_upcall_unattached},
         {"testThreadCreateFloor", "(J)J", (void *)&test_thread_create_floor}
     };
-    (*env)->RegisterNatives(env, clazz, methods, 71);
+    (*env)->RegisterNatives(env, clazz, methods, 138);
     return JNI_VERSION_1_6;
 }

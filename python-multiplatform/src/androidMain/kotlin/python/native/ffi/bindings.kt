@@ -111,6 +111,7 @@ object bindings {
     @JvmStatic external fun PyErr_ClearN()
     @JvmStatic external fun PyRun_SimpleStringN(command: Long): Int
     @JvmStatic external fun PyImport_ImportModuleN(name: Long): Long
+    @JvmStatic external fun PyImport_ImportN(name: Long): Long
     @JvmStatic external fun PyObject_GetAttrStringN(o: Long, name: Long): Long
 
     // ---- Composition probes: the whole binder operation in one crossing ----
@@ -155,14 +156,14 @@ object bindings {
     @dalvik.annotation.optimization.CriticalNative
     external fun Py_Finalize()
     // external fun Py_BytesMain(args: Array<String>): Int // 수동 추가
-    external fun Py_RunMain(): Int // 수동 추가
+    @JvmStatic external fun Py_RunMainN(): Int
     @JvmStatic
     @dalvik.annotation.optimization.CriticalNative
     external fun Py_GetVersion(): Long
-    external fun Py_GetPlatform(): String?
-    external fun Py_GetCopyright(): String?
-    external fun Py_GetCompiler(): String?
-    external fun Py_GetBuildInfo(): String?
+    @JvmStatic external fun Py_GetPlatformN(): Long
+    @JvmStatic external fun Py_GetCopyrightN(): Long
+    @JvmStatic external fun Py_GetCompilerN(): Long
+    @JvmStatic external fun Py_GetBuildInfoN(): Long
     // external fun PyEval_InitThreads()
     // external fun PyThreadState_GetDict(): JNIPointer?
 
@@ -187,7 +188,7 @@ object bindings {
     @dalvik.annotation.optimization.CriticalNative
     external fun PyErr_Clear()
     external fun PyErr_PrintEx(set_sys_last_vars: Int)
-    external fun PyErr_Print()
+    @JvmStatic external fun PyErr_PrintN()
     external fun PyErr_WriteUnraisable(obj: JNIPointer)
     external fun PyErr_DisplayException(exc: JNIPointer)
     external fun PyErr_SetString(type: JNIPointer, message: String)
@@ -210,8 +211,8 @@ object bindings {
     external fun PyErr_Occurred(): Long
     external fun PyErr_ExceptionMatches(exc: JNIPointer): Int
     external fun PyErr_GivenExceptionMatches(given: JNIPointer, exc: JNIPointer): Int
-    external fun PyErr_GetRaisedException(): JNIPointer?
-    external fun PyErr_SetRaisedException(exc: JNIPointer)
+    @JvmStatic external fun PyErr_GetRaisedExceptionN(): Long
+    @JvmStatic external fun PyErr_SetRaisedExceptionN(exc: Long)
     external fun PyErr_Restore(type: JNIPointer, value: JNIPointer, traceback: JNIPointer)
     external fun PyErr_GetHandledException(): JNIPointer?
     external fun PyErr_SetHandledException(exc: JNIPointer)
@@ -221,11 +222,11 @@ object bindings {
     external fun PyErr_SetInterruptEx(signum: Int): Int
     external fun PyErr_NewException(name: String, base: JNIPointer, dict: JNIPointer): JNIPointer?
     external fun PyErr_NewExceptionWithDoc(name: String, doc: String, base: JNIPointer, dict: JNIPointer): JNIPointer?
-    external fun PyException_GetTraceback(ex: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyException_GetTracebackN(ex: Long): Long
     external fun PyException_SetTraceback(ex: JNIPointer, tb: JNIPointer): Int
-    external fun PyException_GetContext(ex: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyException_GetContextN(ex: Long): Long
     external fun PyException_SetContext(ex: JNIPointer, ctx: JNIPointer)
-    external fun PyException_GetCause(ex: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyException_GetCauseN(ex: Long): Long
     external fun PyException_SetCause(ex: JNIPointer, cause: JNIPointer)
     external fun PyException_GetArgs(ex: JNIPointer): JNIPointer?
     external fun PyException_SetArgs(ex: JNIPointer, args: JNIPointer)
@@ -270,7 +271,7 @@ object bindings {
     external fun PyImport_ImportModuleNoBlock(name: String): JNIPointer?
     external fun PyImport_ImportModuleLevelObject(name: JNIPointer, globals: JNIPointer, locals: JNIPointer, fromlist: JNIPointer, level: Int): JNIPointer?
     external fun PyImport_ImportModuleLevel(name: String, globals: JNIPointer, locals: JNIPointer, fromlist: JNIPointer, level: Int): JNIPointer?
-    external fun PyImport_Import(name: JNIPointer): JNIPointer?
+    // external fun PyImport_Import(name: JNIPointer): JNIPointer?
     external fun PyImport_ReloadModule(m: JNIPointer): JNIPointer?
     // external fun PyImport_AddModuleRef(name: String): JNIPointer?
     external fun PyImport_AddModuleObject(name: JNIPointer): JNIPointer?
@@ -288,7 +289,7 @@ object bindings {
 
 
     // Section 9
-    external fun PyEval_GetBuiltins(): JNIPointer?
+    @JvmStatic external fun PyEval_GetBuiltinsN(): Long
     external fun PyEval_GetLocals(): JNIPointer?
     external fun PyEval_GetGlobals(): JNIPointer?
     external fun PyEval_GetFrameBuiltins(): JNIPointer?
@@ -313,41 +314,42 @@ object bindings {
     external fun PyObject_GenericSetAttr(o: JNIPointer, name: JNIPointer, value: JNIPointer): Int
     external fun PyObject_DelAttr(o: JNIPointer, attr_name: JNIPointer): Int
     external fun PyObject_DelAttrString(o: JNIPointer, attr_name: String): Int
-    external fun PyObject_RichCompare(o1: JNIPointer, o2: JNIPointer, opid: Int): JNIPointer?
-    external fun PyObject_RichCompareBool(o1: JNIPointer, o2: JNIPointer, opid: Int): Int
+    @JvmStatic external fun PyObject_RichCompareN(o1: Long, o2: Long, opid: Int): Long
+    @JvmStatic external fun PyObject_RichCompareBoolN(o1: Long, o2: Long, opid: Int): Int
     external fun PyObject_Format(obj: JNIPointer, format_spec: JNIPointer): JNIPointer?
-    external fun PyObject_Repr(o: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyObject_ReprN(o: Long): Long
     external fun PyObject_ASCII(o: JNIPointer): JNIPointer?
     // external fun PyObject_Str(o: JNIPointer): JNIPointer?
     external fun PyObject_Bytes(o: JNIPointer): JNIPointer?
     external fun PyObject_IsSubclass(derived: JNIPointer, cls: JNIPointer): Int
-    external fun PyObject_IsInstance(inst: JNIPointer, cls: JNIPointer): Int
+    @JvmStatic external fun PyObject_IsInstanceN(inst: Long, cls: Long): Int
     // external fun PyObject_IsTrue(o: JNIPointer): Int
     external fun PyObject_Not(o: JNIPointer): Int
-    external fun PyObject_Type(o: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyObject_TypeN(o: Long): Long
     external fun PyObject_Size(o: JNIPointer): Long
     external fun PyObject_Length(o: JNIPointer): Long
-    external fun PyObject_GetItem(o: JNIPointer, key: JNIPointer): JNIPointer?
-    external fun PyObject_SetItem(o: JNIPointer, key: JNIPointer, v: JNIPointer): Int
-    external fun PyObject_DelItem(o: JNIPointer, key: JNIPointer): Int
+    @JvmStatic external fun PyObject_GetItemN(o: Long, key: Long): Long
+    @JvmStatic external fun PyObject_SetItemN(o: Long, key: Long, v: Long): Int
+    @JvmStatic external fun PyObject_DelItemN(o: Long, key: Long): Int
     external fun PyObject_Dir(o: JNIPointer): JNIPointer?
-    external fun PyObject_GetIter(o: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyObject_GetIterN(o: Long): Long
     external fun PyObject_GetAIter(o: JNIPointer): JNIPointer?
 
 
     // Section 11
     external fun PyVectorcall_Call(callable: JNIPointer, tuple: JNIPointer, dict: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyObject_CallN(callable: Long, args: Long, kwargs: Long): Long
     external fun PyObject_Call(callable: JNIPointer, args: JNIPointer, kwargs: JNIPointer): JNIPointer?
     // external fun PyObject_CallNoArgs(callable: JNIPointer): JNIPointer?
     // external fun PyObject_CallObject(callable: JNIPointer, args: JNIPointer): JNIPointer?
-    external fun PyCallable_Check(o: JNIPointer): Int
+    @JvmStatic external fun PyCallable_CheckN(o: Long): Int
 
 
     // Section 12
     external fun PyNumber_Check(o: JNIPointer): Int
-    external fun PyNumber_Add(o1: JNIPointer, o2: JNIPointer): JNIPointer?
-    external fun PyNumber_Subtract(o1: JNIPointer, o2: JNIPointer): JNIPointer?
-    external fun PyNumber_Multiply(o1: JNIPointer, o2: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyNumber_AddN(o1: Long, o2: Long): Long
+    @JvmStatic external fun PyNumber_SubtractN(o1: Long, o2: Long): Long
+    @JvmStatic external fun PyNumber_MultiplyN(o1: Long, o2: Long): Long
     external fun PyNumber_MatrixMultiply(o1: JNIPointer, o2: JNIPointer): JNIPointer?
     external fun PyNumber_FloorDivide(o1: JNIPointer, o2: JNIPointer): JNIPointer?
     external fun PyNumber_TrueDivide(o1: JNIPointer, o2: JNIPointer): JNIPointer?
@@ -360,9 +362,9 @@ object bindings {
     external fun PyNumber_Invert(o: JNIPointer): JNIPointer?
     external fun PyNumber_Lshift(o1: JNIPointer, o2: JNIPointer): JNIPointer?
     external fun PyNumber_Rshift(o1: JNIPointer, o2: JNIPointer): JNIPointer?
-    external fun PyNumber_And(o1: JNIPointer, o2: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyNumber_AndN(o1: Long, o2: Long): Long
     external fun PyNumber_Xor(o1: JNIPointer, o2: JNIPointer): JNIPointer?
-    external fun PyNumber_Or(o1: JNIPointer, o2: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyNumber_OrN(o1: Long, o2: Long): Long
     external fun PyNumber_InPlaceAdd(o1: JNIPointer, o2: JNIPointer): JNIPointer?
     external fun PyNumber_InPlaceSubtract(o1: JNIPointer, o2: JNIPointer): JNIPointer?
     external fun PyNumber_InPlaceMultiply(o1: JNIPointer, o2: JNIPointer): JNIPointer?
@@ -387,9 +389,9 @@ object bindings {
     external fun PySequence_Check(o: JNIPointer): Int
     external fun PySequence_Concat(o1: JNIPointer, o2: JNIPointer): JNIPointer?
     external fun PySequence_InPlaceConcat(o1: JNIPointer, o2: JNIPointer): JNIPointer?
-    external fun PySequence_Contains(o: JNIPointer, value: JNIPointer): Int
-    external fun PySequence_List(o: JNIPointer): JNIPointer?
-    external fun PySequence_Tuple(o: JNIPointer): JNIPointer?
+    @JvmStatic external fun PySequence_ContainsN(o: Long, value: Long): Int
+    @JvmStatic external fun PySequence_ListN(o: Long): Long
+    @JvmStatic external fun PySequence_TupleN(o: Long): Long
     external fun PySequence_Fast(o: JNIPointer, m: String): JNIPointer?
 
 
@@ -409,7 +411,7 @@ object bindings {
     // Section 15
     external fun PyIter_Check(o: JNIPointer): Int
     external fun PyAIter_Check(o: JNIPointer): Int
-    external fun PyIter_Next(o: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyIter_NextN(o: Long): Long
 
 
     // Section 16
@@ -417,20 +419,20 @@ object bindings {
     @dalvik.annotation.optimization.CriticalNative
     external fun PyLong_FromLongLong(v: Long): Long
     external fun PyLong_FromDouble(v: Double): JNIPointer?
-    external fun PyLong_AsInt(obj: JNIPointer): Int
-    external fun PyLong_AsLongLong(obj: JNIPointer): Long
+    @JvmStatic external fun PyLong_AsIntN(obj: Long): Int
+    @JvmStatic external fun PyLong_AsLongLongN(obj: Long): Long
     external fun PyLong_AsDouble(pylong: JNIPointer): Double
     external fun PyLong_GetInfo(): JNIPointer?
 
 
     // Section 17
-    external fun PyBool_FromLong(v: Long): JNIPointer?
+    @JvmStatic external fun PyBool_FromLongN(v: Long): Long
 
 
     // Section 18
     external fun PyFloat_FromString(str: JNIPointer): JNIPointer?
-    external fun PyFloat_FromDouble(v: Double): JNIPointer?
-    external fun PyFloat_AsDouble(pyfloat: JNIPointer): Double
+    @JvmStatic external fun PyFloat_FromDoubleN(v: Double): Long
+    @JvmStatic external fun PyFloat_AsDoubleN(pyfloat: Long): Double
     external fun PyFloat_GetInfo(): JNIPointer?
     external fun PyFloat_GetMax(): Double
     external fun PyFloat_GetMin(): Double
@@ -468,7 +470,7 @@ object bindings {
     external fun PyUnicode_AsASCIIString(unicode: JNIPointer): JNIPointer?
     external fun PyUnicode_AsCharmapString(unicode: JNIPointer, mapping: JNIPointer): JNIPointer?
     external fun PyUnicode_Translate(unicode: JNIPointer, table: JNIPointer, errors: String): JNIPointer?
-    external fun PyUnicode_Concat(left: JNIPointer, right: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyUnicode_ConcatN(left: Long, right: Long): Long
     external fun PyUnicode_Splitlines(unicode: JNIPointer, keepends: Int): JNIPointer?
     external fun PyUnicode_Join(separator: JNIPointer, seq: JNIPointer): JNIPointer?
     external fun PyUnicode_Compare(left: JNIPointer, right: JNIPointer): Int
@@ -476,7 +478,7 @@ object bindings {
     external fun PyUnicode_CompareWithASCIIString(unicode: JNIPointer, string: String): Int
     external fun PyUnicode_RichCompare(left: JNIPointer, right: JNIPointer, op: Int): JNIPointer?
     external fun PyUnicode_Format(format: JNIPointer, args: JNIPointer): JNIPointer?
-    external fun PyUnicode_Contains(unicode: JNIPointer, substr: JNIPointer): Int
+    @JvmStatic external fun PyUnicode_ContainsN(unicode: Long, substr: Long): Int
     external fun PyUnicode_InternFromString(str: String): JNIPointer?
 
 
@@ -487,44 +489,44 @@ object bindings {
     external fun PyList_Size(list: Long): Long
     external fun PyList_GetItem(list: JNIPointer, index: Long): JNIPointer?
     external fun PyList_SetItem(list: JNIPointer, index: Long, item: JNIPointer): Int
-    external fun PyList_Insert(list: JNIPointer, index: Long, item: JNIPointer): Int
-    external fun PyList_Append(list: JNIPointer, item: JNIPointer): Int
-    external fun PyList_Sort(list: JNIPointer): Int
-    external fun PyList_Reverse(list: JNIPointer): Int
-    external fun PyList_AsTuple(list: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyList_InsertN(list: Long, index: Long, item: Long): Int
+    @JvmStatic external fun PyList_AppendN(list: Long, item: Long): Int
+    @JvmStatic external fun PyList_SortN(list: Long): Int
+    @JvmStatic external fun PyList_ReverseN(list: Long): Int
+    @JvmStatic external fun PyList_AsTupleN(list: Long): Long
 
 
     // Section 23
     // external fun PyDict_New(): JNIPointer?
-    external fun PyDict_Size(p: JNIPointer): Long
+    @JvmStatic external fun PyDict_SizeN(p: Long): Long
     external fun PyDictProxy_New(mapping: JNIPointer): JNIPointer?
-    external fun PyDict_Clear(p: JNIPointer)
-    external fun PyDict_Contains(p: JNIPointer, key: JNIPointer): Int
+    @JvmStatic external fun PyDict_ClearN(p: Long)
+    @JvmStatic external fun PyDict_ContainsN(p: Long, key: Long): Int
     external fun PyDict_Copy(p: JNIPointer): JNIPointer?
     // external fun PyDict_SetItem(p: JNIPointer, key: JNIPointer, v: JNIPointer): Int
     // external fun PyDict_SetItemString(p: JNIPointer, key: String, v: JNIPointer): Int
-    external fun PyDict_DelItem(p: JNIPointer, key: JNIPointer): Int
+    @JvmStatic external fun PyDict_DelItemN(p: Long, key: Long): Int
     external fun PyDict_DelItemString(p: JNIPointer, key: String): Int
-    external fun PyDict_GetItem(p: JNIPointer, key: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyDict_GetItemN(p: Long, key: Long): Long
     external fun PyDict_GetItemWithError(p: JNIPointer, key: JNIPointer): JNIPointer?
     // external fun PyDict_GetItemString(p: JNIPointer, key: String): JNIPointer?
-    external fun PyDict_Items(p: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyDict_ItemsN(p: Long): Long
     external fun PyDict_Keys(p: JNIPointer): JNIPointer?
-    external fun PyDict_Values(p: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyDict_ValuesN(p: Long): Long
     external fun PyDict_Merge(a: JNIPointer, b: JNIPointer, override: Int): Int
     external fun PyDict_Update(a: JNIPointer, b: JNIPointer): Int
     external fun PyDict_MergeFromSeq2(a: JNIPointer, seq2: JNIPointer, override: Int): Int
 
 
     // Section 24
-    external fun PySet_New(iterable: JNIPointer): JNIPointer?
-    external fun PyFrozenSet_New(iterable: JNIPointer): JNIPointer?
-    external fun PySet_Contains(anyset: JNIPointer, key: JNIPointer): Int
-    external fun PySet_Size(anyset: JNIPointer): Long
-    external fun PySet_Add(set: JNIPointer, key: JNIPointer): Int
-    external fun PySet_Discard(set: JNIPointer, key: JNIPointer): Int
-    external fun PySet_Pop(set: JNIPointer): JNIPointer?
-    external fun PySet_Clear(set: JNIPointer): Int
+    @JvmStatic external fun PySet_NewN(iterable: Long): Long
+    @JvmStatic external fun PyFrozenSet_NewN(iterable: Long): Long
+    @JvmStatic external fun PySet_ContainsN(anyset: Long, key: Long): Int
+    @JvmStatic external fun PySet_SizeN(anyset: Long): Long
+    @JvmStatic external fun PySet_AddN(set: Long, key: Long): Int
+    @JvmStatic external fun PySet_DiscardN(set: Long, key: Long): Int
+    @JvmStatic external fun PySet_PopN(set: Long): Long
+    @JvmStatic external fun PySet_ClearN(set: Long): Int
 
 
     // Section 25
@@ -540,9 +542,9 @@ object bindings {
 
 
     // Section 27
-    external fun PyType_IsSubtype(a: JNIPointer, b: JNIPointer): Int
+    @JvmStatic external fun PyType_IsSubtypeN(a: Long, b: Long): Int
     external fun PyType_Ready(type: JNIPointer): Int
-    external fun PyType_GetName(type: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyType_GetNameN(type: Long): Long
     external fun PyType_GetFullyQualifiedName(type: JNIPointer): JNIPointer?
     external fun PyType_GetModuleName(type: JNIPointer): JNIPointer?
     external fun PyType_GetModule(type: JNIPointer): JNIPointer?
@@ -550,16 +552,16 @@ object bindings {
 
     // Section 28
     // external fun PyTuple_New(len: Long): JNIPointer?
-    external fun PyTuple_Size(p: JNIPointer): Long
-    external fun PyTuple_GetItem(p: JNIPointer, pos: Long): JNIPointer?
-    external fun PyTuple_GetSlice(p: JNIPointer, low: Long, high: Long): JNIPointer?
+    @JvmStatic external fun PyTuple_SizeN(p: Long): Long
+    @JvmStatic external fun PyTuple_GetItemN(p: Long, pos: Long): Long
+    @JvmStatic external fun PyTuple_GetSliceN(p: Long, low: Long, high: Long): Long
     // external fun PyTuple_SetItem(p: JNIPointer, pos: Long, o: JNIPointer): Int
 
 
     // Section 29
-    external fun PyModule_GetName(module: JNIPointer): String?
-    external fun PyModule_GetDict(module: JNIPointer): JNIPointer?
-    external fun PyModule_GetFilenameObject(module: JNIPointer): JNIPointer?
+    @JvmStatic external fun PyModule_GetNameN(module: Long): Long
+    @JvmStatic external fun PyModule_GetDictN(module: Long): Long
+    @JvmStatic external fun PyModule_GetFilenameObjectN(module: Long): Long
 
 
     //**************************************************
@@ -601,6 +603,12 @@ object bindings {
     @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyUnicode_FromStringF(str: Long): Long
 
     @JvmStatic external fun PyImport_AddModuleRefN(name: Long): Long
+    // Registered after the name-linked fallback crashed the object model on Android: the second
+    // commonTest case died with SIGSEGV at a truncated pointer inside PyImport_AddModule.
+    @JvmStatic external fun PyImport_AddModuleN(name: Long): Long
+    @JvmStatic external fun PyErr_SetStringN(type: Long, message: Long)
+    @JvmStatic external fun PyObject_SetAttrStringN(o: Long, attr_name: Long, v: Long): Int
+    @JvmStatic external fun PyObject_DelAttrStringN(o: Long, attr_name: Long): Int
     @JvmStatic external fun PyRun_StringN(str: Long, start: Int, globals: Long, locals: Long): Long
     @JvmStatic external fun PyObject_StrN(o: Long): Long
     @JvmStatic external fun PyObject_IsTrueN(o: Long): Int
