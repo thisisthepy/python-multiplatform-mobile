@@ -523,3 +523,46 @@ per-call path was. Reflection now runs once per symbol, at link time.
 Strings still convert at the Kotlin level rather than through a handle filter: `withUtf8 { }`
 allocates, passes the address as a long, and frees in a `finally`. Return values owned by
 CPython are read without being freed, since freeing them would be a use-after-free.
+
+### Separating the API level from the hardware
+
+Until now the modern-Android numbers came from a Samsung tablet while the older ones came from
+emulators on the M1 host, so "API 36 is slowest" mixed two variables. Running API 36 on an
+emulator settles it.
+
+Same API level, different machine — real `PyList_Size` call:
+
+| API 36 | floor | `@CriticalNative` | `@FastNative` | ordinary JNI |
+|---|---|---|---|---|
+| emulator (M1 host) | 2.20 ns | 23.20 | **4.28** | 9.39 |
+| hardware (SM-X910) | 3.22 ns | 46.75 | **7.24** | 19.25 |
+
+Hardware is 1.5-2x the emulator across every row, and the floor moves by the same factor
+(3.22 vs 2.20). That is the tablet's core being slower than the host, not anything about
+API 36. The earlier reading that "API 36 is the slow one" was partly this artefact.
+
+Same machine, different API level — emulators on the M1 host only:
+
+| | `@CriticalNative` | `@FastNative` |
+|---|---|---|
+| API 26 | **1.85** | 40.15 |
+| API 33 | **-0.04** | 2.03 |
+| API 36 | 21.72 | **1.66** |
+
+The collapse is still real and still API-driven: `@CriticalNative` goes from free at 33 to
+21.72ns at 36 with the hardware held constant. So the crossover conclusion and the dispatch
+threshold stand — hardware exaggerated the gap but did not create it.
+
+### Desktop vs Android, corrected
+
+The earlier "desktop 2.65ns vs Android 7.47ns" compared an M1 host against a tablet. On the
+same host, for the same real call:
+
+| | `PyList_Size` |
+|---|---|
+| Desktop (Panama, `invokeExact`) | **2.65 ns** |
+| Android API 36 emulator (`@FastNative`) | **4.28 ns** |
+| Android API 36 hardware (`@FastNative`) | 7.24 ns |
+
+About 1.6x between the two paths on identical hardware, not the 2.8x the cross-machine
+comparison implied. Both are now in the same regime, which is the part that matters.
