@@ -14,12 +14,16 @@ Thanks to many contributors who develop dependent packages for this python-kotli
 
 #### Supporting multiplatforms:
 
-- Android (arm64, arm32, x86, x86_64) with [Kivy Android ToolChain](https://github.com/thisisthepy/toolchain-android)
-- iOS (arm64) with [Kivy ios Toolchain](https://github.com/thisisthepy/toolchain-ios)
-- masOS (universal) with [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
-- Linux (x86_64) with [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
-- Windows (x86_64) with [Python Standalone Builds](https://github.com/indygreg/python-build-standalone)
-- WASM - Not yet supported.
+- Android (arm64, x86_64) with the [official CPython Android builds](https://www.python.org/downloads/)
+- iOS (arm64, simulator) with [Python-Apple-support](https://github.com/beeware/Python-Apple-support)
+- macOS (arm64, x86_64) with [Python Standalone Builds](https://github.com/astral-sh/python-build-standalone)
+- Linux (x86_64) with [Python Standalone Builds](https://github.com/astral-sh/python-build-standalone)
+- Windows (x86_64) with [Python Standalone Builds](https://github.com/astral-sh/python-build-standalone)
+- WASM - Not yet supported. See `docs/wasm-design.md` for why, and what it would take.
+
+The interpreter is not vendored into this repository. Gradle downloads it per platform,
+verifies it, and extracts it at build time — see `docs/python-version-acquisition.md`. The
+version is set in `gradle.properties`.
 
 ** Since Xcode only runs on macOS, you need macOS to build this repo for iOS.
 

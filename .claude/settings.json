@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "deny": [
+      "Agent",
+      "Task"
+    ]
+  }
+}
