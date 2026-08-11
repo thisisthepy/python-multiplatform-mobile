@@ -37,7 +37,38 @@ the GIL, and fixing §1 will not turn it green. One test name is covering two un
 and either the iOS decrefs land on objects other than the one being measured or the measurement
 itself is wrong. Nobody has looked yet.
 
-Enabling it was attempted and reverted. Every C API call still outside `withGIL` becomes a
+**The recorded diagnosis is wrong, or at least incomplete.** Enabling the parking call was tried
+again today and the result rules out the explanation this section gives.
+
+```
+desktopTest with PyEval_SaveThread() enabled
+  0 tests run, JVM aborts (exit 134)
+  SIGSEGV in libpython3.14.dylib  _TAIL_CALL_DICT_MERGE
+                                  <- _PyFunction_Vectorcall
+                                  <- PyObject_CallMethodObjArgs
+  Java frame: EmbedAPI_desktopKt.PyImport_ImportModule
+              <- EmbedApiLowLevelTest.importReturnsANewReferenceAndMissingModulesReportFailure
+```
+
+That call site is this:
+
+```kotlin
+val sys = Python3.withPython { PyImport_ImportModule("sys") }
+```
+
+**It is already inside the guard.** So "find the C API call that is outside `withGIL`" is not a
+sufficient theory, and an audit of call sites will not find the bug. `withGIL` itself reads
+correctly — depth-counted `PyGILState_Ensure`/`PyGILState_Release`, outermost acquires — so the
+next attempt has to look at the *interaction*: what `PyGILState_Ensure` does on a thread whose
+state was parked with `PyEval_SaveThread`, and whether the initialising thread and the calling
+thread are the same one. Note this repo has already been bitten once by mixing the raw
+thread-state scheme with the refcounted one.
+
+The crash frame is inside CPython's import machinery, so the GIL is acquired far enough to start
+executing Python before something goes wrong. That is a different shape from "no GIL held".
+
+The older explanation, kept because it is still part of the picture: every C API call outside
+`withGIL` becomes a
 segfault far from its cause: closing the gap in `BenchmarkTest.testAttributeAccess`
 (`PyImport_Import`) moved the crash from `PyImport_Import` to `_PyObject_Malloc`, with no Java
 frame naming the new site.
@@ -74,13 +105,45 @@ removes contention, not the rule that a thread must be attached before touching 
 
 ## 2. Finish the Android JNI surface
 
-**Closed.** 71 functions are bound through `RegisterNatives` — the probes and benchmarks plus
-everything the object model actually reaches. `AssembledApiTest`, written as the acceptance check
-for exactly this, runs without `@Ignore`: 19 tests on `pmp_api26` and `pmp_api36`, 0 failed,
-`python.multiplatform.assembled.AssembledApiTest` present in both result files.
+**Reopened. Marking this closed was wrong.**
 
-The history below is kept because the three failure modes it records are the reason the surface
-had to be rebuilt rather than patched, and because §3 still has to classify what §2 bound.
+It was closed on the strength of `AssembledApiTest` passing — 19 tests on `pmp_api26` and
+`pmp_api36`, 0 failed. That was true and it did not mean what it was taken to mean. Those 19 tests
+only ever exercised the 71 functions that had been registered. **The passing acceptance test
+measured its own scope.**
+
+Connecting `commonTest` to Android (§11b) raised discovery from 19 tests to 168 per device and the
+suite died on the **2nd** one, with a hard SIGSEGV on both API levels. Then, after that fix, on the
+12th:
+
+```
+PyImport_AddModule        fault addr 0xc24110e8   EmbedAPI_androidKt -> PythonTestFixture.mainGlobals
+PyErr_GetRaisedException  fault addr 0xc2411160   PyException.fromCurrentError -> PyObject.getAttr
+```
+
+Both truncated pointers, which is the signature of the name-linked `@CName` fallback described
+below. An unregistered call does not fail cleanly; it corrupts a pointer and kills the process.
+
+**The real numbers:**
+
+```
+bindings.kt external fun    366
+registered                   71
+unregistered                295
+  ...reachable from commonMain with an Android actual    68     every one a latent process kill
+```
+
+So the surface is roughly a fifth done, not finished. `docs/android-unregistered-surface.md`
+carries the reachability analysis; its counts came from a script and were spot-checked, not
+audited line by line.
+
+Four are migrated so far (`PyImport_AddModule`, `PyErr_SetString`, `PyObject_SetAttrString`,
+`PyObject_DelAttrString`), which moved the suite from 10 tests to 12. **Progress on this item is
+measured by how far the 168 get, not by whether a chosen test passes** — that is the mistake that
+closed it prematurely.
+
+The history below is kept because the three failure modes it records are exactly what the two
+crashes above are, and because §3 still has to classify whatever §2 binds.
 
 **Was:** 39 of 380 `external fun` declarations bound through `RegisterNatives`. The rest kept the
 original wiring, which does not work.
