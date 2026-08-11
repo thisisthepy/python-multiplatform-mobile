@@ -660,3 +660,60 @@ pages observed inside coroutine  0   <- uncontaminated
 So the conclusion holds, and now for coroutines too: **nothing in ordinary Kotlin/Wasm touches
 linear memory.** `MEASURE_ALLOCATOR` in the probe is off by default for this reason, and the
 coroutine line must be read as meaningless in any run where it is on.
+
+---
+
+## Resolved upstream: 2.4.20-Beta2 imports the memory
+
+The YouTrack issue drafted in `wasm-youtrack-issue.md` should not be filed. The thing it asks for
+has already shipped, and in a better form than the request.
+
+`importWasmMemoryInsteadOfExport = isWasmJsTarget` was read on the compiler's `master` branch and
+recorded here as unreleased, on the evidence that 2.2.20 and 2.4.10 both export a memory. That was
+right about those two versions and wrong about the conclusion: **2.4.20-Beta2 imports it.** The
+experiment builds against it and the binary says so plainly:
+
+```
+imports   intrinsics.memory   (kind 0x02, memory)
+          intrinsics.memory   (kind 0x03, global)
+          intrinsics.tag
+memory definitions            0        <- defines none of its own
+non-function exports          none     <- no longer exports one
+```
+
+And the generated glue hands it in as an ordinary JavaScript value:
+
+```js
+intrinsics: {
+    memory: new WebAssembly.Memory({ initial: 0 }),
+    tag: wasmTag
+},
+```
+
+Replacing that one expression with Emscripten's `Module.wasmMemory` is the whole integration. No
+binary patching, no compiler flag, no `max` limit to negotiate — `patch-memory-max.py` becomes
+history rather than a build step.
+
+### It also removes the constraint that shaped the design
+
+The instantiation cycle is gone. While Kotlin exported the memory, Emscripten had to import it
+while Kotlin simultaneously needed Emscripten's exports through `@WasmImport`, and wasm supplies
+imports up front, so the two could not be satisfied together. The recorded workaround was JS
+trampolines for the calls, measured at 2.73x a direct call.
+
+With Kotlin importing, the order resolves: instantiate Emscripten first, then hand Kotlin both the
+memory and the functions. **Direct wasm-to-wasm calls and a shared linear memory at the same
+time** — which is the configuration this design wanted and had written off as unavailable.
+
+### What that leaves
+
+The last structural obstacle to §10 is gone. Remaining work is ordinary: pin the Kotlin version at
+2.4.20-Beta2 or later (the library targets 2.0.20 today, so this is a real upgrade with its own
+cost), build CPython for `pyemscripten_2026_0`, write the composed shim, and supply
+`Module.wasmMemory` in place of the placeholder above.
+
+Two facts from earlier still hold and still constrain the shape. Kotlin never touches its linear
+memory on its own — measured across strings, collections, exceptions, a 10 MiB `ByteArray`, a
+100k-object graph, the `ArrayBuffer` bridge and coroutines — so handing it to Emscripten costs
+nothing. And `withScopedMemoryAllocator` must never appear in `wasmJsMain`, because it allocates
+from address 0 upward, on top of Emscripten's static data.
