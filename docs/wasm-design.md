@@ -128,3 +128,112 @@ Component Model.
 Official Emscripten support arrives in **CPython 3.14**. This project is pinned to 3.13, where
 Emscripten has no PEP 11 status at all. WASM support therefore implies moving the embedded
 interpreter to 3.14 or later.
+
+---
+
+# Why WASM is parked, and what it would look like
+
+Recorded so the reasoning survives. Nothing here is implemented.
+
+## The blocker is Kotlin's toolchain, not WebAssembly
+
+Every other platform calls CPython directly — cinterop on iOS and androidNative, Panama on
+desktop, JNI on Android. Kotlin/Wasm cannot: `wasmJs` offers only JS interop and `wasmWasi`
+only WASI syscalls, and neither can link a C library.
+
+Kotlin/Native once had a `wasm32` target that went through LLVM and emitted linear-memory
+wasm — the same memory model Emscripten's CPython uses, which is exactly what would have made
+cinterop work. It was deprecated in 1.8.20 and removed in 1.9.20. So the JS bridge is a
+consequence of a toolchain decision, not of WebAssembly.
+
+**The deeper barrier is memory, not calls.** Two wasm modules can call each other directly if
+the host wires module B's exports to module A's imports at instantiation — JS is needed once,
+not per call. But Kotlin/Wasm is WasmGC: its objects live on a managed heap, and it has no way
+to read another module's linear memory. CPython's entire API is pointers into exactly that
+memory. So JS is not a convenience in the call path — it is where the marshalling has to
+happen.
+
+JetBrains has a **Multiple Memory** proposal under consideration that would address this, and a
+C-interop example PR against `kotlin-wasm-examples` was opened in March 2024. Neither has a
+committed date, and neither appears on the published roadmap, so neither can be planned around.
+
+## emscripten, not wasi
+
+| | `wasm32-emscripten` | `wasm32-wasi` |
+|---|---|---|
+| CPython support | Tier 3 from 3.14 (PEP 776) | **Tier 2** |
+| bridge between the two modules | **JS exists** | none — needs Component Model, which Kotlin does not emit |
+| C extension modules | **dlopen works** | no dlopen in preview1; extensions must be linked in |
+| matches this project | **browser; the sample already targets `wasmJs`** | server/edge |
+
+The decisive row is the third. This project exists to share libraries, and on WASI a user could
+not add a compiled package after the fact — the interpreter would have to be rebuilt. That
+guts the goal on that platform, which outweighs WASI's better support tier.
+
+The second row is nearly as decisive: WASI has no JS host, so there is no mechanism at all to
+connect a Kotlin/Wasm module to a CPython module there.
+
+## The shape it would take
+
+Put our C code inside CPython's module, so it can handle pointers, and keep the boundary to
+integers.
+
+    +- Emscripten module (one linear memory) -----+
+    |  CPython + our C shim                       |   pointers handled here
+    +---------------------+-----------------------+
+                          | i32 only
+                    +-----+-----+
+                    |  JS glue  |                     string copying only
+                    +-----+-----+
+                          |
+                 +--------+---------+
+                 |  Kotlin/Wasm     |
+                 +------------------+
+
+Pointers are 32-bit on wasm32, so a `PyObject*` fits in a Kotlin `Int`. The shim exposes
+composed operations, the same ones measured on Android:
+
+    int  pmp_getattr(int obj, int namePtr);              // lookup + error handling, one crossing
+    int  pmp_exec(int codePtr);                          // __main__ + globals + run
+    int  pmp_list_items(int list, int outPtr, int cap);  // bulk: fills a caller buffer
+    int  pmp_str_utf8(int obj, int outLenPtr);
+    void pmp_decref(int obj);
+    int  pmp_scratch(void);                              // reusable buffer address, once
+
+**Interning applies here and matters more.** A Kotlin string lives on the WasmGC heap and a C
+string in linear memory, so copying costs a JS hop — but attribute and module names are
+repeated literals, so caching the linear-memory address makes every call after the first cost
+nothing. This is the same fix measured on Android at 2238 ns → 148 ns, against a hop that is
+more expensive here than JNI's.
+
+**Bulk is where composition earns its keep on this platform.** It was rejected on desktop and
+superseded by interning on Android; here it is the only mitigation left, because
+`Module.HEAP32.subarray(p, p+n)` fetches N items in one hop where per-element access would cost
+N.
+
+Nothing above changes the layering: `wasmJsMain` supplies `actual`s for the same EmbedAPI
+`expect`s, and the object model does not move.
+
+## What survives if the toolchain improves
+
+If Multiple Memory lands, the C shim stays — composition is wanted for its own sake — and only
+the JS glue is replaced by direct memory access. The `actual` signatures do not change. That
+bounds the throwaway work to a few dozen lines of glue, which is the argument for this shape
+over waiting indefinitely.
+
+## Unresolved
+
+- `NativePointer` holds `Any`, so a wasm32 `Int` boxes on every conversion, and
+  `toRawValue(): Long` needs sign-extension care.
+- CPython must be built with our shim and an explicit `EXPORTED_FUNCTIONS` list; a stock
+  Pyodide build strips the C API by dead-code elimination. That is a second build pipeline.
+- Upcalls: `addFunction(jsFn, sig)` gives a callable function pointer, but re-entering
+  Kotlin/Wasm from it goes through JS. Unmeasured, and likely worse than every other platform.
+- Lifetime: whether Kotlin/Wasm offers a GC hook equivalent to `Cleaner`/`createCleaner` has not
+  been checked. Without one, only explicit `close()` works.
+
+## Start condition
+
+Not now. `wasmJsMain`'s `actual`s cannot be written until it is settled what they implement —
+§1/§4 (GIL and automatic release) and §7 (upcall shape) are both in flight, and building against
+them now means building twice.
