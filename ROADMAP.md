@@ -169,6 +169,41 @@ level, so old devices were never the ones paying for crossings, and they are a s
 bulk iteration, which scales with N (11x at 1000 elements). For single string-carrying calls,
 fix the marshalling instead.
 
+### Interning settles it, on every API level
+
+The direct-buffer path lost to composition on API 26, and the reason was not crossings — both
+make exactly one ordinary-JNI call there. It was where the string gets encoded: composition
+hands the jstring to `GetStringUTFChars` and encodes natively, while the direct-buffer path
+encodes in Java, and API 26's ART is much worse at that.
+
+Attacking the encode rather than the crossing:
+
+| `getAttr`, ns | API 36 | API 26 |
+|---|---|---|
+| composed | 528.85 | 255.19 |
+| direct buffer + `toByteArray` | 694.03 | 800.96 |
+| direct buffer + ASCII fast path | 373.18 | 248.94 |
+| **interned C string** | **160.25** | **167.33** |
+
+**Interning wins on both, and wins uniformly** — 160 against 167 ns, where composition differs
+by 2x between the same two devices. It is 3.3x better than composing on API 36 and 1.5x better
+on API 26, so the API-26-versus-modern split disappears entirely.
+
+That is not surprising in hindsight: attribute and module names are repeated literals, so the
+encode is pure waste after the first time. CPython interns its own strings for the same reason.
+
+The ASCII fast path alone already matches or beats composition on both levels (373 vs 528,
+249 vs 255), which makes it the right fallback for strings that are not worth caching.
+
+**Design consequence.** The `expect`/`actual` memory abstraction should be built around
+`String → cached C string address`, not around a general `Arena`. A bound on the cache is
+required — callers can pass arbitrary strings — with the ASCII path handling everything that
+misses. `Arena`-style allocation is still needed for non-string buffers, but it is not the
+centre of the API.
+
+**This closes composition for string-carrying operations at every API level.** What remains of
+§5 is bulk iteration only, where crossing count genuinely scales with N.
+
 ## 6. Composition on desktop — measured, and the answer is no
 
 **Measured.** The same question Android answered at 1.8x, asked on desktop without building a

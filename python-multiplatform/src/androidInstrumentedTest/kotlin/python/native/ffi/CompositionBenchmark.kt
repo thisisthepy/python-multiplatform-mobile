@@ -210,4 +210,71 @@ class CompositionBenchmark {
         Log.i(TAG, String.format("direct buffer, no comp  %9.2f ns   %.2fx vs per-call", direct, perCall / direct))
         Log.i(TAG, "sink=$sink")
     }
+
+
+    /**
+     * Two ways to close the gap that remains on old ART.
+     *
+     * The direct-buffer path beats composition on API 36 but loses to it on API 26, and the
+     * reason is not crossings -- both make exactly one ordinary-JNI call there. It is where the
+     * string gets encoded: composition hands the jstring to `GetStringUTFChars` and encodes in
+     * native code, while the direct-buffer path encodes in Java, and API 26's ART is much worse
+     * at that.
+     *
+     * So two candidates, both attacking the encode rather than the crossing:
+     *
+     *  - **ASCII fast path**: write the chars straight into the buffer instead of going through
+     *    `toByteArray`, which allocates a byte[] per call. Python identifiers are ASCII in
+     *    practice; anything else would fall back.
+     *  - **Interning**: attribute and module names are repeated literals, so encode once and
+     *    cache the C string. Per-call cost becomes a map lookup. A real implementation would
+     *    need a bound on the cache, since callers can pass arbitrary strings.
+     */
+    @Test
+    fun cheaperMarshallingForOldArt() {
+        PythonOnDevice.ensureInitialised()
+
+        val main = PythonOnDevice.withUtf8("__main__") { bindings.PyImport_ImportModule(it) }
+        assertTrue("could not import __main__", main != 0L)
+        PythonOnDevice.withUtf8("_bench_list = list(range(8))") { bindings.PyRun_SimpleString(it) }
+
+        val name = "_bench_list"
+        val scratch = java.nio.ByteBuffer.allocateDirect(256)
+        val scratchAddr = bindings.ffiDirectBufferAddress(scratch)
+
+        val composed = best(ITERS) { bindings.asmGetAttr(main, name) }
+
+        val viaToByteArray = best(ITERS) {
+            scratch.clear()
+            scratch.put(name.toByteArray(Charsets.UTF_8))
+            scratch.put(0)
+            bindings.PyObject_GetAttrStringN(main, scratchAddr)
+        }
+
+        val viaAsciiFastPath = best(ITERS) {
+            scratch.clear()
+            for (i in name.indices) scratch.put(name[i].code.toByte())
+            scratch.put(0)
+            bindings.PyObject_GetAttrStringN(main, scratchAddr)
+        }
+
+        // Interning: the C string is encoded once, outside the loop.
+        val interned = bindings.ffiAllocUtf8(name)
+        val cache = HashMap<String, Long>().apply { put(name, interned) }
+        val viaInterning = try {
+            best(ITERS) {
+                val addr = cache[name]!!
+                bindings.PyObject_GetAttrStringN(main, addr)
+            }
+        } finally {
+            bindings.ffiFreeUtf8(interned)
+        }
+
+        Log.i(TAG, "--- marshalling variants (API ${Build.VERSION.SDK_INT}) ---")
+        Log.i(TAG, String.format("composed              %9.2f ns", composed))
+        Log.i(TAG, String.format("direct + toByteArray  %9.2f ns", viaToByteArray))
+        Log.i(TAG, String.format("direct + ascii path   %9.2f ns", viaAsciiFastPath))
+        Log.i(TAG, String.format("interned C string     %9.2f ns", viaInterning))
+        Log.i(TAG, "sink=$sink")
+    }
 }
