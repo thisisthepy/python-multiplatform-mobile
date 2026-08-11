@@ -35,7 +35,7 @@
     ]
   },
   "resources": [
-    { "glob": "lib/**" }
+    { "glob": "lib/${hostPlatform}/**" }
   ],
   "reflection": [
     {

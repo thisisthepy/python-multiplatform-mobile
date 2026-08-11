@@ -375,8 +375,20 @@ kotlin {
         tasks.withType<AbstractCopyTask> {
             duplicatesStrategy = DuplicatesStrategy.WARN
         }
+        val hostPlatform = when {
+            System.getProperty("os.name").contains("Mac") ->
+                if (System.getProperty("os.arch") == "aarch64") "macos-aarch64" else "macos-x86_64"
+            System.getProperty("os.name").contains("Windows") -> "windows-x86_64"
+            else -> "linux-x86_64"
+        }
         tasks.withType<ProcessResources> {
             duplicatesStrategy = DuplicatesStrategy.WARN
+            inputs.property("hostPlatform", hostPlatform)
+            filesMatching("**/reachability-metadata.json") {
+                filter { line ->
+                    line.replace("\${hostPlatform}", hostPlatform)
+                }
+            }
         }
         tasks.withType<Jar> {
             duplicatesStrategy = DuplicatesStrategy.WARN

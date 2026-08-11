@@ -5,6 +5,7 @@ import python.multiplatform.reflection.ExposedCallable
 import python.multiplatform.reflection.FunctionTableFragment
 import python.multiplatform.reflection.TypeTag
 import python.multiplatform.reflection.UpcallTable
+import python.multiplatform.ffi.withGIL
 import python.native.ffi.PyRun_SimpleString
 import python.native.ffi.UpcallStub
 import kotlin.system.exitProcess
@@ -78,7 +79,7 @@ fun main() {
             sys.stderr.flush()
     """.trimIndent()
 
-    val status = PyRun_SimpleString(script)
+    val status = withGIL { PyRun_SimpleString(script) }
     if (status != 0) {
         println("KOTLIN: PyRun_SimpleString reported failure (status=$status)")
         exitProcess(1)
