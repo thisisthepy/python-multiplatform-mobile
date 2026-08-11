@@ -284,3 +284,74 @@ built. Pyodide's advantage is a prebuilt catalogue, not a different rule.
 **Decision: our own Emscripten build of CPython 3.14, packaged against by a side module.**
 Compiled third-party extensions are a known limitation on this platform, recorded rather than
 solved.
+
+### Correction: PEP 783 unbinds the tag from Pyodide
+
+The section above is right about the decision and wrong about its cost. It was written from the
+`pyodide_2024_0_wasm32` tag and concluded that any wheel compatibility means being locked to a
+Pyodide release. That stopped being true.
+
+[PEP 783 — Emscripten Packaging](https://peps.python.org/pep-0783/) is **Accepted**. It replaces
+the Pyodide-owned tag with a standard platform tag series that PyPI accepts:
+
+```
+pyodide_2024_0_wasm32          Pyodide's tag, Pyodide's platform
+pyemscripten_2026_0_wasm32     standard platform tag (PEP 783)
+```
+
+Three things follow, and they change the trade-off rather than the conclusion.
+
+**The platform is versioned per Python feature release, not per distribution release.** The
+current series is `pyemscripten_2024_0` (3.12), `pyemscripten_2025_0` (3.13), `pyemscripten_2026_0`
+(3.14). The earlier worry — "the web platform tracks Pyodide's cadence while every other platform
+is pinned to 3.14" — does not apply: the platform version *is* the Python version. Pinning to 3.14
+from source and claiming `pyemscripten_2026_0` are the same act. The patch component exists as
+an escape hatch the PEP hopes never to use.
+
+**Compatibility is a build recipe, not a distribution.** The PEP states that the tags "can be used
+by Python interpreters compiled and linked with the specified version of Emscripten and with the
+specified ABI-sensitive flags". So our own build can claim the platform. The ABI-sensitive surface
+the PEP enumerates:
+
+| | |
+|---|---|
+| Emscripten compiler version | pinned per platform version |
+| statically linked libraries | fixed set |
+| stack unwinding ABI | fixed selection |
+| dependency lookup handling | specified |
+| `-pthread` | prohibited |
+| `-sWASM_BIGINT` | required |
+
+`-sWASM_BIGINT` is worth noting for us specifically: it is what makes an i64 cross the JS boundary
+as a BigInt rather than being split into two i32s, which is the same `NativePointer` width question
+§4 above raises. The platform requires the setting we would have wanted anyway.
+
+**The full specification currently lives in Pyodide's documentation**, which the PEP references
+normatively while noting the wording was chosen to be "more forwards compatible to a future where
+the definition of the platform moves upstream". So Pyodide still *authors* the spec even though it
+no longer *owns* the tag. That is a real residual coupling, but it binds a flag list, not a runtime.
+
+#### What this changes
+
+| | earlier draft | with PEP 783 |
+|---|---|---|
+| what the tag pins | Pyodide release | Python version + a published flag set |
+| our own build + C-extension wheels | mutually exclusive | **compatible, if we match the flags** |
+| Pyodide as a dependency | the price of wheels | not required |
+| pure-Python wheels | work unchanged | work unchanged |
+
+The decision stands — our own Emscripten CPython 3.14 — but the recorded limitation was
+overstated. Compiled extensions are not lost by building our own; they are lost only if we build
+with flags that diverge from `pyemscripten_2026_0`. **Matching that flag set should be a build
+constraint from the start**, because retrofitting it means rebuilding the interpreter.
+
+Evidence that the path is real rather than paper: [pypa/packaging #804](https://github.com/pypa/packaging/pull/804)
+implements the tag handling, [pypi/warehouse #19804](https://github.com/pypi/warehouse/pull/19804)
+adds PyPI support, [maturin #3163](https://github.com/pyo3/maturin/pull/3163) adds it to a build
+backend, and [pydantic publishes Emscripten wheels to PyPI under it](https://pydantic.dev/articles/emscripten-wheels-pydantic).
+
+#### Still unverified
+
+The exact flag list for `pyemscripten_2026_0` — Emscripten version above all — has not been read
+off Pyodide's ABI page; it returned 403 to automated fetching and needs a manual read before the
+build script is written. Until then, treat "we can match the platform" as a plan, not a fact.

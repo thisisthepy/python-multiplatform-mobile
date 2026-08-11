@@ -41,6 +41,27 @@ make that cheaper than the last attempt: `ReleaseCounter` distinguishes "cleaner
 "cleaner ran and could not release", and the suites are large enough now to localise a
 regression.
 
+**Second attempt, and what it bought.** An audit of `commonMain` concluded the sweep was
+complete and enabled the line. It was not: `DesktopOverheadBenchmark` in `desktopTest` called
+`PyImport_ImportModule`, `PyObject_GetAttrString` and `PyList_Size` bare, which was harmless
+only while `initialize()` kept the GIL to itself. Those are now guarded — a real gap closed and
+kept.
+
+With them fixed the crash moved to `_TAIL_CALL_DICT_MERGE`, which is CPython's `DICT_MERGE`
+opcode: **Python bytecode executing without the GIL**, i.e. something that runs Python code
+rather than merely touching an object. Parked again at that point, with the suite back to
+118/117.
+
+One caveat on that last frame: two other agents were editing the tree concurrently, one of them
+in `ffi/conversion/`. An unguarded call only crashes once the GIL is actually released, so a
+gap introduced by in-flight work would look exactly like a gap that was always there. The next
+attempt should start from a quiet tree.
+
+Pattern worth stating plainly, because it has now repeated three times: each fix moves the
+crash somewhere further from its cause. Grep for the EmbedAPI function names across every source
+set — `desktopTest` and `commonTest` included, which is where both misses have been so far —
+rather than auditing by reading.
+
 Note that free-threaded builds do **not** remove this requirement. Dropping the global lock
 removes contention, not the rule that a thread must be attached before touching any object,
 `Py_IncRef` included.
@@ -340,6 +361,14 @@ deprecated in 1.8.20 and removed in 1.9.20. So the JS bridge is a consequence of
 toolchain, not of WASM itself.
 
 Starting now means building on a JS bridge that a future C-interop story would discard.
+
+**Packaging is settled upstream, and constrains our build.** PEP 783 (Accepted) defines the
+`pyemscripten_<year>_<patch>_wasm32` platform tag, one version per Python feature release —
+`pyemscripten_2026_0` is 3.14. Any interpreter built with the specified Emscripten version and
+ABI-sensitive flags (no `-pthread`, `-sWASM_BIGINT`, fixed static libs and unwinding ABI) can
+claim it, so our own build and PyPI C-extension wheels are compatible goals. Match the flag set
+from the first build script — retrofitting means rebuilding the interpreter. The exact flag
+list still needs a manual read of Pyodide's ABI page. See `docs/wasm-design.md`.
 
 ## 11. Build wiring
 
