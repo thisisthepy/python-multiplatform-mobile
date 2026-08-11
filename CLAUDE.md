@@ -95,6 +95,22 @@ agy -p "<프롬프트>" --model gemini-3.1-pro-high --print-timeout 30m
 
 그러므로 보고 내용을 그대로 믿지 말고, **작업 후 항상 `git status --short` 로 범위를 벗어난 변경이 없는지 확인하고 빌드·테스트를 직접 재실행한다.** 되돌릴 수 있도록 검증된 상태를 미리 커밋해 두면 `git checkout -- <path>` 로 복구할 수 있다.
 
+### 플랫폼별 규정은 각 소스셋의 README.md 에 있다
+
+`python-multiplatform/src/<sourceSet>/README.md` 에 그 플랫폼에서 반드시 지켜야 할 것들이
+측정 근거와 함께 정리되어 있다. **해당 소스셋을 건드리기 전에 읽는다.**
+
+| 소스셋 | 핵심 규정 |
+|---|---|
+| `commonMain` | 계층 규약(객체 모델은 `bindings` 참조 금지), 모든 C API 호출에 GIL, 참조 규약 명시 |
+| `desktopMain` | **`invoke` 금지, 무조건 `invokeExact`**. 포인터는 `ADDRESS` 아닌 `JAVA_LONG` |
+| `androidMain` | `RegisterNatives` 로 바인딩, 규약을 API 레벨 + 함수별로 선택, 경계는 원시 타입만 |
+| `artMain` | JNI 는 여기에만(`nativeMain` 은 iOS 와 공유), 조합 함수의 자리 |
+| `nativeMain` | iOS 와 공유되므로 Android 전용 코드 금지, 경계가 없으므로 조합 불필요 |
+| `iosMain` | 프레임워크에 stdlib 없음 → `PYTHONHOME` 필요, `SIMCTL_CHILD_` 접두사 |
+
+미완료 작업과 그 근거는 저장소 루트의 `ROADMAP.md` 에 있다.
+
 ### 알려진 컴파일러 제약
 
 `EmbedAPI.kt` 에는 `expect inline fun` 이 다수 있다. 이를 중간 소스셋(`jvmMain`)의 `expect`/`actual` 과 조합하면 Kotlin 2.0.20 에서 **`Internal error in file lowering`** 컴파일러 크래시가 발생한 사례가 있다. JVM 계열 통합을 설계할 때 이 제약을 먼저 확인할 것.

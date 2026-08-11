@@ -62,18 +62,18 @@ object bindings {
     val PyRun_SimpleStringHandle: MethodHandle
 inline fun PyRun_SimpleString(command: String): Int =
     withUtf8(command) { _command ->
-        PyRun_SimpleStringHandle.invoke(_command) as Int
+        PyRun_SimpleStringHandle.invokeExact(_command) as Int
     }
     val PyRun_StringHandle: MethodHandle
 inline fun PyRun_String(str: String, start: Int, globals: Long, locals: Long): Long =
     withUtf8(str) { _str ->
-        PyRun_StringHandle.invoke(_str, start, globals, locals) as Long
+        PyRun_StringHandle.invokeExact(_str, start, globals, locals) as Long
     }
     val Py_CompileStringHandle: MethodHandle
 inline fun Py_CompileString(str: String, filename: String, start: Int): Long =
     withUtf8(str) { _str ->
         withUtf8(filename) { _filename ->
-            Py_CompileStringHandle.invoke(_str, _filename, start) as Long
+            Py_CompileStringHandle.invokeExact(_str, _filename, start) as Long
         }    }
     val PyEval_EvalCodeHandle: MethodHandle
     inline fun PyEval_EvalCode(co: Long, globals: Long, locals: Long): Long = PyEval_EvalCodeHandle.invokeExact(co, globals, locals) as Long
@@ -112,7 +112,7 @@ inline fun PyErr_SetString(type: Long, message: String) =
     val PyErr_SetFromErrnoWithFilenameHandle: MethodHandle
 inline fun PyErr_SetFromErrnoWithFilename(type: Long, filename: String): Long =
     withUtf8(filename) { _filename ->
-        PyErr_SetFromErrnoWithFilenameHandle.invoke(type, _filename) as Long
+        PyErr_SetFromErrnoWithFilenameHandle.invokeExact(type, _filename) as Long
     }
     val PyErr_SetImportErrorHandle: MethodHandle
     inline fun PyErr_SetImportError(msg: Long, name: Long, path: Long): Long = PyErr_SetImportErrorHandle.invokeExact(msg, name, path) as Long
@@ -135,7 +135,7 @@ inline fun PyErr_WarnExplicit(category: Long, message: String, filename: String,
     withUtf8(message) { _message ->
         withUtf8(filename) { _filename ->
             withUtf8(module) { _module ->
-                PyErr_WarnExplicitHandle.invoke(category, _message, _filename, lineno, _module, registry) as Int
+                PyErr_WarnExplicitHandle.invokeExact(category, _message, _filename, lineno, _module, registry) as Int
             }        }    }
     val PyErr_OccurredHandle: MethodHandle
     inline fun PyErr_Occurred(): Long = PyErr_OccurredHandle.invokeExact() as Long
@@ -164,13 +164,13 @@ inline fun PyErr_WarnExplicit(category: Long, message: String, filename: String,
     val PyErr_NewExceptionHandle: MethodHandle
 inline fun PyErr_NewException(name: String, base: Long, dict: Long): Long =
     withUtf8(name) { _name ->
-        PyErr_NewExceptionHandle.invoke(_name, base, dict) as Long
+        PyErr_NewExceptionHandle.invokeExact(_name, base, dict) as Long
     }
     val PyErr_NewExceptionWithDocHandle: MethodHandle
 inline fun PyErr_NewExceptionWithDoc(name: String, doc: String, base: Long, dict: Long): Long =
     withUtf8(name) { _name ->
         withUtf8(doc) { _doc ->
-            PyErr_NewExceptionWithDocHandle.invoke(_name, _doc, base, dict) as Long
+            PyErr_NewExceptionWithDocHandle.invokeExact(_name, _doc, base, dict) as Long
         }    }
     val PyException_GetTracebackHandle: MethodHandle
     inline fun PyException_GetTraceback(ex: Long): Long = PyException_GetTracebackHandle.invokeExact(ex) as Long
@@ -197,12 +197,12 @@ inline fun PyErr_NewExceptionWithDoc(name: String, doc: String, base: Long, dict
     val PyUnicodeTranslateError_SetReasonHandle: MethodHandle
 inline fun PyUnicodeTranslateError_SetReason(exc: Long, reason: String): Int =
     withUtf8(reason) { _reason ->
-        PyUnicodeTranslateError_SetReasonHandle.invoke(exc, _reason) as Int
+        PyUnicodeTranslateError_SetReasonHandle.invokeExact(exc, _reason) as Int
     }
     val Py_EnterRecursiveCallHandle: MethodHandle
 inline fun Py_EnterRecursiveCall(where: String): Int =
     withUtf8(where) { _where ->
-        Py_EnterRecursiveCallHandle.invoke(_where) as Int
+        Py_EnterRecursiveCallHandle.invokeExact(_where) as Int
     }
     val Py_LeaveRecursiveCallHandle: MethodHandle
     inline fun Py_LeaveRecursiveCall() = Py_LeaveRecursiveCallHandle.invokeExact() as Unit
@@ -232,12 +232,12 @@ inline fun Py_EnterRecursiveCall(where: String): Int =
     val PySys_GetObjectHandle: MethodHandle
 inline fun PySys_GetObject(name: String): Long =
     withUtf8(name) { _name ->
-        PySys_GetObjectHandle.invoke(_name) as Long
+        PySys_GetObjectHandle.invokeExact(_name) as Long
     }
     val PySys_SetObjectHandle: MethodHandle
 inline fun PySys_SetObject(name: String, v: Long): Int =
     withUtf8(name) { _name ->
-        PySys_SetObjectHandle.invoke(_name, v) as Int
+        PySys_SetObjectHandle.invokeExact(_name, v) as Int
     }
     val PySys_ResetWarnOptionsHandle: MethodHandle
     inline fun PySys_ResetWarnOptions() = PySys_ResetWarnOptionsHandle.invokeExact() as Unit
@@ -246,7 +246,7 @@ inline fun PySys_SetObject(name: String, v: Long): Int =
     val PySys_AuditTupleHandle: MethodHandle
 inline fun PySys_AuditTuple(event: String, args: Long): Int =
     withUtf8(event) { _event ->
-        PySys_AuditTupleHandle.invoke(_event, args) as Int
+        PySys_AuditTupleHandle.invokeExact(_event, args) as Int
     }
 
 
@@ -264,19 +264,19 @@ inline fun Py_FatalError(message: String) =
     val PyImport_ImportModuleHandle: MethodHandle
 inline fun PyImport_ImportModule(name: String): Long =
     withUtf8(name) { _name ->
-        PyImport_ImportModuleHandle.invoke(_name) as Long
+        PyImport_ImportModuleHandle.invokeExact(_name) as Long
     }
     val PyImport_ImportModuleNoBlockHandle: MethodHandle
 inline fun PyImport_ImportModuleNoBlock(name: String): Long =
     withUtf8(name) { _name ->
-        PyImport_ImportModuleNoBlockHandle.invoke(_name) as Long
+        PyImport_ImportModuleNoBlockHandle.invokeExact(_name) as Long
     }
     val PyImport_ImportModuleLevelObjectHandle: MethodHandle
     inline fun PyImport_ImportModuleLevelObject(name: Long, globals: Long, locals: Long, fromlist: Long, level: Int): Long = PyImport_ImportModuleLevelObjectHandle.invokeExact(name, globals, locals, fromlist, level) as Long
     val PyImport_ImportModuleLevelHandle: MethodHandle
 inline fun PyImport_ImportModuleLevel(name: String, globals: Long, locals: Long, fromlist: Long, level: Int): Long =
     withUtf8(name) { _name ->
-        PyImport_ImportModuleLevelHandle.invoke(_name, globals, locals, fromlist, level) as Long
+        PyImport_ImportModuleLevelHandle.invokeExact(_name, globals, locals, fromlist, level) as Long
     }
     val PyImport_ImportHandle: MethodHandle
     inline fun PyImport_Import(name: Long): Long = PyImport_ImportHandle.invokeExact(name) as Long
@@ -285,25 +285,25 @@ inline fun PyImport_ImportModuleLevel(name: String, globals: Long, locals: Long,
     val PyImport_AddModuleRefHandle: MethodHandle
 inline fun PyImport_AddModuleRef(name: String): Long =
     withUtf8(name) { _name ->
-        PyImport_AddModuleRefHandle.invoke(_name) as Long
+        PyImport_AddModuleRefHandle.invokeExact(_name) as Long
     }
     val PyImport_AddModuleObjectHandle: MethodHandle
     inline fun PyImport_AddModuleObject(name: Long): Long = PyImport_AddModuleObjectHandle.invokeExact(name) as Long
     val PyImport_AddModuleHandle: MethodHandle
 inline fun PyImport_AddModule(name: String): Long =
     withUtf8(name) { _name ->
-        PyImport_AddModuleHandle.invoke(_name) as Long
+        PyImport_AddModuleHandle.invokeExact(_name) as Long
     }
     val PyImport_ExecCodeModuleHandle: MethodHandle
 inline fun PyImport_ExecCodeModule(name: String, co: Long): Long =
     withUtf8(name) { _name ->
-        PyImport_ExecCodeModuleHandle.invoke(_name, co) as Long
+        PyImport_ExecCodeModuleHandle.invokeExact(_name, co) as Long
     }
     val PyImport_ExecCodeModuleExHandle: MethodHandle
 inline fun PyImport_ExecCodeModuleEx(name: String, co: Long, pathname: String): Long =
     withUtf8(name) { _name ->
         withUtf8(pathname) { _pathname ->
-            PyImport_ExecCodeModuleExHandle.invoke(_name, co, _pathname) as Long
+            PyImport_ExecCodeModuleExHandle.invokeExact(_name, co, _pathname) as Long
         }    }
     val PyImport_ExecCodeModuleObjectHandle: MethodHandle
     inline fun PyImport_ExecCodeModuleObject(name: Long, co: Long, pathname: Long, cpathname: Long): Long = PyImport_ExecCodeModuleObjectHandle.invokeExact(name, co, pathname, cpathname) as Long
@@ -312,7 +312,7 @@ inline fun PyImport_ExecCodeModuleWithPathnames(name: String, co: Long, pathname
     withUtf8(name) { _name ->
         withUtf8(pathname) { _pathname ->
             withUtf8(cpathname) { _cpathname ->
-                PyImport_ExecCodeModuleWithPathnamesHandle.invoke(_name, co, _pathname, _cpathname) as Long
+                PyImport_ExecCodeModuleWithPathnamesHandle.invokeExact(_name, co, _pathname, _cpathname) as Long
             }        }    }
     val PyImport_GetMagicTagHandle: MethodHandle
     inline fun PyImport_GetMagicTag(): String? = PanamaBackend.readUtf8String(PyImport_GetMagicTagHandle.invokeExact() as Long)
@@ -327,7 +327,7 @@ inline fun PyImport_ExecCodeModuleWithPathnames(name: String, co: Long, pathname
     val PyImport_ImportFrozenModuleHandle: MethodHandle
 inline fun PyImport_ImportFrozenModule(name: String): Int =
     withUtf8(name) { _name ->
-        PyImport_ImportFrozenModuleHandle.invoke(_name) as Int
+        PyImport_ImportFrozenModuleHandle.invokeExact(_name) as Int
     }
 
 
@@ -356,21 +356,21 @@ inline fun PyImport_ImportFrozenModule(name: String): Int =
     val PyObject_HasAttrStringWithErrorHandle: MethodHandle
 inline fun PyObject_HasAttrStringWithError(o: Long, attr_name: String): Int =
     withUtf8(attr_name) { _attr_name ->
-        PyObject_HasAttrStringWithErrorHandle.invoke(o, _attr_name) as Int
+        PyObject_HasAttrStringWithErrorHandle.invokeExact(o, _attr_name) as Int
     }
     val PyObject_HasAttrHandle: MethodHandle
     inline fun PyObject_HasAttr(o: Long, attr_name: Long): Int = PyObject_HasAttrHandle.invokeExact(o, attr_name) as Int
     val PyObject_HasAttrStringHandle: MethodHandle
 inline fun PyObject_HasAttrString(o: Long, attr_name: String): Int =
     withUtf8(attr_name) { _attr_name ->
-        PyObject_HasAttrStringHandle.invoke(o, _attr_name) as Int
+        PyObject_HasAttrStringHandle.invokeExact(o, _attr_name) as Int
     }
     val PyObject_GetAttrHandle: MethodHandle
     inline fun PyObject_GetAttr(o: Long, attr_name: Long): Long = PyObject_GetAttrHandle.invokeExact(o, attr_name) as Long
     val PyObject_GetAttrStringHandle: MethodHandle
 inline fun PyObject_GetAttrString(o: Long, attr_name: String): Long =
     withUtf8(attr_name) { _attr_name ->
-        PyObject_GetAttrStringHandle.invoke(o, _attr_name) as Long
+        PyObject_GetAttrStringHandle.invokeExact(o, _attr_name) as Long
     }
     val PyObject_GenericGetAttrHandle: MethodHandle
     inline fun PyObject_GenericGetAttr(o: Long, name: Long): Long = PyObject_GenericGetAttrHandle.invokeExact(o, name) as Long
@@ -379,7 +379,7 @@ inline fun PyObject_GetAttrString(o: Long, attr_name: String): Long =
     val PyObject_SetAttrStringHandle: MethodHandle
 inline fun PyObject_SetAttrString(o: Long, attr_name: String, v: Long): Int =
     withUtf8(attr_name) { _attr_name ->
-        PyObject_SetAttrStringHandle.invoke(o, _attr_name, v) as Int
+        PyObject_SetAttrStringHandle.invokeExact(o, _attr_name, v) as Int
     }
     val PyObject_GenericSetAttrHandle: MethodHandle
     inline fun PyObject_GenericSetAttr(o: Long, name: Long, value: Long): Int = PyObject_GenericSetAttrHandle.invokeExact(o, name, value) as Int
@@ -388,7 +388,7 @@ inline fun PyObject_SetAttrString(o: Long, attr_name: String, v: Long): Int =
     val PyObject_DelAttrStringHandle: MethodHandle
 inline fun PyObject_DelAttrString(o: Long, attr_name: String): Int =
     withUtf8(attr_name) { _attr_name ->
-        PyObject_DelAttrStringHandle.invoke(o, _attr_name) as Int
+        PyObject_DelAttrStringHandle.invokeExact(o, _attr_name) as Int
     }
     val PyObject_RichCompareHandle: MethodHandle
     inline fun PyObject_RichCompare(o1: Long, o2: Long, opid: Int): Long = PyObject_RichCompareHandle.invokeExact(o1, o2, opid) as Long
@@ -538,7 +538,7 @@ inline fun PyObject_DelAttrString(o: Long, attr_name: String): Int =
     val PySequence_FastHandle: MethodHandle
 inline fun PySequence_Fast(o: Long, m: String): Long =
     withUtf8(m) { _m ->
-        PySequence_FastHandle.invoke(o, _m) as Long
+        PySequence_FastHandle.invokeExact(o, _m) as Long
     }
 
 
@@ -548,26 +548,26 @@ inline fun PySequence_Fast(o: Long, m: String): Long =
     val PyMapping_GetItemStringHandle: MethodHandle
 inline fun PyMapping_GetItemString(o: Long, key: String): Long =
     withUtf8(key) { _key ->
-        PyMapping_GetItemStringHandle.invoke(o, _key) as Long
+        PyMapping_GetItemStringHandle.invokeExact(o, _key) as Long
     }
     val PyMapping_SetItemStringHandle: MethodHandle
 inline fun PyMapping_SetItemString(o: Long, key: String, v: Long): Int =
     withUtf8(key) { _key ->
-        PyMapping_SetItemStringHandle.invoke(o, _key, v) as Int
+        PyMapping_SetItemStringHandle.invokeExact(o, _key, v) as Int
     }
     val PyMapping_HasKeyWithErrorHandle: MethodHandle
     inline fun PyMapping_HasKeyWithError(o: Long, key: Long): Int = PyMapping_HasKeyWithErrorHandle.invokeExact(o, key) as Int
     val PyMapping_HasKeyStringWithErrorHandle: MethodHandle
 inline fun PyMapping_HasKeyStringWithError(o: Long, key: String): Int =
     withUtf8(key) { _key ->
-        PyMapping_HasKeyStringWithErrorHandle.invoke(o, _key) as Int
+        PyMapping_HasKeyStringWithErrorHandle.invokeExact(o, _key) as Int
     }
     val PyMapping_HasKeyHandle: MethodHandle
     inline fun PyMapping_HasKey(o: Long, key: Long): Int = PyMapping_HasKeyHandle.invokeExact(o, key) as Int
     val PyMapping_HasKeyStringHandle: MethodHandle
 inline fun PyMapping_HasKeyString(o: Long, key: String): Int =
     withUtf8(key) { _key ->
-        PyMapping_HasKeyStringHandle.invoke(o, _key) as Int
+        PyMapping_HasKeyStringHandle.invokeExact(o, _key) as Int
     }
     val PyMapping_KeysHandle: MethodHandle
     inline fun PyMapping_Keys(o: Long): Long = PyMapping_KeysHandle.invokeExact(o) as Long
@@ -625,7 +625,7 @@ inline fun PyMapping_HasKeyString(o: Long, key: String): Int =
     val PyBytes_FromStringHandle: MethodHandle
 inline fun PyBytes_FromString(v: String): Long =
     withUtf8(v) { _v ->
-        PyBytes_FromStringHandle.invoke(_v) as Long
+        PyBytes_FromStringHandle.invokeExact(_v) as Long
     }
     val PyBytes_FromObjectHandle: MethodHandle
     inline fun PyBytes_FromObject(o: Long): Long = PyBytes_FromObjectHandle.invokeExact(o) as Long
@@ -648,7 +648,7 @@ inline fun PyBytes_FromString(v: String): Long =
     val PyUnicode_FromStringHandle: MethodHandle
 inline fun PyUnicode_FromString(str: String): Long =
     withUtf8(str) { _str ->
-        PyUnicode_FromStringHandle.invoke(_str) as Long
+        PyUnicode_FromStringHandle.invokeExact(_str) as Long
     }
     val PyUnicode_FromObjectHandle: MethodHandle
     inline fun PyUnicode_FromObject(obj: Long): Long = PyUnicode_FromObjectHandle.invokeExact(obj) as Long
@@ -656,23 +656,23 @@ inline fun PyUnicode_FromString(str: String): Long =
 inline fun PyUnicode_FromEncodedObject(obj: Long, encoding: String, errors: String): Long =
     withUtf8(encoding) { _encoding ->
         withUtf8(errors) { _errors ->
-            PyUnicode_FromEncodedObjectHandle.invoke(obj, _encoding, _errors) as Long
+            PyUnicode_FromEncodedObjectHandle.invokeExact(obj, _encoding, _errors) as Long
         }    }
     val PyUnicode_DecodeLocaleHandle: MethodHandle
 inline fun PyUnicode_DecodeLocale(str: String, errors: String): Long =
     withUtf8(str) { _str ->
         withUtf8(errors) { _errors ->
-            PyUnicode_DecodeLocaleHandle.invoke(_str, _errors) as Long
+            PyUnicode_DecodeLocaleHandle.invokeExact(_str, _errors) as Long
         }    }
     val PyUnicode_EncodeLocaleHandle: MethodHandle
 inline fun PyUnicode_EncodeLocale(unicode: Long, errors: String): Long =
     withUtf8(errors) { _errors ->
-        PyUnicode_EncodeLocaleHandle.invoke(unicode, _errors) as Long
+        PyUnicode_EncodeLocaleHandle.invokeExact(unicode, _errors) as Long
     }
     val PyUnicode_DecodeFSDefaultHandle: MethodHandle
 inline fun PyUnicode_DecodeFSDefault(str: String): Long =
     withUtf8(str) { _str ->
-        PyUnicode_DecodeFSDefaultHandle.invoke(_str) as Long
+        PyUnicode_DecodeFSDefaultHandle.invokeExact(_str) as Long
     }
     val PyUnicode_EncodeFSDefaultHandle: MethodHandle
     inline fun PyUnicode_EncodeFSDefault(unicode: Long): Long = PyUnicode_EncodeFSDefaultHandle.invokeExact(unicode) as Long
@@ -680,7 +680,7 @@ inline fun PyUnicode_DecodeFSDefault(str: String): Long =
 inline fun PyUnicode_AsEncodedString(unicode: Long, encoding: String, errors: String): Long =
     withUtf8(encoding) { _encoding ->
         withUtf8(errors) { _errors ->
-            PyUnicode_AsEncodedStringHandle.invoke(unicode, _encoding, _errors) as Long
+            PyUnicode_AsEncodedStringHandle.invokeExact(unicode, _encoding, _errors) as Long
         }    }
     val PyUnicode_AsUTF8StringHandle: MethodHandle
     inline fun PyUnicode_AsUTF8String(unicode: Long): Long = PyUnicode_AsUTF8StringHandle.invokeExact(unicode) as Long
@@ -703,7 +703,7 @@ inline fun PyUnicode_AsEncodedString(unicode: Long, encoding: String, errors: St
     val PyUnicode_TranslateHandle: MethodHandle
 inline fun PyUnicode_Translate(unicode: Long, table: Long, errors: String): Long =
     withUtf8(errors) { _errors ->
-        PyUnicode_TranslateHandle.invoke(unicode, table, _errors) as Long
+        PyUnicode_TranslateHandle.invokeExact(unicode, table, _errors) as Long
     }
     val PyUnicode_ConcatHandle: MethodHandle
     inline fun PyUnicode_Concat(left: Long, right: Long): Long = PyUnicode_ConcatHandle.invokeExact(left, right) as Long
@@ -716,12 +716,12 @@ inline fun PyUnicode_Translate(unicode: Long, table: Long, errors: String): Long
     val PyUnicode_EqualToUTF8Handle: MethodHandle
 inline fun PyUnicode_EqualToUTF8(unicode: Long, string: String): Int =
     withUtf8(string) { _string ->
-        PyUnicode_EqualToUTF8Handle.invoke(unicode, _string) as Int
+        PyUnicode_EqualToUTF8Handle.invokeExact(unicode, _string) as Int
     }
     val PyUnicode_CompareWithASCIIStringHandle: MethodHandle
 inline fun PyUnicode_CompareWithASCIIString(unicode: Long, string: String): Int =
     withUtf8(string) { _string ->
-        PyUnicode_CompareWithASCIIStringHandle.invoke(unicode, _string) as Int
+        PyUnicode_CompareWithASCIIStringHandle.invokeExact(unicode, _string) as Int
     }
     val PyUnicode_RichCompareHandle: MethodHandle
     inline fun PyUnicode_RichCompare(left: Long, right: Long, op: Int): Long = PyUnicode_RichCompareHandle.invokeExact(left, right, op) as Long
@@ -732,7 +732,7 @@ inline fun PyUnicode_CompareWithASCIIString(unicode: Long, string: String): Int 
     val PyUnicode_InternFromStringHandle: MethodHandle
 inline fun PyUnicode_InternFromString(str: String): Long =
     withUtf8(str) { _str ->
-        PyUnicode_InternFromStringHandle.invoke(_str) as Long
+        PyUnicode_InternFromStringHandle.invokeExact(_str) as Long
     }
 
 
@@ -775,14 +775,14 @@ inline fun PyUnicode_InternFromString(str: String): Long =
     val PyDict_SetItemStringHandle: MethodHandle
 inline fun PyDict_SetItemString(p: Long, key: String, v: Long): Int =
     withUtf8(key) { _key ->
-        PyDict_SetItemStringHandle.invoke(p, _key, v) as Int
+        PyDict_SetItemStringHandle.invokeExact(p, _key, v) as Int
     }
     val PyDict_DelItemHandle: MethodHandle
     inline fun PyDict_DelItem(p: Long, key: Long): Int = PyDict_DelItemHandle.invokeExact(p, key) as Int
     val PyDict_DelItemStringHandle: MethodHandle
 inline fun PyDict_DelItemString(p: Long, key: String): Int =
     withUtf8(key) { _key ->
-        PyDict_DelItemStringHandle.invoke(p, _key) as Int
+        PyDict_DelItemStringHandle.invokeExact(p, _key) as Int
     }
     val PyDict_GetItemHandle: MethodHandle
     inline fun PyDict_GetItem(p: Long, key: Long): Long = PyDict_GetItemHandle.invokeExact(p, key) as Long
@@ -791,7 +791,7 @@ inline fun PyDict_DelItemString(p: Long, key: String): Int =
     val PyDict_GetItemStringHandle: MethodHandle
 inline fun PyDict_GetItemString(p: Long, key: String): Long =
     withUtf8(key) { _key ->
-        PyDict_GetItemStringHandle.invoke(p, _key) as Long
+        PyDict_GetItemStringHandle.invokeExact(p, _key) as Long
     }
     val PyDict_ItemsHandle: MethodHandle
     inline fun PyDict_Items(p: Long): Long = PyDict_ItemsHandle.invokeExact(p) as Long
