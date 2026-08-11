@@ -11,4 +11,11 @@ kotlin {
         nodejs()
         binaries.executable()
     }
+    sourceSets {
+        val wasmJsMain by getting {
+            dependencies {
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+            }
+        }
+    }
 }
