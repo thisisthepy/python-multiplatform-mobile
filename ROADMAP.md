@@ -20,7 +20,20 @@ The one failure on each JVM/native suite is `GCLeakTest`, red on purpose — see
 
 ## 1. Release the GIL after initialisation
 
-**Blocks:** all automatic reference release, all multithreaded use.
+**Closed.** `Python3.initialize()` parks its thread state with `PyEval_SaveThread()`, and both
+suites are green with it enabled — desktop 164, iOS 157, zero failures. `GCLeakTest` passes for the
+first time.
+
+The cause was never the runtime. Several tests wrapped a pointer they had only been lent with
+`borrowed = false`, so two wrappers owned one pointer and both decremented it. That double-free
+corrupted CPython's free lists and surfaced later in an unrelated test. With parking off the
+cleaner thread blocked forever, so the extra decrements queued and never ran — which is exactly
+why turning parking on appeared to *cause* the crash. Two earlier attempts read it that way and
+reverted.
+
+**It unblocked §4, multithreaded use, and made three latent bugs visible** (a GIL-less
+`PyType_FromSpec` call among them). Expect more of that shape: anything that only worked because
+the main thread never let go.
 **State:** disabled in `Python3.initialize()`, with the reason in a comment there.
 
 `Py_Initialize()` leaves its calling thread holding the GIL. Until that thread parks its state
@@ -189,7 +202,18 @@ crash once upcalls exist.
 
 ## 4. Automatic reference release
 
-**Depends on:** §1.
+**Closed.** A thousand Python lists holding a target object are dropped with no explicit
+`close()`, Kotlin's collector takes the wrappers, and the target's count falls as the lists are
+destroyed. Verified on both collectors — desktop through `java.lang.ref.Cleaner`, iOS through
+Kotlin/Native's `createCleaner`. Android below API 33 uses the `PhantomReference` path and is not
+covered yet.
+
+**Three things still cannot be freed**, and no amount of testing fixes them: a raw pointer leaks
+if an exception lands between the C call returning it and the wrapper taking ownership; wrappers
+outliving `Py_Finalize()` are skipped deliberately, leaving stale pointers if the interpreter is
+restarted; and cross-boundary cycles need §7's `tp_traverse` wiring, which now exists on desktop.
+
+**Was:** depends on §1.
 
 **Closed.** Both the explicit and automatic (GC-driven) release paths are fully functional on JVM and Kotlin/Native. The block recorded in §1 (GIL locking on parked thread) was resolved, unblocking the background cleaners.
 
@@ -558,7 +582,14 @@ are, run before any instrumented test:
 
 ## 11b. Android does not run the object-model tests
 
-**Found while surveying coverage, and it is the largest hole in the suite.**
+**Closed.** `androidInstrumentedTest` depends on `commonTest` and both emulators run the full
+suite: 176 tests each, where discovery used to be 19. Eight failures remain, tracked in §2.
+
+Wiring it up immediately paid for itself — the suite died on its 2nd test, then its 12th, and the
+two defects behind that (an unpackaged stdlib and a hardcoded `RegisterNatives` count) had been
+invisible because nothing on Android had ever executed those tests.
+
+**Was:** the largest hole in the suite.
 
 `commonTest` holds 111 tests over `PyObject`, `PyDict`, `PyList`, conversion, exceptions and
 refcounting. They reach desktop and iOS through the source-set graph:
