@@ -352,8 +352,38 @@ extract list items in one call without shipping our own native code.
 
 ## 7. Python → Kotlin binder (upcalls)
 
-**Entirely unimplemented.** `reflection/ClassLookup.kt`, `ObjectReference.kt` and
-`ReflectedClass.kt` contain 1–3 lines each. README's only unchecked box.
+**Both halves now exist, and the design premise is proven rather than argued.**
+
+The runtime is in `reflection/` — `HandleTable` (slot plus generation, so a released handle
+cannot alias onto whatever takes its slot), `UpcallTable`, `ExposedCallable`, `ObjectReference`.
+The generator is `python-multiplatform-ksp/`. Fixture modules under `ksp-fixtures/` run 11 tests
+against a table KSP actually generated, not a hand-written one.
+
+**It survives a GraalVM native image**, which is the condition the whole design was chosen for:
+
+```
+PYTHON: resolved handle = 4294967296
+PYTHON: invoke result = 42
+PYTHON: UPCALL_OK
+```
+
+Python builds a function pointer with `ctypes`, resolves `"demo.answer"` by name through
+`HandleTable`, and calls back into Kotlin — inside a closed world where runtime reflection is
+forbidden. Every wall hit getting there was metadata or wiring; the lookup and invoke path itself
+needed no reflection registration, because it uses none. `sample` carries the build path
+(`nativeCompile`, `runNativeUpcallDemo`, Liberica NIK).
+
+**What is not done**, and should not be read as done:
+
+- `tp_traverse` functions are generated and tested, but nothing wires them into CPython's actual
+  `tp_traverse` slot, and `tp_clear` and Kotlin-side cycle closing are untouched. Cycles are
+  therefore still unsolved in practice — see `docs/object-lifetime.md`.
+- Companion-object members, interfaces, enums and annotation classes are not exposed.
+- The aggregator uses `Dependencies.ALL_FILES`, correct but reprocessed every build.
+- No convenience Gradle plugin; user modules wire KSP per target by hand.
+
+**Was:** entirely unimplemented — `ClassLookup.kt`, `ObjectReference.kt` and `ReflectedClass.kt`
+held 1–3 lines each, and this was README's only unchecked box.
 
 Design is settled in `docs/upcall-design.md`: build-time generated function table (runtime
 reflection is impossible on Kotlin/Native and under GraalVM's closed world), blacklist exposure
