@@ -62,6 +62,17 @@ The 39 that work do so through `JNI_OnLoad` → `RegisterNatives`, binding CPyth
 functions directly with no trampoline. Migrating the rest is mechanical **except** for one
 judgement per function — see §3.
 
+**This is not a latent problem — the production API is unusable on Android today.** Calling
+`Python3.exec` crashes the process on its very first call, on both API 26 and API 36, because
+the functions it reaches (`PyImport_AddModuleRef`, `PyObject_GetAttrString`, `PyRun_String`)
+still take a Kotlin `String` straight across JNI. Every Android test that passes does so by
+going through `bindings` directly and reconstructing the path by hand; none of them had ever
+called the real object model, so nothing caught it. A benchmark added against `Python3.exec`
+found it immediately.
+
+The string-marshalling work (interning) converted three functions. The rest of the several
+hundred still carry the original wiring.
+
 ## 3. Classify the remaining functions leaf vs re-entrant
 
 **Depends on:** §2.
