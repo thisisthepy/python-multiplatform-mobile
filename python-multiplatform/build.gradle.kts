@@ -526,12 +526,33 @@ kotlin {
         desktopMain.dependsOn(jvmMain)
         androidMain.dependsOn(jvmMain)
 
+        // `commonTest` holds the entire object-model suite, and it used to run only on desktop and
+        // the iOS simulator -- yet Android is the platform where that model was most recently
+        // found broken. It runs here as an *instrumented* test: `androidUnitTest` executes on a
+        // host JVM that cannot load the arm64/x86_64 `.so`, so the interpreter is unreachable
+        // there. `jvmTest` (not `commonTest` directly) keeps the test hierarchy the mirror of the
+        // main one -- desktopTest -> jvmTest -> commonTest, androidInstrumentedTest -> jvmTest.
         val androidInstrumentedTest by getting {
             dependencies {
                 implementation(libs.androidx.test.junit)
                 implementation("androidx.test:runner:1.6.2")
+                // On the JVM, `kotlin.test.Test` and the `assert*` functions are `expect`
+                // declarations; kotlin-test-junit supplies the actuals, mapping `kotlin.test.Test`
+                // onto `org.junit.Test` by typealias. Without it commonTest does not compile here,
+                // and -- because AndroidJUnitRunner discovers tests by scanning the dex for
+                // `org.junit.Test` -- it is also what makes the runner see these classes at all.
+                implementation(libs.kotlin.test)
+                implementation(libs.kotlin.test.junit)
             }
         }
+        // KGP warns here ("Source Set groups can't depend on 'jvmTest' together as they belong to
+        // different Kotlin Source Set Trees") because androidInstrumentedTest lives in the
+        // `instrumentedTest` tree while desktopTest lives in `test`. There is no way to share
+        // commonTest with an instrumented compilation without crossing that line, and the warning
+        // is exactly that: both compilations build the shared sources independently, which is what
+        // we want. It is why `forceGC()` needs an `actual` in androidInstrumentedTest as well as
+        // in androidUnitTest -- they are two separate compilations of the same target.
+        androidInstrumentedTest.dependsOn(jvmTest)
 
         val nativeMain by creating
         nativeMain.dependsOn(commonMain)
@@ -607,7 +628,13 @@ android {
         // Instrumented tests are the only way to exercise the Android JNI path at all: the JVM
         // unit-test JVM cannot load the arm64 .so, and every other verification target only
         // compiles rather than runs.
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        //
+        // The runner is a subclass rather than the stock one because `commonTest` knows nothing
+        // about Android: its fixture just calls `Python3.initialize()`, which aborts the *process*
+        // ("Failed to import encodings module") unless the stdlib has been unpacked out of the
+        // APK assets and PYTHONHOME points at it first. The subclass does that once, before any
+        // test class is loaded.
+        testInstrumentationRunner = "python.multiplatform.PythonInstrumentationRunner"
     }
     packaging {
         resources {

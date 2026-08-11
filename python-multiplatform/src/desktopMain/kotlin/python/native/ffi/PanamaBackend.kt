@@ -181,8 +181,11 @@ internal object PanamaBackend {
             )
         }
 
-        // MemorySegment.ofAddress(long)
-        val ofAddressMH = memorySegmentClass.getMethod("ofAddress", Long::class.javaPrimitiveType!!)
+        // MemorySegment.ofAddress(long). Resolved reflectively because the class is not on the
+        // compile-time classpath, then immediately unreflected: both of its users (readUtf8String,
+        // allocateUtf8Freeable) are per-call, and Method.invoke boxes the long on every one.
+        val ofAddressMH: MethodHandle =
+            lookup.unreflect(memorySegmentClass.getMethod("ofAddress", Long::class.javaPrimitiveType!!))
 
         // Linker.nativeLinker()
         val linker = linkerClass.getMethod("nativeLinker").invoke(null)
@@ -201,6 +204,20 @@ internal object PanamaBackend {
         val lookupFindMH = lookup.findVirtual(
             symbolLookupClass, "find",
             MethodType.methodType(java.util.Optional::class.java, String::class.java)
+        )
+
+        // Exact-callable form: the receiver is bound in (it never varies) and the return is
+        // widened to Object, so the call site's static signature `(String) -> Any` matches the
+        // handle's MethodType and `invokeExact` links. See "Always invokeExact" in this source
+        // set's README.
+        val findOptExact: MethodHandle = MethodHandles
+            .insertArguments(lookupFindMH, 0, combinedLookup)
+            .asType(MethodType.methodType(Any::class.java, String::class.java))
+
+        // MemorySegment.address() with the receiver widened to Object, for the two sites that
+        // hold a segment typed only as `Any`.
+        val segmentAddressExact: MethodHandle = segmentAddressMH.asType(
+            MethodType.methodType(Long::class.javaPrimitiveType, Any::class.java)
         )
 
         // Linker.downcallHandle(MemorySegment, FunctionDescriptor, Linker.Option...)
@@ -229,22 +246,43 @@ internal object PanamaBackend {
             else -> throw IllegalArgumentException("Unsupported type: $cls")
         }
 
+        // ---- Hot-path string handles, folded into one exact-callable handle each ----
+        //
+        // `allocStr` and `readStr` each used to be two or three `MethodHandle.invoke` calls whose
+        // intermediate value was a MemorySegment -- a type this file must not name, which is what
+        // forced the inexact `invoke` and its per-call asType adaptation plus boxing of both the
+        // segment and the returned long. Folding the intermediate away with filterReturnValue /
+        // collectArguments removes the un-nameable type from the call site entirely: what is left
+        // is `(String) -> long` and `(long) -> String`, both nameable, both `invokeExact`.
+
+        // Arena.allocateFrom/allocateUtf8String with the global arena bound in, then .address()
+        // folded onto the result: (String) -> long.
+        val allocStrExact: MethodHandle = MethodHandles.filterReturnValue(
+            MethodHandles.insertArguments(allocateFromMH, 0, globalArena),
+            segmentAddressMH
+        ).asType(MethodType.methodType(Long::class.javaPrimitiveType, String::class.java))
+
+        // MemorySegment.ofAddress(addr).reinterpret(MAX_VALUE).getString(0): (long) -> String.
+        val readStrExact: MethodHandle = MethodHandles.filterReturnValue(
+            MethodHandles.filterReturnValue(
+                ofAddressMH,
+                MethodHandles.insertArguments(reinterpretMH, 1, Long.MAX_VALUE)
+            ),
+            MethodHandles.insertArguments(getStringMH, 1, 0L)
+        ).asType(MethodType.methodType(String::class.java, Long::class.javaPrimitiveType))
+
         val allocStr: (String) -> Long = { str ->
-            val seg = allocateFromMH.invoke(globalArena, str)
-            segmentAddressMH.invoke(seg) as Long
+            allocStrExact.invokeExact(str) as Long
         }
 
         val readStr: (Long) -> String? = { addr ->
             if (addr == 0L) null
-            else {
-                val seg = ofAddressMH.invoke(null, addr) as Any
-                val bigSeg = reinterpretMH.invoke(seg, Long.MAX_VALUE)
-                getStringMH.invoke(bigSeg, 0L) as String
-            }
+            else readStrExact.invokeExact(addr) as String
         }
 
         val findSym: (String, Class<*>, Array<Class<*>>) -> MethodHandle = { name, retType, paramTypes ->
-            val optSeg = lookupFindMH.invoke(combinedLookup, name) as java.util.Optional<*>
+            val optAny: Any = findOptExact.invokeExact(name) as Any
+            val optSeg = optAny as java.util.Optional<*>
             val seg = optSeg.orElseThrow {
                 UnsatisfiedLinkError("Symbol not found: $name")
             }
@@ -280,35 +318,65 @@ internal object PanamaBackend {
         // ---- Symbol address lookup (no downcall handle built) ----
 
         val findAddr: (String) -> Long = { name ->
-            val optSeg = lookupFindMH.invoke(combinedLookup, name) as java.util.Optional<*>
-            if (optSeg.isPresent) segmentAddressMH.invoke(optSeg.get()) as Long else 0L
+            val optAny: Any = findOptExact.invokeExact(name) as Any
+            val optSeg = optAny as java.util.Optional<*>
+            if (optSeg.isPresent) {
+                val seg: Any = optSeg.get() as Any
+                segmentAddressExact.invokeExact(seg) as Long
+            } else 0L
         }
 
         // ---- Freeable UTF-8 strings, backed by native malloc/free ----
 
+        // `findSym` builds these from FunctionDescriptors made entirely of JAVA_LONG, so their
+        // MethodTypes are literally (long) -> long and (long) -> void: nothing to adapt, and
+        // `invokeExact` links against Kotlin's primitive `Long` directly.
         val mallocHandle = findSym("malloc", POINTER_TYPE, arrayOf(POINTER_TYPE))
         val freeHandle = findSym("free", Void.TYPE, arrayOf(POINTER_TYPE))
-        val ofArrayMethod = memorySegmentClass.getMethod("ofArray", ByteArray::class.java)
-        val copyMethod = memorySegmentClass.getMethod(
-            "copy", memorySegmentClass, Long::class.javaPrimitiveType, memorySegmentClass,
-            Long::class.javaPrimitiveType, Long::class.javaPrimitiveType
+
+        // MemorySegment.ofArray(byte[]), return widened to Object: (byte[]) -> Any.
+        val ofArrayExact: MethodHandle =
+            lookup.unreflect(memorySegmentClass.getMethod("ofArray", ByteArray::class.java))
+                .asType(MethodType.methodType(Any::class.java, ByteArray::class.java))
+
+        // MemorySegment.copy(src, srcOff, dst, dstOff, bytes) with both segment parameters
+        // widened to Object: (Any, long, Any, long, long) -> void.
+        val copyExact: MethodHandle = lookup.unreflect(
+            memorySegmentClass.getMethod(
+                "copy", memorySegmentClass, Long::class.javaPrimitiveType, memorySegmentClass,
+                Long::class.javaPrimitiveType, Long::class.javaPrimitiveType
+            )
+        ).asType(
+            MethodType.methodType(
+                Void.TYPE, Any::class.java, Long::class.javaPrimitiveType, Any::class.java,
+                Long::class.javaPrimitiveType, Long::class.javaPrimitiveType
+            )
         )
+
+        // MemorySegment.ofAddress(addr).reinterpret(len) as one handle: (long, long) -> Any.
+        // collectArguments feeds ofAddress's result into reinterpret's receiver slot, so the
+        // MemorySegment never reaches the call site.
+        val addressToSegmentExact: MethodHandle =
+            MethodHandles.collectArguments(reinterpretMH, 0, ofAddressMH).asType(
+                MethodType.methodType(
+                    Any::class.java, Long::class.javaPrimitiveType, Long::class.javaPrimitiveType
+                )
+            )
 
         val allocFreeable: (String) -> Long = { str ->
             val bytes = str.toByteArray(Charsets.UTF_8) + byteArrayOf(0)
             val len = bytes.size.toLong()
-            val addr = mallocHandle.invoke(len) as Long
+            val addr = mallocHandle.invokeExact(len) as Long
             if (addr == 0L) throw OutOfMemoryError("native malloc failed for UTF-8 string of length $len")
-            val srcSeg = ofArrayMethod.invoke(null, bytes)
-            val dstSeg = reinterpretMH.invoke(ofAddressMH.invoke(null, addr), len)
-            copyMethod.invoke(null, srcSeg, 0L, dstSeg, 0L, len)
+            val srcSeg: Any = ofArrayExact.invokeExact(bytes) as Any
+            val dstSeg: Any = addressToSegmentExact.invokeExact(addr, len) as Any
+            copyExact.invokeExact(srcSeg, 0L, dstSeg, 0L, len) as Unit
             addr
         }
 
         val freeAddr: (Long) -> Unit = { addr ->
             if (addr != 0L) {
-                freeHandle.invoke(addr)
-                Unit
+                freeHandle.invokeExact(addr) as Unit
             }
         }
 
@@ -353,8 +421,8 @@ internal object PanamaBackend {
             // Wait, in Panama, primitive types in fd map directly to primitives in MethodHandle.
             // So if fd is JAVA_LONG -> JAVA_LONG, the MethodHandle MUST have type (long)long.
             // No adaptation is needed!
-            val stub = upcallStubMethod.invoke(linker, handle, fd, globalArena, emptyOptions)
-            segmentAddressMH.invoke(stub) as Long
+            val stub: Any = upcallStubMethod.invoke(linker, handle, fd, globalArena, emptyOptions)
+            segmentAddressExact.invokeExact(stub) as Long
         }
 
         return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape, buildUpcallStub)
