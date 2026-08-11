@@ -5,3 +5,4 @@ import factory from './probeA.mjs';
 const m = await factory();
 export const add_two = m._add_two;
 export const str_len = m._str_len;
+export default m._add_two;
