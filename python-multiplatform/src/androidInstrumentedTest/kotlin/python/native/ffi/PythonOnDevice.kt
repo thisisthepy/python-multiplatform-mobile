@@ -25,10 +25,10 @@ object PythonOnDevice {
 
     fun ensureInitialised() {
         stageStdlibOnce()
-        if (bindings.Py_IsInitialized() == 0) {
-            bindings.Py_Initialize()
+        if (Py_IsInitialized() == 0) {
+            Py_Initialize()
         }
-        check(bindings.Py_IsInitialized() != 0) { "Py_Initialize() did not take effect" }
+        check(Py_IsInitialized() != 0) { "Py_Initialize() did not take effect" }
     }
 
     /** Allocates a C string the caller must release with [freeUtf8]. */
