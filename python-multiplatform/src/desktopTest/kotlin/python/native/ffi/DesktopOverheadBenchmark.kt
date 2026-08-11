@@ -73,4 +73,91 @@ class DesktopOverheadBenchmark {
 
         assertTrue(bestPanama > 0, "measurement produced no elapsed time")
     }
+
+
+    /**
+     * How much of a realistic desktop call is string marshalling.
+     *
+     * On Android, composing `Python3.exec` nearly halved it -- 17.8 us to 10.1 us -- and the
+     * cost turned out not to be boundary crossings at all: the per-call figure was identical on
+     * devices whose per-crossing cost differs by 20x. It was the three allocate/copy/free round
+     * trips for the C strings. Desktop marshals strings too, through `withUtf8`, so the same
+     * question applies here even though a crossing costs only 2.65 ns.
+     *
+     * This measures it without building a composed path. Both variants run exactly the same
+     * three C calls; the only difference is whether the C strings are allocated per iteration
+     * or once up front. The gap is what composing could remove.
+     */
+    @Test
+    fun stringMarshallingShareOfARealisticCall() {
+        if (Py_IsInitialized() == 0) Py_Initialize()
+
+        val code = "x = 1 + 1"
+        val fileInput = 257
+        val iters = 20_000
+
+        fun timeBest(body: () -> Long): Double {
+            var best = Double.MAX_VALUE
+            repeat(5) {
+                var local = 0L
+                val t0 = System.nanoTime()
+                for (i in 0 until iters) local += body()
+                val ns = (System.nanoTime() - t0).toDouble() / iters
+                sink += local
+                if (ns < best) best = ns
+            }
+            return best
+        }
+
+        // Allocates "__main__", "__dict__" and the source on every iteration, which is what
+        // Python3.exec does today.
+        val perCall = timeBest {
+            val mod = bindings.PyImport_AddModuleRef("__main__")
+            var rc = 0L
+            if (mod != 0L) {
+                val globals = bindings.PyObject_GetAttrString(mod, "__dict__")
+                if (globals != 0L) {
+                    val r = bindings.PyRun_String(code, fileInput, globals, globals)
+                    if (r != 0L) { bindings.Py_DecRef(r); rc = 1L }
+                    bindings.Py_DecRef(globals)
+                }
+                bindings.Py_DecRef(mod)
+            }
+            rc
+        }
+
+        // Same three calls, same work, but the C strings are allocated once.
+        val mainAddr = PanamaBackend.allocateUtf8Freeable("__main__")
+        val dictAddr = PanamaBackend.allocateUtf8Freeable("__dict__")
+        val codeAddr = PanamaBackend.allocateUtf8Freeable(code)
+        val hoisted = try {
+            timeBest {
+                val mod = bindings.PyImport_AddModuleRefHandle.invoke(mainAddr) as Long
+                var rc = 0L
+                if (mod != 0L) {
+                    val globals = bindings.PyObject_GetAttrStringHandle.invoke(mod, dictAddr) as Long
+                    if (globals != 0L) {
+                        val r = bindings.PyRun_StringHandle.invoke(codeAddr, fileInput, globals, globals) as Long
+                        if (r != 0L) { bindings.Py_DecRef(r); rc = 1L }
+                        bindings.Py_DecRef(globals)
+                    }
+                    bindings.Py_DecRef(mod)
+                }
+                rc
+            }
+        } finally {
+            PanamaBackend.freeUtf8Address(mainAddr)
+            PanamaBackend.freeUtf8Address(dictAddr)
+            PanamaBackend.freeUtf8Address(codeAddr)
+        }
+
+        println("=== desktop: string marshalling share of exec(\"$code\") ===")
+        println(String.format("allocating per call   %9.2f ns", perCall))
+        println(String.format("strings hoisted       %9.2f ns", hoisted))
+        println(String.format("marshalling share     %9.2f ns  (%.1f%% of the call, %.2fx)",
+            perCall - hoisted, 100.0 * (perCall - hoisted) / perCall, perCall / hoisted))
+        println("sink=$sink")
+
+        assertTrue(perCall > 0 && hoisted > 0, "measurement produced no elapsed time")
+    }
 }

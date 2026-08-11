@@ -140,27 +140,36 @@ a JNI call plus `GetStringUTFChars` plus malloc plus copy plus free.
 Which means composition is worth extending past the object model, and that **string-carrying
 operations are the ones to compose first**, regardless of how much real work they do.
 
-## 6. Composition on desktop — undecided
+## 6. Composition on desktop — measured, and the answer is no
 
-Desktop crosses at 2.65 ns, so single operations gain nothing measurable; `Python3.initialize()`
-would save ~8 ns on an operation that takes tens of milliseconds. Only bulk operations are
-plausible candidates.
+**Measured.** The same question Android answered at 1.8x, asked on desktop without building a
+composed path: run `exec`'s three C calls with the C strings allocated per iteration, then with
+them allocated once. The gap is what composing could remove.
 
-The Stable ABI closes the obvious shortcut: `PySequence_Fast_ITEMS` is a macro reading
-`PyListObject->ob_item`, and `abi3t` (3.15 free-threaded) makes `PyObject` an incomplete type.
-There is no supported way to bulk-extract list items in one call, so composing on desktop means
-shipping our own native code — currently macOS/Linux only, since Windows cannot host a
-Kotlin/Native library here.
+| | ns |
+|---|---|
+| `exec("x = 1 + 1")`, strings allocated per call | 5768.04 |
+| same, strings hoisted out of the loop | 5161.29 |
+| **marshalling share** | **606.74 (10.5% of the call, 1.12x)** |
 
-The "speed does not matter here" reasoning is now doubtful. It rested on desktop's 2.65 ns
-crossing, but the Android `exec` measurement shows the boundary cost of a realistic call is
-dominated by string marshalling, not crossings — and desktop marshals strings too, through
-`withUtf8`'s allocate/copy/free rather than JNI's chain.
+Against Android's 43% and 1.8x. The difference is what the two platforms do to produce a C
+string: Android's `ffiAllocUtf8` is a JNI round trip — a crossing, then `GetStringUTFChars`,
+then malloc, copy, free — at roughly 2.5 µs per string. Desktop's `withUtf8` is a Panama
+`allocateFrom` with no crossing at all, about 200 ns per string.
 
-What that costs on desktop has not been measured. It can be measured without building a
-composed path at all: compare `Python3.exec` against a variant that reuses pre-allocated C
-strings, and the difference is what composition would remove. That number should come before
-the Windows question, because if it is small the whole item goes away.
+So composing on desktop would buy ~10%, and cost new Kotlin/Native targets for macOS and Linux,
+a packaging path for the resulting library, and a permanent asymmetry where Windows cannot
+participate. **Not worth it.** This item is closed unless something changes the premise.
+
+A cheaper win is available on the same code and is not yet taken: the 45 string-carrying
+desktop wrappers still use `MethodHandle.invoke` rather than `invokeExact`, so they box
+arguments and results on every call while the other 265 do not. That is a local edit with no
+new build machinery behind it, and it addresses part of the same 606 ns.
+
+Also worth recording for whoever revisits this: the Stable ABI closes the obvious bulk shortcut
+regardless. `PySequence_Fast_ITEMS` is a macro reading `PyListObject->ob_item`, and `abi3t`
+(3.15 free-threaded) makes `PyObject` an incomplete type, so there is no supported way to
+extract list items in one call without shipping our own native code.
 
 ## 7. Python → Kotlin binder (upcalls)
 
