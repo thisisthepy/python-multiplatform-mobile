@@ -442,3 +442,50 @@ once upcalls exist.
 Losing the fast path on the re-entrant half is not the tragedy it appears. Those calls do real
 work — importing a module or running a statement dwarfs a 40ns transition — whereas the leaf
 calls, where the transition genuinely dominates, are exactly the ones that keep it.
+
+## Desktop vs Android, measured
+
+Same benchmark shape on both sides: same warmup, same iteration count, best-of-7, a
+pure-Kotlin identity call subtracted as the floor, and the same real C API call —
+`PyList_Size` on `sys.path`.
+
+| | floor | `PyList_Size` | net |
+|---|---|---|---|
+| **Desktop** (Apple M1, JDK 21, Panama) | 0.33 ns | **1015.95 ns** | **1015.61 ns** |
+| Android API 36 (SM-X910, `@FastNative`) | 3.08 ns | 7.47 ns | 4.39 ns |
+| Android API 33 (emulator, `@CriticalNative`) | 2.28 ns | 2.22 ns | ~0 ns |
+
+Desktop is roughly **140x more expensive per call than Android hardware**, and the gap is
+worse than it looks: the host is about 9x faster at the floor (0.33ns vs 3.08ns), so the FFI
+call is slower on the machine that is faster at everything else.
+
+The assumption running through this document — that Android is the platform with the
+overhead problem and desktop is the reference — is backwards. Desktop is currently the
+slowest FFI path in the project by two orders of magnitude.
+
+### Why
+
+None of this is inherent to Panama. It is the reflection-based backend:
+
+    inline fun PyList_Size(list: Long): Long = PyList_SizeHandle.invoke(list) as Long
+
+`invoke` rather than `invokeExact` forces an `asType` adaptation and boxes the argument and
+the result on every call. Worse, the argument and return filters are themselves reflective
+`MethodHandle.invoke` calls that build a `MemorySegment` per call via `ofAddress` and
+`reinterpret`. A microsecond for an O(1) header read is what that chain costs.
+
+The backend was written reflectively so the code would compile against `java.lang.foreign`
+and `jdk.incubator.foreign` on any JDK, which was the right call for portability and the
+wrong one for the hot path. The portability requirement does not extend to the per-call path
+— only to how handles are *created*.
+
+### Consequence
+
+`invokeExact` was flagged as a concern long before this measurement and never quantified.
+It is now: about 1000ns per call, against roughly 5-10ns for a properly linked Panama
+downcall.
+
+This makes desktop, not Android, the first thing to fix. The shape vocabulary already
+committed is the lever: 14 fixed signatures make `invokeExact` reachable, because the call
+site's static type is then known and constant. That work now has a measured payoff rather
+than a suspected one.
