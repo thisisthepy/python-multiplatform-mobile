@@ -62,11 +62,11 @@ inline fun PyRun_String(str: String, start: Int, globals: Long, locals: Long): L
     return PyRun_StringHandle.invokeExact(_str, start, globals, locals) as Long
 }
     val Py_CompileStringHandle: MethodHandle
-inline fun Py_CompileString(str: String, filename: String, start: Int): Long =
-    withUtf8(str) { _str ->
-        withUtf8(filename) { _filename ->
-            Py_CompileStringHandle.invokeExact(_str, _filename, start) as Long
-        }    }
+inline fun Py_CompileString(str: String, filename: String, start: Int): Long {
+    val _str = encodeScratchUtf8(str)
+    val _filename = internedUtf8(filename)
+    return Py_CompileStringHandle.invokeExact(_str, _filename, start) as Long
+}
     val PyEval_EvalCodeHandle: MethodHandle
     inline fun PyEval_EvalCode(co: Long, globals: Long, locals: Long): Long = PyEval_EvalCodeHandle.invokeExact(co, globals, locals) as Long
 
@@ -123,12 +123,12 @@ inline fun PyErr_SyntaxLocation(filename: String, lineno: Int) {
     val PyErr_BadInternalCallHandle: MethodHandle
     inline fun PyErr_BadInternalCall() = PyErr_BadInternalCallHandle.invokeExact() as Unit
     val PyErr_WarnExplicitHandle: MethodHandle
-inline fun PyErr_WarnExplicit(category: Long, message: String, filename: String, lineno: Int, module: String, registry: Long): Int =
-    withUtf8(message) { _message ->
-        withUtf8(filename) { _filename ->
-            withUtf8(module) { _module ->
-                PyErr_WarnExplicitHandle.invokeExact(category, _message, _filename, lineno, _module, registry) as Int
-            }        }    }
+inline fun PyErr_WarnExplicit(category: Long, message: String, filename: String, lineno: Int, module: String, registry: Long): Int {
+    val _message = encodeScratchUtf8(message)
+    val _filename = internedUtf8(filename)
+    val _module = internedUtf8(module)
+    return PyErr_WarnExplicitHandle.invokeExact(category, _message, _filename, lineno, _module, registry) as Int
+}
     val PyErr_OccurredHandle: MethodHandle
     inline fun PyErr_Occurred(): Long = PyErr_OccurredHandle.invokeExact() as Long
     val PyErr_ExceptionMatchesHandle: MethodHandle
@@ -300,12 +300,12 @@ inline fun PyImport_ExecCodeModuleEx(name: String, co: Long, pathname: String): 
     val PyImport_ExecCodeModuleObjectHandle: MethodHandle
     inline fun PyImport_ExecCodeModuleObject(name: Long, co: Long, pathname: Long, cpathname: Long): Long = PyImport_ExecCodeModuleObjectHandle.invokeExact(name, co, pathname, cpathname) as Long
     val PyImport_ExecCodeModuleWithPathnamesHandle: MethodHandle
-inline fun PyImport_ExecCodeModuleWithPathnames(name: String, co: Long, pathname: String, cpathname: String): Long =
-    withUtf8(name) { _name ->
-        withUtf8(pathname) { _pathname ->
-            withUtf8(cpathname) { _cpathname ->
-                PyImport_ExecCodeModuleWithPathnamesHandle.invokeExact(_name, co, _pathname, _cpathname) as Long
-            }        }    }
+inline fun PyImport_ExecCodeModuleWithPathnames(name: String, co: Long, pathname: String, cpathname: String): Long {
+    val _name = internedUtf8(name)
+    val _pathname = encodeScratchUtf8(pathname)
+    val _cpathname = encodeScratchUtf8(cpathname)
+    return PyImport_ExecCodeModuleWithPathnamesHandle.invokeExact(_name, co, _pathname, _cpathname) as Long
+}
     val PyImport_GetMagicTagHandle: MethodHandle
     inline fun PyImport_GetMagicTag(): String? = Panama.readUtf8String(PyImport_GetMagicTagHandle.invokeExact() as Long)
     val PyImport_GetModuleDictHandle: MethodHandle
@@ -645,17 +645,17 @@ inline fun PyUnicode_FromString(str: String): Long {
     val PyUnicode_FromObjectHandle: MethodHandle
     inline fun PyUnicode_FromObject(obj: Long): Long = PyUnicode_FromObjectHandle.invokeExact(obj) as Long
     val PyUnicode_FromEncodedObjectHandle: MethodHandle
-inline fun PyUnicode_FromEncodedObject(obj: Long, encoding: String, errors: String): Long =
-    withUtf8(encoding) { _encoding ->
-        withUtf8(errors) { _errors ->
-            PyUnicode_FromEncodedObjectHandle.invokeExact(obj, _encoding, _errors) as Long
-        }    }
+inline fun PyUnicode_FromEncodedObject(obj: Long, encoding: String, errors: String): Long {
+    val _encoding = internedUtf8(encoding)
+    val _errors = encodeScratchUtf8(errors)
+    return PyUnicode_FromEncodedObjectHandle.invokeExact(obj, _encoding, _errors) as Long
+}
     val PyUnicode_DecodeLocaleHandle: MethodHandle
-inline fun PyUnicode_DecodeLocale(str: String, errors: String): Long =
-    withUtf8(str) { _str ->
-        withUtf8(errors) { _errors ->
-            PyUnicode_DecodeLocaleHandle.invokeExact(_str, _errors) as Long
-        }    }
+inline fun PyUnicode_DecodeLocale(str: String, errors: String): Long {
+    val _str = encodeScratchUtf8(str)
+    val _errors = encodeScratchUtf8(errors)
+    return PyUnicode_DecodeLocaleHandle.invokeExact(_str, _errors) as Long
+}
     val PyUnicode_EncodeLocaleHandle: MethodHandle
 inline fun PyUnicode_EncodeLocale(unicode: Long, errors: String): Long {
     val _errors = encodeScratchUtf8(errors)
@@ -669,11 +669,11 @@ inline fun PyUnicode_DecodeFSDefault(str: String): Long {
     val PyUnicode_EncodeFSDefaultHandle: MethodHandle
     inline fun PyUnicode_EncodeFSDefault(unicode: Long): Long = PyUnicode_EncodeFSDefaultHandle.invokeExact(unicode) as Long
     val PyUnicode_AsEncodedStringHandle: MethodHandle
-inline fun PyUnicode_AsEncodedString(unicode: Long, encoding: String, errors: String): Long =
-    withUtf8(encoding) { _encoding ->
-        withUtf8(errors) { _errors ->
-            PyUnicode_AsEncodedStringHandle.invokeExact(unicode, _encoding, _errors) as Long
-        }    }
+inline fun PyUnicode_AsEncodedString(unicode: Long, encoding: String, errors: String): Long {
+    val _encoding = internedUtf8(encoding)
+    val _errors = encodeScratchUtf8(errors)
+    return PyUnicode_AsEncodedStringHandle.invokeExact(unicode, _encoding, _errors) as Long
+}
     val PyUnicode_AsUTF8StringHandle: MethodHandle
     inline fun PyUnicode_AsUTF8String(unicode: Long): Long = PyUnicode_AsUTF8StringHandle.invokeExact(unicode) as Long
     val PyUnicode_AsUTF8Handle: MethodHandle

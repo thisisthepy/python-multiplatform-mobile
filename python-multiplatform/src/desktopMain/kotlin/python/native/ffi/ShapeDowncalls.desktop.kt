@@ -87,8 +87,15 @@ internal actual fun ffiSymbolRaw(name: String): Long = Panama.findSymbolAddress(
 private val internCache = ConcurrentHashMap<String, Long>()
 private const val CACHE_MAX_ENTRIES = 4096
 
-private val scratchThreadLocal = object : ThreadLocal<Long>() {
-    override fun initialValue() = 0L
+private const val SCRATCH_SLOT_COUNT = 4
+
+private class DesktopScratchSlots {
+    val slots = LongArray(SCRATCH_SLOT_COUNT)
+    var index = 0
+}
+
+private val scratchThreadLocal = object : ThreadLocal<DesktopScratchSlots>() {
+    override fun initialValue() = DesktopScratchSlots()
 }
 
 @PublishedApi internal actual fun internedUtf8(s: String): Long {
@@ -109,12 +116,15 @@ private val scratchThreadLocal = object : ThreadLocal<Long>() {
 }
 
 @PublishedApi internal actual fun encodeScratchUtf8(s: String): Long {
-    val old = scratchThreadLocal.get()
+    val state = scratchThreadLocal.get()
+    val slot = state.index
+    state.index = (slot + 1) % SCRATCH_SLOT_COUNT
+    val old = state.slots[slot]
     if (old != 0L) {
         Panama.freeUtf8Address(old)
     }
     val newAddr = Panama.allocateUtf8Freeable(s)
-    scratchThreadLocal.set(newAddr)
+    state.slots[slot] = newAddr
     return newAddr
 }
 

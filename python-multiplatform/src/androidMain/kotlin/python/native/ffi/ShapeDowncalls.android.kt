@@ -47,12 +47,20 @@ private val internCache = ConcurrentHashMap<String, InternedString>()
 // but 4096 string pointers is very little memory and covers virtually all attribute accesses.
 private const val CACHE_MAX_ENTRIES = 4096
 
+private const val SCRATCH_SLOT_COUNT = 4
+
 private class ScratchBuffer {
     var buf: ByteBuffer = ByteBuffer.allocateDirect(1024)
     var addr: Long = bindings.ffiDirectBufferAddress(buf)
 }
-private val scratchThreadLocal = object : ThreadLocal<ScratchBuffer>() {
-    override fun initialValue() = ScratchBuffer()
+
+private class AndroidScratchSlots {
+    val slots = Array(SCRATCH_SLOT_COUNT) { ScratchBuffer() }
+    var index = 0
+}
+
+private val scratchThreadLocal = object : ThreadLocal<AndroidScratchSlots>() {
+    override fun initialValue() = AndroidScratchSlots()
 }
 
 private fun encodeInto(s: String, buf: ByteBuffer) {
@@ -96,7 +104,10 @@ private fun encodeInto(s: String, buf: ByteBuffer) {
 
 @PublishedApi internal actual fun encodeScratchUtf8(s: String): Long {
     val maxLen = s.length * 3 + 1
-    val sb = scratchThreadLocal.get()!!
+    val state = scratchThreadLocal.get()
+    val slotIndex = state.index
+    state.index = (slotIndex + 1) % SCRATCH_SLOT_COUNT
+    val sb = state.slots[slotIndex]
     if (sb.buf.capacity() < maxLen) {
         var newCap = sb.buf.capacity() * 2
         while (newCap < maxLen) newCap *= 2
