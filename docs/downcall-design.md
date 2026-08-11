@@ -34,7 +34,7 @@ Kotlin/Native 가 헤더를 읽어 직접 호출 코드를 낸다. **오버헤�
 
 ### Desktop — Panama
 
-`desktopMain/.../PanamaBackend.kt` 가 `java.lang.foreign`(JDK 22+, 19~21 은 preview)과
+`desktopMain/.../Panama.kt` 가 `java.lang.foreign`(JDK 22+, 19~21 은 preview)과
 `jdk.incubator.foreign`(JDK 16~18)을 **둘 다 리플렉션으로만** 접근한다. 어느 API 도 직접 import 하지
 않으므로 **어떤 JDK 에서도 컴파일**되고, 런타임에 백엔드를 고른다.
 
@@ -225,7 +225,7 @@ Android 의 Panama 는 런타임인 척하는 라이브러리다. 같은 바닥 
 Android 쪽이 더 빠를 수는 없다. 다만 **얼마나 다른지는 측정된 바 없다.**
 
 우리 desktop 구현은 현재 `Linker.Option.critical()` 을 쓰지 않는다 —
-`PanamaBackend.kt` 가 `downcallHandle(..., emptyOptions)` 로 기본 경로를 탄다.
+`Panama.kt` 가 `downcallHandle(..., emptyOptions)` 로 기본 경로를 탄다.
 
 ### 미결정: 조립 단위의 범위
 
