@@ -27,9 +27,15 @@ The one failure on each JVM/native suite is `GCLeakTest`, red on purpose — see
 with `PyEval_SaveThread()`, no other thread can attach, and any thread that tries blocks
 forever in `PyGILState_Ensure`.
 
-That is not theoretical. `GCLeakTest` reports `cleanup actions started: 1, reached Py_DecRef: 0`
-— the cleaner thread starts one release, blocks, and never processes another. **Reference
-counting is structurally unable to release on any platform until this is enabled.**
+That is not theoretical. On desktop `GCLeakTest` reports `cleanup actions started: 1, reached
+Py_DecRef: 0` — the cleaner thread starts one release, blocks, and never processes another.
+
+**Correction: "on any platform" was wrong.** Running the same test on the iOS simulator gives
+`started: 101002, reached Py_DecRef: 101001`. The cleaners run there and they do reach the
+decref; the target's count still does not move (202 before, 202 after). So iOS is not blocked on
+the GIL, and fixing §1 will not turn it green. One test name is covering two unrelated defects,
+and either the iOS decrefs land on objects other than the one being measured or the measurement
+itself is wrong. Nobody has looked yet.
 
 Enabling it was attempted and reverted. Every C API call still outside `withGIL` becomes a
 segfault far from its cause: closing the gap in `BenchmarkTest.testAttributeAccess`
@@ -68,8 +74,16 @@ removes contention, not the rule that a thread must be attached before touching 
 
 ## 2. Finish the Android JNI surface
 
-**State:** 39 of 380 `external fun` declarations are bound through `RegisterNatives`. The rest
-keep the original wiring, which does not work.
+**Closed.** 71 functions are bound through `RegisterNatives` — the probes and benchmarks plus
+everything the object model actually reaches. `AssembledApiTest`, written as the acceptance check
+for exactly this, runs without `@Ignore`: 19 tests on `pmp_api26` and `pmp_api36`, 0 failed,
+`python.multiplatform.assembled.AssembledApiTest` present in both result files.
+
+The history below is kept because the three failure modes it records are the reason the surface
+had to be rebuilt rather than patched, and because §3 still has to classify what §2 bound.
+
+**Was:** 39 of 380 `external fun` declarations bound through `RegisterNatives`. The rest kept the
+original wiring, which does not work.
 
 The original wiring is broken three ways, all measured or read off the code:
 
@@ -309,9 +323,16 @@ share one binary — so this is a JVM-only cost.
 
 ## 7b. Finish `PyValue`
 
-**State:** `PyContext` is complete — `withContext` restores the strategy even on throw, and all
-five `ConversionStrategy` variants dispatch. `PyValue`/`PyProxy` is not: `toKotlin()` and
-`toPython()` are TODO stubs that end in `cachedNativeValue!!`, so a cache miss is an NPE.
+**Closed for the eager path.** `PyContext` was already complete — `withContext` restores the
+strategy even on throw, and all five `ConversionStrategy` variants dispatch. `PyValue`/`PyProxy`
+now is too: `toKotlin`, `toKotlinOrNull` and `toPython` are implemented, no TODO stub remains in
+`PyProxy.kt`, and `ConversionTest` passes on desktop (in the 118-test run) and on the iOS
+simulator (111 tests).
+
+The lazy path is deliberately still out, because it depends on release timing and so on §1/§4.
+
+**Was:** `PyValue`/`PyProxy` incomplete — `toKotlin()` and `toPython()` were TODO stubs ending in
+`cachedNativeValue!!`, so a cache miss was an NPE.
 
 It works today only because the basic types bypass it. `PyInt`, `PyFloat` and the rest convert
 inside their own `cachedNativeValue` accessors and never reach the stub, so `TYPED` conversion
@@ -351,10 +372,34 @@ an incomplete type does not break us.
 
 ## 10. WASM
 
-**Deferred deliberately.** Kotlin/Wasm cannot link C code — `wasmJs` offers only JS interop,
-`wasmWasi` only WASI syscalls — and CPython's Emscripten build only becomes a supported
-platform in 3.14 (PEP 776, Tier 3), with binaries still coming from downstream rather than
-python.org.
+**Deferred, but no longer for the reason first written here.** The original claim — that
+Kotlin/Wasm cannot reach C at all, so everything must go through JS — is false, and
+`wasm-experiment/` disproves both halves of it by building and running the thing:
+
+- `@WasmImport` binds to a function exported by an Emscripten module. Kotlin called
+  `emcc`-compiled `add_two` and got 42, through a real wasm import, with no JS frame.
+- Emscripten built with `-sIMPORTED_MEMORY` accepts the linear memory Kotlin exports, and the
+  sharing works both ways: an address from C reads back in Kotlin as the bytes C wrote, and a
+  string Kotlin writes into a `malloc`'d buffer reads back through C's `strlen`. **No copying and
+  no JS in the data path** — which removes the cost every other platform measured as dominant.
+
+One constant blocks it: Kotlin emits `WasmLimits(0, null)`, a memory with no maximum, and wasm
+requires a supplied memory to sit inside the importer's limits, so no Emscripten import can ever
+accept it. Patching the six-byte memory section to `{min: 0, max: 32768}` makes everything link.
+That belongs in a YouTrack issue, not in this design.
+
+One structural constraint remains: Kotlin needs Emscripten's exports at instantiation and
+Emscripten needs Kotlin's memory before that, and wasm imports are supplied up front, so the two
+halves cannot yet be combined in one graph. The clean fix is the master-only
+`importWasmMemoryInsteadOfExport`, which inverts ownership; the available fix is JS trampolines
+for calls with the data path still shared, which keeps the half that matters.
+
+A rule falls out for `wasmJsMain`: **`withScopedMemoryAllocator` must never be called.** Measured
+— it grows the memory and allocates at address `0x0`, on top of Emscripten's static data.
+
+See `docs/wasm-design.md`. What still defers §10 is that `wasmJsMain`'s `actual`s cannot be
+written until §1/§4 and §7 settle, plus CPython's Emscripten build only becoming supported in
+3.14 (PEP 776, Tier 3), with binaries still coming from downstream rather than python.org.
 
 Kotlin/Native once had a `wasm32` target that could have shared CPython's linear memory; it was
 deprecated in 1.8.20 and removed in 1.9.20. So the JS bridge is a consequence of the current
@@ -383,6 +428,31 @@ are, run before any instrumented test:
 
     ./gradlew :python-multiplatform:linkAndroidNativeArm64 :python-multiplatform:linkAndroidNativeX64 \
               :python-multiplatform:copyAndroidPythonBinaries :python-multiplatform:copyAndroidPythonAssets
+
+## 11b. Android does not run the object-model tests
+
+**Found while surveying coverage, and it is the largest hole in the suite.**
+
+`commonTest` holds 111 tests over `PyObject`, `PyDict`, `PyList`, conversion, exceptions and
+refcounting. They reach desktop and iOS through the source-set graph:
+
+    jvmTest.dependsOn(commonTest)
+    desktopTest.dependsOn(jvmTest)
+
+`androidInstrumentedTest` has no such edge, so **none of the 111 run on Android**. Its entire
+coverage is 19 instrumented tests — 14 of JNI wiring and benchmarks, 5 of `AssembledApiTest`.
+
+That is the wrong platform to under-test. §2 was exactly a case of the object model being broken
+on Android alone — the production API crashed on the first `Python3.exec` — and the only thing
+that caught it was an acceptance test written by hand for the purpose. The 111 would very likely
+have caught it earlier.
+
+They cannot be `androidUnitTest`: the native library is not loadable there, so they have to run
+instrumented. Whether `kotlin.test` annotations are discovered by the AndroidJUnit4 runner, and
+how the interpreter gets initialised on device, are the two things to establish.
+
+**Expect failures when this lands.** These tests have never run on Android; whatever they report
+is the actual state of the Android object model, and that is the point of doing it.
 
 ## 12. Smaller known items
 
