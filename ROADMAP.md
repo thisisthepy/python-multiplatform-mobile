@@ -161,10 +161,16 @@ So composing on desktop would buy ~10%, and cost new Kotlin/Native targets for m
 a packaging path for the resulting library, and a permanent asymmetry where Windows cannot
 participate. **Not worth it.** This item is closed unless something changes the premise.
 
-A cheaper win is available on the same code and is not yet taken: the 45 string-carrying
-desktop wrappers still use `MethodHandle.invoke` rather than `invokeExact`, so they box
-arguments and results on every call while the other 265 do not. That is a local edit with no
-new build machinery behind it, and it addresses part of the same 606 ns.
+That cheaper win has since been taken: all 45 string-carrying wrappers moved to `invokeExact`,
+so `bindings.kt` now has 310 exact calls and zero inexact ones. Marshalling went from
+606.74 ns to **440.03 ns** (10.5% → 8.1% of the call). Kotlin passes the `Long` out of
+`withUtf8`'s lambda as a primitive `long`, so no descriptor changes were needed.
+
+The benchmark that produced those numbers is now `@Ignore`d. Running `exec` 200,000 times left
+the JVM aborting inside `PyDict_New` and took the suite from 108 tests down to 2. Clearing the
+error indicator on its failure paths recovered most of that — a pending exception was part of
+it — but an abort still followed the run, and the cause is not pinned. Re-enable only after
+that is understood.
 
 Also worth recording for whoever revisits this: the Stable ABI closes the obvious bulk shortcut
 regardless. `PySequence_Fast_ITEMS` is a macro reading `PyListObject->ob_item`, and `abi3t`
