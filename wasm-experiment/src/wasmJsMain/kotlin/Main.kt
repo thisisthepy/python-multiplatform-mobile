@@ -52,6 +52,8 @@ fun memoryPages(): Int = currentPagesViaJs()
 // The linear-memory probe: is Kotlin's memory genuinely unused?
 // ---------------------------------------------------------------------------------------------
 
+private const val MEASURE_ALLOCATOR = false
+
 fun main() {
     println("=== Kotlin/Wasm linear memory probe ===")
     println("pages at startup                 ${currentPagesViaJs()}")
@@ -69,8 +71,32 @@ fun main() {
         println("pages after exception            ${currentPagesViaJs()}   (${e.message})")
     }
 
+    val ba = ByteArray(10 * 1024 * 1024)
+    println("pages after large ByteArray      ${currentPagesViaJs()}   (size=${ba.size})")
+
+    val largeGraph = Array(100_000) { it.toString() }
+    println("pages after large obj graph      ${currentPagesViaJs()}   (size=${largeGraph.size})")
+
+    // Captured rather than printed in place: runPromise resolves after main() returns, so a
+    // println here lands *after* the explicit allocate below and would report that allocation's
+    // page count instead of the coroutine's. Comparing against the pre-allocate snapshot is the
+    // only reading that means anything.
+    var coroutinePages = -1
+    runPromise { coroutinePages = currentPagesViaJs() }
+
+    val jsArray = getJsArray()
+    println("pages after ArrayBuffer bridge   ${currentPagesViaJs()}   (jsArray=$jsArray)")
+
+    val pagesBeforeAllocate = currentPagesViaJs()
+    println("pages before explicit allocate   $pagesBeforeAllocate")
+
     // The one thing that must never appear in wasmJsMain, shown here to prove why.
-    withScopedMemoryAllocator { alloc ->
+    //
+    // Gated off by default. runPromise resolves after main() returns, so if this runs the
+    // coroutine's page reading is taken *after* the allocator grew the memory and says nothing
+    // about coroutines. Turn it on only to re-confirm the allocator's own behaviour, and read the
+    // coroutine line as meaningless in that run.
+    if (MEASURE_ALLOCATOR) withScopedMemoryAllocator { alloc ->
         val p = alloc.allocate(64)
         p.storeInt(0x41424344)
         println("pages after explicit allocate    ${currentPagesViaJs()}   (at 0x${p.address.toString(16)}, reads 0x${p.loadInt().toString(16)})")
@@ -79,6 +105,15 @@ fun main() {
     println()
     println("Every line before the explicit allocate reads 0 => Kotlin never touches linear")
     println("memory on its own, so the memory it exports can be handed to Emscripten whole.")
+    println()
+    runPromise {
+        val verdict = when {
+            coroutinePages < 0 -> "NOT MEASURED -- the coroutine never ran"
+            coroutinePages <= pagesBeforeAllocate -> "OK -- coroutines did not grow it"
+            else -> "GROWN -- coroutines DO touch linear memory, which breaks memory sharing"
+        }
+        println("pages observed inside coroutine  $coroutinePages  (pre-allocate snapshot was $pagesBeforeAllocate)  $verdict")
+    }
 }
 
 private fun currentPagesViaJs(): Int =
@@ -98,3 +133,28 @@ external fun cAddTwo(a: Int, b: Int): Int
 
 @JsExport
 fun callCAddTwo(a: Int, b: Int): Int = cAddTwo(a, b)
+
+fun getJsArray(): JsAny = js("new Uint8Array(10)")
+
+fun runPromise(callback: () -> Unit): Unit = js("Promise.resolve().then(callback)")
+
+@JsModule("./probeA-wrapper.mjs")
+external fun add_two(a: Int, b: Int): Int
+
+@JsExport
+fun measureDirect(iterations: Int): Int {
+    var sum = 0
+    for (i in 0 until iterations) {
+        sum += cAddTwo(i, 2)
+    }
+    return sum
+}
+
+@JsExport
+fun measureTrampoline(iterations: Int): Int {
+    var sum = 0
+    for (i in 0 until iterations) {
+        sum += add_two(i, 2)
+    }
+    return sum
+}

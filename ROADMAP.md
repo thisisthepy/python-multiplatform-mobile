@@ -369,16 +369,42 @@ carried over: `.klib` discovery on a Native target is inferred rather than teste
 `getDeclarationsFromPackage` is `@KspExperimental`, so keep that step swappable. See
 `docs/upcall-table-design.md`.
 
-**Tree shaking is not solved.** A table referencing every `public` declaration does defeat
-dead-code elimination, and that is inherent to blacklist exposure plus static linking. Five
-mitigations were evaluated and none removes the problem without changing the exposure model. The
-recommendation is to measure the cost before optimising it — which has not been done.
+**The generator exists now.** `python-multiplatform-ksp/` is the shipped KSP processor (library
+role emits a fragment, app role emits a fragment for itself then aggregates every `Fragment_*`
+it can see). `ksp-fixtures/{library,app}` is the TDD harness: `GeneratedTableTest` (11 tests, JVM)
+runs `UpcallTableTest`'s exact scenarios — constructor/method/getter/setter through
+`HandleTable`, `@PythonInternal` exclusion, narrow `Int`/`Float` boundary widening, `tp_traverse`
+field detection — against a table KSP generated rather than a hand-written fragment. `.klib`
+discovery is no longer inferred: the same pair on `androidNativeArm64` found the library's
+fragment from its compiled `.klib` and linked a real test binary (compiled and linked only, not
+run — no device in this workspace). See `docs/upcall-table-design.md` for the full account,
+including the one place the doc's own sketch was wrong (fragments must be `public`, not
+`internal` — Kotlin enforces `internal` per module, and the app module compiling generated code
+that references a library's fragment is a different module even inside one Gradle build).
 
-**Cycle collection is now in scope.** `tp_traverse` on the Python proxy must reach through the
-handle into the Kotlin object's `PyObject`-typed fields, which means the generator emits a
-traverse function per exposed class alongside the call entries. That is cheap here only because
-the table is generated at build time; see `docs/object-lifetime.md` for the mechanism and for
-the three parts that are still hard.
+**Tree shaking is not solved, but it is now measured.** A table referencing every `public`
+declaration does defeat dead-code elimination, and that is inherent to blacklist exposure plus
+static linking. 200 synthetic exposed functions cost ≈1.84 KB/entry in a stripped
+`androidNativeArm64` binary (368,640 bytes total) — a floor, since the synthetic functions were
+trivial one-liners and a real function's body adds its own size on top. Whether that floor plus a
+real library's bodies is acceptable is a product judgement the measurement informs but does not
+settle. See `docs/upcall-table-design.md` §4.
+
+**Companion object members, interfaces, enums and annotation classes are not exposed yet.** The
+generator currently walks top-level functions and `ClassKind.CLASS` declarations (their primary
+constructor, member functions, and properties). `binding-policy.md`'s "companion object members
+exposed as static methods" line is not implemented.
+
+**Cycle collection: the generator's half is done.** `tp_traverse` on the Python proxy must reach
+through the handle into the Kotlin object's `PyObject`-typed fields, which means the generator
+emits a traverse function per exposed class alongside the call entries. That part is implemented
+and tested (`FragmentScanner` detects `PyObject`-typed — including subclass-typed — fields via
+`isPyObjectType`, emits `traverse = { obj, visit -> ... }`, and `ReflectedClass.hasTraverse` /
+`.traverse(...)` are exercised end to end in `ksp-fixtures`). What is still open is everything
+downstream of the generated function actually running during a real CPython GC pass — the proxy
+type's `tp_traverse` slot wiring, `tp_clear` mutating Kotlin state, and cycles that close on the
+Kotlin side — none of which this task touched. See `docs/object-lifetime.md` for the mechanism
+and the three parts that are still hard.
 
 Cost is not yet measured. The table lookup is an array index and is not the expense; the
 boundary is. Note that iOS and androidNative have no boundary here at all — Python and Kotlin

@@ -265,12 +265,49 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
     override fun listIterator(): MutableListIterator<PyObject> = ListItr(0)
     override fun listIterator(index: Int): MutableListIterator<PyObject> = ListItr(index)
 
+    private class PySubList(
+        private val list: MutableList<PyObject>,
+        private val fromIndex: Int,
+        private var toIndex: Int
+    ) : AbstractMutableList<PyObject>() {
+        
+        init {
+            if (fromIndex < 0 || toIndex > list.size) {
+                throw IndexOutOfBoundsException("fromIndex: $fromIndex, toIndex: $toIndex, size: ${list.size}")
+            }
+            if (fromIndex > toIndex) {
+                throw IllegalArgumentException("fromIndex: $fromIndex > toIndex: $toIndex")
+            }
+        }
+
+        override val size: Int
+            get() = toIndex - fromIndex
+
+        override fun get(index: Int): PyObject {
+            if (index < 0 || index >= size) throw IndexOutOfBoundsException("index: $index, size: $size")
+            return list[fromIndex + index]
+        }
+
+        override fun set(index: Int, element: PyObject): PyObject {
+            if (index < 0 || index >= size) throw IndexOutOfBoundsException("index: $index, size: $size")
+            return list.set(fromIndex + index, element)
+        }
+
+        override fun add(index: Int, element: PyObject) {
+            if (index < 0 || index > size) throw IndexOutOfBoundsException("index: $index, size: $size")
+            list.add(fromIndex + index, element)
+            toIndex++
+        }
+
+        override fun removeAt(index: Int): PyObject {
+            if (index < 0 || index >= size) throw IndexOutOfBoundsException("index: $index, size: $size")
+            val removed = list.removeAt(fromIndex + index)
+            toIndex--
+            return removed
+        }
+    }
+
     override fun subList(fromIndex: Int, toIndex: Int): MutableList<PyObject> {
-        // TODO: this is a detached snapshot, not a live view backed by this PyList (Kotlin's
-        // MutableList.subList contract expects write-through); acceptable for now since nothing
-        // in the current test/usage surface relies on write-through semantics.
-        val result = ArrayList<PyObject>(toIndex - fromIndex)
-        for (i in fromIndex until toIndex) result.add(get(i))
-        return result
+        return PySubList(this, fromIndex, toIndex)
     }
 }

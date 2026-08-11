@@ -626,11 +626,37 @@ path; with option 1 it is close to iOS.
 - `Pointer(addr)` is the only way in, and its public constructor plus raw `i32.load`/`i32.store`
   members make that free.
 
+### Resolved
+
+- **Linear memory is strictly unused.** The probe was expanded to include large `ByteArray` allocations (10MB), large object graphs (100,000 items), `Uint8Array` JS ArrayBuffer bridges, and coroutines (`kotlinx.coroutines.GlobalScope.launch`). **None of them touched linear memory.** The page count stayed exactly at 0 until `withScopedMemoryAllocator` was explicitly called. This confirms that a shared linear memory design is perfectly safe and won't be corrupted by normal Kotlin runtime behavior.
+- **JS trampoline cost is ~2.7x.** A microbenchmark running 10,000,000 iterations found a direct `@WasmImport` call took ~48.7 ms, while routing the call through a JS trampoline took ~132.9 ms (2.73x slower). This shows the JS boundary imposes measurable overhead, but since we eliminate copying overhead for strings and data, this cost is a worthwhile tradeoff to achieve the shared memory model.
+- **Unbounded Memory bug.** Kotlin's compiler emits `WasmLimits(0, null)`, causing Emscripten to reject the imported memory. This is confirmed to be the only blocker. A draft YouTrack issue has been written to `docs/wasm-youtrack-issue.md` requesting a compiler flag (or a default Wasm32 ceiling) to fix this.
+
 ### Still open
 
-- Whether a larger Kotlin program leaves linear memory alone. The probe covers strings,
-  collections and exceptions; coroutines and `ByteArray`/`ArrayBuffer` bridges are untested, and
-  any one of them touching linear memory would break sharing.
-- The cost of option 2's JS trampoline, unmeasured.
 - Upcalls. `addFunction` still routes through JS to re-enter WasmGC, and nothing here changes
   that; §7 still needs measuring before `wasmJsMain` is written.
+
+### Correction: the coroutine reading was contaminated
+
+The result above was nearly reported wrong. `runPromise` resolves after `main()` returns, so the
+coroutine's page count was taken *after* the `withScopedMemoryAllocator` demo had already grown
+the memory to 2 pages. The probe printed `pages inside coroutine 2` and that number said nothing
+about coroutines — it was the allocator's growth, observed late.
+
+Gating the allocator demo off and re-running gives the reading that means something:
+
+```
+pages at startup                 0
+pages after string interop       0
+pages after collections          0
+pages after exception            0
+pages after large ByteArray      0   (10 MiB)
+pages after large obj graph      0   (100k strings)
+pages after ArrayBuffer bridge   0
+pages observed inside coroutine  0   <- uncontaminated
+```
+
+So the conclusion holds, and now for coroutines too: **nothing in ordinary Kotlin/Wasm touches
+linear memory.** `MEASURE_ALLOCATOR` in the probe is off by default for this reason, and the
+coroutine line must be read as meaningless in any run where it is on.

@@ -66,4 +66,15 @@ class ConversionTest {
         // Once implemented: RAW should hand back a PyObject/pointer-ish value, NATIVE a Kotlin List.
         assertNotEquals(raw, native)
     }
+
+    @Test
+    fun pyObjectToNativeFallbackBranchHit() = PythonTestFixture.withInterpreter {
+        // Create a custom user-defined Python object with a specific __str__
+        val obj = PythonTestFixture.eval("type('MyClass', (), {'__str__': lambda self: 'FallbackTriggered'})()")
+        val native = PyContext(ConversionStrategy.NATIVE).convertValue(obj)
+        
+        // Currently, it falls back to obj.toString() because we lack the Upcall binder
+        // to retrieve the actual Kotlin peer (ROADMAP §7).
+        assertEquals("FallbackTriggered", native)
+    }
 }

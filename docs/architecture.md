@@ -31,7 +31,7 @@ commonMain
 commonMain/kotlin/python/native/ffi/EmbedAPI.kt      expect 약 330개
  ├── nativeMain/.../EmbedAPI.native.kt               cinterop  (iOS, androidNative)
  ├── androidMain/.../EmbedAPI.android.kt + bindings.kt   JNI
- └── desktopMain/.../EmbedAPI.desktop.kt + bindings.kt + PanamaBackend.kt   Panama
+ └── desktopMain/.../EmbedAPI.desktop.kt + bindings.kt + Panama.kt   Panama
 ```
 
 포인터는 `NativePointer` (value class, `address: Any`) 로 통일한다. 플랫폼별 실체는 `Long`(JVM),

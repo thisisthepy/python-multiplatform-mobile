@@ -6,7 +6,7 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Desktop (Panama) actuals for the shape vocabulary declared in `jvmMain/.../ShapeDowncalls.kt`.
  *
- * One unbound `MethodHandle` is built per shape (14 total, via [PanamaBackend.unboundDowncallHandle])
+ * One unbound `MethodHandle` is built per shape (14 total, via [Panama.unboundDowncallHandle])
  * and reused for every CPython function of that shape -- this is the whole point of collapsing
  * ~330 bound, per-function handles down to 14 shared ones. Each handle's static Java method type is
  * fixed and known at this call site, which is exactly what makes `invokeExact` reachable: unlike the
@@ -19,20 +19,20 @@ import java.util.concurrent.ConcurrentHashMap
  * exactly -- see the `Unit`-cast idiom used for the void-returning shapes below).
  */
 
-private val hV = PanamaBackend.unboundDowncallHandle(0, 0, ReturnKind.VOID)
-private val hI = PanamaBackend.unboundDowncallHandle(0, 0, ReturnKind.LONG)
-private val hF = PanamaBackend.unboundDowncallHandle(0, 0, ReturnKind.DOUBLE)
-private val hI_V = PanamaBackend.unboundDowncallHandle(1, 0, ReturnKind.VOID)
-private val hI_I = PanamaBackend.unboundDowncallHandle(1, 0, ReturnKind.LONG)
-private val hI_F = PanamaBackend.unboundDowncallHandle(1, 0, ReturnKind.DOUBLE)
-private val hF_I = PanamaBackend.unboundDowncallHandle(0, 1, ReturnKind.LONG)
-private val hII_V = PanamaBackend.unboundDowncallHandle(2, 0, ReturnKind.VOID)
-private val hII_I = PanamaBackend.unboundDowncallHandle(2, 0, ReturnKind.LONG)
-private val hIII_V = PanamaBackend.unboundDowncallHandle(3, 0, ReturnKind.VOID)
-private val hIII_I = PanamaBackend.unboundDowncallHandle(3, 0, ReturnKind.LONG)
-private val hIIII_I = PanamaBackend.unboundDowncallHandle(4, 0, ReturnKind.LONG)
-private val hIIIII_I = PanamaBackend.unboundDowncallHandle(5, 0, ReturnKind.LONG)
-private val hIIIIII_I = PanamaBackend.unboundDowncallHandle(6, 0, ReturnKind.LONG)
+private val hV = Panama.unboundDowncallHandle(0, 0, ReturnKind.VOID)
+private val hI = Panama.unboundDowncallHandle(0, 0, ReturnKind.LONG)
+private val hF = Panama.unboundDowncallHandle(0, 0, ReturnKind.DOUBLE)
+private val hI_V = Panama.unboundDowncallHandle(1, 0, ReturnKind.VOID)
+private val hI_I = Panama.unboundDowncallHandle(1, 0, ReturnKind.LONG)
+private val hI_F = Panama.unboundDowncallHandle(1, 0, ReturnKind.DOUBLE)
+private val hF_I = Panama.unboundDowncallHandle(0, 1, ReturnKind.LONG)
+private val hII_V = Panama.unboundDowncallHandle(2, 0, ReturnKind.VOID)
+private val hII_I = Panama.unboundDowncallHandle(2, 0, ReturnKind.LONG)
+private val hIII_V = Panama.unboundDowncallHandle(3, 0, ReturnKind.VOID)
+private val hIII_I = Panama.unboundDowncallHandle(3, 0, ReturnKind.LONG)
+private val hIIII_I = Panama.unboundDowncallHandle(4, 0, ReturnKind.LONG)
+private val hIIIII_I = Panama.unboundDowncallHandle(5, 0, ReturnKind.LONG)
+private val hIIIIII_I = Panama.unboundDowncallHandle(6, 0, ReturnKind.LONG)
 
 internal actual fun downcall_V(fn: Long) {
     hV.invokeExact(fn) as Unit
@@ -82,7 +82,7 @@ internal actual fun downcallIIIIII_I(fn: Long, a0: Long, a1: Long, a2: Long, a3:
 
 // ---- Symbol lookup ----
 
-internal actual fun ffiSymbolRaw(name: String): Long = PanamaBackend.findSymbolAddress(name)
+internal actual fun ffiSymbolRaw(name: String): Long = Panama.findSymbolAddress(name)
 
 private val internCache = ConcurrentHashMap<String, Long>()
 private const val CACHE_MAX_ENTRIES = 4096
@@ -99,10 +99,10 @@ private val scratchThreadLocal = object : ThreadLocal<Long>() {
         return encodeScratchUtf8(s)
     }
 
-    val addr = PanamaBackend.allocateUtf8Freeable(s)
+    val addr = Panama.allocateUtf8Freeable(s)
     val existing = internCache.putIfAbsent(s, addr)
     if (existing != null) {
-        PanamaBackend.freeUtf8Address(addr)
+        Panama.freeUtf8Address(addr)
         return existing
     }
     return addr
@@ -111,14 +111,14 @@ private val scratchThreadLocal = object : ThreadLocal<Long>() {
 @PublishedApi internal actual fun encodeScratchUtf8(s: String): Long {
     val old = scratchThreadLocal.get()
     if (old != 0L) {
-        PanamaBackend.freeUtf8Address(old)
+        Panama.freeUtf8Address(old)
     }
-    val newAddr = PanamaBackend.allocateUtf8Freeable(s)
+    val newAddr = Panama.allocateUtf8Freeable(s)
     scratchThreadLocal.set(newAddr)
     return newAddr
 }
 
-@PublishedApi internal actual fun freeUtf8(address: Long) = PanamaBackend.freeUtf8Address(address)
+@PublishedApi internal actual fun freeUtf8(address: Long) = Panama.freeUtf8Address(address)
 
-internal actual fun ffiReadUtf8(ptr: Long): String? = PanamaBackend.readUtf8String(ptr)
+internal actual fun ffiReadUtf8(ptr: Long): String? = Panama.readUtf8String(ptr)
 

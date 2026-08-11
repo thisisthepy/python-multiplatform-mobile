@@ -21,7 +21,7 @@ internal enum class ReturnKind { VOID, LONG, DOUBLE }
  * cached MethodHandles with zero reflective overhead.
  */
 @PublishedApi
-internal object PanamaBackend {
+internal object Panama {
 
     // ---- public surface used by bindings.kt ----
 
@@ -390,7 +390,7 @@ internal object PanamaBackend {
         // position, so asType() is used to give the (Any-returning) static adapter method the
         // exact reflectively-obtained MemorySegment return type.
         val longToSegmentExact = lookup.findStatic(
-            PanamaBackend::class.java, "modernLongToSegment",
+            Panama::class.java, "modernLongToSegment",
             MethodType.methodType(Any::class.java, Long::class.javaPrimitiveType)
         ).asType(MethodType.methodType(memorySegmentClass, Long::class.javaPrimitiveType))
 
@@ -443,7 +443,7 @@ internal object PanamaBackend {
             // raw returns MemorySegment, we want long
             // Insert an adapter: (MemorySegment) -> long via address()
             val segToLong = lookup.findStatic(
-                PanamaBackend::class.java, "modernSegmentToLong",
+                Panama::class.java, "modernSegmentToLong",
                 MethodType.methodType(Long::class.javaPrimitiveType, Any::class.java)
             ).asType(MethodType.methodType(Long::class.javaPrimitiveType, segmentClass))
             h = MethodHandles.filterReturnValue(h, segToLong)
@@ -453,7 +453,7 @@ internal object PanamaBackend {
         for (i in paramTypes.indices) {
             if (paramTypes[i] == POINTER_TYPE) {
                 val longToSeg = lookup.findStatic(
-                    PanamaBackend::class.java, "modernLongToSegment",
+                    Panama::class.java, "modernLongToSegment",
                     MethodType.methodType(Any::class.java, Long::class.javaPrimitiveType)
                 ).asType(MethodType.methodType(segmentClass, Long::class.javaPrimitiveType))
                 // The parameter index in the adapted handle: account for already-adapted params
@@ -666,7 +666,7 @@ internal object PanamaBackend {
         )
 
         val longToAddrExact = lookup.findStatic(
-            PanamaBackend::class.java, "incubatorLongToAddr",
+            Panama::class.java, "incubatorLongToAddr",
             MethodType.methodType(Any::class.java, Long::class.javaPrimitiveType)
         ).asType(MethodType.methodType(memoryAddressClass, Long::class.javaPrimitiveType))
 
@@ -721,7 +721,7 @@ internal object PanamaBackend {
         // Adapt return: MemoryAddress -> long
         if (retType == POINTER_TYPE) {
             val addrToLong = lookup.findStatic(
-                PanamaBackend::class.java, "incubatorAddrToLong",
+                Panama::class.java, "incubatorAddrToLong",
                 MethodType.methodType(Long::class.javaPrimitiveType, Any::class.java)
             )
             h = MethodHandles.filterReturnValue(h, addrToLong)
@@ -731,7 +731,7 @@ internal object PanamaBackend {
         for (i in paramTypes.indices) {
             if (paramTypes[i] == POINTER_TYPE) {
                 val longToAddr = lookup.findStatic(
-                    PanamaBackend::class.java, "incubatorLongToAddr",
+                    Panama::class.java, "incubatorLongToAddr",
                     MethodType.methodType(Any::class.java, Long::class.javaPrimitiveType)
                 )
                 h = MethodHandles.filterArguments(h, i, longToAddr)

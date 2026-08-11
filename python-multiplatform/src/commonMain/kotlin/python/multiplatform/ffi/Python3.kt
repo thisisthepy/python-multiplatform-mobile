@@ -54,6 +54,7 @@ object Python3 {
         // Py_DecRef) can attach via PyGILState_Ensure. Every C API call reachable from
         // commonMain and commonTest is now inside withPython{} or withGIL{}, so this is safe.
         // See ROADMAP §1 and §4 for the history and the previous revert.
+        // See ROADMAP §1 and §4 for the history and the previous revert.
         //   if (mainThreadState == null) mainThreadState = PyEval_SaveThread()
     }
 
