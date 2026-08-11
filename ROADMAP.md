@@ -120,10 +120,25 @@ Composed operations belong in the FFI layer as `expect`/`actual`, not in the obj
 `PyObject` must not reference `bindings` (see `docs/architecture.md`). Restoring composition
 therefore does **not** require reopening `PyObject` as `expect`/`actual`.
 
-`Python3.exec` has a composed probe (`asmExec`) whose measurement has not been taken yet. Its
-per-call form crosses about eleven times but also parses, compiles and executes Python, so the
-ratio should be far below the 5.5x above; that number decides whether composition is worth
-extending past the object model.
+`Python3.exec` was measured too, and it contradicts the reasoning above:
+
+| | per-call | composed | |
+|---|---|---|---|
+| `exec("x = 1 + 1")`, API 36 emulator | 17799.46 ns | 10123.94 ns | **1.76x** |
+| `exec("x = 1 + 1")`, API 26 emulator | 17798.43 ns | 9570.26 ns | **1.86x** |
+
+Composing a realistic binder call — one that parses, compiles and executes Python — still
+nearly halves it. The prediction beforehand was "a few percent", on the argument that Python's
+own work would dominate. It does not: about 7.7 µs of the 17.8 µs is boundary cost.
+
+The mechanism is visible in the numbers. 7.7 µs over ~11 crossings would be 700 ns each, two
+orders of magnitude above the 7 ns a crossing actually costs. And the per-call figure is
+identical on API 26 and API 36 (17798 vs 17799) despite those devices differing by 20x in
+per-crossing cost. So this is not crossings — it is the three `ffiAllocUtf8` round trips, each
+a JNI call plus `GetStringUTFChars` plus malloc plus copy plus free.
+
+Which means composition is worth extending past the object model, and that **string-carrying
+operations are the ones to compose first**, regardless of how much real work they do.
 
 ## 6. Composition on desktop — undecided
 
@@ -137,8 +152,15 @@ There is no supported way to bulk-extract list items in one call, so composing o
 shipping our own native code — currently macOS/Linux only, since Windows cannot host a
 Kotlin/Native library here.
 
-Open question, unresolved: whether the goal is speed (measurement says no) or structural
-symmetry with Android (in which case Windows dropping out undermines the point).
+The "speed does not matter here" reasoning is now doubtful. It rested on desktop's 2.65 ns
+crossing, but the Android `exec` measurement shows the boundary cost of a realistic call is
+dominated by string marshalling, not crossings — and desktop marshals strings too, through
+`withUtf8`'s allocate/copy/free rather than JNI's chain.
+
+What that costs on desktop has not been measured. It can be measured without building a
+composed path at all: compare `Python3.exec` against a variant that reuses pre-allocated C
+strings, and the difference is what composition would remove. That number should come before
+the Windows question, because if it is small the whole item goes away.
 
 ## 7. Python → Kotlin binder (upcalls)
 
