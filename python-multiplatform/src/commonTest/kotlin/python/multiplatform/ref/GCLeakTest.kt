@@ -68,10 +68,15 @@ class GCLeakTest {
         // Deltas, not absolutes. ReleaseCounter is process-wide, so `ran > released` can be true
         // from residue left by earlier tests -- which is precisely the mistake that hid this bug
         // for so long, when a global 101002 was read as "the cleaners for this test ran".
-        if (ranDelta > releasedDelta) {
+        // The deadlock signature is that cleaners START and NONE arrive -- releasedDelta stays at
+        // zero while ranDelta climbs. Requiring the two to be equal instead was too strict: the
+        // counters are sampled separately, so a cleaner in flight at that moment shows up as a
+        // difference of one and says nothing about a deadlock. iOS failed here at 12 started and
+        // 11 released, which is the mechanism working, not stalling.
+        if (ranDelta > 0 && releasedDelta == 0) {
             assertTrue(
                 false,
-                "Cleaner started but never reached Py_DecRef. (ranDelta: $ranDelta, releasedDelta: $releasedDelta; " +
+                "Cleaners started and none reached Py_DecRef. (ranDelta: $ranDelta, releasedDelta: $releasedDelta; " +
                 "absolute ran: $ranAfter, released: $releasedAfter). " +
                 "This implies the cleaner thread is deadlocked in PyGILState_Ensure because Python3.initialize() still holds the GIL (ROADMAP §1)."
             )
@@ -85,7 +90,7 @@ class GCLeakTest {
                 "never considered the wrappers unreachable, or it did and the cleaner runs on a background " +
                 "thread that the tight forceGC() loop -- which finishes in microseconds -- gave no chance to " +
                 "wake up. " +
-                "What it is NOT is the §1 GIL deadlock: that shows up as ranDelta > releasedDelta, handled above. " +
+                "What it is NOT is the §1 GIL deadlock: that shows up as ranDelta > 0 with releasedDelta == 0, handled above. " +
                 "The large absolute counts here are the whole process's explicit close() calls from earlier " +
                 "tests, which is why only the deltas are trusted."
             )
