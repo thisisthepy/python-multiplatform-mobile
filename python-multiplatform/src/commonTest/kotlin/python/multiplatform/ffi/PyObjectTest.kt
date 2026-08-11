@@ -103,7 +103,7 @@ class PyObjectTest {
 
     @Test
     fun getTypeReturnsTheObjectsPythonType() = PythonTestFixture.withInterpreter {
-        val intType = PythonTestFixture.eval("42").getType()
+        val intType = PythonTestFixture.eval("42").Type
         assertEquals("int", intType.name)
     }
 
@@ -123,15 +123,15 @@ class PyObjectTest {
         Python3.exec("def _callable_for_test(): pass")
         val fn = PythonTestFixture.eval("_callable_for_test")
         val value = PythonTestFixture.eval("42")
-        assertTrue(fn.isCallable())
-        assertFalse(value.isCallable())
+        assertTrue(fn.isCallable)
+        assertFalse(value.isCallable)
     }
 
     @Test
     fun isTruthyMatchesPythonBoolConversion() = PythonTestFixture.withInterpreter {
-        assertTrue(PythonTestFixture.eval("1").isTruthy())
-        assertFalse(PythonTestFixture.eval("0").isTruthy())
-        assertFalse(PythonTestFixture.eval("[]").isTruthy())
+        assertTrue(PythonTestFixture.eval("1").isTruthy)
+        assertFalse(PythonTestFixture.eval("0").isTruthy)
+        assertFalse(PythonTestFixture.eval("[]").isTruthy)
     }
 
     @Test

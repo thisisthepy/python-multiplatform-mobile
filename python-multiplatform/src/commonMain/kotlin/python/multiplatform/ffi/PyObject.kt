@@ -49,39 +49,25 @@ enum class PyCompareOp(val opId: Int) {
 internal fun pyErrorOrGeneric(fallback: String): PyException =
     PyException.fromCurrentError() ?: PyException(fallback)
 
-/**
- * Reference counting needs the GIL like any other C API call, and it is reached from places that
- * are easy to overlook — an object's `init`, and [PyAutoCloseable.clean], which runs on a cleaner
- * thread that has never touched Python and therefore has no thread state at all.
- *
- * The initialisation check matters for the cleaner path specifically: objects can be collected
- * after `Py_Finalize()`, and attaching a thread state to a finalized interpreter is invalid.
- */
-internal fun gilIncRef(p: NativePointer) {
-    if (Python3.isInitialized) withGIL { Py_IncRef(p) }
-}
-
-internal fun gilDecRef(p: NativePointer) {
-    if (Python3.isInitialized) withGIL { Py_DecRef(p) }
-}
 
 // TODO: !!IMPORTANT!! We need to check the case where the pointer is null one more time. (PyObject, PyType, PyException)
 open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoCloseable(pointer) {
 
     init {
         if (borrowed) {
-            gilIncRef(pointer)
+            incRef()
             // TODO: PyIncRef을 사용하는게 적절한 선택일까?
         }
     }
 
     /**
-     * Deliberately named `pyType` rather than `type`: a property called `type` compiles to a
-     * `getType()` accessor on JVM targets, which collides with the public [getType] below and
-     * makes every subclass fail to compile for Android and Desktop. Kotlin/Native has no such
-     * signature rule, which is why this only ever surfaced once a JVM target was built.
+     * The Python type of this object, as the design sketch names it.
+     *
+     * On JVM targets this compiles to a `getType()` accessor, which is why there is no separate
+     * `getType()` method -- declaring both clashes on the JVM signature and breaks every
+     * subclass on Android and Desktop.
      */
-    protected val pyType: PyType by lazy {
+    val Type: PyType by lazy {
         // PyObject_Type returns a new reference; PyType.getInstance's private
         // constructor stores it via PyObject(pointer, borrowed = false), i.e.
         // it takes ownership of exactly that reference (no extra incRef).
@@ -90,12 +76,24 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         PyType.getInstance(typePointer)
     }
 
+    /**
+     * Takes an extra reference to this object.
+     *
+     * Refcounting is a C API call like any other and needs a thread state attached, so it goes
+     * through [withGIL]. That is true of free-threaded builds too: removing the global lock
+     * removes contention, not the requirement that the calling thread be attached.
+     *
+     * The initialisation check exists for [clean], which runs on a cleaner thread that may have
+     * never touched Python and may run after `Py_Finalize()`; attaching to a finalized
+     * interpreter is invalid.
+     */
     protected fun incRef() {
-        gilIncRef(pointer)
+        if (python.multiplatform.ffi.Python3.isInitialized) withGIL { Py_IncRef(pointer) }
     }
 
+    /** Releases one reference. See [incRef] for why the GIL and the initialisation check are here. */
     protected fun decRef() {
-        gilDecRef(pointer)
+        if (python.multiplatform.ffi.Python3.isInitialized) withGIL { Py_DecRef(pointer) }
     }
 
     @Throws(PyException::class)
@@ -155,77 +153,130 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         }
     }
 
-    /** Public accessor for [type], mirroring the mermaid sketch's `getType()`. */
-    fun getType(): PyType = pyType
-
     /**
-     * Calls this object as a Python callable: `self(*args, **kwargs)`.
+     * Calls this object as a Python callable.
      *
-     * The mermaid sketch lists a family of `invoke(arg0)`, `invoke(arg0, arg1)`, ...,
-     * `invoke(vararg args)` overloads; those collapse into this single vararg +
-     * named-kwargs signature here since Kotlin varargs already cover the arity-specific
-     * overloads without the boilerplate.
+     * The arity-specific overloads are not boilerplate: a `vararg` parameter allocates an
+     * `Array<out PyObject>` at every call site, and one-to-three argument calls dominate FFI
+     * use. These build the argument tuple directly and allocate nothing on the Kotlin side.
+     * The `vararg` form remains for wider calls and for spreading an existing array.
+     *
+     * Keyword arguments live on [call] rather than here so the common path never pays for a
+     * `Map` parameter it does not use.
      */
     @Throws(PyException::class)
-    open operator fun invoke(vararg args: PyObject, kwargs: Map<String, PyObject> = emptyMap()): PyObject {
-        if (args.isEmpty() && kwargs.isEmpty()) {
-            val result = python.multiplatform.ffi.Python3.withPython { PyObject_CallNoArgs(pointer) } ?: throw pyErrorOrGeneric("Call failed")
-            return PyObject(result, false)
+    open operator fun invoke(): PyObject = python.multiplatform.ffi.Python3.withPython {
+        // No tuple at all -- PyObject_CallNoArgs is CPython's dedicated zero-argument path.
+        PyObject(PyObject_CallNoArgs(pointer) ?: throw pyErrorOrGeneric("Call failed"), false)
+    }
+
+    @Throws(PyException::class)
+    open operator fun invoke(arg0: PyObject): PyObject = callWithTuple(1) { t ->
+        setArg(t, 0, arg0)
+    }
+
+    @Throws(PyException::class)
+    open operator fun invoke(arg0: PyObject, arg1: PyObject): PyObject = callWithTuple(2) { t ->
+        setArg(t, 0, arg0); setArg(t, 1, arg1)
+    }
+
+    @Throws(PyException::class)
+    open operator fun invoke(arg0: PyObject, arg1: PyObject, arg2: PyObject): PyObject = callWithTuple(3) { t ->
+        setArg(t, 0, arg0); setArg(t, 1, arg1); setArg(t, 2, arg2)
+    }
+
+    @Throws(PyException::class)
+    open operator fun invoke(arg0: PyObject, arg1: PyObject, arg2: PyObject, arg3: PyObject): PyObject = callWithTuple(4) { t ->
+        setArg(t, 0, arg0); setArg(t, 1, arg1); setArg(t, 2, arg2); setArg(t, 3, arg3)
+    }
+
+    @Throws(PyException::class)
+    open operator fun invoke(vararg args: PyObject): PyObject {
+        if (args.isEmpty()) return invoke()
+        return callWithTuple(args.size) { t ->
+            for (i in args.indices) setArg(t, i, args[i])
         }
+    }
 
-        val argTuple = python.multiplatform.ffi.Python3.withPython { PyTuple_New(args.size.toLong()) } ?: throw pyErrorOrGeneric("Failed to build argument tuple")
-        for ((index, arg) in args.withIndex()) {
-            // PyTuple_SetItem steals the reference to the item it's given.
-            // `arg.pointer` is owned by `arg` for the rest of its lifetime, so
-            // hand the tuple a fresh +1 rather than `arg`'s own reference.
-            gilIncRef(arg.pointer)
-            if (python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(argTuple, index.toLong(), arg.pointer) } != 0) {
-                gilDecRef(argTuple)
-                throw pyErrorOrGeneric("Failed to populate argument tuple")
-            }
-        }
+    /**
+     * `self(*args, **kwargs)`. Separate from [invoke] because keyword arguments require
+     * building a dict as well as a tuple, and callers that do not need them should not pay
+     * for the parameter.
+     */
+    @Throws(PyException::class)
+    open fun call(args: Array<out PyObject> = emptyArray(), kwargs: Map<String, PyObject>): PyObject =
+        python.multiplatform.ffi.Python3.withPython {
+            if (kwargs.isEmpty()) return@withPython invoke(*args)
 
-        try {
-            if (kwargs.isEmpty()) {
-                val result = python.multiplatform.ffi.Python3.withPython { PyObject_CallObject(pointer, argTuple) } ?: throw pyErrorOrGeneric("Call failed")
-                return PyObject(result, false)
-            }
-
-            val kwargsDict = python.multiplatform.ffi.Python3.withPython { PyDict_New() } ?: throw pyErrorOrGeneric("Failed to build keyword argument dict")
+            val argTuple = PyTuple_New(args.size.toLong()) ?: throw pyErrorOrGeneric("Failed to build argument tuple")
             try {
-                for ((key, value) in kwargs) {
-                    // PyDict_SetItemString does NOT steal `value.pointer` -- CPython
-                    // increfs it internally, so no extra incRef is needed here.
-                    if (python.multiplatform.ffi.Python3.withPython { PyDict_SetItemString(kwargsDict, key, value.pointer) } != 0) {
-                        throw pyErrorOrGeneric("Failed to populate keyword argument dict")
+                for (i in args.indices) {
+                    // PyTuple_SetItem steals the reference it is given, and args[i].pointer stays
+                    // owned by args[i], so hand the tuple a fresh +1 instead of that reference.
+                    Py_IncRef(args[i].pointer)
+                    if (PyTuple_SetItem(argTuple, i.toLong(), args[i].pointer) != 0) {
+                        throw pyErrorOrGeneric("Failed to populate argument tuple")
                     }
                 }
-                val result = python.multiplatform.ffi.Python3.withPython { PyObject_Call(pointer, argTuple, kwargsDict) } ?: throw pyErrorOrGeneric("Call failed")
-                return PyObject(result, false)
+                val kwargsDict = PyDict_New() ?: throw pyErrorOrGeneric("Failed to build keyword argument dict")
+                try {
+                    for ((key, value) in kwargs) {
+                        // PyDict_SetItemString does not steal; CPython increfs internally.
+                        if (PyDict_SetItemString(kwargsDict, key, value.pointer) != 0) {
+                            throw pyErrorOrGeneric("Failed to populate keyword argument dict")
+                        }
+                    }
+                    PyObject(PyObject_Call(pointer, argTuple, kwargsDict) ?: throw pyErrorOrGeneric("Call failed"), false)
+                } finally {
+                    Py_DecRef(kwargsDict)
+                }
             } finally {
-                gilDecRef(kwargsDict)
+                Py_DecRef(argTuple)
             }
-        } finally {
-            gilDecRef(argTuple)
+        }
+
+    /**
+     * Builds an argument tuple of [size], lets [fill] populate it, and calls this object with it.
+     * The whole sequence runs under a single GIL acquisition rather than one per C API call.
+     */
+    private inline fun callWithTuple(size: Int, fill: (NativePointer) -> Unit): PyObject =
+        python.multiplatform.ffi.Python3.withPython {
+            val argTuple = PyTuple_New(size.toLong()) ?: throw pyErrorOrGeneric("Failed to build argument tuple")
+            try {
+                fill(argTuple)
+                PyObject(PyObject_CallObject(pointer, argTuple) ?: throw pyErrorOrGeneric("Call failed"), false)
+            } finally {
+                Py_DecRef(argTuple)
+            }
+        }
+
+    /** Stores [arg] at [index]. Caller must already hold the GIL. */
+    private fun setArg(tuple: NativePointer, index: Int, arg: PyObject) {
+        // PyTuple_SetItem steals the reference; arg keeps its own, so give the tuple a fresh +1.
+        Py_IncRef(arg.pointer)
+        if (PyTuple_SetItem(tuple, index.toLong(), arg.pointer) != 0) {
+            throw pyErrorOrGeneric("Failed to populate argument tuple")
         }
     }
 
     /** `callable(self)`, i.e. whether [invoke] has any chance of succeeding. */
-    open fun isCallable(): Boolean = python.multiplatform.ffi.Python3.withPython { PyCallable_Check(pointer) } != 0
+    open val isCallable: Boolean
+        get() = python.multiplatform.ffi.Python3.withPython { PyCallable_Check(pointer) } != 0
 
-    /** `bool(self)`. */
-    open fun isTruthy(): Boolean {
-        val result = python.multiplatform.ffi.Python3.withPython { PyObject_IsTrue(pointer) }
-        if (result < 0) throw pyErrorOrGeneric("Failed to evaluate truthiness")
-        return result != 0
-    }
+    /** `bool(self)`. Kotlin has no truthiness protocol, so this stays an explicit query. */
+    open val isTruthy: Boolean
+        get() {
+            val result = python.multiplatform.ffi.Python3.withPython { PyObject_IsTrue(pointer) }
+            if (result < 0) throw pyErrorOrGeneric("Failed to evaluate truthiness")
+            return result != 0
+        }
 
     /** `repr(self)`. */
     open fun repr(): String {
         // PyObject_Repr: new reference on success, null + exception set on failure.
         val reprPointer = python.multiplatform.ffi.Python3.withPython { PyObject_Repr(pointer) } ?: throw pyErrorOrGeneric("Failed to compute repr()")
         val result = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(reprPointer) }
-        gilDecRef(reprPointer)
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(reprPointer) }
         return result ?: throw pyErrorOrGeneric("Failed to decode repr() result")
     }
 
@@ -236,9 +287,23 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         val resultPointer = python.multiplatform.ffi.Python3.withPython { PyObject_RichCompare(pointer, other.pointer, op.opId) }
             ?: throw pyErrorOrGeneric("Comparison failed")
         val truthy = python.multiplatform.ffi.Python3.withPython { PyObject_IsTrue(resultPointer) }
-        gilDecRef(resultPointer)
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(resultPointer) }
         if (truthy < 0) throw pyErrorOrGeneric("Failed to evaluate comparison result")
         return truthy != 0
+    }
+
+    /**
+     * Bridges Python's rich comparison to Kotlin's `<`, `<=`, `>` and `>=`.
+     *
+     * Python has no single three-way comparison, so this asks `<` and then `>`; a type that
+     * implements neither raises rather than silently reporting equality. Kotlin's `==` is left
+     * to [equals], which compares identity of the underlying pointer -- deliberately not the
+     * same question as Python's `==`, which [richCompare] answers.
+     */
+    open operator fun compareTo(other: PyObject): Int = when {
+        richCompare(other, PyCompareOp.LT) -> -1
+        richCompare(other, PyCompareOp.GT) -> 1
+        else -> 0
     }
 
     override fun toString(): String {
@@ -252,7 +317,7 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
             return "<error converting to str${message?.let { ": $it" } ?: ""}>"
         }
         val result = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(strPointer) }
-        gilDecRef(strPointer)
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(strPointer) }
         return result ?: "<error decoding str>"
     }
 

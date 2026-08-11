@@ -19,7 +19,6 @@ import python.native.ffi.PySequence_Contains
 import python.native.ffi.PyTuple_GetItem
 import python.native.ffi.PyTuple_Size
 import python.native.ffi.Py_DecRef
-import python.multiplatform.ffi.gilDecRef
 
 /**
  * Wrapper around a Python `dict` object, adopting `MutableMap<PyObject, PyObject>`
@@ -88,7 +87,7 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
         val itemsPtr = python.multiplatform.ffi.Python3.withPython { PyDict_Items(pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("PyDict_Items failed")
         val itemsTuplePtr = python.multiplatform.ffi.Python3.withPython { PyList_AsTuple(itemsPtr) }
-        gilDecRef(itemsPtr) // list of (k, v) 2-tuples, new reference, no longer needed once copied
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(itemsPtr) } // list of (k, v) 2-tuples, new reference, no longer needed once copied
         if (itemsTuplePtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to snapshot dict items")
         val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(itemsTuplePtr) }
         val result = ArrayList<DictEntry>(count.toInt())
@@ -98,7 +97,7 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
             val valPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pairPtr, 1) }!! // borrowed
             result.add(DictEntry(PyObject(keyPtr, true), PyObject(valPtr, true), this))
         }
-        gilDecRef(itemsTuplePtr)
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(itemsTuplePtr) }
         return result
     }
 
@@ -187,7 +186,7 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
         val valuesPtr = python.multiplatform.ffi.Python3.withPython { PyDict_Values(pointer) }
             ?: throw PyException.fromCurrentError() ?: PyException("PyDict_Values failed")
         val result = python.multiplatform.ffi.Python3.withPython { PySequence_Contains(valuesPtr, value.pointer) }
-        gilDecRef(valuesPtr) // new reference to a list, no longer needed
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(valuesPtr) } // new reference to a list, no longer needed
         if (result == -1) throw PyException.fromCurrentError() ?: PyException("Failed to check dict value membership")
         return result == 1
     }

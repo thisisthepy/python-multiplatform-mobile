@@ -133,12 +133,12 @@ object Python3 {
                         ?: throw pyErrorOrGeneric("Python exec failed")
                     // PyRun_String returns a new reference (usually None for
                     // statement-mode execution); we have no use for it here.
-                    gilDecRef(result)
+                    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(result) }
                 } finally {
-                    gilDecRef(globalsPointer)
+                    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(globalsPointer) }
                 }
             } finally {
-                gilDecRef(modulePointer)
+                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(modulePointer) }
             }
         }
     }

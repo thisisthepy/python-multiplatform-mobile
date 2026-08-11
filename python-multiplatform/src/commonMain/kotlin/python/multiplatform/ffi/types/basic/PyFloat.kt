@@ -24,7 +24,7 @@ import python.native.ffi.PyObject_RichCompareBool
 open class PyFloat(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, borrowed), PyProxy<Double> {
     companion object {
         /** The `PyType` for `float` (`builtins.float`). */
-        val TYPE: PyType by lazy { val obj = from(0.0); val t = obj.getType(); obj.clean(); t }
+        val TYPE: PyType by lazy { val obj = from(0.0); val t = obj.Type; obj.clean(); t }
 
         /** Wraps [value] as a new Python `float` object (`PyFloat_FromDouble`). */
         fun from(value: Double): PyFloat {

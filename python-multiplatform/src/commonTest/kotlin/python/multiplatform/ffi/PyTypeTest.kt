@@ -21,43 +21,43 @@ class PyTypeTest {
 
     @Test
     fun nameReflectsThePythonTypeName() = PythonTestFixture.withInterpreter {
-        val intType = PythonTestFixture.eval("42").getType()
+        val intType = PythonTestFixture.eval("42").Type
         assertEquals("int", intType.name)
 
-        val strType = PythonTestFixture.eval("'x'").getType()
+        val strType = PythonTestFixture.eval("'x'").Type
         assertEquals("str", strType.name)
     }
 
     @Test
     fun baseTypeOfIntIsObject() = PythonTestFixture.withInterpreter {
-        val intType = PythonTestFixture.eval("42").getType()
+        val intType = PythonTestFixture.eval("42").Type
         assertEquals("object", intType.baseType.name)
     }
 
     @Test
     fun baseTypesOfBoolIncludesInt() = PythonTestFixture.withInterpreter {
-        val boolType = PythonTestFixture.eval("True").getType()
+        val boolType = PythonTestFixture.eval("True").Type
         val baseNames = boolType.baseTypes.map { it.name }
         assertTrue("int" in baseNames, "expected bool.__bases__ to include int, got $baseNames")
     }
 
     @Test
     fun mroOfBoolIncludesIntAndObject() = PythonTestFixture.withInterpreter {
-        val boolType = PythonTestFixture.eval("True").getType()
+        val boolType = PythonTestFixture.eval("True").Type
         val mroNames = boolType.mro.map { it.name }
         assertTrue(mroNames.containsAll(listOf("bool", "int", "object")), "expected bool.__mro__ to include bool/int/object, got $mroNames")
     }
 
     @Test
     fun isSubtypeOfReflectsPythonSubclassing() = PythonTestFixture.withInterpreter {
-        val boolType = PythonTestFixture.eval("True").getType()
-        val intType = PythonTestFixture.eval("42").getType()
+        val boolType = PythonTestFixture.eval("True").Type
+        val intType = PythonTestFixture.eval("42").Type
         assertTrue(boolType.isSubtypeOf(intType), "bool should be a subtype of int in Python")
     }
 
     @Test
     fun isInstanceRecognisesActualInstances() = PythonTestFixture.withInterpreter {
-        val intType = PythonTestFixture.eval("42").getType()
+        val intType = PythonTestFixture.eval("42").Type
         val fortyTwo = PythonTestFixture.eval("42")
         val hello = PythonTestFixture.eval("'hello'")
         assertTrue(intType.isInstance(fortyTwo))
@@ -66,14 +66,14 @@ class PyTypeTest {
 
     @Test
     fun invokeConstructsANewInstance() = PythonTestFixture.withInterpreter {
-        val intType = PythonTestFixture.eval("42").getType()
+        val intType = PythonTestFixture.eval("42").Type
         val result = intType.invoke(PythonTestFixture.eval("'7'"))
         assertEquals("7", result.toString())
     }
 
     @Test
     fun castRaisesForIncompatibleObjects() = PythonTestFixture.withInterpreter {
-        val intType = PythonTestFixture.eval("42").getType()
+        val intType = PythonTestFixture.eval("42").Type
         val notAnInt = PythonTestFixture.eval("'not an int'")
         assertFailsWith<PyTypeError> {
             intType.cast(notAnInt)

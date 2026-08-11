@@ -15,7 +15,7 @@ import python.native.ffi.PyUnicode_FromString
 open class PyString(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, borrowed), PyProxy<String> {
     companion object {
         /** The `PyType` for `str` (`builtins.str`). */
-        val TYPE: PyType by lazy { val obj = from(""); val t = obj.getType(); obj.clean(); t }
+        val TYPE: PyType by lazy { val obj = from(""); val t = obj.Type; obj.clean(); t }
 
         /** Wraps [value] as a new Python `str` object (`PyUnicode_FromString`). */
         fun from(value: String): PyString {

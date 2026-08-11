@@ -16,7 +16,6 @@ import python.native.ffi.PyTuple_GetItem
 import python.native.ffi.PyTuple_Size
 import python.native.ffi.PyUnicode_AsUTF8
 import python.native.ffi.Py_DecRef
-import python.multiplatform.ffi.gilDecRef
 
 /**
  * Small helpers shared by the collection wrappers in this package.
@@ -43,7 +42,7 @@ internal fun pyEquals(a: NativePointer, b: NativePointer): Boolean {
 internal fun deriveTypeAndRelease(instancePointer: NativePointer): PyType {
     val typePtr = python.multiplatform.ffi.Python3.withPython { PyObject_Type(instancePointer) }
         ?: throw PyException.fromCurrentError() ?: PyException("Failed to get PyType of scratch instance")
-    gilDecRef(instancePointer) // only needed to read its type; release the scratch instance itself
+    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(instancePointer) } // only needed to read its type; release the scratch instance itself
     return PyType.getInstance(typePtr)
 }
 
@@ -68,7 +67,7 @@ internal fun snapshotElements(pointer: NativePointer): List<PyObject> {
         val itemPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(tuplePtr, i) }!!
         result.add(PyObject(itemPtr, true))
     }
-    gilDecRef(tuplePtr) // scratch snapshot tuple, new reference, no longer needed
+    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(tuplePtr) } // scratch snapshot tuple, new reference, no longer needed
     return result
 }
 
@@ -117,6 +116,6 @@ internal fun pyObjectToNative(obj: PyObject): Any? {
             else -> obj.toString()
         }
     } finally {
-        gilDecRef(typePtr) // PyObject_Type: new reference, only needed for the dispatch above
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(typePtr) } // PyObject_Type: new reference, only needed for the dispatch above
     }
 }

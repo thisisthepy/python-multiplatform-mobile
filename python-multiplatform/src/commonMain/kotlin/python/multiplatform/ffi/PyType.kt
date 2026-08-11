@@ -29,7 +29,7 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
         // PyType_GetName: new reference on success.
         val namePtr: NativePointer = python.multiplatform.ffi.Python3.withPython { PyType_GetName(pointer) } ?: throw pyErrorOrGeneric("Failed to get the type's name")
         val nameStr: String? = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(namePtr) }
-        gilDecRef(namePtr)
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(namePtr) }
         nameStr ?: throw pyErrorOrGeneric("Failed to decode the type's name")
     }
 
@@ -68,12 +68,12 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
                 // types, which CPython treats as immortal.
                 val itemPointer = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(tuplePointer, i) }
                     ?: throw pyErrorOrGeneric("Failed to get $attrName[$i]")
-                gilIncRef(itemPointer)
+                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(itemPointer) }
                 list.add(getInstance(itemPointer))
             }
             return list
         } finally {
-            gilDecRef(tuplePointer)
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(tuplePointer) }
         }
     }
 
@@ -117,14 +117,16 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
         return PyIterator(iterPointer, false)
     }
 
-    /** Calls this type object, i.e. constructs a new instance: `self(*args, **kwargs)`. */
+    /**
+     * Calls this type object, i.e. constructs a new instance: `self(*args, **kwargs)`.
+     *
+     * Type objects are themselves callable -- `self(...)` runs `type.__call__`, i.e. `__new__`
+     * followed by `__init__` -- so this just names the operation; the arity-specific [invoke]
+     * overloads and [call] inherited from [PyObject] do the work.
+     */
     @Throws(PyException::class)
-    override operator fun invoke(vararg args: PyObject, kwargs: Map<String, PyObject>): PyObject {
-        // Type objects are themselves callable (`self(*args, **kwargs)` runs
-        // `type.__call__`, i.e. `__new__` + `__init__`); reuse PyObject's
-        // generic call machinery rather than duplicating it here.
-        return super.invoke(*args, kwargs = kwargs)
-    }
+    override fun call(args: Array<out PyObject>, kwargs: Map<String, PyObject>): PyObject =
+        super.call(args, kwargs)
 
     /** `type.__new__(self)` -- allocates (but does not initialise) a new instance of this type. */
     fun __new__(): PyObject {
@@ -162,8 +164,8 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
         val metaTypeName: String? = metaTypeNamePointer?.let { python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(it) } }
         if (metaTypeNamePointer == null) python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
 
-        metaTypeNamePointer?.let { gilDecRef(it) }
-        gilDecRef(metaTypePointer)
+        metaTypeNamePointer?.let { python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(it) } }
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(metaTypePointer) }
 
         return metaTypeName == "type"
     }

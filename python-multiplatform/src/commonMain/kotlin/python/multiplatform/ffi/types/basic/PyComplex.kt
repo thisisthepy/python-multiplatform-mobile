@@ -14,8 +14,6 @@ import python.native.ffi.PyTuple_SetItem
 import python.native.ffi.Py_IncRef
 import python.native.ffi.Py_DecRef
 import python.native.ffi.PyErr_Occurred
-import python.multiplatform.ffi.gilIncRef
-import python.multiplatform.ffi.gilDecRef
 
 /**
  * Wrapper around a Python `complex` object.
@@ -30,7 +28,7 @@ import python.multiplatform.ffi.gilDecRef
 open class PyComplex(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, borrowed) {
     companion object {
         /** The `PyType` for `complex` (`builtins.complex`). */
-        val TYPE: PyType by lazy { val obj = from(0.0, 0.0); val t = obj.getType(); obj.clean(); t }
+        val TYPE: PyType by lazy { val obj = from(0.0, 0.0); val t = obj.Type; obj.clean(); t }
 
         /** Constructs a new `complex(real, imag)` object. */
         fun from(real: Double, imag: Double): PyComplex {
@@ -41,14 +39,14 @@ open class PyComplex(pointer: NativePointer, borrowed: Boolean) : PyObject(point
             val realObj = PyFloat.from(real)
             val imagObj = PyFloat.from(imag)
             
-            gilIncRef(realObj.pointer)
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(realObj.pointer) }
             python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(args, 0, realObj.pointer) }
             
-            gilIncRef(imagObj.pointer)
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(imagObj.pointer) }
             python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(args, 1, imagObj.pointer) }
             
             val resPtr = python.multiplatform.ffi.Python3.withPython { PyObject_CallObject(complexTypePtr, args) }
-            gilDecRef(args)
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(args) }
             realObj.clean()
             imagObj.clean()
             

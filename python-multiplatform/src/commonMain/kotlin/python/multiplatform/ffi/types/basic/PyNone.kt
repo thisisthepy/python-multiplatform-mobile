@@ -22,7 +22,7 @@ import python.native.ffi.Py_DecRef
 class PyNone private constructor(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, borrowed) {
     companion object {
         /** The `PyType` for `NoneType`. */
-        val TYPE: PyType by lazy { get().getType() }
+        val TYPE: PyType by lazy { get().Type }
 
         private var _instance: PyNone? = null
 

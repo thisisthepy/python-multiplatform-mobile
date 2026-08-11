@@ -14,7 +14,6 @@ import python.native.ffi.PyTuple_New
 import python.native.ffi.PyTuple_SetItem
 import python.native.ffi.PyTuple_Size
 import python.native.ffi.Py_IncRef
-import python.multiplatform.ffi.gilIncRef
 
 /**
  * Wrapper around a Python `tuple` object, adopting the read-only
@@ -47,7 +46,7 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
             elements.forEachIndexed { i, el ->
                 // PyTuple_SetItem steals the reference to its 3rd argument -- incref first so
                 // `el`'s own, independently-managed reference stays valid afterwards.
-                gilIncRef(el.pointer)
+                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(el.pointer) }
                 python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(ptr, i.toLong(), el.pointer) }
             }
             return PyTuple(ptr, false) // PyTuple_New already returned a new/owned reference

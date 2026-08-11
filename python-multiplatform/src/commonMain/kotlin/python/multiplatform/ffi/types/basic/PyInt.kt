@@ -26,7 +26,7 @@ import python.native.ffi.PyObject_RichCompareBool
 open class PyInt(pointer: NativePointer, borrowed: Boolean) : PyObject(pointer, borrowed), PyProxy<Long> {
     companion object {
         /** The `PyType` for `int` (`builtins.int`). */
-        val TYPE: PyType by lazy { val obj = from(0L); val t = obj.getType(); obj.clean(); t }
+        val TYPE: PyType by lazy { val obj = from(0L); val t = obj.Type; obj.clean(); t }
 
         /** Wraps [value] as a new Python `int` object (`PyLong_FromLongLong`). */
         fun from(value: Long): PyInt {

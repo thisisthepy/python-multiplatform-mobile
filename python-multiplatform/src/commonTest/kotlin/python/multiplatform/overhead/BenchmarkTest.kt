@@ -69,11 +69,11 @@ class BenchmarkTest {
         }
 
         Benchmark.run("Py_IncRef/Py_DecRef", iterations = 1_000_000) {
-            python.multiplatform.ffi.gilIncRef(obj)
-            python.multiplatform.ffi.gilDecRef(obj)
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(obj) }
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(obj) }
         }
         
-        python.multiplatform.ffi.gilDecRef(obj)
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(obj) }
     }
 
     @Test
@@ -87,7 +87,7 @@ class BenchmarkTest {
             Benchmark.run("PyUnicode_FromString ($len chars)", warmupIterations = 100, iterations = 10_000) {
                 val pyStr = python.multiplatform.ffi.Python3.withPython { PyUnicode_FromString(str) }
                 if (pyStr != null) {
-                    python.multiplatform.ffi.gilDecRef(pyStr)
+                    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(pyStr) }
                 }
             }
 
@@ -96,7 +96,7 @@ class BenchmarkTest {
                 Benchmark.run("PyUnicode_AsUTF8 ($len chars)", warmupIterations = 100, iterations = 10_000) {
                     python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(pyStr) }
                 }
-                python.multiplatform.ffi.gilDecRef(pyStr)
+                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(pyStr) }
             }
         }
     }
@@ -108,7 +108,7 @@ class BenchmarkTest {
         Benchmark.run("PyLong_FromLongLong", iterations = 100_000) {
             val obj = python.multiplatform.ffi.Python3.withPython { PyLong_FromLongLong(123456789L) }
             if (obj != null) {
-                python.multiplatform.ffi.gilDecRef(obj)
+                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(obj) }
             }
         }
 
@@ -117,7 +117,7 @@ class BenchmarkTest {
             Benchmark.run("PyLong_AsLongLong", iterations = 100_000) {
                 python.multiplatform.ffi.Python3.withPython { PyLong_AsLongLong(obj) }
             }
-            python.multiplatform.ffi.gilDecRef(obj)
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(obj) }
         }
     }
 
@@ -129,8 +129,8 @@ class BenchmarkTest {
         val rawObj = python.multiplatform.ffi.Python3.withPython { PyLong_FromLongLong(42L) }
         if (rawObj != null) {
             Benchmark.run("Manual IncRef/DecRef", iterations = 100_000) {
-                python.multiplatform.ffi.gilIncRef(rawObj)
-                python.multiplatform.ffi.gilDecRef(rawObj)
+                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(rawObj) }
+                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(rawObj) }
             }
             
             Benchmark.run("PyObject wrapper creation", iterations = 100_000) {
@@ -138,7 +138,7 @@ class BenchmarkTest {
                 obj.clean()
             }
             
-            python.multiplatform.ffi.gilDecRef(rawObj)
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(rawObj) }
         }
     }
 
@@ -151,7 +151,7 @@ class BenchmarkTest {
         if (moduleName == null) return
         
         val sysModule = python.native.ffi.PyImport_Import(moduleName)
-        python.multiplatform.ffi.gilDecRef(moduleName)
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(moduleName) }
         
         if (sysModule == null) {
             python.native.ffi.PyErr_Clear()
@@ -162,10 +162,10 @@ class BenchmarkTest {
         Benchmark.run("PyObject_GetAttrString", iterations = 10_000) {
             val attr = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(sysModule, "version") }
             if (attr != null) {
-                python.multiplatform.ffi.gilDecRef(attr)
+                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(attr) }
             }
         }
         
-        python.multiplatform.ffi.gilDecRef(sysModule)
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(sysModule) }
     }
 }
