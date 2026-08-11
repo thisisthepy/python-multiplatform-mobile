@@ -159,4 +159,48 @@ class GCLeakTest {
         listType.close()
         builtins.close()
     }
+
+    @Test
+    fun testCascadingReleaseOnGC() {
+        if (!Python3.isInitialized) Python3.initialize()
+        
+        val builtins = Python3.import("builtins")
+        val listType = builtins.getAttr("list")
+        val testTarget = listType() // the object we will track
+        
+        val refBefore = getRefCount(testTarget)
+        
+        // Create 1000 lists, each containing testTarget
+        val WRAPPERS_LARGE = 1000
+        repeat(WRAPPERS_LARGE) {
+            val wrapperList = listType()
+            val appendMethod = wrapperList.getAttr("append")
+            appendMethod(testTarget) // inner object refcount++
+            appendMethod.close()
+            // We do NOT close wrapperList. It falls out of scope and should be GC'd.
+        }
+        
+        val refAfterLoop = getRefCount(testTarget)
+        assertTrue(
+            refAfterLoop >= refBefore + WRAPPERS_LARGE,
+            "target count should have risen by $WRAPPERS_LARGE (before: $refBefore, after: $refAfterLoop)"
+        )
+        
+        var refAfterGC = refAfterLoop
+        var attempts = 0
+        while (refAfterGC == refAfterLoop && attempts < 50) {
+            forceGC()
+            refAfterGC = getRefCount(testTarget)
+            attempts++
+        }
+        
+        assertTrue(
+            refAfterGC < refAfterLoop,
+            "target count should drop as outer lists are GC'd (before GC: $refAfterLoop, after GC: $refAfterGC)"
+        )
+        
+        testTarget.close()
+        listType.close()
+        builtins.close()
+    }
 }

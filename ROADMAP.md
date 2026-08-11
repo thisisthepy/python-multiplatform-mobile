@@ -191,13 +191,21 @@ crash once upcalls exist.
 
 **Depends on:** §1.
 
-The cleaner path itself is fixed: the cleanup action closes over the pointer value alone, so it
-no longer keeps the wrapper reachable, and `createCleaner` is back on Kotlin/Native. `close()`
-is idempotent and the accounting is verified by `RefCountTest` (6 tests, passing) — wrappers
-take exactly the references they claim and give back exactly those.
+**Closed.** Both the explicit and automatic (GC-driven) release paths are fully functional on JVM and Kotlin/Native. The block recorded in §1 (GIL locking on parked thread) was resolved, unblocking the background cleaners.
 
-What does not work is GC-driven release, for the reason in §1. `GCLeakTest` is left red and
-states that in its assertion message.
+Measurements prove that GC-driven release actually drops CPython reference counts:
+- `GCLeakTest.testReferenceCountDecreasesOnGC` verifies a simple single-object wrapper lifecycle.
+- `GCLeakTest.testCascadingReleaseOnGC` verifies complex nested structures: appending a target object to 1000 Python lists, then dropping the Kotlin wrappers for those outer lists. The Kotlin GC correctly collects the list wrappers, their cleaners call `Py_DecRef` on the lists, which cascades into CPython freeing the lists and decrementing the target object's reference count.
+
+**Platform Differences:**
+- **JVM (`desktopMain`)**: Uses `java.lang.ref.Cleaner`, driven by a dedicated background thread.
+- **Kotlin/Native (`iosMain`, etc)**: Uses `kotlin.native.ref.createCleaner`, which runs on a dedicated worker thread, allowing asynchronous non-blocking cleanup.
+- **Android (`androidMain`)**: Uses `Cleaner` where available (API 33+), with a fallback to `PhantomReference` requiring background polling on older devices. (Testing on device requires `androidInstrumentedTest` setup — see §11b).
+
+**What fundamentally cannot be released in this architecture:**
+1. **Uncaught exceptions during FFI allocation**: If Kotlin code calls a C-API function that returns a new reference (e.g., `PyObject_GetAttrString`), and a Kotlin exception disrupts the control flow *before* that raw pointer is wrapped in `PyObject(..., borrowed = false)` or explicitly `Py_DecRef`'d via a `finally` block, the CPython reference leaks permanently.
+2. **Post-Finalize GC**: When `Py_Finalize()` executes, it frees CPython's heap. If Kotlin wrappers are GC'd *after* this, their cleaners see `!Python3.isInitialized` and exit early to avoid segfaults. While safe for shutdown, if the interpreter is later re-initialized via `Py_Initialize()`, those dangling wrappers will retain pointers that either point to unmapped memory or alias newly allocated CPython objects.
+3. **Cross-boundary cycles**: A Python object holding an upcall proxy to a Kotlin object, which in turn holds a `PyObject` pointing back to the Python object. Neither language's GC can trace through the other, leading to a permanent leak unless broken manually or addressed via `tp_traverse` (see §7).
 
 ## 5. Composition (조립)
 
