@@ -66,13 +66,13 @@ class MainActivity : ComponentActivity() {
     }
 
     val PYTHON_DIR: String = "lib/python3.13"
-    val PYTHON_ASSET_DIR: String = if (currentPlatform.is64Bit && currentPlatform.isArm) {
+    val PYTHON_ASSET_DIR: String = (if (currentPlatform.is64Bit && currentPlatform.isArm) {
         "arm64-v8a"
     } else if (currentPlatform.is64Bit && currentPlatform.isX86) {
         "x86_64"
     } else {
         throw IllegalStateException("Unsupported platform: ${currentPlatform.os} ${currentPlatform.arch}")
-    } + "/" + PYTHON_DIR
+    }) + "/" + PYTHON_DIR
 
     private fun copyPythonFromAssets(context: Context) {
         val filesDir = context.filesDir
