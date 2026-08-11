@@ -113,6 +113,15 @@ object bindings {
     @JvmStatic external fun PyImport_ImportModuleN(name: Long): Long
     @JvmStatic external fun PyObject_GetAttrStringN(o: Long, name: Long): Long
 
+    // ---- Composition probes: the whole binder operation in one crossing ----
+    // asmGetAttr replaces ffiAllocUtf8 + PyObject_GetAttrString + PyErr_Clear + ffiFreeUtf8.
+    // asmListToArray replaces PyList_Size + N x PyList_GetItem, filling the caller's array
+    // and returning how many elements it wrote.
+    // Borrowed reference, leaf: pure index into the list's item array.
+    @JvmStatic @dalvik.annotation.optimization.CriticalNative external fun PyList_GetItemRaw(list: Long, i: Long): Long
+    @JvmStatic external fun asmGetAttr(obj: Long, name: String): Long
+    @JvmStatic external fun asmListToArray(list: Long, out: LongArray): Int
+
     /**
      * Which JNI calling convention this device fast-paths.
      *

@@ -1,0 +1,100 @@
+package python.native.ffi
+
+import android.os.Build
+import android.util.Log
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/**
+ * Measures what composing a binder operation on the native side is worth.
+ *
+ * Every other benchmark here optimises the cost of ONE crossing. This one changes how many
+ * crossings happen. That was the shape the Android path was originally built around --
+ * `artMain` assembling a whole operation and `androidMain` calling the assembly once -- and
+ * it is the only lever left now that the per-crossing cost has bottomed out at ~2-7ns.
+ *
+ * Two cases, chosen because they bracket the range:
+ *
+ *   getAttr        a fixed 4 crossings composed into 1 (alloc, call, error check, free)
+ *   list -> array  N+1 crossings composed into 1, so the gap grows with N
+ */
+@RunWith(AndroidJUnit4::class)
+class CompositionBenchmark {
+
+    private companion object {
+        const val TAG = "CompositionBenchmark"
+        const val WARMUP = 20_000
+        const val ITERS = 200_000
+        const val ROUNDS = 5
+        const val LIST_SIZE = 1000
+    }
+
+    private var sink = 0L
+
+    private inline fun best(iters: Int, body: () -> Long): Double {
+        var b = Double.MAX_VALUE
+        repeat(ROUNDS) {
+            var local = 0L
+            val t0 = System.nanoTime()
+            for (i in 0 until iters) local += body()
+            val ns = (System.nanoTime() - t0).toDouble() / iters
+            sink += local
+            if (ns < b) b = ns
+        }
+        return b
+    }
+
+    @Test
+    fun composedVersusPerCallCrossings() {
+        PythonOnDevice.ensureInitialised()
+
+        val main = PythonOnDevice.withUtf8("__main__") { bindings.PyImport_ImportModule(it) }
+        assertTrue("could not import __main__", main != 0L)
+
+        val setup = "_bench_list = list(range($LIST_SIZE))"
+        assertEquals(0, PythonOnDevice.withUtf8(setup) { bindings.PyRun_SimpleString(it) })
+
+        val list = PythonOnDevice.withUtf8("_bench_list") { bindings.PyObject_GetAttrString(main, it) }
+        assertTrue("could not read _bench_list", list != 0L)
+        assertEquals(LIST_SIZE.toLong(), bindings.PyList_Size(list))
+
+        // --- getAttr: 4 crossings vs 1 ---
+        val perCallAttr = best(ITERS) {
+            val p = bindings.ffiAllocUtf8("_bench_list")
+            try {
+                val r = bindings.PyObject_GetAttrStringN(main, p)
+                if (r == 0L) bindings.PyErr_ClearN()
+                r
+            } finally {
+                bindings.ffiFreeUtf8(p)
+            }
+        }
+        val composedAttr = best(ITERS) { bindings.asmGetAttr(main, "_bench_list") }
+
+        assertTrue("composed getAttr returned 0", bindings.asmGetAttr(main, "_bench_list") != 0L)
+
+        // --- list -> array: N+1 crossings vs 1 ---
+        val out = LongArray(LIST_SIZE)
+        val small = 200
+        val perCallList = best(small) {
+            val n = bindings.PyList_Size(list).toInt()
+            var acc = 0L
+            for (i in 0 until n) acc += bindings.PyList_GetItemRaw(list, i.toLong())
+            acc
+        }
+        val composedList = best(small) { bindings.asmListToArray(list, out).toLong() }
+
+        assertEquals("composed copy wrote the wrong count", LIST_SIZE, bindings.asmListToArray(list, out))
+        assertTrue("composed copy left the array empty", out[LIST_SIZE - 1] != 0L)
+
+        Log.i(TAG, "=== API ${Build.VERSION.SDK_INT} / ${Build.MODEL} ===")
+        Log.i(TAG, String.format("getAttr   per-call (4 crossings) %9.2f ns   composed %9.2f ns   %.1fx",
+            perCallAttr, composedAttr, perCallAttr / composedAttr))
+        Log.i(TAG, String.format("list->arr per-call (%d crossings) %9.2f ns   composed %9.2f ns   %.1fx",
+            LIST_SIZE + 1, perCallList, composedList, perCallList / composedList))
+        Log.i(TAG, "sink=$sink")
+    }
+}

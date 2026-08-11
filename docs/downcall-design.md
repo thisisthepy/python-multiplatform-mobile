@@ -566,3 +566,72 @@ same host, for the same real call:
 
 About 1.6x between the two paths on identical hardware, not the 2.8x the cross-machine
 comparison implied. Both are now in the same regime, which is the part that matters.
+
+## Composition: measured
+
+Per-crossing cost has bottomed out — 2.65ns on desktop, 1.66-7.24ns on Android depending on
+API level and hardware. The only lever left is crossing fewer times, which is the structure
+the Android path was originally built around: `artMain` assembling a whole binder operation
+and `androidMain` calling that assembly once, rather than `commonMain` driving raw C API
+calls one crossing at a time.
+
+`CompositionBenchmark` measures two cases against their per-call equivalents.
+
+| | per-call | composed | |
+|---|---|---|---|
+| **API 36 hardware** | | | |
+| `getAttr` (4 crossings → 1) | 3929.84 ns | **713.34 ns** | 5.5x |
+| `list → LongArray`, 1000 elems (1001 → 1) | 50065.89 ns | **4532.55 ns** | 11.0x |
+| **API 36 emulator** | | | |
+| `getAttr` | 2270.23 ns | **474.67 ns** | 4.8x |
+| `list → LongArray` | 28145.00 ns | **3705.63 ns** | 7.6x |
+| **API 26 emulator** | | | |
+| `getAttr` | 2431.34 ns | **244.70 ns** | 9.9x |
+| `list → LongArray` | 4890.83 ns | 4113.13 ns | 1.2x |
+
+### What the numbers actually say
+
+**Composition wins, but not purely by removing crossings.** Four crossings at ~7ns is 28ns,
+which does not explain 3929ns versus 713ns. The per-call `getAttr` allocates a C string
+through `ffiAllocUtf8` — a malloc, a copy out of the jstring, and a matching free — where the
+composed version borrows the jstring directly with `GetStringUTFChars` and releases it. Most
+of the win is redundant work that disappears when the operation is expressed once on the
+native side, and the crossing count is the smaller part. That is still a real argument for
+composing, but the mechanism is not the one the crossing-count framing suggests.
+
+**The bulk case is where crossing count genuinely dominates**, and it scales with N: 11x at
+1000 elements on hardware. That is the case the current design handles worst, because
+`commonMain` drives it element by element.
+
+**API 26 barely benefits from composing the bulk case** — 1.2x. Its per-element crossings run
+under `@CriticalNative`, which is free at that API level, so there was little to remove. This
+is the mirror image of the convention result: composition pays most exactly where the
+per-crossing cost is highest, which is modern Android, which is where the users are.
+
+### Where this leaves the design
+
+`PyObject` was `expect`/`actual` with an Android `actual` marked `external` — the hook for
+exactly this — until commit 0fae961a (2025-12-20) folded it into a single `commonMain` class
+along with `PyObject.desktop.kt` and `PyObject.native.kt`. That commit's real subject was
+moving `PyAutoCloseable` to per-platform implementations, which was right and should stand;
+losing the composition hook was collateral. Restoring `expect`/`actual` on `PyObject` while
+keeping the `PyAutoCloseable` split is what reopens this path.
+
+Windows cannot host a Kotlin/Native assembly library, so a composed desktop path would cover
+macOS and Linux only, with Windows staying on direct Panama calls. At 2.65ns per crossing
+that is a much smaller loss on desktop than the same gap would be on Android.
+
+## A build defect that made all of this harder
+
+Three separate instrumented runs failed with `UnsatisfiedLinkError` on symbols that were
+demonstrably present in the freshly linked `.so`. The cause was in `build.gradle.kts`:
+
+    linkTaskProvider.configure {
+        copy { from(outputFile); into(...) }   // runs at CONFIGURATION time
+    }
+
+A bare `copy {}` inside a `configure {}` block executes while Gradle is configuring the build,
+not when the link task runs — so every build staged the *previous* build's library into
+`jniLibs`. Any change to the `.def` or to native sources needed two full builds before it
+reached the device, and in between the failure looked exactly like a code bug. Moved into
+`doLast`, so it stages what the link actually produced.

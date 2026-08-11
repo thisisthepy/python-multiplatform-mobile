@@ -459,9 +459,17 @@ kotlin {
 
                         linkTaskProvider.configure {
                             val type = if (buildType == NativeBuildType.DEBUG) "debug" else "release"
-                            copy {
-                                from(outputFile)
-                                into(file("$androidBuildDir/$type/jniLibs/$targetABI/"))
+                            val dest = file("$androidBuildDir/$type/jniLibs/$targetABI/")
+                            // doLast, not the configure block itself: a bare copy {} here runs at
+                            // CONFIGURATION time, so it stages whatever the previous build left in
+                            // outputFile. That is why a changed .def or source produced an APK with
+                            // a stale library and an UnsatisfiedLinkError that looked like a code
+                            // bug -- the fix had to be built twice for the second run to pick it up.
+                            doLast {
+                                copy {
+                                    from(outputFile)
+                                    into(dest)
+                                }
                             }
                         }
                         afterEvaluate {

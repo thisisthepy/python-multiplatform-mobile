@@ -13,6 +13,8 @@ extern const char* Py_GetVersion(void);
 extern jlong PyImport_ImportModule(const char*);
 extern jlong PyObject_GetAttrString(jlong, const char*);
 extern jlong PyErr_Occurred(void);
+extern jlong PyList_GetItem(jlong, jlong);
+extern void PyErr_Clear(void);
 
 jlong critical_echo0(jlong x) { return x; }
 jlong critical_echo1(jlong x) { return x; }
@@ -59,6 +61,37 @@ static jlong f_PyImport_ImportModule(JNIEnv *e, jclass c, jlong n) { return PyIm
 static jlong f_PyObject_GetAttrString(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_GetAttrString(o, (const char*)n); }
 static jlong f_PyErr_Occurred(JNIEnv *e, jclass c) { return PyErr_Occurred(); }
 
+/*
+ * Composition probes.
+ *
+ * Everything else here crosses the JNI boundary once per C API call. These do the whole
+ * binder-level operation on the native side and cross once, which is the design the Android
+ * path was originally built around (artMain assembling, androidMain calling the assembly).
+ * They exist to measure what that structure is worth before committing to it.
+ *
+ * Ordinary JNI on purpose: they need JNIEnv to touch the jstring and the jlong[], and they
+ * run Python code, so a GC-blocking convention would be wrong regardless of speed.
+ */
+static jlong asm_getattr(JNIEnv *e, jclass c, jlong obj, jstring name) {
+    const char *n = (*e)->GetStringUTFChars(e, name, NULL);
+    if (n == NULL) return 0;
+    jlong r = PyObject_GetAttrString(obj, n);
+    (*e)->ReleaseStringUTFChars(e, name, n);
+    if (r == 0) PyErr_Clear();
+    return r;
+}
+
+static jint asm_list_to_array(JNIEnv *e, jclass c, jlong list, jlongArray out) {
+    jsize cap = (*e)->GetArrayLength(e, out);
+    jlong len = PyList_Size(list);
+    jsize n = (len < (jlong)cap) ? (jsize)len : cap;
+    jlong *buf = (*e)->GetLongArrayElements(e, out, NULL);
+    if (buf == NULL) return -1;
+    for (jsize i = 0; i < n; i++) buf[i] = PyList_GetItem(list, (jlong)i);
+    (*e)->ReleaseLongArrayElements(e, out, buf, 0);
+    return n;
+}
+
 int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -98,6 +131,9 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyImport_ImportModuleF", "(J)J", (void *)&f_PyImport_ImportModule},
         {"PyObject_GetAttrStringF", "(JJ)J", (void *)&f_PyObject_GetAttrString},
         {"PyErr_OccurredF", "()J", (void *)&f_PyErr_Occurred},
+        {"PyList_GetItemRaw", "(JJ)J", (void *)&PyList_GetItem},
+        {"asmGetAttr", "(JLjava/lang/String;)J", (void *)&asm_getattr},
+        {"asmListToArray", "(J[J)I", (void *)&asm_list_to_array},
 
         /*
          * Ordinary-JNI registrations, reusing the same wrappers as the @FastNative set --
@@ -111,6 +147,6 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyImport_ImportModuleN", "(J)J", (void *)&f_PyImport_ImportModule},
         {"PyObject_GetAttrStringN", "(JJ)J", (void *)&f_PyObject_GetAttrString}
     };
-    (*env)->RegisterNatives(env, clazz, methods, 35);
+    (*env)->RegisterNatives(env, clazz, methods, 38);
     return JNI_VERSION_1_6;
 }
