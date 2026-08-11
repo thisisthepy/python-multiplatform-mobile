@@ -213,3 +213,45 @@ only place an `actual external fun` could go, and that was the hook for routing 
 through a single composed JNI call. Measurement later put a number on it — 5.5x on one
 `getAttr`, 11x on a 1000-element list conversion. Recovering it does not mean reverting the
 commit; it means expressing composed operations in the FFI layer, as above.
+
+## Test layering: low-level and assembled
+
+Tests are split by which layer they exercise, and both layers must be covered on every
+platform. This is not organisational tidiness — the gap between them hid a defect for the whole
+of the object model's life.
+
+**Low-level** tests call EmbedAPI functions one at a time: does this function return what its C
+counterpart returns, does it report failure the documented way, does it leave the reference
+count where it found it. `commonTest/.../python/native/ffi/EmbedApiLowLevelTest.kt` and, on
+Android, everything under `androidInstrumentedTest` that reaches through `bindings`.
+
+**Assembled** tests call `Python3` and the object model as an application would.
+`commonTest/.../python/multiplatform/ffi/**` and
+`androidInstrumentedTest/.../assembled/AssembledApiTest.kt`.
+
+### Why both, everywhere
+
+`commonTest` was entirely assembled and ran only on iOS and desktop. Android's instrumented
+tests were entirely low-level. So no test anywhere called the real object model on a device —
+and it turned out `Python3.exec` crashes the process on its first call there, because several
+functions it reaches still take a Kotlin `String` straight across JNI.
+
+Fourteen green Android tests said nothing about that. A test that does not walk the path
+callers walk proves only that some other path works.
+
+The Android assembled tests are `@Ignore`d until ROADMAP §2 lands, because they crash the
+instrumentation process rather than failing, and a crashed runner takes every other test with
+it. They are the acceptance check for that work.
+
+### Two things to know when adding tests here
+
+**The interpreter is process-wide; no single test owns its lifecycle.** `DesktopPythonTest`
+used to call `Py_Initialize()` and `Py_Finalize()` itself. Every class scheduled after it then
+died inside `PyGILState_Ensure` → `new_threadstate`, reporting *zero* tests because the JVM
+went down before any XML was written. It stayed invisible while nothing happened to run
+afterwards. Go through `PythonTestFixture`, which initialises once per process.
+
+**Read test counts from a cleaned results directory.** Gradle leaves XML from previous runs in
+place, so a crashed run can report the previous run's numbers. A suite that "passes 111 tests"
+while crashing is what stale XML looks like — delete `build/test-results/<target>/` when a
+count needs to be trusted.
