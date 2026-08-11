@@ -248,8 +248,8 @@ internal object PanamaBackend {
             for (i in paramTypes.indices) {
                 val p = paramTypes[i]
                 if (p == POINTER_TYPE) {
-                    java.lang.reflect.Array.set(layoutParams, i, address)
-                    mtParams.add(memorySegmentClass)
+                    java.lang.reflect.Array.set(layoutParams, i, javaLong)
+                    mtParams.add(Long::class.javaPrimitiveType!!)
                 } else {
                     java.lang.reflect.Array.set(layoutParams, i, classToLayout(p))
                     mtParams.add(p)
@@ -259,22 +259,16 @@ internal object PanamaBackend {
             val fd = if (retType == Void.TYPE) {
                 fdOfVoidMethod.invoke(null, layoutParams)
             } else if (retType == POINTER_TYPE) {
-                fdOfMethod.invoke(null, address, layoutParams)
+                fdOfMethod.invoke(null, javaLong, layoutParams)
             } else {
                 fdOfMethod.invoke(null, classToLayout(retType), layoutParams)
             }
 
-            val mtRet = if (retType == POINTER_TYPE) memorySegmentClass
-                        else if (retType == Void.TYPE) Void.TYPE
-                        else retType
-
             val rawHandle = downcallHandleMethod.invoke(
                 linker, seg, fd, emptyOptions
             ) as MethodHandle
-
-            // Adapt: replace MemorySegment params with long, MemorySegment returns with long
-            adaptModernHandle(rawHandle, retType, paramTypes, memorySegmentClass,
-                ofAddressMH, segmentAddressMH, nullSegment)
+            
+            rawHandle
         }
 
         // ---- Symbol address lookup (no downcall handle built) ----
@@ -516,8 +510,8 @@ internal object PanamaBackend {
             for (i in paramTypes.indices) {
                 val p = paramTypes[i]
                 if (p == POINTER_TYPE) {
-                    java.lang.reflect.Array.set(layoutParams, i, cPointer)
-                    mtParams.add(memoryAddressClass)
+                    java.lang.reflect.Array.set(layoutParams, i, cLongLong)
+                    mtParams.add(Long::class.javaPrimitiveType!!)
                 } else {
                     java.lang.reflect.Array.set(layoutParams, i, classToLayout(p))
                     mtParams.add(p)
@@ -527,21 +521,19 @@ internal object PanamaBackend {
             val fd = if (retType == Void.TYPE) {
                 fdOfVoidMethod.invoke(null, layoutParams)
             } else if (retType == POINTER_TYPE) {
-                fdOfMethod.invoke(null, cPointer, layoutParams)
+                fdOfMethod.invoke(null, cLongLong, layoutParams)
             } else {
                 fdOfMethod.invoke(null, classToLayout(retType), layoutParams)
             }
 
-            val mtRet = if (retType == POINTER_TYPE) memoryAddressClass
+            val mtRet = if (retType == POINTER_TYPE) Long::class.javaPrimitiveType!!
                         else if (retType == Void.TYPE) Void.TYPE
                         else retType
             val mt = MethodType.methodType(mtRet, mtParams)
 
             val rawHandle = downcallMethod.invoke(clinker, symAddr, mt, fd) as MethodHandle
 
-            // Adapt: replace MemoryAddress params with long, MemoryAddress returns with long
-            adaptIncubatorHandle(rawHandle, retType, paramTypes, memoryAddressClass,
-                ofLongMethod, toRawLongMethod)
+            rawHandle
         }
 
         // ---- Symbol address lookup (no downcall handle built) ----

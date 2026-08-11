@@ -489,3 +489,37 @@ This makes desktop, not Android, the first thing to fix. The shape vocabulary al
 committed is the lever: 14 fixed signatures make `invokeExact` reachable, because the call
 site's static type is then known and constant. That work now has a measured payoff rather
 than a suspected one.
+
+### Fixed: 1015.95 ns -> 2.65 ns
+
+Two changes, both confined to the desktop backend:
+
+**Pointers are now described as `ValueLayout.JAVA_LONG`, not `ADDRESS`.** Both are 8 bytes and
+travel in the same register on a 64-bit ABI, but describing them as addresses forced Panama to
+hand back a `MemorySegment`, which the backend then unwrapped through per-call argument and
+return filters -- reflective `MethodHandle` invocations of `ofAddress`, `reinterpret` and
+`getString`. Describing them as longs deletes the filters outright.
+
+**Call sites use `invokeExact`.** With no filters the handle's type is exactly
+`(long, long, ...) -> long`, which matches the Kotlin call site's static type, and that is the
+condition `invokeExact` requires. Kotlin accepted it directly with no signature-polymorphism
+workaround, which had been the open question. 265 wrappers now use it.
+
+Measured on the same machine, same benchmark:
+
+| | before | after |
+|---|---|---|
+| `PyList_Size` on `sys.path` | 1015.95 ns/call | **2.65 ns/call** |
+| net of the Kotlin floor | 1015.61 ns | **2.01 ns** |
+
+About 380x, and desktop goes from the slowest FFI path in the project to the fastest — 2.65ns
+against 7.47ns on Android hardware, on a host roughly 9x faster at the floor, so the two are
+now in the same regime rather than separated by two orders of magnitude.
+
+The reflective two-backend selection is untouched and still resolves `java.lang.foreign` or
+`jdk.incubator.foreign` at startup. That was never the problem; letting reflection reach the
+per-call path was. Reflection now runs once per symbol, at link time.
+
+Strings still convert at the Kotlin level rather than through a handle filter: `withUtf8 { }`
+allocates, passes the address as a long, and frees in a `finally`. Return values owned by
+CPython are read without being freed, since freeing them would be a use-after-free.
