@@ -160,37 +160,56 @@ reopening `PyObject` as `expect`/`actual`.
 
 ## What the PyAutoCloseable split actually changed
 
-Commit `0fae961a` (2025-12-20) is often described as de-duplicating `PyObject`. It did not:
-there was no duplication to remove.
+Commit `0fae961a` (2025-12-20) has been described here as de-duplicating `PyObject`, and as
+extracting lifetime management out of it. Both are wrong.
 
-Before it, `PyObject` was `expect`/`actual`, but every `actual` was a placeholder. The whole
-desktop implementation was one line:
+There was no duplication: every `actual` was a placeholder. The whole desktop implementation
+was one line, the Android one carried a single commented `//actual external fun incRef()`, and
+the real logic sat in a **comment block** in `commonMain` above the note *"Temporary commented
+due to the error: Expected declaration cannot have a body. TODO: Move this to the actual
+implementation."*
+
+And lifetime management was already extracted. `PyObjectAutoCloseable` in `jvmMain` held the
+`Cleaner`; `PyObject` never owned it.
+
+What the commit actually did:
+
+**1. Hoisted the base class from `jvmMain` into `commonMain` as `expect`/`actual`.**
 
 ```kotlin
-actual open class PyObject actual constructor(...): PyObjectAutoCloseable(pointer, borrowed)
+// before -- a plain class in jvmMain, shared by android and desktop
+abstract class PyObjectAutoCloseable(open val pointer: NativePointer, borrowed: Boolean): AutoCloseable
+
+// after -- an expect in commonMain, with a leaf actual per platform
+expect abstract class PyAutoCloseable(pointer: NativePointer) {
+    abstract fun clean()
+}
 ```
 
-and the Android one carried a single commented `//actual external fun incRef()`. The real
-logic — `getAttr`, `setAttr`, `delAttr`, `toString` — sat in a **comment block** in
-`commonMain`, above a note reading *"Temporary commented due to the error: Expected
-declaration cannot have a body. TODO: Move this to the actual implementation."*
+**2. Gave it an abstract `clean()`, so the cleanup action comes from the subclass.** Before,
+the base held a hardcoded (and commented-out) `//PyDecRef(this.pointer)`; after, it calls
+`clean()` and `PyObject` supplies it.
 
-So the problem being solved was that an `expect` declaration cannot have a body, which left
-the logic with nowhere to live. Moving lifetime management out into its own
-`expect`/`actual` `PyAutoCloseable` freed `PyObject` to become an ordinary common class with
-real method bodies, and the commented logic finally became code.
+**3. Split the single `jvmMain` implementation into per-platform leaves** — and this fixed a
+latent crash. `jvmMain`'s version called `Cleaner.create()` unconditionally, and Android
+inherited it while minSdk was 24. `java.lang.ref.Cleaner` does not exist below API 33, so
+every `PyObject` construction on API 24-32 would have thrown `NoClassDefFoundError`. The new
+`PyAutoCloseable.android.kt` branches on `SDK_INT` and falls back to `PhantomReference` +
+`ReferenceQueue`.
 
-The split itself is sound and should stay. Lifetime management genuinely differs per platform:
+**4. As a consequence, `PyObject` stopped being `expect`/`actual`.** Once the base class was
+expressible in `commonMain`, `PyObject` could inherit it there and finally have real method
+bodies — which is how the commented logic became code.
 
-| platform | mechanism |
+| platform | lifetime mechanism after the split |
 |---|---|
 | Kotlin/Native | explicit `close()` |
 | Android API 33+ | `java.lang.ref.Cleaner` |
-| Android API 26-32 | `PhantomReference` + `ReferenceQueue` + a daemon thread (`Cleaner` does not exist) |
+| Android API 26-32 | `PhantomReference` + `ReferenceQueue` + daemon thread |
 | Desktop | `java.lang.ref.Cleaner` |
 
-What was lost was incidental: `PyObject.android.kt` had been the only place an
-`actual external fun` could go, and that was the hook for routing an operation through a
-single composed JNI call. Measurement later put a number on it — 5.5x on a single `getAttr`,
-11x on a 1000-element list conversion. Recovering it does not mean reverting that commit; it
-means expressing composed operations in the FFI layer, as above.
+The split is sound and stays. What was lost was incidental: `PyObject.android.kt` had been the
+only place an `actual external fun` could go, and that was the hook for routing an operation
+through a single composed JNI call. Measurement later put a number on it — 5.5x on one
+`getAttr`, 11x on a 1000-element list conversion. Recovering it does not mean reverting the
+commit; it means expressing composed operations in the FFI layer, as above.
