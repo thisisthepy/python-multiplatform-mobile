@@ -11,7 +11,7 @@ object UpcallTarget {
 
     @JvmStatic
     fun upcallString(addr: Long): Long {
-        val s = PanamaBackend.readUtf8String(addr) ?: return 0L
+        val s = Panama.readUtf8String(addr) ?: return 0L
         return s.length.toLong()
     }
 }
@@ -20,12 +20,12 @@ object UpcallStub {
     val primitiveStubAddr: Long by lazy {
         val method = UpcallTarget::class.java.methods.first { it.name == "upcallPrimitive" }
         val handle = MethodHandles.lookup().unreflect(method)
-        PanamaBackend.createUpcallStubLongToLong(handle)
+        Panama.createUpcallStubLongToLong(handle)
     }
 
     val stringStubAddr: Long by lazy {
         val method = UpcallTarget::class.java.methods.first { it.name == "upcallString" }
         val handle = MethodHandles.lookup().unreflect(method)
-        PanamaBackend.createUpcallStubLongToLong(handle)
+        Panama.createUpcallStubLongToLong(handle)
     }
 }

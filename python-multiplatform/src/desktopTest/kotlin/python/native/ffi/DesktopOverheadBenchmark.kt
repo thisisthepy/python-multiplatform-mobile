@@ -152,9 +152,9 @@ class DesktopOverheadBenchmark {
         }
 
         // Same three calls, same work, but the C strings are allocated once.
-        val mainAddr = PanamaBackend.allocateUtf8Freeable("__main__")
-        val dictAddr = PanamaBackend.allocateUtf8Freeable("__dict__")
-        val codeAddr = PanamaBackend.allocateUtf8Freeable(code)
+        val mainAddr = Panama.allocateUtf8Freeable("__main__")
+        val dictAddr = Panama.allocateUtf8Freeable("__dict__")
+        val codeAddr = Panama.allocateUtf8Freeable(code)
         val hoisted = try {
             timeBest {
                 val mod = bindings.PyImport_AddModuleRefHandle.invoke(mainAddr) as Long
@@ -171,9 +171,9 @@ class DesktopOverheadBenchmark {
                 rc
             }
         } finally {
-            PanamaBackend.freeUtf8Address(mainAddr)
-            PanamaBackend.freeUtf8Address(dictAddr)
-            PanamaBackend.freeUtf8Address(codeAddr)
+            Panama.freeUtf8Address(mainAddr)
+            Panama.freeUtf8Address(dictAddr)
+            Panama.freeUtf8Address(codeAddr)
         }
 
         println("=== desktop: string marshalling share of exec(\"$code\") ===")

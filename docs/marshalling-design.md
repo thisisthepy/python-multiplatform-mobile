@@ -108,7 +108,7 @@ full UTF-8 only when it sees a character above 0x7F.
 
 | | allocation | address |
 |---|---|---|
-| desktop | Panama, via the existing `PanamaBackend` allocator | already a `long` |
+| desktop | Panama, via the existing `Panama` allocator | already a `long` |
 | android | `ByteBuffer.allocateDirect` | `GetDirectBufferAddress`, **once per buffer** |
 
 Android's one JNI call per buffer is amortised to nothing; what matters is that no crossing

@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
  * compiler with "Internal error in file lowering".
  *
  * `desktopMain` implements these over cached, unbound Panama `MethodHandle`s (one per
- * shape, see `PanamaBackend.kt`). `androidMain` implements these by delegating through
+ * shape, see `Panama.kt`). `androidMain` implements these by delegating through
  * JNI to Kotlin/Native trampolines compiled into `libmultiplatform_python3.13.so` (see
  * `nativeMain/.../EmbedAPI.native.kt`), which invoke the target function pointer directly
  * via a `CFunction` cast -- no NDK, no C project, no ART entry-point patching.
@@ -57,7 +57,7 @@ internal expect fun downcallIIIIII_I(fn: Long, a0: Long, a1: Long, a2: Long, a3:
  * lookup total, not one per call. Returns the cached address on every subsequent call.
  *
  * Throws [IllegalStateException] if the symbol cannot be resolved (mirrors the existing
- * `UnsatisfiedLinkError` thrown by `PanamaBackend.findSymbol` for bound handles).
+ * `UnsatisfiedLinkError` thrown by `Panama.findSymbol` for bound handles).
  */
 internal expect fun ffiSymbolRaw(name: String): Long
 

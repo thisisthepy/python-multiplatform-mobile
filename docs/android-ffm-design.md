@@ -163,7 +163,7 @@ Two problems from that discussion remain unresolved:
 
 ### The reflective Panama backend conflicts with it
 
-`desktopMain/.../PanamaBackend.kt` reaches `java.lang.foreign` and `jdk.incubator.foreign` entirely
+`desktopMain/.../Panama.kt` reaches `java.lang.foreign` and `jdk.incubator.foreign` entirely
 through `Class.forName` plus `MethodHandles`, precisely so it compiles on any JDK. Under Native
 Image that is a problem twice over: the reflective lookups need build-time registration, and more
 fundamentally **GraalVM requires FFM downcalls themselves to be registered at compile time** —
