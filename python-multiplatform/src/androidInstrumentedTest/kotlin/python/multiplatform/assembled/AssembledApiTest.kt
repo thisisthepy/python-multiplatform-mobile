@@ -1,5 +1,7 @@
 package python.multiplatform.assembled
 
+import python.multiplatform.Versions
+
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Ignore
 import org.junit.Test
@@ -41,8 +43,12 @@ class AssembledApiTest {
     @Test
     fun interpreterReportsItsVersion() {
         PythonOnDevice.ensureInitialised()
+        // Against the *configured* version rather than a literal -- same reason as the four
+        // assertions ROADMAP §9 already converted: this checks the interpreter loaded is the one
+        // the build configured, instead of pinning a release line that needs hand-editing.
+        val expected = Versions.currentVersion.compactVersionString
         val version = Python3.version
-        assertTrue("expected 3.14.x, got $version", version.startsWith("3.14"))
+        assertTrue("expected $expected.x, got $version", version.startsWith(expected))
     }
 
     @Test
@@ -58,7 +64,8 @@ class AssembledApiTest {
         try {
             val version = sys.getAttr("version")
             try {
-                assertTrue("sys.version was $version", version.toString().startsWith("3.14"))
+                val expected = Versions.currentVersion.compactVersionString
+                assertTrue("sys.version was $version", version.toString().startsWith(expected))
             } finally {
                 version.close()
             }

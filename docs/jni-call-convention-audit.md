@@ -274,11 +274,19 @@ are string-carrying; 31 are re-entrant and correctly ordinary:
 
 | mechanism | functions |
 |---|---|
-| executes module or arbitrary code | `PyImport_ExecCodeModuleN`, `PyImport_ExecCodeModuleExN`, `PyImport_ExecCodeModuleWithPathnamesN`, `PyImport_ImportModuleLevelN`, `PyImport_ImportModuleNoBlockN`, `PyImport_ImportFrozenModuleN`, `Py_CompileStringN` |
+| executes module or arbitrary code | `PyImport_ExecCodeModuleN`, `PyImport_ExecCodeModuleExN`, `PyImport_ExecCodeModuleWithPathnamesN`, `PyImport_ImportModuleLevelN`, `PyImport_ImportModuleNoBlockN` †, `PyImport_ImportFrozenModuleN`, `Py_CompileStringN` |
 | runs a Python-level hook | `PyObject_HasAttrStringN`, `PyObject_HasAttrStringWithErrorN` (`__getattr__`), `PyMapping_GetItemStringN`, `PyMapping_SetItemStringN`, `PyMapping_HasKeyStringN`, `PyMapping_HasKeyStringWithErrorN` (`__getitem__`/`__contains__`), `PySequence_FastN` (`__iter__`), `PyUnicode_TranslateN` (`__getitem__` on the table), `PySys_AuditTupleN` (audit hooks), `PyErr_WarnExplicitN` (the `warnings` machinery) |
 | Python codec lookup / error handler | `PyUnicode_AsEncodedStringN`, `PyUnicode_FromEncodedObjectN`, `PyUnicode_DecodeLocaleN`, `PyUnicode_EncodeLocaleN`, `PyUnicode_DecodeFSDefaultN` |
 | drops a reference, or allocates GC-tracked | `PyDict_DelItemStringN`, `PySys_SetObjectN`, `PyErr_NewExceptionN`, `PyErr_NewExceptionWithDocN`, `PyErr_SetFromErrnoWithFilenameN`, `PyErr_SyntaxLocationN`, `PyErr_SyntaxLocationExN`, `PyUnicodeTranslateError_SetReasonN` |
 | never returns | `Py_FatalErrorN` |
+
+† `PyImport_ImportModuleNoBlockN` has since been unregistered: CPython 3.15 removed
+`PyImport_ImportModuleNoBlock`, which had been an exact alias of `PyImport_ImportModule` since 3.3
+(ROADMAP §9). The counts above are left as they were read, since this section records what the
+table held at `9abc8edd`/`aea09585` rather than what it holds now. The same migration also
+unregistered `PySys_ResetWarnOptionsN` and renamed `PyWeakref_GetObjectN` to `PyWeakref_GetRefN`;
+none of the three changed anyone's convention, and the replacement is registered ordinary like the
+function it replaces.
 
 The remaining 11 are leaves on the success path: `PyBytes_FromStringN`, `PyBytes_AsStringN`,
 `PyByteArray_AsStringN`, `PyUnicode_EqualToUTF8N`, `PyUnicode_CompareWithASCIIStringN`,

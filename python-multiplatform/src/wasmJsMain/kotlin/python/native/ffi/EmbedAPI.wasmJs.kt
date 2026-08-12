@@ -238,7 +238,6 @@ actual inline fun PySys_SetObject(name: String, v: NativePointer): Int {
     val __name = Wasm.internedUtf8(name)
     return python.native.ffi.bindings.PySys_SetObject(__name, v.toPlatformPointer())
 }
-actual inline fun PySys_ResetWarnOptions() = python.native.ffi.bindings.PySys_ResetWarnOptions()
 actual fun PySys_GetXOptions(): NativePointer? = python.native.ffi.bindings.PySys_GetXOptions().toNativePointerFromRaw()
 actual inline fun PySys_AuditTuple(event: String, args: NativePointer): Int {
     val __event = Wasm.internedUtf8(event)
@@ -252,10 +251,6 @@ actual inline fun Py_Exit(status: Int) = python.native.ffi.bindings.Py_Exit(stat
 actual fun PyImport_ImportModule(name: String): NativePointer? {
     val __name = Wasm.internedUtf8(name)
     return python.native.ffi.bindings.PyImport_ImportModule(__name).toNativePointerFromRaw()
-}
-actual fun PyImport_ImportModuleNoBlock(name: String): NativePointer? {
-    val __name = Wasm.internedUtf8(name)
-    return python.native.ffi.bindings.PyImport_ImportModuleNoBlock(__name).toNativePointerFromRaw()
 }
 actual fun PyImport_ImportModuleLevelObject(name: NativePointer, globals: NativePointer, locals: NativePointer, fromlist: NativePointer, level: Int): NativePointer? = python.native.ffi.bindings.PyImport_ImportModuleLevelObject(name.toPlatformPointer(), globals.toPlatformPointer(), locals.toPlatformPointer(), fromlist.toPlatformPointer(), level).toNativePointerFromRaw()
 actual fun PyImport_ImportModuleLevel(name: String, globals: NativePointer, locals: NativePointer, fromlist: NativePointer, level: Int): NativePointer? {
@@ -563,7 +558,23 @@ actual fun PySeqIter_New(seq: NativePointer): NativePointer? = python.native.ffi
 actual fun PyCallIter_New(callable: NativePointer, sentinel: NativePointer): NativePointer? = python.native.ffi.bindings.PyCallIter_New(callable.toPlatformPointer(), sentinel.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyWeakref_NewRef(ob: NativePointer, callback: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_NewRef(ob.toPlatformPointer(), callback.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyWeakref_NewProxy(ob: NativePointer, callback: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_NewProxy(ob.toPlatformPointer(), callback.toPlatformPointer()).toNativePointerFromRaw()
-actual fun PyWeakref_GetObject(ref: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_GetObject(ref.toPlatformPointer()).toNativePointerFromRaw()
+@OptIn(kotlin.wasm.unsafe.UnsafeWasmMemoryApi::class)
+actual fun PyWeakref_GetRef(ref: NativePointer): NativePointer? {
+    // The out-parameter needs four bytes of linear memory (wasm32 pointers are 32-bit). There is
+    // no scope allocator on this target -- see `memScoped` above -- so the slot comes from
+    // CPython's own heap and is released here. `try`/`finally` keeps that true if the call traps.
+    val slot = python.native.ffi.bindings.malloc(4)
+    if (slot == 0) throw OutOfMemoryError("malloc(4) failed for a PyWeakref_GetRef out-parameter")
+    try {
+        val status = python.native.ffi.bindings.PyWeakref_GetRef(ref.toPlatformPointer(), slot)
+        // Status 1 alone means the slot holds a new strong reference. 0 (dead) and -1 (error)
+        // both become null; PyErr_Occurred is what separates them.
+        if (status != 1) return null
+        return kotlin.wasm.unsafe.Pointer(slot.toUInt()).loadInt().toNativePointerFromRaw()
+    } finally {
+        python.native.ffi.bindings.free(slot)
+    }
+}
 actual inline fun PyObject_ClearWeakRefs(o: NativePointer) = python.native.ffi.bindings.PyObject_ClearWeakRefs(o.toPlatformPointer())
 actual inline fun PyType_IsSubtype(a: NativePointer, b: NativePointer): Int = python.native.ffi.bindings.PyType_IsSubtype(a.toPlatformPointer(), b.toPlatformPointer())
 actual inline fun PyType_Ready(type: NativePointer): Int = python.native.ffi.bindings.PyType_Ready(type.toPlatformPointer())

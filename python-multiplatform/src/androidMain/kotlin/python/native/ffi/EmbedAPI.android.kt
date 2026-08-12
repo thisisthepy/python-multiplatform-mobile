@@ -234,7 +234,6 @@ actual fun PySys_GetObject(name: String): NativePointer? =
     python.native.ffi.bindings.PySys_GetObjectN(internedUtf8(name)).toNativePointer()
 actual inline fun PySys_SetObject(name: String, v: NativePointer): Int =
     python.native.ffi.bindings.PySys_SetObjectN(internedUtf8(name), v.toPlatformPointer())
-actual inline fun PySys_ResetWarnOptions() = python.native.ffi.bindings.PySys_ResetWarnOptionsN()
 actual fun PySys_GetXOptions(): NativePointer? = python.native.ffi.bindings.PySys_GetXOptionsN().toNativePointer()
 actual inline fun PySys_AuditTuple(event: String, args: NativePointer): Int =
     python.native.ffi.bindings.PySys_AuditTupleN(internedUtf8(event), args.toPlatformPointer())
@@ -252,8 +251,6 @@ actual fun PyImport_ImportModule(name: String): NativePointer? {
     // Runs the module's top-level code.
     return python.native.ffi.bindings.PyImport_ImportModuleN(ptr).toNativePointer()
 }
-actual fun PyImport_ImportModuleNoBlock(name: String): NativePointer? =
-    python.native.ffi.bindings.PyImport_ImportModuleNoBlockN(internedUtf8(name)).toNativePointer()
 actual fun PyImport_ImportModuleLevelObject(name: NativePointer, globals: NativePointer, locals: NativePointer, fromlist: NativePointer, level: Int): NativePointer? = python.native.ffi.bindings.PyImport_ImportModuleLevelObjectN(name.toPlatformPointer(), globals.toPlatformPointer(), locals.toPlatformPointer(), fromlist.toPlatformPointer(), level).toNativePointer()
 actual fun PyImport_ImportModuleLevel(name: String, globals: NativePointer, locals: NativePointer, fromlist: NativePointer, level: Int): NativePointer? =
     python.native.ffi.bindings.PyImport_ImportModuleLevelN(internedUtf8(name), globals.toPlatformPointer(), locals.toPlatformPointer(), fromlist.toPlatformPointer(), level).toNativePointer()
@@ -613,7 +610,7 @@ actual fun PyCallIter_New(callable: NativePointer, sentinel: NativePointer): Nat
 // Section 26
 actual fun PyWeakref_NewRef(ob: NativePointer, callback: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_NewRefN(ob.toPlatformPointer(), callback.toPlatformPointer()).toNativePointer()
 actual fun PyWeakref_NewProxy(ob: NativePointer, callback: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_NewProxyN(ob.toPlatformPointer(), callback.toPlatformPointer()).toNativePointer()
-actual fun PyWeakref_GetObject(ref: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_GetObjectN(ref.toPlatformPointer()).toNativePointer()
+actual fun PyWeakref_GetRef(ref: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_GetRefN(ref.toPlatformPointer()).toNativePointer()
 actual inline fun PyObject_ClearWeakRefs(o: NativePointer) = python.native.ffi.bindings.PyObject_ClearWeakRefsN(o.toPlatformPointer())
 
 

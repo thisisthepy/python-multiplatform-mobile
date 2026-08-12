@@ -264,7 +264,6 @@ object bindings {
     // Section 6
     @JvmStatic external fun PySys_GetObjectN(name: Long): Long
     @JvmStatic external fun PySys_SetObjectN(name: Long, v: Long): Int
-    @JvmStatic external fun PySys_ResetWarnOptionsN()
     @JvmStatic external fun PySys_GetXOptionsN(): Long
     @JvmStatic external fun PySys_AuditTupleN(event: Long, args: Long): Int
 
@@ -278,7 +277,6 @@ object bindings {
     @JvmStatic
     @dalvik.annotation.optimization.CriticalNative
     external fun PyImport_ImportModule(name: Long): Long
-    @JvmStatic external fun PyImport_ImportModuleNoBlockN(name: Long): Long
     @JvmStatic external fun PyImport_ImportModuleLevelObjectN(name: Long, globals: Long, locals: Long, fromlist: Long, level: Int): Long
     @JvmStatic external fun PyImport_ImportModuleLevelN(name: Long, globals: Long, locals: Long, fromlist: Long, level: Int): Long
     // external fun PyImport_Import(name: JNIPointer): JNIPointer?
@@ -552,7 +550,7 @@ object bindings {
     // Section 26
     @JvmStatic external fun PyWeakref_NewRefN(ob: Long, callback: Long): Long
     @JvmStatic external fun PyWeakref_NewProxyN(ob: Long, callback: Long): Long
-    @JvmStatic external fun PyWeakref_GetObjectN(ref: Long): Long
+    @JvmStatic external fun PyWeakref_GetRefN(ref: Long): Long
     @JvmStatic external fun PyObject_ClearWeakRefsN(o: Long)
 
 
