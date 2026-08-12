@@ -394,7 +394,6 @@ static jlong f_PyErr_NewExceptionN(JNIEnv *e, jclass c, jlong name, jlong base, 
 static jlong f_PyErr_NewExceptionWithDocN(JNIEnv *e, jclass c, jlong name, jlong doc, jlong base, jlong dict) { return PyErr_NewExceptionWithDoc((const char*)name, (const char*)doc, base, dict); }
 static jint f_PyUnicodeTranslateError_SetReasonN(JNIEnv *e, jclass c, jlong exc, jlong reason) { return PyUnicodeTranslateError_SetReason(exc, (const char*)reason); }
 static jint f_Py_EnterRecursiveCallN(JNIEnv *e, jclass c, jlong where) { return Py_EnterRecursiveCall((const char*)where); }
-static jlong f_PySys_GetObjectN(JNIEnv *e, jclass c, jlong name) { return PySys_GetObject((const char*)name); }
 static jint f_PySys_SetObjectN(JNIEnv *e, jclass c, jlong name, jlong v) { return PySys_SetObject((const char*)name, v); }
 static jint f_PySys_AuditTupleN(JNIEnv *e, jclass c, jlong event, jlong args) { return PySys_AuditTuple((const char*)event, args); }
 static void f_Py_FatalErrorN(JNIEnv *e, jclass c, jlong message) { Py_FatalError((const char*)message); }
@@ -973,7 +972,6 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyErr_NewExceptionWithDocN", "(JJJJ)J", (void *)&f_PyErr_NewExceptionWithDocN},
         {"PyUnicodeTranslateError_SetReasonN", "(JJ)I", (void *)&f_PyUnicodeTranslateError_SetReasonN},
         {"Py_EnterRecursiveCallN", "(J)I", (void *)&f_Py_EnterRecursiveCallN},
-        {"PySys_GetObjectN", "(J)J", (void *)&f_PySys_GetObjectN},
         {"PySys_SetObjectN", "(JJ)I", (void *)&f_PySys_SetObjectN},
         {"PySys_AuditTupleN", "(JJ)I", (void *)&f_PySys_AuditTupleN},
         {"Py_FatalErrorN", "(J)V", (void *)&f_Py_FatalErrorN},
