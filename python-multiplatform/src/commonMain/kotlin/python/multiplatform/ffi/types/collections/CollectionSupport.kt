@@ -4,6 +4,7 @@ import python.multiplatform.ffi.PyCompareOp
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyType
 import python.multiplatform.ffi.PyTypeChecks
+import python.multiplatform.ffi.adoptingNewReference
 import python.multiplatform.ffi.exceptions.PyException
 import python.multiplatform.ffi.types.basic.PyNone
 import python.native.ffi.NativePointer
@@ -40,10 +41,15 @@ internal fun pyEquals(a: NativePointer, b: NativePointer): Boolean {
  * collection wrapper's `TYPE` companion property.
  */
 internal fun deriveTypeAndRelease(instancePointer: NativePointer): PyType {
-    val typePtr = python.multiplatform.ffi.Python3.withPython { PyObject_Type(instancePointer) }
-        ?: throw PyException.fromCurrentError() ?: PyException("Failed to get PyType of scratch instance")
-    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(instancePointer) } // only needed to read its type; release the scratch instance itself
-    return PyType.getInstance(typePtr)
+    // The scratch instance is released in a finally, not after the call: on the failure path it
+    // used to be abandoned, and nothing had wrapped it, so it could never be reclaimed.
+    try {
+        val typePtr = python.multiplatform.ffi.Python3.withPython { PyObject_Type(instancePointer) }
+            ?: throw PyException.fromCurrentError() ?: PyException("Failed to get PyType of scratch instance")
+        return typePtr.adoptingNewReference { PyType.getInstance(it) }
+    } finally {
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(instancePointer) } // only needed to read its type
+    }
 }
 
 /**
@@ -58,17 +64,22 @@ internal fun deriveTypeAndRelease(instancePointer: NativePointer): PyType {
 internal fun snapshotElements(pointer: NativePointer): List<PyObject> {
     val tuplePtr = python.multiplatform.ffi.Python3.withPython { PySequence_Tuple(pointer) }
         ?: throw PyException.fromCurrentError() ?: PyException("Failed to snapshot elements (PySequence_Tuple failed)")
-    val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(tuplePtr) }
-    val result = ArrayList<PyObject>(count.toInt())
-    for (i in 0 until count) {
-        // Borrowed reference into tuplePtr, valid only while tuplePtr is alive -- wrap with
-        // borrowed = true so each element gets its own independent, incref'd reference before
-        // the scratch tuple below is released.
-        val itemPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(tuplePtr, i) }!!
-        result.add(PyObject(itemPtr, true))
+    // Nobody adopts the scratch tuple, so its release goes in a finally -- the `!!` in the loop
+    // is a real throw site, and stranding the tuple there would be unrecoverable.
+    try {
+        val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(tuplePtr) }
+        val result = ArrayList<PyObject>(count.toInt())
+        for (i in 0 until count) {
+            // Borrowed reference into tuplePtr, valid only while tuplePtr is alive -- wrap with
+            // borrowed = true so each element gets its own independent, incref'd reference before
+            // the scratch tuple below is released.
+            val itemPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(tuplePtr, i) }!!
+            result.add(PyObject(itemPtr, true))
+        }
+        return result
+    } finally {
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(tuplePtr) } // scratch snapshot tuple
     }
-    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(tuplePtr) } // scratch snapshot tuple, new reference, no longer needed
-    return result
 }
 
 /**

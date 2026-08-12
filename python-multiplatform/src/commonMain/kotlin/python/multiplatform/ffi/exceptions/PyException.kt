@@ -2,6 +2,7 @@ package python.multiplatform.ffi.exceptions
 
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyType
+import python.multiplatform.ffi.adoptingNewReference
 import python.native.ffi.NativePointer
 import python.native.ffi.PyErr_Clear
 import python.native.ffi.PyErr_GetRaisedException
@@ -34,11 +35,19 @@ internal fun NativePointer.isNoneObject(): Boolean {
         python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
         return false
     }
-    val namePointer = python.multiplatform.ffi.Python3.withPython { PyType_GetName(typePointer) }
-    val name = namePointer?.let { python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(it) } }
-    namePointer?.let { python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(it) } }
-    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(typePointer) }
-    return name == "NoneType"
+    // Two new references, neither owned by any wrapper, so both releases go in a finally
+    // rather than after the decode.
+    try {
+        val namePointer = python.multiplatform.ffi.Python3.withPython { PyType_GetName(typePointer) } ?: return false
+        val name = try {
+            python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(namePointer) }
+        } finally {
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(namePointer) }
+        }
+        return name == "NoneType"
+    } finally {
+        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(typePointer) }
+    }
 }
 
 /**
@@ -105,20 +114,20 @@ open class PyException(
          * touch [excPointer] again after calling this.
          */
         private fun fromExceptionInstance(excPointer: NativePointer): PyException {
-            // New reference; PyType.getInstance() takes ownership of it (or,
-            // if this type is already cached, simply leaks this one extra
-            // incRef -- harmless, since exception types are immortal builtins
-            // or long-lived user classes).
+            // First, before anything that can throw. PyObject(_, borrowed = false) takes
+            // ownership of excPointer -- no extra incRef, matching the "new reference" we were
+            // handed -- and from here on a cleaner can reclaim it. Doing this last (as it used
+            // to be) meant a failure anywhere below stranded the exception instance itself, in
+            // the one code path that exists to report failures.
+            val value = PyObject(excPointer, false)
+
+            // New reference; PyType.getInstance() settles it either way -- adopting it on a
+            // cache miss, releasing it on a cache hit.
             val typePointer = python.multiplatform.ffi.Python3.withPython { PyObject_Type(excPointer) }
             if (typePointer == null) python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
-            val type = typePointer?.let { PyType.getInstance(it) }
+            val type = typePointer?.adoptingNewReference { PyType.getInstance(it) }
 
             val message = messageOf(excPointer)
-
-            // PyObject(_, borrowed = false) takes ownership of excPointer
-            // itself -- no extra incRef, matching the "new reference" we were
-            // handed.
-            val value = PyObject(excPointer, false)
 
             // New reference, or null if this exception was never associated
             // with a traceback (e.g. constructed but never raised/propagated).
@@ -160,8 +169,11 @@ open class PyException(
                 python.multiplatform.ffi.Python3.withPython { PyErr_Clear() }
                 return "<unprintable exception>"
             }
-            val message = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(strPointer) }
-            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(strPointer) }
+            val message = try {
+                python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(strPointer) }
+            } finally {
+                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(strPointer) }
+            }
             return message ?: "<unprintable exception>"
         }
     }

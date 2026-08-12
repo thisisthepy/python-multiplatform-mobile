@@ -228,10 +228,45 @@ destroyed. Verified on both collectors — desktop through `java.lang.ref.Cleane
 Kotlin/Native's `createCleaner`. Android below API 33 uses the `PhantomReference` path and is not
 covered yet.
 
-**Three things still cannot be freed**, and no amount of testing fixes them: a raw pointer leaks
-if an exception lands between the C call returning it and the wrapper taking ownership; wrappers
-outliving `Py_Finalize()` are skipped deliberately, leaving stale pointers if the interpreter is
-restarted; and cross-boundary cycles need §7's `tp_traverse` wiring, which now exists on desktop.
+**Two things still cannot be freed**: wrappers outliving `Py_Finalize()` are skipped
+deliberately, leaving stale pointers if the interpreter is restarted; and cross-boundary cycles
+need §7's `tp_traverse` wiring, which now exists on desktop.
+
+**The third — the exception window — was not structural, and is closed.** "A raw pointer leaks
+if an exception lands between the C call returning it and the wrapper taking ownership"
+described real bugs, not a property of the architecture. `OwnershipLeakTest` forces two of them
+and measures the count; both were red before the fix by exactly the number of attempts — **+50
+references over 50 attempts in each case**, one lost per attempt, and no collector can reach
+them because no Kotlin object ever owned them.
+
+- `PyDict.fromMap` allocated the dict and populated it afterwards. One unhashable key makes
+  `PyDict_SetItem` fail partway, and the half-built dict — by then holding a reference to every
+  key and value already stored — was still a bare pointer. Measured on both the stored value and
+  the already-stored key: +50 each.
+- `PyType.getInstance` is handed a new reference on every call and, on a **cache hit**, dropped
+  it. The comment argued this was harmless because types are immortal — true of `int` and
+  `list`, false of every user-defined class, which leaked one reference per `PyObject.Type`
+  read. Measured against a class defined in Python: +50 over 50 reads.
+
+The fix is `adoptingNewReference` in `PyObject.kt` — release the reference if, and only if, the
+block that was going to adopt it throws — plus `try/finally` at the sites that hold a new
+reference across a second C call: `repr`, `toString`, `richCompare`, `PyType.name`,
+`snapshotElements`, `PyDict.snapshotEntries`, the four `fromList`/`fromSet` scratch tuples,
+`deriveTypeAndRelease` (which abandoned its scratch instance outright when `PyObject_Type`
+failed), `PyException.messageOf` and `isNoneObject`. `PyException.fromExceptionInstance` now
+wraps the exception instance **first**, so a failure while building the message or walking
+`__context__`/`__cause__` can no longer strand the exception itself — in the one path that
+exists to report failures.
+
+One rule came out of it, and it is written on the helper: **it must never wrap a constructor
+that can throw.** `PyAutoCloseable` registers the cleaner in its own constructor, before any
+subclass initialiser runs, so a wrapper that throws from `init` has *already* queued a release;
+releasing again would be the double free of §1. `PyType.getInstance` therefore validates before
+it constructs rather than from `init`.
+
+Only the two above are proven by a red-then-green test; the rest are windows that no current
+call site can force (they need `PyUnicode_AsUTF8` or `PyTuple_GetItem` to fail on a live
+object). They are fixed as structure, not as measured leaks, and are marked as such here.
 
 **Was:** depends on §1.
 
@@ -247,7 +282,7 @@ Measurements prove that GC-driven release actually drops CPython reference count
 - **Android (`androidMain`)**: Uses `Cleaner` where available (API 33+), with a fallback to `PhantomReference` requiring background polling on older devices. (Testing on device requires `androidInstrumentedTest` setup — see §11b).
 
 **What fundamentally cannot be released in this architecture:**
-1. **Uncaught exceptions during FFI allocation**: If Kotlin code calls a C-API function that returns a new reference (e.g., `PyObject_GetAttrString`), and a Kotlin exception disrupts the control flow *before* that raw pointer is wrapped in `PyObject(..., borrowed = false)` or explicitly `Py_DecRef`'d via a `finally` block, the CPython reference leaks permanently.
+1. ~~**Uncaught exceptions during FFI allocation**: If Kotlin code calls a C-API function that returns a new reference (e.g., `PyObject_GetAttrString`), and a Kotlin exception disrupts the control flow *before* that raw pointer is wrapped in `PyObject(..., borrowed = false)` or explicitly `Py_DecRef`'d via a `finally` block, the CPython reference leaks permanently.~~ **Closed — see above.** This was a list of missing `finally` blocks, not a limit of the architecture.
 2. **Post-Finalize GC**: When `Py_Finalize()` executes, it frees CPython's heap. If Kotlin wrappers are GC'd *after* this, their cleaners see `!Python3.isInitialized` and exit early to avoid segfaults. While safe for shutdown, if the interpreter is later re-initialized via `Py_Initialize()`, those dangling wrappers will retain pointers that either point to unmapped memory or alias newly allocated CPython objects.
 3. **Cross-boundary cycles**: A Python object holding an upcall proxy to a Kotlin object, which in turn holds a `PyObject` pointing back to the Python object. Neither language's GC can trace through the other, leading to a permanent leak unless broken manually or addressed via `tp_traverse` (see §7).
 

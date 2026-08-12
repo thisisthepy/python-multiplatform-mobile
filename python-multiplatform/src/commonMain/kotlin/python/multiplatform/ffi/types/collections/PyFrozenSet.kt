@@ -47,12 +47,16 @@ open class PyFrozenSet(pointer: NativePointer, borrowed: Boolean) :
         fun fromSet(elements: Set<PyObject>): PyFrozenSet {
             val tuplePtr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate tuple() scratch buffer")
-            elements.forEachIndexed { i, el ->
-                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(el.pointer) } // PyTuple_SetItem steals; keep `el`'s own reference valid
-                python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
+            // See PyList.fromList for why the release covers the fill loop.
+            val setPtr = try {
+                elements.forEachIndexed { i, el ->
+                    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(el.pointer) } // PyTuple_SetItem steals; keep `el`'s own reference valid
+                    python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
+                }
+                python.multiplatform.ffi.Python3.withPython { PyFrozenSet_New(tuplePtr) }
+            } finally {
+                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(tuplePtr) } // scratch tuple, no longer needed once copied into the frozenset
             }
-            val setPtr = python.multiplatform.ffi.Python3.withPython { PyFrozenSet_New(tuplePtr) }
-            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(tuplePtr) } // scratch tuple, no longer needed once copied into the frozenset
             if (setPtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to build frozenset()")
             return PyFrozenSet(setPtr, false)
         }

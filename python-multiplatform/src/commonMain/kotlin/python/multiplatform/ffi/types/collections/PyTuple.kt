@@ -2,6 +2,7 @@ package python.multiplatform.ffi.types.collections
 
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyType
+import python.multiplatform.ffi.adoptingNewReference
 import python.multiplatform.ffi.conversion.PyProxy
 import python.multiplatform.ffi.exceptions.PyException
 import python.multiplatform.ffi.types.iteration.PyIterator
@@ -43,13 +44,17 @@ open class PyTuple(pointer: NativePointer, borrowed: Boolean) :
         fun fromList(elements: List<PyObject>): PyTuple {
             val ptr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate tuple")
-            elements.forEachIndexed { i, el ->
-                // PyTuple_SetItem steals the reference to its 3rd argument -- incref first so
-                // `el`'s own, independently-managed reference stays valid afterwards.
-                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(el.pointer) }
-                python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(ptr, i.toLong(), el.pointer) }
+            // Nothing owns the tuple until the wrapper on the last line adopts it, so an escape
+            // from the fill loop has to release it here or it is lost for good.
+            return ptr.adoptingNewReference {
+                elements.forEachIndexed { i, el ->
+                    // PyTuple_SetItem steals the reference to its 3rd argument -- incref first so
+                    // `el`'s own, independently-managed reference stays valid afterwards.
+                    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(el.pointer) }
+                    python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(it, i.toLong(), el.pointer) }
+                }
+                PyTuple(it, false) // PyTuple_New already returned a new/owned reference
             }
-            return PyTuple(ptr, false) // PyTuple_New already returned a new/owned reference
         }
     }
 
