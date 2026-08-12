@@ -196,6 +196,24 @@ object BindingPolicy {
      */
     private fun hasRenderableSignature(declaration: KSDeclaration): Boolean = declaration.typeParameters.isEmpty()
 
+    /**
+     * The type-usage counterpart to [hasRenderableSignature]: every parameter and the return type
+     * of [function] must be an [isExposableType], not just spelled without a bare type parameter.
+     *
+     * Kept as a separate predicate rather than folded into [isExposedFunctionShape] so
+     * [FragmentScanner] can tell "not exposed because of shape" (private, `@PythonInternal`, ...)
+     * apart from "not exposed because a type in the signature has no callable entry" and warn only
+     * on the latter -- the former is ordinary and silent by design, the latter is the failure mode
+     * `docs/upcall-async-design.md` §2.1 measured as a classifier that compiles and checkcasts but
+     * has nothing behind it.
+     */
+    fun hasExposableTypes(function: KSFunctionDeclaration): Boolean =
+        function.parameters.all { isExposableType(it.type) } &&
+            (function.returnType?.let { isExposableType(it) } ?: true)
+
+    /** [hasExposableTypes] for a property's own type. */
+    fun hasExposableTypes(property: KSPropertyDeclaration): Boolean = isExposableType(property.type)
+
     private val EXPOSED_CLASS_KINDS =
         setOf(ClassKind.CLASS, ClassKind.INTERFACE, ClassKind.ENUM_CLASS, ClassKind.OBJECT)
 }

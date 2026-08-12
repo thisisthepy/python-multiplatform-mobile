@@ -25,7 +25,7 @@ class PythonBindingProcessorProvider : SymbolProcessorProvider {
             ?.map { it.trim() }
             ?.filter { it.isNotEmpty() }
             ?: emptyList()
-        val scanner = FragmentScanner(excludePackages)
+        val scanner = FragmentScanner(excludePackages, environment.logger)
 
         return when (environment.options[OPTION_ROLE]) {
             ROLE_LIBRARY -> LibraryProcessor(environment, scanner, moduleName)
