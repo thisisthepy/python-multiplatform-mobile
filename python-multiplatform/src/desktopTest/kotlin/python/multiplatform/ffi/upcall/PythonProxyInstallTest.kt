@@ -45,6 +45,9 @@ class PythonProxyInstallTest {
     fun install() {
         UpcallTable.install(listOf(ProxyFragment))
         ProxyFragment.parked.clear()
+        // `ProxyFragment` is an `object`, so the static-property fixtures outlive a single test.
+        ProxyFragment.tally = 0
+        ProxyFragment.created = 0
         // Binds `_pm_resolve` and `_pm_invoke` into `__main__`. The generated module needs them and
         // refuses to install without them; which name is bound is irrelevant, only the bootstrap is.
         assertTrue(bindUpcallOrNull("demo.calc.ping"), "the fixture table is not installed")
@@ -111,6 +114,111 @@ class PythonProxyInstallTest {
             assertEquals("1", PythonTestFixture.eval("_p_prop['before']").toString())
             assertEquals("counter", PythonTestFixture.eval("_p_prop['label_before']").toString())
             assertEquals("renamed", PythonTestFixture.eval("_p_prop['label_after']").toString())
+        }
+
+    @Test
+    fun aStaticPropertyIsReadAndWrittenThroughTheClassObjectItselfRatherThanThroughAnInstance() =
+        PythonTestFixture.withInterpreter {
+            PythonProxySource.install()
+            // *After* install: a value the generator could not have baked in. A snapshot rendering
+            // would report whatever `created` held while the source was being built.
+            ProxyFragment.created = 5
+
+            Python3.exec(
+                """
+                from proxycls import Counter
+                _p_static = {'before': Counter.created, 'kind': Counter.KIND}
+                Counter.created = 12
+                _p_static['after'] = Counter.created
+                try:
+                    _p_static['on_instance'] = Counter(1).created
+                except AttributeError:
+                    _p_static['on_instance'] = 'AttributeError'
+                """.trimIndent(),
+            )
+
+            assertEquals("5", PythonTestFixture.eval("_p_static['before']").toString())
+            assertEquals("counter-class", PythonTestFixture.eval("_p_static['kind']").toString())
+            assertEquals("12", PythonTestFixture.eval("_p_static['after']").toString())
+            assertEquals(12L, ProxyFragment.created, "the assignment from Python has to reach Kotlin's setter")
+            // Kotlin reaches a companion member through the class and never through an instance;
+            // putting the descriptor on the metaclass reproduces that rather than inventing a
+            // Python-only shape.
+            assertEquals("AttributeError", PythonTestFixture.eval("_p_static['on_instance']").toString())
+        }
+
+    @Test
+    fun aStaticPropertyWithNoExposedSetterRefusesAssignmentInsteadOfShadowingTheKotlinVal() =
+        PythonTestFixture.withInterpreter {
+            PythonProxySource.install()
+
+            Python3.exec(
+                """
+                from proxycls import Counter
+                try:
+                    Counter.KIND = 'overwritten'
+                    _p_ro = 'assignment succeeded'
+                except AttributeError:
+                    _p_ro = 'AttributeError'
+                _p_ro_after = Counter.KIND
+                """.trimIndent(),
+            )
+
+            // Letting the assignment through would bind a plain class attribute that shadows the
+            // Kotlin `val` for every later read -- silently, and only in Python.
+            assertEquals("AttributeError", PythonTestFixture.eval("_p_ro").toString())
+            assertEquals("counter-class", PythonTestFixture.eval("_p_ro_after").toString())
+        }
+
+    @Test
+    fun aTopLevelStaticPropertyIsReadAndWrittenAsAnOrdinaryModuleAttribute() =
+        PythonTestFixture.withInterpreter {
+            PythonProxySource.install()
+            ProxyFragment.tally = 3
+
+            Python3.exec(
+                """
+                import demo.calc
+                _p_mod = {'before': demo.calc.tally, 'origin': demo.calc.origin}
+                demo.calc.tally = 9
+                _p_mod['after'] = demo.calc.tally
+                # the module's ordinary function attributes must still resolve after the module
+                # object was reclassed to carry the dynamic ones
+                _p_mod['ping'] = demo.calc.ping()
+                # and a name with no Kotlin declaration behind it must stay an ordinary attribute:
+                # __setattr__ intercepts only what was registered, everything else falls through
+                demo.calc.marker = 'plain'
+                _p_mod['marker'] = demo.calc.marker
+                """.trimIndent(),
+            )
+
+            assertEquals("3", PythonTestFixture.eval("_p_mod['before']").toString())
+            assertEquals("kotlin", PythonTestFixture.eval("_p_mod['origin']").toString())
+            assertEquals("9", PythonTestFixture.eval("_p_mod['after']").toString())
+            assertEquals("7", PythonTestFixture.eval("_p_mod['ping']").toString())
+            assertEquals("plain", PythonTestFixture.eval("_p_mod['marker']").toString())
+            assertEquals(9L, ProxyFragment.tally, "the assignment from Python has to reach Kotlin's setter")
+        }
+
+    @Test
+    fun aReadOnlyTopLevelStaticPropertyRefusesAssignmentToo() =
+        PythonTestFixture.withInterpreter {
+            PythonProxySource.install()
+
+            Python3.exec(
+                """
+                import demo.calc
+                try:
+                    demo.calc.origin = 'overwritten'
+                    _p_mod_ro = 'assignment succeeded'
+                except AttributeError:
+                    _p_mod_ro = 'AttributeError'
+                _p_mod_ro_after = demo.calc.origin
+                """.trimIndent(),
+            )
+
+            assertEquals("AttributeError", PythonTestFixture.eval("_p_mod_ro").toString())
+            assertEquals("kotlin", PythonTestFixture.eval("_p_mod_ro_after").toString())
         }
 
     @Test
@@ -285,6 +393,16 @@ object ProxyFragment : FunctionTableFragment {
 
     val parked = LinkedBlockingQueue<() -> Unit>()
 
+    /**
+     * The Kotlin state behind the `STATIC_GETTER`/`STATIC_SETTER` entries: a top-level `var` in
+     * `demo.calc` and a companion-style `var` on `proxycls.Counter`. Both are read and written from
+     * the Kotlin side of the assertions, which is how "the Python assignment reached Kotlin" is
+     * observed rather than assumed.
+     */
+    var tally: Long = 0
+
+    var created: Long = 0
+
     private suspend fun doubleLater(x: Long): Long = suspendCoroutine { c -> parked.put { c.resume(x * 2) } }
 
     private suspend fun doubleNow(x: Long): Long = x * 2
@@ -326,6 +444,29 @@ object ProxyFragment : FunctionTableFragment {
             paramTypes = emptyList(),
             returnType = TypeTag.INT,
         ) { 7L },
+        // A top-level Kotlin `val`: readable as a module attribute, and not assignable.
+        ExposedCallable(
+            name = "demo.calc.origin",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.STRING,
+            kind = CallableKind.STATIC_GETTER,
+        ) { "kotlin" },
+        // A top-level Kotlin `var`: the same, plus a setter entry.
+        ExposedCallable(
+            name = "demo.calc.tally",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.INT,
+            kind = CallableKind.STATIC_GETTER,
+        ) { tally },
+        ExposedCallable(
+            name = "demo.calc.tally=",
+            arity = 1,
+            paramTypes = listOf(TypeTag.INT),
+            returnType = TypeTag.UNIT,
+            kind = CallableKind.STATIC_SETTER,
+        ) { args -> tally = args[0] as Long },
     ) + counterEntries()
 
     override fun classes(): List<ReflectedClass> = listOf(
@@ -338,6 +479,9 @@ object ProxyFragment : FunctionTableFragment {
                 "$COUNTER.label",
                 "$COUNTER.label=",
                 "$COUNTER.fetchLater",
+                "$COUNTER.KIND",
+                "$COUNTER.created",
+                "$COUNTER.created=",
             ),
         ),
     )
@@ -388,6 +532,29 @@ object ProxyFragment : FunctionTableFragment {
             kind = CallableKind.METHOD,
             isSuspend = true,
         ) { args -> PendingCall.start { (args[0] as ProxyCounter).fetchLater(args[1] as Long) } },
+        // The companion-object shape: no receiver in `args`, and the class object itself is what
+        // Python reads and writes. `KIND` is the `val` half, `created` the `var` half.
+        ExposedCallable(
+            name = "$COUNTER.KIND",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.STRING,
+            kind = CallableKind.STATIC_GETTER,
+        ) { "counter-class" },
+        ExposedCallable(
+            name = "$COUNTER.created",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.INT,
+            kind = CallableKind.STATIC_GETTER,
+        ) { created },
+        ExposedCallable(
+            name = "$COUNTER.created=",
+            arity = 1,
+            paramTypes = listOf(TypeTag.INT),
+            returnType = TypeTag.UNIT,
+            kind = CallableKind.STATIC_SETTER,
+        ) { args -> created = args[0] as Long },
     )
 }
 
