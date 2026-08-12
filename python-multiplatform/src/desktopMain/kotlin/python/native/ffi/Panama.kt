@@ -77,6 +77,15 @@ internal object Panama {
     /** Create a Panama upcall stub for a (Long) -> Int MethodHandle */
     val createUpcallStubI_I: (MethodHandle) -> Long
 
+    /** Create a Panama upcall stub for a (Long) -> Unit MethodHandle.
+     *
+     *  `destructor` -- the C type of `tp_dealloc` -- returns void, and the descriptor a stub is
+     *  built from has to match the signature CPython will call it through. The int-returning
+     *  shape above happens to survive the mismatch on both SysV x86-64 and AAPCS64 (the caller
+     *  simply ignores the return register), but that is an ABI accident rather than a guarantee,
+     *  so `tp_dealloc` gets its own void shape. */
+    val createUpcallStubI_V: (MethodHandle) -> Long
+
     // ---- internals ----
 
     private enum class Backend { MODERN, INCUBATOR }
@@ -96,6 +105,7 @@ internal object Panama {
                 createUpcallStubLongToLong = data.createUpcallStubLongToLong
                 createUpcallStubIII_I = data.createUpcallStubIII_I
                 createUpcallStubI_I = data.createUpcallStubI_I
+                createUpcallStubI_V = data.createUpcallStubI_V
             }
             Backend.INCUBATOR -> {
                 val data = implData as IncubatorData
@@ -109,6 +119,7 @@ internal object Panama {
                 createUpcallStubLongToLong = data.createUpcallStubLongToLong
                 createUpcallStubIII_I = data.createUpcallStubIII_I
                 createUpcallStubI_I = data.createUpcallStubI_I
+                createUpcallStubI_V = data.createUpcallStubI_V
             }
         }
     }
@@ -125,7 +136,8 @@ internal object Panama {
         val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle,
         val createUpcallStubLongToLong: (MethodHandle) -> Long,
         val createUpcallStubIII_I: (MethodHandle) -> Long,
-        val createUpcallStubI_I: (MethodHandle) -> Long
+        val createUpcallStubI_I: (MethodHandle) -> Long,
+        val createUpcallStubI_V: (MethodHandle) -> Long
     )
 
     private fun initModern(): ModernData {
@@ -455,7 +467,15 @@ internal object Panama {
             segmentAddressExact.invokeExact(stub) as Long
         }
 
-        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape, buildUpcallStub, buildUpcallStubIII_I, buildUpcallStubI_I)
+        val buildUpcallStubI_V: (MethodHandle) -> Long = { handle ->
+            val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 1)
+            java.lang.reflect.Array.set(layoutParams, 0, javaLong)
+            val fd = fdOfVoidMethod.invoke(null, layoutParams)
+            val stub: Any = upcallStubMethod.invoke(linker, handle, fd, globalArena, emptyOptions)
+            segmentAddressExact.invokeExact(stub) as Long
+        }
+
+        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape, buildUpcallStub, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
     }
 
     private fun adaptModernHandle(
@@ -527,7 +547,8 @@ internal object Panama {
         val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle,
         val createUpcallStubLongToLong: (MethodHandle) -> Long,
         val createUpcallStubIII_I: (MethodHandle) -> Long,
-        val createUpcallStubI_I: (MethodHandle) -> Long
+        val createUpcallStubI_I: (MethodHandle) -> Long,
+        val createUpcallStubI_V: (MethodHandle) -> Long
     )
 
     private fun initIncubator(): IncubatorData {
@@ -756,7 +777,15 @@ internal object Panama {
             toRawLongMethod.invoke(segAddressMethod.invoke(stub)) as Long
         }
 
-        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape, buildUpcallStub, buildUpcallStubIII_I, buildUpcallStubI_I)
+        val buildUpcallStubI_V: (MethodHandle) -> Long = { handle ->
+            val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 1)
+            java.lang.reflect.Array.set(layoutParams, 0, cLongLong)
+            val fd = fdOfVoidMethod.invoke(null, layoutParams)
+            val stub = upcallStubMethod.invoke(clinker, handle, fd)
+            toRawLongMethod.invoke(segAddressMethod.invoke(stub)) as Long
+        }
+
+        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape, buildUpcallStub, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
     }
 
     private fun adaptIncubatorHandle(

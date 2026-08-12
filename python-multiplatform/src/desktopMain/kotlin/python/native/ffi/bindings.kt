@@ -878,6 +878,26 @@ inline fun PyDict_GetItemString(p: Long, key: String): Long {
     val PyObject_GetTypeDataHandle: MethodHandle
     fun PyObject_GetTypeData(obj: Long, type: Long): Long = PyObject_GetTypeDataHandle.invokeExact(obj, type) as Long
 
+    /**
+     * `void *PyType_GetSlot(PyTypeObject *type, int slot)`.
+     *
+     * The abi3 way to reach a slot function of a type whose struct is opaque under the limited
+     * API. `tp_dealloc` needs it for `Py_tp_free` (74): a hand-written dealloc must free the
+     * object itself, and the allocator that matches the type is only reachable through here.
+     */
+    val PyType_GetSlotHandle: MethodHandle
+    fun PyType_GetSlot(type: Long, slot: Int): Long = PyType_GetSlotHandle.invokeExact(type, slot) as Long
+
+    /**
+     * `void PyObject_GC_UnTrack(void *op)`.
+     *
+     * Removes a GC-tracked object from the collector's list. A `tp_dealloc` on a
+     * `Py_TPFLAGS_HAVE_GC` type must call this before freeing the object, or the collector walks
+     * a list that contains released memory.
+     */
+    val PyObject_GC_UnTrackHandle: MethodHandle
+    fun PyObject_GC_UnTrack(op: Long) = PyObject_GC_UnTrackHandle.invokeExact(op) as Unit
+
     init {
         val P = Panama.POINTER_TYPE  // Long.TYPE — represents a native pointer
 
@@ -1287,5 +1307,7 @@ inline fun PyDict_GetItemString(p: Long, key: String): Long {
         PyModule_GetFilenameObjectHandle = find("PyModule_GetFilenameObject", P, P)
         PyType_FromSpecHandle = find("PyType_FromSpec", P, P)
         PyObject_GetTypeDataHandle = find("PyObject_GetTypeData", P, P, P)
+        PyType_GetSlotHandle = find("PyType_GetSlot", P, P, Integer.TYPE)
+        PyObject_GC_UnTrackHandle = find("PyObject_GC_UnTrack", Void.TYPE, P)
     }
 }
