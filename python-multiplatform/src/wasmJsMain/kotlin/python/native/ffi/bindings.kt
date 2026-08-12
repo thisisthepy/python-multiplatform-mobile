@@ -676,6 +676,14 @@ external fun PyType_GetSlot(type: Int, slot: Int): Int
 @WasmImport(MODULE, "PyObject_GC_UnTrack")
 external fun PyObject_GC_UnTrack(op: Int)
 
+/**
+ * `PyObject *PyCFunction_NewEx(PyMethodDef *ml, PyObject *self, PyObject *module)` -- what
+ * `UpcallEntry.bind` (ROADMAP §11, upcall argument marshalling) builds a real Python callable
+ * from. `self` carries the callable handle, the same slot a generated proxy's `self` will occupy.
+ */
+@WasmImport(MODULE, "PyCFunction_NewEx")
+external fun PyCFunction_NewEx(ml: Int, self: Int, module: Int): Int
+
 // -------------------------------------------------------------------------------------------------
 // The glue, and why it is here rather than in `python.wasm`
 //
