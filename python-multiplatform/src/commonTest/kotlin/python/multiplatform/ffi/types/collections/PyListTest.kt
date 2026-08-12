@@ -6,10 +6,18 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * Red-phase functional tests for [PyList]: construction, indexing,
- * iteration, mutation and conversion to/from Kotlin collections. Every
- * member is `TODO("Not yet implemented")`, so all of these are expected to
- * fail with [NotImplementedError] until the next phase.
+ * Functional tests for [PyList]: construction, indexing, iteration, mutation
+ * (`add`/`removeAt`/`sort`) and conversion to/from Kotlin collections.
+ *
+ * The second half is all `subList`, because it returns a live view rather
+ * than a copy: writes through the view have to reach the backing Python list
+ * and writes to the list have to be visible through the view, out-of-range
+ * bounds have to be rejected rather than clamped, and a nested `subList` has
+ * to resolve its indices against the original.
+ *
+ * This header used to say every member was a `TODO("Not yet implemented")`
+ * stub expected to fail with [NotImplementedError]. They are all implemented
+ * now, so every test here is a regression test and any failure is a real one.
  */
 class PyListTest {
 

@@ -1,8 +1,21 @@
 # Python Multiplatform
 
-![Build](https://github.com/thisisthepy/toolchain/workflows/Build/badge.svg)
-[![Version](https://img.shields.io/jetbrains/plugin/v/MARKETPLACE_ID.svg)](https://plugins.jetbrains.com/plugin/MARKETPLACE_ID)
-[![Downloads](https://img.shields.io/jetbrains/plugin/d/MARKETPLACE_ID.svg)](https://plugins.jetbrains.com/plugin/MARKETPLACE_ID)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Kotlin Multiplatform](https://img.shields.io/badge/Kotlin-Multiplatform-7F52FF.svg?logo=kotlin&logoColor=white)](https://kotlinlang.org/docs/multiplatform.html)
+[![Platforms](https://img.shields.io/badge/platforms-Android%20%7C%20iOS%20%7C%20macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20wasmJs-lightgrey.svg)](#supporting-multiplatforms)
+
+<!--
+There is deliberately no build/CI badge here: this repository has no CI. Adding one would
+assert a green build that nothing produces. The three badges removed in favour of the above
+were all broken and pointed away from this project:
+  - a `Build` workflow badge for github.com/thisisthepy/toolchain — a *different* repository,
+    and one with no `Build` workflow either (the badge URL served the text "Not Found").
+  - two JetBrains Marketplace badges still carrying the literal `MARKETPLACE_ID` placeholder
+    from the IntelliJ Platform Plugin Template; they rendered "jetbrains plugin: not found",
+    and this project is a Kotlin Multiplatform library, not an IDE plugin.
+If CI is added later, add its badge then — pointing at this repository.
+-->
+
 
 
 ### Description
@@ -19,7 +32,7 @@ Thanks to many contributors who develop dependent packages for this python-kotli
 - macOS (arm64, x86_64) with [Python Standalone Builds](https://github.com/astral-sh/python-build-standalone)
 - Linux (x86_64) with [Python Standalone Builds](https://github.com/astral-sh/python-build-standalone)
 - Windows (x86_64) with [Python Standalone Builds](https://github.com/astral-sh/python-build-standalone)
-- WASM - Not yet supported. See `docs/wasm-design.md` for why, and what it would take.
+- wasmJs (browser, Node) with CPython built here for `wasm32-emscripten` — see `docs/wasm-design.md`
 
 The interpreter is not vendored into this repository. Gradle downloads it per platform,
 verifies it, and extracts it at build time — see `docs/python-version-acquisition.md`. The

@@ -18,9 +18,14 @@ import kotlin.test.assertTrue
  * comparable is each platform's transition measured against its own floor, which is what
  * this reports.
  *
- * The desktop path currently reaches Panama through `MethodHandle.invoke` rather than
- * `invokeExact`, which forces an asType adaptation and boxes arguments and results on every
- * call. This benchmark is also the first measurement of what that costs.
+ * This header used to say the desktop path reached Panama through `MethodHandle.invoke` rather
+ * than `invokeExact`, paying an asType adaptation and boxing arguments and results on every call.
+ * That migration has since happened -- `bindings.kt` is `invokeExact` throughout -- and this
+ * benchmark is what measured it: `PyList_Size` on `sys.path` went from 1015.95 ns to 2.65 ns.
+ * See `desktopMain/README.md`, which now states "always `invokeExact`, never `invoke`" as a rule.
+ *
+ * The remaining bare `.invoke(...)` calls in this file are in the `@Ignore`d benchmark below,
+ * which drives raw handles directly rather than going through the wrappers.
  */
 class DesktopOverheadBenchmark {
 

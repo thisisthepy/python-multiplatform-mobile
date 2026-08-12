@@ -1464,12 +1464,41 @@ is the actual state of the Android object model, and that is the point of doing 
 
 ## 12. Smaller known items
 
-- **Download integrity**: desktop, Android and iOS archives are pinned in
-  `python-checksums.properties` and verified. python.org publishes Sigstore bundles for the
-  Android archives — and, from 3.15, for the iOS XCframework (§9) — that are not checked; what
-  verifying them would require is noted in `docs/python-version-acquisition.md`. The lockfile is
-  keyed by version *and* flavour, so a `-freethreaded` or a 3.15 archive is a separate entry and
-  cannot be silently accepted under an existing key.
+- ~~**Download integrity**: python.org's Sigstore bundles are not checked.~~ **Done for every
+  archive that publishes one.** `-PverifyPythonSignatures=true` verifies the sibling
+  `<archive>.sigstore` in-process with `dev.sigstore:sigstore-java`, pinning the release manager's
+  Fulcio SAN and OIDC issuer — both Android tarballs, and from 3.15 the iOS XCframework. The claim
+  this entry rested on, that Sigstore verification needs an external CLI and is therefore
+  unreasonable inside Gradle, was false; `docs/python-version-acquisition.md` §5 is corrected.
+  Three things worth keeping:
+  - **The identity is a version→signer map, not a constant.** 3.14/3.15 are `hugo@python.org` via
+    GitHub; 3.12/3.13 are `thomas@python.org` via Google. A constant would keep passing on the
+    series it was written for and invite loosening on any other. An unrecorded series fails hard
+    rather than skipping.
+  - **Two negative controls were run, not just the happy path.** Flipping one base64 character in
+    the bundle's signature gave `Artifact signature was not valid`; pointing the map at the wrong
+    release manager gave `No provided certificate identities matched values in certificate`. Both
+    failed the build with a non-zero exit. Without the identity pin the second case would pass,
+    which is the whole reason the pin is there.
+  - **It is opt-in, and the SHA-256 lockfile is untouched.** `sigstore-java` drags in
+    grpc-netty-shaded/protobuf/bouncycastle and needs the network for its TUF root, so a default
+    build resolves none of it (measured: zero mentions, exit 0). The two gates prove different
+    things — lockfile "the bytes we reviewed", Sigstore "the bytes the release manager signed" —
+    and only the lockfile works offline or covers every source.
+
+  Still uncovered, for reasons not fixable here: **python-build-standalone** publishes no sibling
+  signature at all (853 assets, `SHA256SUMS` the only non-archive; provenance lives in GitHub's
+  attestations API, keyed by digest rather than filename and rate-limited to 60/hour unauthenticated),
+  and **BeeWare's Python-Apple-support** (iOS ≤ 3.14) publishes five tar.gz assets and nothing
+  else — no checksums, no signatures, no attestations. Desktop is still checked against the
+  release's own `SHA256SUMS`; for BeeWare the lockfile pin is the only instrument that exists.
+  The lockfile stays keyed by version *and* flavour, so a `-freethreaded` or a 3.15 archive is a
+  separate entry and cannot be silently accepted under an existing key.
+- **Fixed in passing: the Android download URL 404'd on every pre-release.** It built
+  `ftp/python/$version/`, but python.org publishes `3.15.0rc1` under `3.15.0/`. It stayed
+  invisible because the archives were already in the download directory so the fetch was skipped;
+  adding the `.sigstore` fetch surfaced it on the first run. `pythonOrgReleaseDir`, which the iOS
+  task already used, is now declared above both tasks and used by both.
 - ~~**`PyList.subList`** returns a copy, not a live view.~~ **Stale — it returns `PySubList`,
   which delegates `get`/`set`/`add`/`removeAt` to the backing list, i.e. it is a live view.**
   **`pyObjectToNative`**'s fallback branch is still not fully native; the open question is now
@@ -1514,11 +1543,30 @@ is the actual state of the Android object model, and that is the point of doing 
   were appended as needed. Documented target order: Type before Integer Objects (§16), Tuple
   before List Objects (§22), Module before Iterator Objects (§25). It is a ~370-line pure-comment
   move with no behavioural effect, so it should be done alone, on a quiet tree, or not at all.
-- **Several `commonTest` file headers still describe their subjects as `TODO` stubs "expected to
-  fail with `NotImplementedError`"** — `PyObjectTest`, `Python3Test`, `PyBasicTypesTest`,
-  `PyModuleTest`, `PyDictTest`, `PyIteratorTest`, `PySetTest`, `PyTupleTest`, `PyListTest`,
-  `ConversionTest`. Every one of those is implemented, so the headers invite the next reader to
-  dismiss a real failure as expected. `PyTypeTest`'s was corrected; the rest were left.
+- ~~**Several `commonTest` file headers still describe their subjects as `TODO` stubs "expected to
+  fail with `NotImplementedError`"**~~ **— done.** The ten named here (`PyObjectTest`,
+  `Python3Test`, `PyBasicTypesTest`, `PyModuleTest`, `PyDictTest`, `PyIteratorTest`, `PySetTest`,
+  `PyTupleTest`, `PyListTest`, `ConversionTest`) now say what they actually cover and that a
+  failure is real. A sweep of the *rest* of the test tree found five more of the same shape, which
+  this entry had not counted:
+  - `PyExceptionTest` claimed the exec/eval sites "do not yet call `PyException.fromCurrentError`"
+    and that its `type`-asserting cases were expected to fail. They all route through
+    `pyErrorOrGeneric`, and `Python3.exec` is built on `PyRun_String` specifically so the error
+    indicator survives to be read — the opposite of what the header said.
+  - `RefCountTest` said `GCLeakTest` was "blocked by the GIL still being held by the initialising
+    thread". §1 is closed; `initialize()` parks with `PyEval_SaveThread()` and `GCLeakTest` passes.
+  - `PythonTestFixture` named "CPython 3.13"; `pythonVersion` is 3.14.7 and the fixture is
+    version-agnostic, so it no longer names one.
+  - `DesktopOverheadBenchmark` (desktopTest) said desktop "currently reaches Panama through
+    `MethodHandle.invoke` rather than `invokeExact`". That migration is done and this benchmark is
+    what measured it — 1015.95 ns → 2.65 ns.
+  - `ConversionTest`'s inline `// Once implemented: RAW should hand back a PyObject/pointer-ish
+    value, NATIVE a Kotlin List` described the shipped behaviour as future work.
+
+  Headers checked and left alone because they were already accurate: `HandleTableTest` and
+  `UpcallTableTest` carry red-phase *notes* that explicitly distinguish "failed to compile before
+  the implementation existed" from a regression, which is still the right thing to tell a reader.
+  Comment-only throughout: desktop stayed at 236 tests, 0 failures, 1 skipped.
 - **No CI.** The README badges point at a different repository.
 - ~~**Sample app** has not been revisited since the object model landed.~~ **Done — see §13.**
 

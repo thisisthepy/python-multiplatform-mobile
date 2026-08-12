@@ -7,10 +7,14 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 /**
- * Red-phase functional tests for [PyModule]'s metadata accessors
- * (`name`/`doc`/`dict`). Attribute access itself (inherited from
- * [python.multiplatform.ffi.PyObject]) already works; `name`/`doc`/`file`/`dict`
- * are new `TODO` stubs.
+ * Functional tests for [PyModule]'s metadata accessors: `name`, `dict` (the
+ * module namespace), `doc` -- which must come back null for a module that has
+ * none rather than throwing -- and `get`, which delegates to the attribute
+ * lookup inherited from [python.multiplatform.ffi.PyObject].
+ *
+ * This header used to say `name`/`doc`/`file`/`dict` were new `TODO` stubs.
+ * They are implemented now, so every test here is a regression test and any
+ * failure is a real one.
  */
 class PyModuleTest {
 

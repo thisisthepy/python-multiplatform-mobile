@@ -8,9 +8,13 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Red-phase functional tests for [PyIterator]: obtaining one via `iter()`
- * and driving it to exhaustion. Both [PyIterator.hasNext] and
- * [PyIterator.next] are `TODO`.
+ * Functional tests for [PyIterator]: obtaining one via `PyObject_GetIter` and
+ * driving it to exhaustion, including the empty-iterable case where
+ * [PyIterator.hasNext] must be false on the first ask.
+ *
+ * This header used to say [PyIterator.hasNext] and [PyIterator.next] were
+ * `TODO` stubs. Both are implemented now, so every test here is a regression
+ * test and any failure is a real one.
  */
 class PyIteratorTest {
 

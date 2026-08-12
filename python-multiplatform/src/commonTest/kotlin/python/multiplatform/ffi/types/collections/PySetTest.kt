@@ -6,8 +6,12 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * Red-phase functional tests for [PySet] and [PyFrozenSet]: construction,
- * membership, mutation and the set-algebra operations. All members are `TODO`.
+ * Functional tests for [PySet] and [PyFrozenSet]: construction from a Kotlin
+ * set, `add`, membership, the set-algebra operations (`union`,
+ * `intersection`, `difference`) and conversion back to a Kotlin set.
+ *
+ * This header used to say all members were `TODO` stubs. They are implemented
+ * now, so every test here is a regression test and any failure is a real one.
  */
 class PySetTest {
 
