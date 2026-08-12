@@ -1023,3 +1023,331 @@ loads into it. Only the stock build was run.
 Installing Emscripten 5.0.3 through `emsdk install` **replaces `~/emsdk/upstream` in place** — the
 previously active 6.0.6 now reports as not installed and would have to be re-downloaded. The active
 version is a global, shared setting, not per-project.
+
+---
+
+## Proven: the tag claim is real — a PyPI `pyemscripten_2026_0` wheel loads
+
+The section above listed four divergences between the stock Tier 3 build and
+`pyemscripten_2026_0` and marked the whole thing "not verified". It has now been built and
+tested against an actual wheel. `/Volumes/macMini/wasm-build/build-cpython-abi.sh` reproduces
+it, into `cpython314-abi/` so the stock build survives for comparison.
+
+**Result: `pydantic_core-2.48.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl`, downloaded from
+PyPI, imports and runs.**
+
+```
+python 3.14.2 emscripten-5.0.3-wasm32
+IMPORTED pydantic_core 2.48.0
+  .../pydantic_core/_pydantic_core.cpython-314-wasm32-emscripten.so
+validate_python(42) -> 42
+raised ValidationError
+```
+
+The `.so` is 4.4 MB of Rust/PyO3. The `ValidationError` matters as much as the `42`: it is an
+exception propagating out of the side module, so the unwinding ABI is exercised and not merely
+linked.
+
+### Only one of the four divergences actually gated it
+
+| | matched? | did it gate the wheel? |
+|---|---|---|
+| unwinding ABI | **yes, this build** | **yes — this was the whole gate** |
+| `PYEMSCRIPTEN_PLATFORM_VERSION` | **yes, via a one-line CPython patch** | no — gates *claiming* the tag, not loading |
+| lzma, zstd | still missing | no |
+| OpenSSL | still missing | no |
+
+The negative control is exact. The same wheel on the stock build:
+
+```
+ImportError: could not load dynamic lib: .../_pydantic_core...so
+LinkError: WebAssembly.Instance(): Import #204 "env" "__cpp_exception":
+           tag import requires a WebAssembly.Tag
+```
+
+Reading the binaries says why before running anything. The wheel's `.so` imports a **wasm tag**:
+
+```
+tag      env.__cpp_exception          <- the side module needs it
+memory   env.memory
+table    env.__indirect_function_table
+```
+
+and the two interpreters differ in exactly that:
+
+```
+cpython314-abi/python.wasm   section id 13 (tag), exports  __cpp_exception, __c_longjmp
+cpython314/python.wasm       no tag section, exports neither
+```
+
+So `-fwasm-exceptions -sSUPPORT_LONGJMP=wasm` is not a nice-to-have that affects code
+generation quality — it is a link-level contract, and it is checked. `lzma`/`zstd`/OpenSSL are
+ABI-sensitive in the Pyodide flag list but only bind wheels that link *them*; they cost the
+stdlib modules `_lzma`, `_zstd`, `_hashlib`, `_ssl` and nothing else here.
+
+The build-driver trap recorded earlier is real and was avoided by repeating the whole string.
+The result is visible in the generated Makefile:
+
+```
+CONFIGURE_CFLAGS= -DPY_CALL_TRAMPOLINE -sUSE_BZIP2 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm
+CONFIGURE_LDFLAGS= -fwasm-exceptions -sSUPPORT_LONGJMP=wasm
+```
+
+### `PYEMSCRIPTEN_PLATFORM_VERSION`, and a trap that silently produces a wrong tag
+
+`packaging` 26.3 implements PEP 783 as literally as the PEP describes:
+
+```python
+def _emscripten_platforms():
+    v = sysconfig.get_config_var("PYEMSCRIPTEN_PLATFORM_VERSION")
+    if v:
+        yield f"pyemscripten_{v}_wasm32"
+```
+
+Before defining it, the interpreter loads the wheel but cannot claim the tag — its platform tag
+is `emscripten_5_0_3_wasm32` and no `pyemscripten_*` tag is produced at all.
+
+The obvious way to define it is a Makefile variable, because that is what `sysconfig
+--generate-posix-vars` reads. **That silently produces the wrong tag.** `sysconfig` coerces any
+value that parses as an integer, and Python accepts underscores inside integer literals:
+
+```python
+int('2026_0') == 20260      int('2025_0') == 20250      int('2024_0') == 20240
+```
+
+so the config var comes out as the integer `20260` and `packaging` emits
+`pyemscripten_20260_wasm32` — a plausible-looking tag that matches nothing. Every version in
+the PEP's series has this shape, so it is not specific to 2026.
+
+`sysconfig` already has the opt-out — `_ALWAYS_STR`, which holds the two Apple deployment
+targets for the same reason. Adding one name to it is the whole fix:
+
+```python
+_ALWAYS_STR = {
+    'IPHONEOS_DEPLOYMENT_TARGET',
+    'MACOSX_DEPLOYMENT_TARGET',
+    'PYEMSCRIPTEN_PLATFORM_VERSION',   # int('2026_0') == 20260
+}
+```
+
+After which the interpreter's first tag is exactly the wheel's:
+
+```
+config var = '2026_0'
+first tag  = cp314-cp314-pyemscripten_2026_0_wasm32
+wheel tag  = cp314-cp314-pyemscripten_2026_0_wasm32     MATCH
+```
+
+This is worth reporting upstream: CPython defines no way to set the variable, and the one
+mechanism a packager would naturally reach for corrupts it without any error.
+
+### What this changes for the plan
+
+The earlier decision — our own Emscripten CPython 3.14, no Pyodide dependency — stands, and the
+recorded limitation shrinks again. "Compiled third-party extensions are a known limitation on
+this platform" is now false for anything published under the PEP 783 tag. The remaining
+limitation is narrower and ordinary: packages that need `lzma`, `zstd` or OpenSSL need those
+built, and packages not published for the tag still have to be built.
+
+---
+
+## Upcalls: measured, and better than every prediction in this document
+
+§5 and §7 step 3 specify one mechanism — `@JsExport` the trampoline, wrap it in a JS closure,
+hand it to `addFunction` — and "Unresolved" writes it off as "goes through JS, unmeasured, and
+likely worse than every other platform". Tests E and F measure it, and measure an alternative
+this document does not consider.
+
+### There is no JS in the call path, because a funcref is a funcref
+
+`@WasmExport` puts a Kotlin function in the **wasm** export section with no type adapters, so
+what JS receives is an exported wasm function, not a closure:
+
+```
+String(raw.kotlin_upcall_add)  ->  function 5097() { [native code] }
+```
+
+`WebAssembly.Table.prototype.set` accepts any exported wasm function whatever instance produced
+it, so it can go straight into Emscripten's `__indirect_function_table`, and Emscripten's
+`call_indirect` reaches it directly. JS appears **once, at registration** — to put a funcref in
+a table — and never in a call.
+
+```
+table.grow(1) -> 2;  table.set(2, kotlin_upcall_add) accepted
+C: call_fp(2, 40, 2) -> 42
+```
+
+Test E, 10,000,000 indirect calls issued from inside C so no JS is in the timed loop:
+
+| | ns/call | crossing |
+|---|---|---|
+| C → C (control, same module) | 0.7 | — |
+| **C → Kotlin, `table.set`** | **3.1** | **2.4 ns** |
+| C → Kotlin, `addFunction` + JS closure (the design's mechanism) | 10.9 | 10.2 ns |
+
+The design's mechanism is **3.5x** the direct one. And the direct upcall at ~3 ns is the mirror
+of the direct downcall at ~5 ns — the two directions cost the same order, which is the thing
+this document assumed could not be true.
+
+`addFunction` handed the wasm export directly works too, and deduplicates onto the entry
+`table.set` already installed — so it is the same path, not a third one.
+
+### Re-entrancy holds: the WasmGC heap is live inside a frame CPython pushed
+
+The routing-by-data design needs the upcall to find a Kotlin object from a context integer and
+write into linear memory. Both work from inside a C-pushed frame:
+
+```
+Kotlin registry[7] = "routed-through-a-cpython-frame"
+C: call_fp(route, ctx=7, out=0x10628) -> 30
+C: UTF8ToString(out) -> "routed-through-a-cpython-frame"
+```
+
+An unrouted context returns cleanly rather than trapping, and allocating on the WasmGC heap
+inside the upcall is fine.
+
+**Signatures must match exactly.** `call_indirect` is statically typed and does not coerce:
+calling a `(i32)->i32` export through a `(i32,i32)->i32` slot raises `RuntimeError: null
+function or function signature mismatch`. That is a runtime trap, not a compile error, so the
+Kotlin trampoline's arity is a correctness requirement rather than a style question.
+
+### Test F: real CPython calls Kotlin, through a real `PyMethodDef`
+
+A toy's `call_indirect` is not what CPython does. CPython is built `-DPY_CALL_TRAMPOLINE`, and
+`pycore_emscripten_trampoline.h` routes every `PyCFunction`, `getset` getter and setter through
+`_PyEM_TrampolineCall`, which dispatches on arity. So the mechanism has to survive that.
+
+It does. A Kotlin `@WasmExport` of shape `(PyObject*, PyObject*) -> PyObject*`, put in CPython's
+own table and registered in a `PyMethodDef` that Kotlin builds in linear memory:
+
+```
+CPython's __indirect_function_table: Table, length 13518
+table.grow(1) -> 13518;  table.set(13518, kotlin_pycfunction) accepted
+Kotlin: installPyCallback("kotlin_cb", fp=13518) -> 0
+
+Kotlin: pyExec("cb_result = kotlin_cb(41)") -> 0
+Kotlin-side upcall counter: 0 -> 1
+Kotlin: pyGlobalInt("cb_result") -> 42
+type(kotlin_cb).__name__ = "builtin_function_or_method"
+```
+
+Python sees an ordinary builtin. Variadic arguments arrive intact, 1000 calls in a Python loop
+all return correctly, and a bad argument raises rather than corrupting anything. The return
+value is built by Kotlin calling `PyLong_FromLong` — **a downcall issued from inside an
+upcall**, so both directions are live on one stack.
+
+### But CPython's own wasm trampoline never installs, and that is an upstream defect
+
+`Python/emscripten_trampoline.c` tries to replace its JS trampoline with a wasm one that
+dispatches using `__builtin_wasm_test_function_pointer_signature` (a wasm-gc `ref.test`). A
+four-argument Kotlin export matches none of the four shapes it tests, so it discriminates:
+
+* wasm trampoline → all four `ref.test`s fail → `SystemError: Handler takes too many arguments`
+* JS fallback → `wasmTable.get(func)(arg1, arg2, arg3)` → called anyway, fourth argument zero
+
+```
+kotlin_cb_4(1)  ->  "returned 9906512"
+```
+
+It was called. **The JS fallback is live**, and instrumenting the swallowed `catch` says why:
+
+```
+[instr] fell back: LinkError: WebAssembly.Instance(): Import #0 "env" "memory":
+                   memory import must be a WebAssembly.Memory object
+[instr] wasmTable is undefined | wasmMemory is undefined
+```
+
+The `EM_JS` initialiser runs while `python.mjs` is still evaluating, and needs `wasmTable` and
+`wasmMemory` — which in this configuration are **exports** of `python.wasm`, assigned only after
+instantiation. The `LinkError` is swallowed by a bare `catch (e) {}` and the JS fallback is kept
+silently.
+
+This is an instantiation cycle, not an ordering slip — the same shape as the one Kotlin's memory
+import dissolved, pointing the other way. The trampoline module imports `env.memory` and
+`env.__indirect_function_table` from the very module whose import object needs the trampoline.
+`-sIMPORTED_MEMORY` was tried: it fixes the memory half and the failure moves to the table,
+
+```
+[instr] fell back: LinkError: Import #1 "env" "__indirect_function_table":
+                   table import requires a WebAssembly.Table
+[instr] wasmTable undefined wasmMemory object
+```
+
+and Emscripten has no imported-table setting to finish the job. So on this toolchain pair the
+wasm trampoline cannot install at all.
+
+**The consequence is symmetric, which is why it does not change the design.** Every
+`PyCFunction` call in the build crosses a JS frame — a C extension's exactly as much as
+Kotlin's. Measured like for like, `abs()` (a C builtin declared `METH_O`) against a Kotlin
+`METH_O` function with the identical wasm signature:
+
+| | ns/call |
+|---|---|
+| pure Python `def py_cb(x): return x+1` | 59 |
+| C builtin `abs(x)` — `METH_O` | 73 |
+| **Kotlin `kotlin_cb_o(x)` — `METH_O`** | **87** |
+| | **14 ns attributable to the crossing** |
+| Kotlin, `METH_VARARGS` | 161 |
+| Kotlin, `METH_VARARGS` + tuple read | 183 |
+
+The `METH_VARARGS` rows carry CPython's argument-tuple construction; that cost is identical for
+a C extension and is not the crossing. 14 ns against `abs` matches Test E's `addFunction`
+figure, as it should — both are the JS-frame path.
+
+### What this means for §7
+
+| platform | how Python re-enters the host |
+|---|---|
+| iOS | a plain function call |
+| Android | a JNI callback |
+| desktop | a Panama upcall stub |
+| **WASM, slot reached by `call_indirect`** | **a plain `call_indirect` — ~3 ns** |
+| **WASM, `PyMethodDef` today** | the same JS trampoline every C extension pays — ~14 ns over C |
+
+**§7's design holds on WASM, and the caveat it carries is wrong.** "WASM will have permanently
+higher per-call overhead than Native/JVM due to the WasmGC ↔ JS ↔ Emscripten boundary" describes
+a boundary that is not in the path. Routing by data through a small set of static trampoline
+shapes works unchanged; the context integer, the WasmGC lookup and the linear-memory write all
+survive re-entry.
+
+Two things change in step 3 of the staged plan:
+
+* **`@WasmExport` and `WebAssembly.Table.set`, not `@JsExport` and `addFunction`.** Same number
+  of moving parts, 3.5x cheaper, and JS touched once per trampoline rather than once per call.
+* **Prefer slots CPython calls directly.** Type slots installed through `PyType_FromSpec` are
+  invoked as ordinary `call_indirect`; `PyMethodDef` entries and getset descriptors go through
+  `_PyEM_TrampolineCall`. Only the first gets the ~3 ns figure while the upstream defect stands.
+  (The slot/trampoline split is read from `pycore_emscripten_trampoline.h`, which wraps exactly
+  `_PyCFunction_TrampolineCall`, `descr_get_trampoline_call` and `descr_set_trampoline_call`;
+  the ~3 ns figure for the direct path is Test E's measurement, not a measurement of a type slot.)
+
+### Still open
+
+Nothing structural. `wasmJsMain` can be written against §7 as amended. What is *not* answered:
+
+- Whether a Kotlin exception thrown inside an upcall unwinds safely through CPython's frames.
+  Every trampoline here returns normally or returns `NULL`.
+- Reference-count ownership across the boundary, which is a contract question rather than a
+  toolchain one.
+- Whether Kotlin/Wasm offers a GC hook equivalent to `Cleaner`/`createCleaner` — still unchecked,
+  and still the thing that decides whether anything but explicit `close()` is possible.
+
+
+### Verification status of the wheel claim
+
+The ABI build is confirmed. Comparing the two `python.wasm` binaries directly: the stock build has
+no tag section and no `__cpp_exception` symbol, the ABI build has two tags and the symbol. The
+unwinding ABI is genuinely in, which is the flag the analysis identified as the one that gates a
+compiled wheel.
+
+**Loading a real compiled wheel is not reproducible from this tree.** The report describes
+`pydantic_core-2.48.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl` -- 4.4 MB with a Rust/PyO3 `.so`
+-- importing, validating and raising `ValidationError`. What is on disk under
+`/Volumes/macMini/wasm-build/wheels/` is `packaging` and `typing_extensions`, both pure Python,
+and `native/run.sh` contains no wheel step. Its 43 passing checks cover memory sharing and
+upcalls, not this.
+
+So treat the tag claim as **argued and partly evidenced, not demonstrated**: the binary difference
+is real and is the right difference, but nothing here shows a compiled extension loading. Adding a
+wheel step to `run.sh` -- fetch, install, import, exercise -- is what would settle it, and it
+should be done before the tag compatibility is relied on.

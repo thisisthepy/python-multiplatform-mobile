@@ -12,6 +12,10 @@ how to reproduce them and what each result was.
 RUN_LEGACY_B=1 ./native/run.sh  # additionally runs the historical Test B (see below)
 ```
 
+Currently **43 PASS, 0 FAIL**. Tests D and F need a CPython build at `$PMP_PYTHON_DIR`, which
+defaults to the ABI-matched one (`/Volumes/macMini/wasm-build/build-cpython-abi.sh`); they skip if
+it is absent and pass against the stock build too.
+
 Emscripten is pinned to **5.0.3**, which is what `pyemscripten_2026_0` specifies (Pyodide
 `Makefile.envs` at tag `314.0.4`). The experiment does not depend on the version; the pin exists so
 this and the CPython build agree.
@@ -60,11 +64,62 @@ Kotlin: pyExec("bytearray(48 MiB)") -> 0,  320 -> 934 pages             PASS
 Kotlin wrote the Python source directly into CPython's heap with `Pointer.storeByte` on an address
 `malloc` returned, and dereferenced `PyUnicode_AsUTF8`'s `char*` to read the result back.
 
-It needs a CPython build at `$PMP_PYTHON_DIR` (default
-`/Volumes/macMini/wasm-build/cpython314/cross-build/wasm32-emscripten/build/python`) relinked with
-`wasmExports,wasmMemory` added to `-sEXPORTED_RUNTIME_METHODS` — without those the 8191 exports are
-in the binary but unreachable from JS, so there is nothing to hand `@WasmImport`. Neither setting is
-in PEP 783's ABI-sensitive list. The test skips if the build is absent.
+It needs a CPython build at `$PMP_PYTHON_DIR` relinked with `wasmExports,wasmMemory` added to
+`-sEXPORTED_RUNTIME_METHODS` — without those the 8191 exports are in the binary but unreachable from
+JS, so there is nothing to hand `@WasmImport`. Neither setting is in PEP 783's ABI-sensitive list.
+The test skips if the build is absent. The default is now the ABI-matched build
+(`cpython314-abi/...`, 8287 exports); the figures above are from the stock one, and both pass.
+
+**Test E — upcalls: Emscripten-side C re-entering Kotlin/Wasm.** PASS.
+The design (§5, §7 step 3) specifies `@JsExport` + a JS closure + `addFunction`. `@WasmExport`
+gives a raw wasm export instead, and `WebAssembly.Table.set` accepts it into Emscripten's own
+`__indirect_function_table` — so `call_indirect` reaches Kotlin with no JS in the path. JS is used
+once, at registration.
+
+```
+String(raw.kotlin_upcall_add)  ->  function 5097() { [native code] }
+table.grow(1) -> 2;  table.set(2, kotlin_upcall_add) accepted
+C: call_fp(2, 40, 2) -> 42                                              PASS
+C: call_fp(route, ctx=7, out) -> "routed-through-a-cpython-frame"       PASS
+```
+
+10,000,000 indirect calls issued from inside C, so no JS is in the timed loop:
+
+| | ns/call |
+|---|---|
+| C → C (control, same module) | 0.7 |
+| **C → Kotlin, `table.set`** | **3.1** |
+| C → Kotlin, `addFunction` + JS closure | 10.9 |
+
+`call_indirect` is statically typed: calling a `(i32)->i32` export through a `(i32,i32)->i32` slot
+traps rather than coercing. Trampoline arity is a correctness requirement.
+
+**Test F — the same against the real interpreter, as a `PyMethodDef`.** PASS.
+A Kotlin `@WasmExport` registered as an ordinary `PyCFunction`, called from Python source, building
+its return value by calling `PyLong_FromLong` — a downcall from inside an upcall.
+
+```
+table.grow(1) -> 13518;  table.set(13518, kotlin_pycfunction) accepted
+Kotlin: pyExec("cb_result = kotlin_cb(41)") -> 0,  pyGlobalInt("cb_result") -> 42   PASS
+type(kotlin_cb).__name__ = "builtin_function_or_method"                            PASS
+1000 calls in a Python loop, variadic args, error paths                            PASS
+```
+
+It also found an upstream defect. CPython's `PY_CALL_TRAMPOLINE` tries to install a wasm trampoline
+and silently keeps its JS fallback, because the `EM_JS` initialiser needs `wasmTable`/`wasmMemory`
+before they exist and the resulting `LinkError` is swallowed by a bare `catch (e) {}`. A
+four-argument Kotlin export discriminates the two (the wasm one would raise `Handler takes too many
+arguments`; the JS one calls it anyway) and says JS. So today every `PyCFunction` call crosses a JS
+frame — a C extension's as much as Kotlin's. Measured like for like on `METH_O`:
+
+| | ns/call |
+|---|---|
+| pure Python `def py_cb(x): return x+1` | 59 |
+| C builtin `abs(x)` | 73 |
+| Kotlin `kotlin_cb_o(x)` | 87 |
+
+14 ns of that is the crossing. See `docs/wasm-design.md` for the diagnosis and why
+`-sIMPORTED_MEMORY` does not fix it.
 
 **Composition, measured against the interpreter.** Reading one global from `__main__`, 200,000
 times, each row adding a pure-Kotlin optimisation:
@@ -168,3 +223,35 @@ no conversion — the copy the design expected to pay for was already gone. And
 - The linear memory is safe to share: `min_pages = 0`, all data segments passive (they feed WasmGC
   arrays via `array.new_data`), and the page count stays 0 across string interop, collections,
   exceptions, a 10 MiB `ByteArray`, a 100k-object graph, the `ArrayBuffer` bridge and coroutines.
+
+## The ABI-matched CPython, and the wheel
+
+`/Volumes/macMini/wasm-build/build-cpython-abi.sh` builds CPython 3.14.2 to match
+`pyemscripten_2026_0` (PEP 783) in `cpython314-abi/`, leaving the stock build in `cpython314/` for
+comparison. It verifies itself at the end — exported wasm tags, and the platform version.
+
+The claim it proves:
+
+```
+$ PYTHONPATH=<extracted wheel> .../cpython314-abi/.../python.sh -c "import pydantic_core; ..."
+IMPORTED pydantic_core 2.48.0            # pydantic_core-2.48.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl
+validate_python(42) -> 42
+raised ValidationError
+```
+
+and the negative control, the same wheel on the stock build:
+
+```
+LinkError: Import #204 "env" "__cpp_exception": tag import requires a WebAssembly.Tag
+```
+
+Two things are worth knowing before repeating it:
+
+- **The unwinding ABI is the only thing that gated the wheel.** `-fwasm-exceptions
+  -sSUPPORT_LONGJMP=wasm` at compile *and* link; the check is that `python.wasm` grows a tag
+  section exporting `__cpp_exception` and `__c_longjmp`. lzma, zstd and OpenSSL are still missing
+  and did not matter here.
+- **`PYEMSCRIPTEN_PLATFORM_VERSION` cannot be set through the Makefile without corrupting it.**
+  `sysconfig` coerces integer-looking values and Python accepts `int('2026_0') == 20260`, so
+  `packaging` emits `pyemscripten_20260_wasm32`. The fix is one name in `sysconfig._ALWAYS_STR`,
+  which exists for exactly this reason.

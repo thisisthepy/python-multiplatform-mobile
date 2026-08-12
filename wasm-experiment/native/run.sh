@@ -3,6 +3,9 @@
 #
 #   Test A  @WasmImport binds to an Emscripten export.                            (still current)
 #   Test C  that AND a shared linear memory, in one instantiation graph.          (the live result)
+#   Test D  both mechanisms against real CPython 3.14.2.
+#   Test E  upcalls: Emscripten-side C re-entering Kotlin through a function pointer.
+#   Test F  upcalls against the real interpreter: a Kotlin @WasmExport as a PyCFunction.
 #   Test B  Emscripten importing a memory Kotlin exports.        (historical -- see the note below)
 #
 # Test B was the shape forced by Kotlin <= 2.4.10, which DEFINED and exported its linear memory.
@@ -14,27 +17,39 @@ cd "$(dirname "$0")/.."
 NODE=$(find ~/.gradle/nodejs -name node -type f -perm +111 | head -1)
 source ~/emsdk/emsdk_env.sh > /dev/null 2>&1
 
-EXPORTS='["_add_two","_get_static_message","_alloc_message","_str_len","_poke","_alloc_int_array","_malloc","_free"]'
-RT='["UTF8ToString","wasmMemory","HEAP32","HEAPU8"]'
+EXPORTS='["_add_two","_get_static_message","_alloc_message","_str_len","_poke","_alloc_int_array","_malloc","_free","_call_fp","_call_fp_n","_c_add","_c_add_fp","_fp_is_two_arg","_fp_is_one_arg","_fp_is_zero_arg"]'
+RT='["UTF8ToString","wasmMemory","HEAP32","HEAPU8","wasmTable","addFunction","removeFunction"]'
 ( cd native
   # -sALLOW_MEMORY_GROWTH matches how CPython links itself (configure.ac appends
   # "-sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=20971520" to LINKFORSHARED), so the shared memory
   # under test is one that can grow after Kotlin is already holding it.
-  emcc probe.c -O2 -o probeA.mjs -sMODULARIZE -sEXPORT_ES6 -sALLOW_MEMORY_GROWTH \
+  #
+  # -sALLOW_TABLE_GROWTH is what addFunction needs, and what Test E needs to put a Kotlin export
+  # into the table. -mgc is for __builtin_wasm_test_function_pointer_signature, the wasm-gc ref.test
+  # CPython's own PY_CALL_TRAMPOLINE dispatches on (Python/emscripten_trampoline_inner.c).
+  emcc probe.c -O2 -mgc -o probeA.mjs -sMODULARIZE -sEXPORT_ES6 -sALLOW_MEMORY_GROWTH \
+       -sALLOW_TABLE_GROWTH \
        -sEXPORTED_FUNCTIONS="$EXPORTS" -sEXPORTED_RUNTIME_METHODS="$RT"
   if [ -n "$RUN_LEGACY_B" ]; then
-    emcc probe.c -O2 -o probeB.mjs -sMODULARIZE -sEXPORT_ES6 -sIMPORTED_MEMORY -sALLOW_MEMORY_GROWTH \
+    emcc probe.c -O2 -mgc -o probeB.mjs -sMODULARIZE -sEXPORT_ES6 -sIMPORTED_MEMORY -sALLOW_MEMORY_GROWTH \
+         -sALLOW_TABLE_GROWTH \
          -sEXPORTED_FUNCTIONS="$EXPORTS" -sEXPORTED_RUNTIME_METHODS="$RT"
   fi )
 
-: "${PMP_PYTHON_DIR:=/Volumes/macMini/wasm-build/cpython314/cross-build/wasm32-emscripten/build/python}"
+# Defaults to the ABI-matched build (build-cpython-abi.sh), which is the one that can load a
+# pyemscripten_2026_0 wheel. The stock build is still at .../cpython314/... if you want to compare;
+# Tests D and F pass against either.
+: "${PMP_PYTHON_DIR:=/Volumes/macMini/wasm-build/cpython314-abi/cross-build/wasm32-emscripten/build/python}"
 HAVE_CPYTHON=0
 [ -f "$PMP_PYTHON_DIR/python.mjs" ] && HAVE_CPYTHON=1
 
 ./gradlew compileDevelopmentExecutableKotlinWasmJs --console=plain
 K=build/compileSync/wasmJs/main/developmentExecutable/kotlin
 cp native/probeA.mjs native/probeA.wasm native/probeA-wrapper.mjs \
-   native/direct-call-test.mjs native/combined-test.mjs "$K/"
+   native/direct-call-test.mjs native/combined-test.mjs native/upcall-test.mjs "$K/"
+
+# Test E reaches Kotlin's @WasmExport functions, which the generated entry module does not bind.
+python3 native/patch-export-raw.py "$K/wasm-experiment.mjs"
 
 # The Kotlin module @WasmImports from BOTH wrappers, so both specifiers must resolve even in the
 # processes that only exercise one of them. Tests A and C get a stub: the imports are declared but
@@ -47,6 +62,8 @@ export const wasmMemory = null, mod = null, exports_ = null;
 export const PyRun_SimpleString = nope, PyImport_AddModule = nope, PyModule_GetDict = nope;
 export const PyDict_GetItemString = nope, PyLong_AsLong = nope, PyUnicode_AsUTF8 = nope;
 export const PyErr_Occurred = nope, pmalloc = nope, pfree = nope;
+export const PyCFunction_NewEx = nope, PyLong_FromLong = nope, PyTuple_Size = nope;
+export const PyTuple_GetItem = nope, PyDict_SetItemString = nope;
 export default nope;
 STUB
 
@@ -71,13 +88,22 @@ if [ "$HAVE_CPYTHON" = 1 ]; then
   rm -rf "$D"; mkdir -p "$D"
   cp "$K"/*.mjs "$K"/*.js "$K"/*.wasm "$D/" 2>/dev/null || true
   cp /tmp/import-object.pristine.mjs "$D/wasm-experiment.import-object.mjs"
-  cp native/cpython-wrapper.mjs native/cpython-test.mjs "$D/"
+  cp native/cpython-wrapper.mjs native/cpython-test.mjs native/cpython-upcall-test.mjs "$D/"
   cp "$PMP_PYTHON_DIR/python.mjs" "$PMP_PYTHON_DIR/python.wasm" "$D/"
   python3 native/patch-import-object.py "$D/wasm-experiment.import-object.mjs" ./cpython-wrapper.mjs
+  python3 native/patch-export-raw.py "$D/wasm-experiment.mjs"
   PMP_PYTHON_DIR="$PMP_PYTHON_DIR" "$NODE" "$D/cpython-test.mjs"
+
+  echo; echo "##### Test F: the upcall against the real interpreter"
+  PMP_PYTHON_DIR="$PMP_PYTHON_DIR" "$NODE" "$D/cpython-upcall-test.mjs"
 else
   echo "SKIPPED -- no CPython build at $PMP_PYTHON_DIR"
 fi
+
+echo; echo "##### Test E: upcalls -- Emscripten-side C re-entering Kotlin/Wasm"
+# Same instantiation graph as Test C (Kotlin's import object already points at Emscripten's memory
+# from the patch above), so the upcall runs with the memory shared, as it would in production.
+"$NODE" "$K/upcall-test.mjs"
 
 if [ -n "$RUN_LEGACY_B" ]; then
   echo; echo "##### Test B (historical): Emscripten importing Kotlin's exported memory"

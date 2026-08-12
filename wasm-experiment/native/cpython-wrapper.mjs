@@ -53,4 +53,13 @@ export const PyUnicode_AsUTF8 = E.PyUnicode_AsUTF8;
 export const PyErr_Occurred = E.PyErr_Occurred;
 export const pmalloc = E.malloc;
 export const pfree = E.free;
+
+// Test F -- what a Kotlin trampoline needs in order to be registered as a PyCFunction and to build
+// its own return value from inside the upcall.
+export const PyCFunction_NewEx = E.PyCFunction_NewEx;
+export const PyLong_FromLong = E.PyLong_FromLong;
+export const PyTuple_Size = E.PyTuple_Size;
+export const PyTuple_GetItem = E.PyTuple_GetItem;
+export const PyDict_SetItemString = E.PyDict_SetItemString;
+
 export default E.PyRun_SimpleString;
