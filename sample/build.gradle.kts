@@ -1,3 +1,5 @@
+import java.io.ByteArrayOutputStream
+import org.apache.tools.ant.util.TeeOutputStream
 import org.gradle.internal.classpath.Instrumented
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
@@ -270,4 +272,29 @@ tasks.register<Exec>("runNativeUpcallDemo") {
     dependsOn(nativeCompile)
     executable = nativeImageOutputDir.get().asFile.resolve("upcall-native-demo").absolutePath
     environment("PYTHONHOME", pythonHomeForHost.get().asFile.absolutePath)
+
+    // A zero exit status is not the same as a working upcall path. `PyRun_SimpleString` reports
+    // failure for an exception raised inside the script, but a Python interpreter that never got
+    // as far as running the script -- or a `print` lost to a missing flush -- exits 0 with the
+    // marker absent. Since this task is the only thing standing between a missing reachability
+    // registration and a shipped binary that dies on first call, it has to assert on the marker
+    // itself rather than on the exit code.
+    val captured = ByteArrayOutputStream()
+    standardOutput = TeeOutputStream(System.out, captured)
+    errorOutput = TeeOutputStream(System.err, captured)
+
+    doLast {
+        val text = captured.toString(Charsets.UTF_8)
+        if (!text.contains("PYTHON: UPCALL_OK")) {
+            throw GradleException(
+                "upcall-native-demo exited successfully but never printed `PYTHON: UPCALL_OK`. " +
+                    "The Python -> Kotlin upcall path did not complete inside the native image. " +
+                    "A `MissingForeignRegistrationError` here means the shipped " +
+                    "reachability-metadata.json is missing a descriptor -- regenerate it with " +
+                    "`:python-multiplatform:generateDesktopReachabilityMetadata` and check that " +
+                    "the new signature's shape is derivable by GenerateReachabilityMetadata.\n" +
+                    "--- output ---\n$text"
+            )
+        }
+    }
 }

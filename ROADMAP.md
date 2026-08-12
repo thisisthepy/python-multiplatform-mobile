@@ -482,6 +482,27 @@ forbidden. Every wall hit getting there was metadata or wiring; the lookup and i
 needed no reflection registration, because it uses none. `sample` carries the build path
 (`nativeCompile`, `runNativeUpcallDemo`, Liberica NIK).
 
+**The metadata is generated, not maintained.** `reachability-metadata.json` was a checked-in file,
+and a checked-in file rots without saying so: a native image links a `FunctionDescriptor` the
+metadata does not declare, builds clean, and dies on the first call with
+`MissingForeignRegistrationError`. It had already rotted — it declared one upcall descriptor while
+`Panama` builds three, so `ProxyTypeFactory` (the `tp_traverse` wiring below) would have failed in
+any image that reached it. `generateDesktopReachabilityMetadata` now derives the `foreign` section
+from `bindings.kt`, `ShapeDowncalls.desktop.kt` and `Panama.kt`, and fails the build on a
+declaration form it cannot read rather than dropping the descriptor. `ReachabilityMetadataTest`
+re-checks the result against the `MethodHandle.type()`s the loaded classes actually produce, and
+`runNativeUpcallDemo` now asserts on the `UPCALL_OK` marker instead of on the exit status. The
+failure mode was confirmed by deliberately mis-declaring one descriptor and watching the binary
+die at runtime, not argued from the documentation.
+
+**The binary is 16.7 MB, down from 35.4 MB.** The largest single item in the image was CPython
+itself: a registered resource is baked into the image heap as a `byte[]`, so the binary carried
+19.4 MB of `libpython` only so that `manager.kt` could write it back out to a temporary file at
+startup. It has to be on disk anyway — `PYTHONHOME` must point at a prefix with a matching stdlib
+for `Py_Initialize` to get past `encodings` — so `manager.kt` loads it from that prefix when the
+classpath copy is absent (`PYTHON_MULTIPLATFORM_LIBPYTHON` overrides), and the resource
+registration is gone.
+
 **What is not done**, and should not be read as done:
 
 - `tp_traverse` functions are generated and tested, but nothing wires them into CPython's actual
