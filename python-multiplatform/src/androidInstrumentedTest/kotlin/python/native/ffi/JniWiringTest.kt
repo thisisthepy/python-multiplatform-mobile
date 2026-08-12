@@ -44,67 +44,22 @@ class JniWiringTest {
 
     @Test
     fun cpythonInitialisesCorrectly() {
-        val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
-        val abi = android.os.Build.SUPPORTED_ABIS[0]
-        val archDir = if (abi.contains("arm64")) "arm64-v8a" else "x86_64"
-        val PYTHON_DIR = "lib/python3.14"
-        val PYTHON_ASSET_DIR = "$archDir/$PYTHON_DIR"
-
-        val pythonDir = java.io.File(context.filesDir, PYTHON_DIR)
-        
-        fun copyAssetFolder(assetManager: android.content.res.AssetManager, fromAssetPath: String, toPath: String) {
-            val files = assetManager.list(fromAssetPath) ?: return
-            for (file in files) {
-                val assetFilePath = "$fromAssetPath/$file"
-                val destFilePath = "$toPath/$file"
-                val subfiles = assetManager.list(assetFilePath)
-                if (!subfiles.isNullOrEmpty()) {
-                    java.io.File(destFilePath).mkdirs()
-                    copyAssetFolder(assetManager, assetFilePath, destFilePath)
-                    continue
-                }
-                assetManager.open(assetFilePath).use { `in` ->
-                    java.io.FileOutputStream(destFilePath).use { out ->
-                        val buffer = ByteArray(4096)
-                        var read: Int
-                        while ((`in`.read(buffer).also { read = it }) != -1) {
-                            out.write(buffer, 0, read)
-                        }
-                        if (destFilePath.endsWith(".so")) {
-                            java.io.File(destFilePath).setExecutable(true)
-                        }
-                    }
-                }
-            }
+        python.multiplatform.ffi.PythonTestFixture.withInterpreter {
+            android.util.Log.d("JniWiringTest", "Calling Py_IsInitialized()")
+            org.junit.Assert.assertNotEquals(0, Py_IsInitialized())
+            
+            val code = "x = 1 + 1"
+            android.util.Log.d("JniWiringTest", "Calling PyRun_SimpleString()")
+            org.junit.Assert.assertEquals(0, PyRun_SimpleString(code))
+            
+            android.util.Log.d("JniWiringTest", "Calling Py_GetVersion()")
+            val version = Py_GetVersion()
+            android.util.Log.d("JniWiringTest", "Version: $version")
+            org.junit.Assert.assertTrue("Version should start with 3.14, got $version", version?.startsWith("3.14") == true)
+            
+            android.util.Log.d("JniWiringTest", "Calling PyImport_ImportModule()")
+            val sysModule = PyImport_ImportModule("sys")
+            org.junit.Assert.assertNotNull(sysModule)
         }
-        
-        pythonDir.deleteRecursively()
-        pythonDir.mkdirs()
-        copyAssetFolder(context.assets, PYTHON_ASSET_DIR, pythonDir.absolutePath)
-        
-        // Set PYTHONHOME environment variable to point to the parent of lib/python3.14
-        android.system.Os.setenv("PYTHONHOME", context.filesDir.absolutePath, true)
-        
-        android.util.Log.d("JniWiringTest", "Calling Py_Initialize()")
-        Py_Initialize()
-        android.util.Log.d("JniWiringTest", "Calling Py_IsInitialized()")
-        org.junit.Assert.assertNotEquals(0, Py_IsInitialized())
-        
-        val code = "x = 1 + 1"
-        android.util.Log.d("JniWiringTest", "Calling PyRun_SimpleString()")
-        org.junit.Assert.assertEquals(0, PyRun_SimpleString(code))
-        
-        android.util.Log.d("JniWiringTest", "Calling Py_GetVersion()")
-        val version = Py_GetVersion()
-        android.util.Log.d("JniWiringTest", "Version: $version")
-        org.junit.Assert.assertTrue("Version should start with 3.14, got $version", version?.startsWith("3.14") == true)
-        
-        android.util.Log.d("JniWiringTest", "Calling PyImport_ImportModule()")
-        val sysModule = PyImport_ImportModule("sys")
-        org.junit.Assert.assertNotNull(sysModule)
-        
-        android.util.Log.d("JniWiringTest", "Calling Py_Finalize()")
-        Py_Finalize()
-        android.util.Log.d("JniWiringTest", "Finished test")
     }
 }

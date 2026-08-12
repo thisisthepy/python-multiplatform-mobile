@@ -252,7 +252,13 @@ actual inline fun PyErr_SyntaxLocationEx(filename: String, lineno: Int, col_offs
 actual inline fun PyErr_SyntaxLocation(filename: String, lineno: Int) = python.native.ffi.bindings.PyErr_SyntaxLocation(filename, lineno)
 @CName("${namePrefix}PyErr_1BadInternalCall")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun PyErr_BadInternalCall() = python.native.ffi.bindings.PyErr_BadInternalCall()
+// pyerrors.h declares both a PyErr_BadInternalCall function and a macro of the same name that
+// expands to _PyErr_BadInternalCall(__FILE__, __LINE__). cinterop sees the deprecated function
+// shadowed by the macro and refuses to import it, so the underlying function is called directly --
+// which is what the macro does anyway. Desktop reaches the plain symbol through Panama and is
+// unaffected.
+actual inline fun PyErr_BadInternalCall() =
+    python.native.ffi.bindings._PyErr_BadInternalCall("EmbedAPI.native.kt", 0)
 @CName("${namePrefix}PyErr_1WarnExplicit")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PyErr_WarnExplicit(category: NativePointer, message: String, filename: String, lineno: Int, module: String, registry: NativePointer): Int = python.native.ffi.bindings.PyErr_WarnExplicit(category.toPlatformPointer(), message, filename, lineno, module, registry.toPlatformPointer())

@@ -483,12 +483,12 @@ object bindings {
 
 
     // Section 22
-    external fun PyList_New(len: Long): JNIPointer?
+    @JvmStatic external fun PyList_NewN(len: Long): Long
     @JvmStatic
     @dalvik.annotation.optimization.CriticalNative
     external fun PyList_Size(list: Long): Long
     external fun PyList_GetItem(list: JNIPointer, index: Long): JNIPointer?
-    external fun PyList_SetItem(list: JNIPointer, index: Long, item: JNIPointer): Int
+    @JvmStatic external fun PyList_SetItemN(list: Long, index: Long, item: Long): Int
     @JvmStatic external fun PyList_InsertN(list: Long, index: Long, item: Long): Int
     @JvmStatic external fun PyList_AppendN(list: Long, item: Long): Int
     @JvmStatic external fun PyList_SortN(list: Long): Int

@@ -192,19 +192,19 @@ class JniOverheadBenchmark {
     fun realCPythonCallByCallingConvention() {
         PythonOnDevice.ensureInitialised()
 
-        val sys = PythonOnDevice.withUtf8("sys") { bindings.PyImport_ImportModule(it) }
+        val sys = PythonOnDevice.withUtf8("sys") { bindings.PyImport_ImportModuleN(it) }
         assertTrue("could not import sys", sys != 0L)
-        val path = PythonOnDevice.withUtf8("path") { bindings.PyObject_GetAttrString(sys, it) }
+        val path = PythonOnDevice.withUtf8("path") { bindings.PyObject_GetAttrStringN(sys, it) }
         assertTrue("could not read sys.path", path != 0L)
 
-        val len = bindings.PyList_Size(path)
+        val len = bindings.PyList_SizeNormal(path) // using SizeNormal because PyList_Size is broken without N (or it's what SizeNormal binds to)
         assertTrue("sys.path should be a non-empty list, got len=$len", len > 0)
         assertTrue("PyList_SizeFast disagrees: ${bindings.PyList_SizeFast(path)} vs $len", bindings.PyList_SizeFast(path) == len)
         assertTrue("PyList_SizeNormal disagrees: ${bindings.PyList_SizeNormal(path)} vs $len", bindings.PyList_SizeNormal(path) == len)
 
         var w = 0L
         repeat(WARMUP) {
-            w += bindings.PyList_Size(path) + bindings.PyList_SizeFast(path) + bindings.PyList_SizeNormal(path)
+            w += bindings.PyList_SizeNormal(path) + bindings.PyList_SizeFast(path) + bindings.PyList_SizeNormal(path)
         }
         sink += w
 
@@ -212,7 +212,7 @@ class JniOverheadBenchmark {
         var bestFast = Double.MAX_VALUE
         var bestNormal = Double.MAX_VALUE
         repeat(ROUNDS) {
-            timeOnce { bindings.PyList_Size(path) }.let { if (it < bestCritical) bestCritical = it }
+            timeOnce { bindings.PyList_SizeNormal(path) }.let { if (it < bestCritical) bestCritical = it }
             timeOnce { bindings.PyList_SizeFast(path) }.let { if (it < bestFast) bestFast = it }
             timeOnce { bindings.PyList_SizeNormal(path) }.let { if (it < bestNormal) bestNormal = it }
         }

@@ -354,11 +354,11 @@ kotlin {
                     }
                 }
             }
-            tasks.whenTaskAdded {
+            tasks.configureEach {
                 if (name.startsWith("merge") && (name.endsWith("JniLibFolders") || name.endsWith("NativeLibs"))) {
                     dependsOn(copyAndroidPythonBinaries)
                 }
-                if (name.endsWith("Assets")) {
+                if (name != "copyAndroidPythonAssets" && name.endsWith("Assets")) {
                     dependsOn(copyAndroidPythonAssets)
                 }
             }
