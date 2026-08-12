@@ -1802,9 +1802,32 @@ Three things the work settled, each recorded in `docs/upcall-design.md`:
   and `PyBytes_AsStringAndSize` is in no platform's `EmbedAPI`. The trampoline goes an item at a
   time — correct, and the slowest path across this boundary by a wide margin.
 
-**What is still open.** The other platforms' entry points, which are the address-publishing step
-and nothing more: iOS/androidNative want a `@CName` pair reached through `ctypes.CDLL(None)` (still
-the cheapest — one binary, no C glue), Android a `RegisterNatives` method behind a `PyCFunction`
-shim, wasm a `@WasmExport` plus `Table.set` (3.1 ns, measured in §11). Per-platform detail is in
-`docs/upcall-design.md`'s "What each platform still owes". The generated proxy type that would let
-Python write `obj.method(x)` instead of resolving through a `ctypes` shim is §7's remaining half.
+**iOS and androidNative have it too.** `python.native.ffi.UpcallEntry` (`nativeMain`, so both
+targets get it at once) publishes the same trampoline, and `UpcallEntryTest` (`nativeTest`) drives
+it from inside the interpreter: iOS simulator 230 tests, 0 failed, 8 of them new; androidNative
+compiles main and test. Desktop is unchanged at 236, 0 failed, 1 skipped.
+
+It is *not* the `@CName` + `ctypes.CDLL(None)` route this document and `docs/upcall-design.md`
+both predicted, and the reason is two independent measurements rather than a preference:
+
+- `@CName` symbols are exported from the androidNative `.so` (`T` in `nm -D`) and **are not
+  present at all** in the iOS framework or in either target's test executable — not stripped at
+  link time, never emitted.
+- This project's iOS `Python.framework` carries **no `_ctypes`** (no `lib-dynload`, and its
+  `PyInit_*` exports stop at `time`), so `import ctypes` raises there regardless.
+
+What it uses instead is a real `PyMethodDef` whose `ml_meth` is a `staticCFunction` and whose
+`self` carries the callable handle — i.e. the `PyCFunction` slot the shape was chosen to be, and
+what the generated proxy type installs anyway. The desktop `ctypes` shim was standing in for
+exactly this. The `@CName` functions are kept: they are the C-host entry point, they are what
+`ctypes` reaches on Android, and `UpcallEntry.invokeAddress` hands out their addresses regardless
+of what the linker did with the name.
+
+`nativeTest` had to be wired into the source-set hierarchy for that test to exist — the directory
+was there and nothing pointed at it, so its one file was dead source and had been copied
+byte-for-byte into all five native target test source sets. Those copies are gone.
+
+**What is still open.** Android (JVM/ART) — a `RegisterNatives` method behind a `PyCFunction`
+shim — and wasm, a `@WasmExport` plus `Table.set` (3.1 ns, measured in §11). Per-platform detail
+is in `docs/upcall-design.md`'s "What each platform still owes". The generated proxy type that
+would let Python write `obj.method(x)` instead of going through `_pm_bind` is §7's remaining half.
