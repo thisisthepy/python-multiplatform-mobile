@@ -235,8 +235,6 @@ inline fun PySys_SetObject(name: String, v: Long): Int {
     val _name = internedUtf8(name)
     return PySys_SetObjectHandle.invokeExact(_name, v) as Int
 }
-    val PySys_ResetWarnOptionsHandle: MethodHandle
-    inline fun PySys_ResetWarnOptions() = PySys_ResetWarnOptionsHandle.invokeExact() as Unit
     val PySys_GetXOptionsHandle: MethodHandle
     inline fun PySys_GetXOptions(): Long = PySys_GetXOptionsHandle.invokeExact() as Long
     val PySys_AuditTupleHandle: MethodHandle
@@ -261,11 +259,6 @@ inline fun Py_FatalError(message: String) {
 inline fun PyImport_ImportModule(name: String): Long {
     val _name = internedUtf8(name)
     return PyImport_ImportModuleHandle.invokeExact(_name) as Long
-}
-    val PyImport_ImportModuleNoBlockHandle: MethodHandle
-inline fun PyImport_ImportModuleNoBlock(name: String): Long {
-    val _name = internedUtf8(name)
-    return PyImport_ImportModuleNoBlockHandle.invokeExact(_name) as Long
 }
     val PyImport_ImportModuleLevelObjectHandle: MethodHandle
     inline fun PyImport_ImportModuleLevelObject(name: Long, globals: Long, locals: Long, fromlist: Long, level: Int): Long = PyImport_ImportModuleLevelObjectHandle.invokeExact(name, globals, locals, fromlist, level) as Long
@@ -834,8 +827,28 @@ inline fun PyDict_GetItemString(p: Long, key: String): Long {
     inline fun PyWeakref_NewRef(ob: Long, callback: Long): Long = PyWeakref_NewRefHandle.invokeExact(ob, callback) as Long
     val PyWeakref_NewProxyHandle: MethodHandle
     inline fun PyWeakref_NewProxy(ob: Long, callback: Long): Long = PyWeakref_NewProxyHandle.invokeExact(ob, callback) as Long
-    val PyWeakref_GetObjectHandle: MethodHandle
-    inline fun PyWeakref_GetObject(ref: Long): Long = PyWeakref_GetObjectHandle.invokeExact(ref) as Long
+    val PyWeakref_GetRefHandle: MethodHandle
+    /**
+     * `int PyWeakref_GetRef(PyObject *ref, PyObject **pobj)`, collapsed to the referent pointer.
+     *
+     * The C function reports through two channels: an `int` status and an out-parameter. The slot
+     * for the out-parameter has to be real native memory, so it is allocated, passed and read
+     * here rather than at the call site -- `EmbedAPI.desktop.kt` sees a plain `Long`.
+     *
+     * Returns the new strong reference on success and `0` otherwise. `0` covers both a dead
+     * referent (status `0`) and an error (status `-1`); the caller separates them with
+     * `PyErr_Occurred`, exactly as the `expect` documents. `finally` matters here: the status is
+     * read before the slot is freed and the slot is freed even if `invokeExact` throws.
+     */
+    inline fun PyWeakref_GetRef(ref: Long): Long {
+        val slot = Panama.allocatePointerSlot()
+        try {
+            val status = PyWeakref_GetRefHandle.invokeExact(ref, slot) as Int
+            return if (status == 1) Panama.readPointerSlot(slot) else 0L
+        } finally {
+            Panama.freePointerSlot(slot)
+        }
+    }
     val PyObject_ClearWeakRefsHandle: MethodHandle
     inline fun PyObject_ClearWeakRefs(o: Long) = PyObject_ClearWeakRefsHandle.invokeExact(o) as Unit
 
@@ -1012,7 +1025,6 @@ inline fun PyDict_GetItemString(p: Long, key: String): Long {
         // Section 6
         PySys_GetObjectHandle = find("PySys_GetObject", P, P)
         PySys_SetObjectHandle = find("PySys_SetObject", Integer.TYPE, P, P)
-        PySys_ResetWarnOptionsHandle = find("PySys_ResetWarnOptions", Void.TYPE)
         PySys_GetXOptionsHandle = find("PySys_GetXOptions", P)
         PySys_AuditTupleHandle = find("PySys_AuditTuple", Integer.TYPE, P, P)
 
@@ -1024,7 +1036,6 @@ inline fun PyDict_GetItemString(p: Long, key: String): Long {
 
         // Section 8
         PyImport_ImportModuleHandle = find("PyImport_ImportModule", P, P)
-        PyImport_ImportModuleNoBlockHandle = find("PyImport_ImportModuleNoBlock", P, P)
         PyImport_ImportModuleLevelObjectHandle = find("PyImport_ImportModuleLevelObject", P, P, P, P, P, Integer.TYPE)
         PyImport_ImportModuleLevelHandle = find("PyImport_ImportModuleLevel", P, P, P, P, P, Integer.TYPE)
         PyImport_ImportHandle = find("PyImport_Import", P, P)
@@ -1286,7 +1297,7 @@ inline fun PyDict_GetItemString(p: Long, key: String): Long {
         // Section 26
         PyWeakref_NewRefHandle = find("PyWeakref_NewRef", P, P, P)
         PyWeakref_NewProxyHandle = find("PyWeakref_NewProxy", P, P, P)
-        PyWeakref_GetObjectHandle = find("PyWeakref_GetObject", P, P)
+        PyWeakref_GetRefHandle = find("PyWeakref_GetRef", Integer.TYPE, P, P)
         PyObject_ClearWeakRefsHandle = find("PyObject_ClearWeakRefs", Void.TYPE, P)
 
 

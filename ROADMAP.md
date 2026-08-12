@@ -942,7 +942,7 @@ against the full headers. "abi3" in this codebase means a self-imposed rule abou
 functions to call, not a compilation mode. The rule is what keeps one binding working across
 versions, and it is unaffected.
 
-### 3.15.0rc1: desktop is already there; the native targets need three functions migrated
+### 3.15.0rc1: the three functions are migrated, on every target
 
 `-PpythonVersion=3.15.0rc1` gives **208 tests, 0 failures, 1 skipped** on desktop — the same as
 the default. The first attempt failed 4, all of them assertions hardcoding `"3.14"` against the
@@ -966,12 +966,68 @@ with `nm` on `libpython3.15.dylib`, all three are there — and were removed onl
 Panama resolves by symbol name at run time, so nothing breaks; cinterop and the hand-written C in
 `jni_onload.def` compile against headers, so they do.
 
-That makes the porting cost concrete rather than open-ended: three functions, each appearing in
+That made the porting cost concrete rather than open-ended: three functions, each appearing in
 the `commonMain` `expect`, four platform `actual`s, `jni_onload.def` (declaration, thunk and table
 entry) and the wasmJs `@WasmImport` block. Roughly 20 sites, no behavioural change on 3.14.
 
-**The default stays 3.14.7.** A release candidate is not a default. What is established is what
-raising it costs.
+**Done.** All three were still present when this was picked up, and all three are now migrated:
+
+| was | is now |
+|---|---|
+| `PySys_ResetWarnOptions` | removed outright — there is no C replacement, and the documented migration (configure `sys.warnoptions` through `PyConfig`, or clear it from Python) is not a binding |
+| `PyImport_ImportModuleNoBlock` | kept as a `@Deprecated` **plain `commonMain` function** forwarding to `PyImport_ImportModule`, with no C symbol behind it. It had been an exact alias since 3.3, so forwarding is behaviour-preserving rather than an approximation, and existing source still compiles through the bump |
+| `PyWeakref_GetObject` | replaced by `PyWeakref_GetRef`, which 3.13 and 3.14 also export, so nothing was given up to gain it |
+
+**The out-parameter is the part that was not free.** `PyWeakref_GetRef` is
+`int f(PyObject *ref, PyObject **pobj)` — a status *and* a write-through slot, where the removed
+function was a single return. Three of the four targets already had somewhere to put that slot and
+needed no new machinery: `jni_onload.def`'s thunk uses a C local (so the JNI boundary still carries
+only primitives, per `androidMain/README.md`), cinterop uses `memScoped`, and wasmJs takes four
+bytes from CPython's own heap through the `malloc`/`free` it already imports. Desktop had nothing —
+Panama here reaches native memory only through `allocateUtf8String`/`readUtf8String`, neither of
+which can carry a pointer, since a pointer is not NUL-terminated. So `Panama` gained
+`allocatePointerSlot`/`readPointerSlot`/`freePointerSlot`, built entirely from handles the modern
+backend already had (`malloc` plus the same `MemorySegment.copy` that backs `allocateUtf8Freeable`,
+run in the other direction). **No new reflective lookups**, so no new JDK-version surface. This will
+be reused: CPython is converting more borrowed-reference getters to the same shape
+(`PyDict_GetItemRef`, `PyObject_GetOptionalAttr`).
+
+The JDK 16-18 incubator backend throws instead. Allocating there is easy; *reading* is not, and the
+class that could (`MemoryAccess`) changed shape across 16, 17 and 18. A guessed read yields a wrong
+`PyObject *`, i.e. a use-after-free landing somewhere unrelated — so it refuses at the allocation
+step, before anything has been allocated. That branch is already documented as an unverified
+best-effort mirror, and JDK 19+ resolves the modern one.
+
+Signature at the Kotlin level is `PyWeakref_GetRef(ref): NativePointer?` — a new strong reference,
+or null. C's `0` (dead) and `-1` (error) both arrive as null because an out-parameter does not
+survive the JNI boundary, but **no information is lost**: the error case sets the error indicator
+and the dead case does not, so `PyErr_Occurred` separates them.
+
+Three tests in `EmbedApiLowLevelTest` (`commonTest`, so they run on desktop, iOS and Android):
+`PyWeakref_GetRef` on a live referent returns the referent *and* raises its reference count by one,
+which is what distinguishes the new function from the borrowed-reference one it replaces — an
+implementation still wired to `PyWeakref_GetObject` would pass an identity check and then corrupt
+the heap on the caller's matching `Py_DecRef`; a dead referent returns null with a *clear* error
+indicator; and the `ImportModuleNoBlock` shim resolves to the same module object as the function it
+aliases.
+
+Writing them turned up a trap worth recording: the first version built its referent from
+`types.SimpleNamespace`, which is **not weakly referenceable** (nor are `int`, `str`, `tuple`,
+`list` or `dict`; `set` and `frozenset` are). `PyWeakref_NewRef` answered by returning null and
+raising `TypeError` — and because every class in the binary shares one interpreter, the unhandled
+indicator then took down two *unrelated* tests, which is what surfaced first. The assertions now
+clear the indicator before failing, so a failure in this file can no longer be mistaken for a
+failure elsewhere.
+
+Verified: `compileKotlinAndroidNativeArm64`, `compileKotlinIosSimulatorArm64`,
+`compileDebugKotlinAndroid` and `compileKotlinWasmJs` all compile; `desktopTest` **236 tests,
+0 failures, 1 skipped** and `iosSimulatorArm64Test` **222 tests, 0 failures** (both counted from a
+cleaned `build/test-results/`). The `jni_onload.def` invariants hold — no duplicate thunk or table
+name, registration count still taken with `sizeof`, and every table entry still has a matching
+`external fun` and vice versa.
+
+**The default stays 3.14.7.** A release candidate is not a default, and this migration is
+version-neutral: `PyWeakref_GetRef` exists on 3.14, so none of it waits for the bump.
 
 ### iOS: the source has to change with the version, and 3.15 is the switchover
 
@@ -995,13 +1051,59 @@ Neither source publishes checksums this build can use — BeeWare publishes none
 publishes sigstore material that is not reasonable to verify in Gradle — so both stay pinned by
 the local lockfile.
 
-The swap is verified as far as it can be while 3.15 is not the default:
+The swap was verified as far as it could be while 3.15 is not the default:
 `cinteropPythonIosSimulatorArm64` **succeeds** against the python.org framework, so its headers and
-`Python.framework` are consumed exactly like BeeWare's. The build then fails in
+`Python.framework` are consumed exactly like BeeWare's. The build then failed in
 `compileKotlinIosSimulatorArm64` — on the three removed functions above, with byte-identical errors
 to `androidNativeArm64`, i.e. in shared `nativeMain` source and not in anything iOS-specific.
 `compileKotlinIosSimulatorArm64` on the default 3.14 (BeeWare) still passes, so no regression was
-introduced for the version actually in use.
+introduced for the version actually in use. **That compile blocker is now gone** (see above), which
+leaves the acquisition path as the thing to be sure of.
+
+#### The acquisition path is ready; four smaller things are not
+
+Re-read against the build on 2026-08-12. The switchover itself is wired and pinned:
+
+* the predicate is `python-multiplatform/build.gradle.kts`, `iosFromPythonOrg` — it splits the
+  configured version and compares major/minor only, so the `rc1` suffix on `3.15.0rc1` does not
+  reach `toInt()` and the gate answers correctly;
+* `pythonOrgReleaseDir` strips the pre-release suffix separately, because python.org publishes
+  `3.15.0rc1` **under `ftp/python/3.15.0/`** while the archive keeps the full name;
+* the extraction directory is keyed by version, so 3.14 and 3.15 trees cannot collide;
+* `python-checksums.properties` already pins `ios-3.15.0rc1-pythonorg`, both Android ABIs, and all
+  four desktop platforms at 3.15.0rc1. A plain `-PpythonVersion=3.15.0rc1` downloads nothing
+  unpinned.
+
+What a bump would still hit, none of it iOS-specific and none of it large:
+
+1. **Free-threading has no 3.15 checksums.** There are `-freethreaded` entries for 3.14.7 only, so
+   `-PpythonVersion=3.15.0rc1 -PpythonFreeThreaded=true` fails on a missing checksum. Consistent
+   with the table above — 3.15 free-threading is desktop-only anyway — but it is a lockfile gap,
+   not a deliberate refusal.
+2. ~~**Three Android *instrumented* tests still hardcode `"3.14"`**, plus
+   `PythonOnDevice.PYTHON_DIR`~~ — **fixed.** The earlier pass that moved four assertions onto
+   `Versions.currentVersion.compactVersionString` covered the desktop and common tests and missed
+   these, because nothing compiles them without an SDK configured. The three assertions now derive
+   from `compactVersionString` and `PYTHON_DIR` from `taggedVersionString`, matching what
+   `MainActivity` already did — and `taggedVersionString` additionally carries the `t` suffix for a
+   free-threaded build, which the literal could not express.
+   **Compile-verified only** (`compileDebugAndroidTestKotlinAndroid`); not run, because the
+   emulators were reserved for other work.
+3. **The two python.org paths disagree about pre-release layout.** iOS strips the suffix to build
+   the ftp directory; the Android download uses the configured version verbatim
+   (`ftp/python/3.15.0rc1/…`). A checksum is pinned for the Android archive, so that URL evidently
+   resolves today — but only one of the two can be right in general.
+4. **The iOS *app* packaging path has no producer.** `sample/build.gradle.kts` and the Xcode project
+   both reference `sample/build/xcode-frameworks/Python.xcframework`, and no Gradle task anywhere
+   creates it. Only the simulator *test* path is connected to the download pipeline. This predates
+   3.15 and is not a version problem, but it is the reason "iOS works" should not be read as
+   covering the device app.
+
+Also stale, and cheap to correct when touched: `iosMain/README.md` still says the stdlib comes from
+BeeWare unqualified, and `extractIosSimulatorStdlib`'s KDoc still says `lib/python3.13`. Neither
+affects behaviour — the code is `$libVersion`-derived — and `extractIosSimulatorStdlib` does hardcode
+the simulator slice name and `lib-arm64`, which is correct for the arm64 host but would need
+`lib-x86_64` for an x86_64 simulator.
 
 ## 10. WASM
 
