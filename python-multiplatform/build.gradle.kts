@@ -1151,6 +1151,19 @@ kotlin {
         artMain.dependsOn(nativeMain)
         androidNativeX64Main.dependsOn(artMain)
         androidNativeArm64Main.dependsOn(artMain)
+
+        // `src/nativeTest` existed as a directory long before this line, and nothing pointed at
+        // it -- so its `GCLeakTest.native.kt` was dead source, and the same file had been copied
+        // byte-for-byte into all five target test source sets to compensate. This is the mirror of
+        // the main hierarchy (nativeMain -> iosMain/artMain), which is what a test for anything in
+        // `nativeMain` needs: a test placed in one target's source set is compiled for that target
+        // only, and androidNative is exactly the target that goes unbuilt when that happens.
+        val nativeTest by creating
+        nativeTest.dependsOn(commonTest)
+        listOf(
+            "iosX64Test", "iosArm64Test", "iosSimulatorArm64Test",
+            "androidNativeX64Test", "androidNativeArm64Test",
+        ).forEach { getByName(it).dependsOn(nativeTest) }
     }
 }
 
