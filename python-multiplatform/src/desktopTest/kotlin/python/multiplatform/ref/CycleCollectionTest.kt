@@ -102,4 +102,100 @@ class CycleCollectionTest {
             assertTrue(collectedObj == null, "Node was not collected by Python GC!")
         }
     }
+
+    /**
+     * The leak `tp_clear` cannot reach: a proxy that dies **without** being in a cycle.
+     *
+     * `tp_clear` only runs when the cyclic collector decides to break a loop, which is the
+     * exceptional case. The ordinary one is a refcount reaching zero, and that goes straight to
+     * `tp_dealloc` -- so with no `tp_dealloc` slot the [HandleTable] entry stays rooted for the
+     * life of the interpreter, holding its Kotlin object with it. Almost every proxy dies this
+     * way, so almost every proxy leaks.
+     *
+     * The [Node]s here deliberately reference nothing: `rawPtr` stays 0 and `ref` stays null, so
+     * there is no cycle for the collector to find and `gc.collect()` is never called. The only
+     * thing that can release these handles is `tp_dealloc`.
+     *
+     * ### The type refcount assertions
+     *
+     * `tp_dealloc` on a heap type has a second obligation beyond freeing the object: since 3.8
+     * every instance holds a strong reference to its type, and the default `subtype_dealloc`
+     * releases it. A hand-written `tp_dealloc` that forgets to leaks one type reference per
+     * instance; one that releases it twice eventually frees the type out from under the process.
+     * Both are checked here by reading `ob_refcnt`, which is the first field of `PyObject` and
+     * fixed by the stable ABI. Reading it directly rather than through `sys.getrefcount` keeps
+     * the argument's own temporary reference out of the number.
+     *
+     * The "rises while alive" assertion is not decoration: it is what proves the probe reads a
+     * real refcount, so that the "returns afterwards" assertion cannot pass vacuously on a
+     * garbage address.
+     */
+    @Test
+    fun testHandleReleasedWhenProxyDiesWithoutCycle() {
+        python.multiplatform.ffi.withGIL {
+            val proxyTypeAddr = ProxyTypeFactory.createProxyType()
+            assertTrue(proxyTypeAddr != 0L, "Proxy type creation failed")
+
+            val unsafeClass = Class.forName("sun.misc.Unsafe")
+            val theUnsafe = unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }.get(null)
+            val putLong = unsafeClass.getMethod("putLong", Long::class.javaPrimitiveType, Long::class.javaPrimitiveType)
+            val getLong = unsafeClass.getMethod("getLong", Long::class.javaPrimitiveType)
+            fun typeRefCount(): Long = getLong.invoke(theUnsafe, proxyTypeAddr) as Long
+
+            val liveBefore = HandleTable.liveCount
+            val typeRefBefore = typeRefCount()
+
+            val rounds = 100
+            val proxies = LongArray(rounds)
+            val handles = LongArray(rounds)
+
+            repeat(rounds) { i ->
+                val pyObjPtr = bindings.PyObject_CallObject(proxyTypeAddr, 0L)
+                assertTrue(pyObjPtr != 0L, "Failed to instantiate proxy type at round $i")
+                proxies[i] = pyObjPtr
+
+                val node = Node() // rawPtr stays 0 and ref stays null: nothing to make a cycle out of
+                val handle = HandleTable.register(node).raw
+                handles[i] = handle
+                putLong.invoke(theUnsafe, bindings.PyObject_GetTypeData(pyObjPtr, proxyTypeAddr), handle)
+            }
+
+            assertEquals(
+                liveBefore + rounds, HandleTable.liveCount,
+                "setup failed: $rounds handles should be rooted while the proxies are alive"
+            )
+            val typeRefAlive = typeRefCount()
+            assertEquals(
+                typeRefBefore + rounds, typeRefAlive,
+                "each live instance of a heap type holds one reference to that type, so the count " +
+                    "should have risen by exactly $rounds (before: $typeRefBefore, alive: $typeRefAlive). " +
+                    "If this fails the ob_refcnt probe below is not reading a refcount and the " +
+                    "balance assertion after it would be meaningless"
+            )
+
+            // Drop the only reference to each proxy. This takes the refcount to zero, which is
+            // tp_dealloc's path and *not* tp_clear's -- the cyclic collector never runs here.
+            repeat(rounds) { i -> bindings.Py_DecRef(proxies[i]) }
+
+            val stillRooted = handles.count { HandleTable.resolveRaw(it) != null }
+            assertEquals(
+                0, stillRooted,
+                "$stillRooted of $rounds handles are still rooted after their proxies were " +
+                    "deallocated. A proxy that dies without a cycle never runs tp_clear, so " +
+                    "without a tp_dealloc slot its HandleTable entry -- and the Kotlin object it " +
+                    "holds -- leaks for the life of the interpreter"
+            )
+            assertEquals(
+                liveBefore, HandleTable.liveCount,
+                "the table should be back to its starting size once every proxy is gone"
+            )
+            assertEquals(
+                typeRefBefore, typeRefCount(),
+                "tp_dealloc must release the instance's reference to its heap type exactly once: " +
+                    "a count above $typeRefBefore means it was never released and the type leaks " +
+                    "per instance, below means it was released twice and the type will be freed " +
+                    "while still in use"
+            )
+        }
+    }
 }

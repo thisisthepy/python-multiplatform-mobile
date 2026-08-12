@@ -985,8 +985,21 @@ typedef struct {
 extern jlong PyType_FromSpec(void *spec);
 extern void *PyObject_GetTypeData(jlong obj, jlong type);
 
+/*
+ * The two the dealloc slot needs. PyObject_Type and Py_DecRef are already declared above.
+ *
+ * PyType_GetSlot is the abi3 route to a slot function of a type whose struct is opaque under the
+ * limited API; tp_dealloc needs it for Py_tp_free (74), because a hand-written dealloc has to
+ * free the object itself and only the type knows which allocator to use.
+ */
+extern void *PyType_GetSlot(jlong type, int slot);
+extern void PyObject_GC_UnTrack(void *op);
+
+/* CPython's freefunc: void (*)(void *). */
+typedef void (*pmp_freefunc)(void *);
+
 static jlong g_proxyType = 0;
-static pmp_type_slot g_proxySlots[3];
+static pmp_type_slot g_proxySlots[4];
 static pmp_type_spec g_proxySpec;
 
 static jclass g_proxyCallbacks = NULL;
@@ -1079,32 +1092,96 @@ static int pmp_proxy_traverse(void *self, pmp_visitproc visit, void *arg) {
 }
 
 /*
- * int tp_clear(PyObject *self)
+ * Empties the object's handle slot and returns what was in it, or 0.
  *
- * Releases the HandleTable entry and nothing else. That entry is the Kotlin-side half of the
- * cycle and dropping it is what breaks the loop; calling PyObject.close() on the Kotlin object's
- * fields from here would decrement references the collector is in the middle of accounting for,
- * which double-frees. The collector reclaims the Python side on its own.
- *
- * The slot is zeroed before the upcall, so a second tp_clear on the same object -- or a
- * tp_dealloc-time release, once one exists -- is a no-op rather than a double release.
+ * Zeroing before the caller releases is what lets tp_clear and tp_dealloc run one after the
+ * other without double-releasing. An object that dies inside a cycle takes both paths: tp_clear
+ * breaks the loop, the refcount then falls to zero, and tp_dealloc follows. The second call
+ * finds 0 here and does nothing.
  */
-static int pmp_proxy_clear(void *self) {
+static jlong pmp_take_handle(void *self) {
     jlong *slot = pmp_handle_slot((jlong)self);
     if (slot == NULL) return 0;
     jlong handle = *slot;
     if (handle == 0) return 0;
     *slot = 0;
-    if (g_proxyCallbacks == NULL || g_proxyClear == NULL) return 0;
+    return handle;
+}
+
+/*
+ * Drops the Kotlin-side root for `handle`, and nothing else.
+ *
+ * Calling PyObject.close() on the Kotlin object's fields from here would decrement references
+ * the collector is in the middle of accounting for, which double-frees. The collector reclaims
+ * the Python side on its own.
+ */
+static void pmp_release_handle(jlong handle) {
+    if (handle == 0) return;
+    if (g_proxyCallbacks == NULL || g_proxyClear == NULL) return;
 
     int attached = 0;
     JNIEnv *env = pmp_attach(&attached);
-    if (env == NULL) return 0;
+    if (env == NULL) return;
 
     (*env)->CallStaticVoidMethod(env, g_proxyCallbacks, g_proxyClear, handle);
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+}
+
+/*
+ * int tp_clear(PyObject *self)
+ *
+ * Releases the HandleTable entry and nothing else. That entry is the Kotlin-side half of the
+ * cycle and dropping it is what breaks the loop.
+ */
+static int pmp_proxy_clear(void *self) {
+    pmp_release_handle(pmp_take_handle(self));
     return 0;
+}
+
+/*
+ * void tp_dealloc(PyObject *self) -- the slot tp_clear is not a substitute for.
+ *
+ * tp_clear runs only when the cyclic collector decides to break a loop. A proxy whose refcount
+ * simply reaches zero never goes near it, and that is the ordinary case: cycles are the
+ * exception. Without this slot every such proxy left its HandleTable entry rooted for the life of
+ * the interpreter, holding a Kotlin object nothing could reach again.
+ *
+ * Unlike tp_clear, this one owns the object's memory. Installing it replaces CPython's
+ * subtype_dealloc outright, so everything that function does for a GC'd heap type happens here:
+ *
+ *  - untrack first. The type carries Py_TPFLAGS_HAVE_GC, so the instance is on the collector's
+ *    list; freeing it while still linked leaves the collector walking released memory.
+ *  - free through the type's own tp_free, reached with PyType_GetSlot. The type must come from
+ *    the instance rather than from g_proxyType: the type is declared Py_TPFLAGS_BASETYPE, so
+ *    Python code may subclass it and inherit this function.
+ *  - release the instance's reference to its type. Since 3.8 an instance of a heap type holds
+ *    one and subtype_dealloc gives it back. Forgetting leaks the type once per instance; doing it
+ *    twice frees the type while it is still in use.
+ *
+ * Py_TYPE is a macro over a struct this file deliberately does not include, so the type comes
+ * from PyObject_Type -- a real stable-ABI function that returns a NEW reference. Hence the two
+ * decrements: one for that temporary, one for the instance's own.
+ *
+ * CPython holds the GIL here, as for the other two slots. Nothing here takes or releases it.
+ */
+static void pmp_proxy_dealloc(void *self) {
+    if (self == NULL) return;
+
+    /* Taken before anything is torn down; this reference keeps the type alive across the free. */
+    jlong type = PyObject_Type((jlong)self);
+
+    PyObject_GC_UnTrack(self);
+    pmp_release_handle(pmp_take_handle(self));
+
+    if (type != 0) {
+        pmp_freefunc tp_free = (pmp_freefunc)PyType_GetSlot(type, 74 /* Py_tp_free */);
+        if (tp_free != NULL) {
+            tp_free(self);
+            Py_DecRef(type); /* the reference the instance held on its heap type */
+        }
+        Py_DecRef(type); /* the reference PyObject_Type just handed us */
+    }
 }
 
 /*
@@ -1124,8 +1201,10 @@ static jlong proxy_create_type(JNIEnv *e, jclass c) {
     g_proxySlots[0].pfunc = (void *)&pmp_proxy_traverse;
     g_proxySlots[1].slot = 51; /* Py_tp_clear */
     g_proxySlots[1].pfunc = (void *)&pmp_proxy_clear;
-    g_proxySlots[2].slot = 0;  /* sentinel */
-    g_proxySlots[2].pfunc = NULL;
+    g_proxySlots[2].slot = 52; /* Py_tp_dealloc */
+    g_proxySlots[2].pfunc = (void *)&pmp_proxy_dealloc;
+    g_proxySlots[3].slot = 0;  /* sentinel */
+    g_proxySlots[3].pfunc = NULL;
 
     g_proxySpec.name = "KotlinProxy";
     g_proxySpec.basicsize = -8; /* 8 bytes of relative type data: the handle */
