@@ -4,3 +4,5 @@ package python.multiplatform.ref
 actual fun forceGC() {
     kotlin.native.runtime.GC.collect()
 }
+
+actual val cleanerReleasesAutomatically: Boolean = true

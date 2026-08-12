@@ -25,3 +25,5 @@ actual fun forceGC() {
     // scheduled and run its action, which is a separate event.
     Thread.sleep(50)
 }
+
+actual val cleanerReleasesAutomatically: Boolean = true

@@ -8,6 +8,16 @@ import kotlin.test.assertTrue
 
 expect fun forceGC()
 
+/**
+ * Whether this platform can release a dropped wrapper without an explicit `close()`.
+ *
+ * False only on wasmJs: Kotlin/Wasm's stdlib has no `FinalizationRegistry`, no `WeakRef` and no
+ * `Cleaner` -- checked against the klib, not inferred -- so nothing observes a wrapper becoming
+ * unreachable. Tests whose subject is what happens *after* the cleaner runs have nothing to
+ * measure there, and say so rather than asserting on a mechanism the platform lacks.
+ */
+expect val cleanerReleasesAutomatically: Boolean
+
 private const val WRAPPERS = 200
 
 /**
