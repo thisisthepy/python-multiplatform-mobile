@@ -71,14 +71,24 @@ object PythonTestFixture {
      * The `__main__` module's `__dict__`, usable as both the `globals` and
      * `locals` argument to [Python3.eval] -- convenience plumbing for tests
      * that need to evaluate a Python expression to obtain a real [PyObject]
-     * to exercise the (still-`TODO`) typed wrappers against.
+     * to exercise the typed wrappers against.
+     *
+     * The two lines below use two different reference conventions, and they are not
+     * interchangeable -- this used to get the second one wrong. `PyObject_GetAttrString` returns
+     * a **new** reference, so the wrapper takes `borrowed = false` and adopts it. With
+     * `borrowed = true` it took a *second* reference on top of the one it had already been
+     * handed, and a wrapper only ever releases one: one reference lost per call, and
+     * [eval] calls this every single time. Measured at exactly +50 over 50 calls;
+     * `OwnershipLeakTest.theTestFixtureDoesNotLeakMainGlobals` is the guard against it returning.
      */
     fun mainGlobals(): PyObject = Python3.withPython {
         // These reach the C API directly, so they need the GIL like any other call. The
         // initialising thread no longer holds it — see Python3.initialize.
+        // PyImport_AddModule: *borrowed* reference, only read below and never wrapped.
         val modulePtr = python.multiplatform.ffi.Python3.withPython { PyImport_AddModule("__main__") } ?: error("Could not get __main__ module")
+        // PyObject_GetAttrString: *new* reference, adopted by the wrapper.
         val dictPtr = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(modulePtr, "__dict__") } ?: error("Could not get __main__.__dict__")
-        PyObject(dictPtr, true)
+        PyObject(dictPtr, false)
     }
 
     /** Evaluates [expression] (e.g. `"1 + 1"`) against [mainGlobals] and returns the resulting [PyObject]. */

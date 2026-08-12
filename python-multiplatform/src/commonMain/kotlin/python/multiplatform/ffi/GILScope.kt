@@ -6,7 +6,49 @@ import python.native.ffi.PyEval_SaveThread
 import python.native.ffi.PyEval_RestoreThread
 import python.native.ffi.NativePointer
 
-public class ThreadGILState(var state: Int = 0, var depth: Int = 0)
+public class ThreadGILState(var state: Int = 0, var depth: Int = 0) {
+    /**
+     * Outermost [withGIL] scopes this thread may still enter before it takes an automatic
+     * eval-loop checkpoint. See [Python3.drainPendingReleases].
+     */
+    public var checkpointCountdown: Int = 0
+
+    /**
+     * Set while this thread must not take a checkpoint: inside one already, or on a cleaner
+     * running [python.multiplatform.ffi.ReleaseCounter]-counted release actions. Running Python
+     * from a cleaner is what ROADMAP §1 turned into a deadlock and §9 explicitly rules out as a
+     * fix, and it would drain the wrong thread's queue in any case.
+     */
+    public var checkpointsSuppressed: Boolean = false
+}
+
+/**
+ * Decides whether this outermost scope should take an eval-loop checkpoint, and takes it.
+ *
+ * Two gates, both cheap. The countdown bounds how often a checkpoint can happen at all; the
+ * release mark skips it entirely when no reference has been given back since the previous one, so
+ * a workload that allocates nothing pays a field compare and nothing else.
+ *
+ * Not inline, so that [withGIL] — which is — can reach the internal counters through it.
+ */
+@PublishedApi
+internal fun maybeReachEvalCheckpoint(tState: ThreadGILState) {
+    val interval = Python3.autoDrainInterval
+    if (interval <= 0 || tState.checkpointsSuppressed) return
+    if (--tState.checkpointCountdown > 0) return
+    tState.checkpointCountdown = interval
+
+    val released = ReleaseCounter.released
+    if (released == Python3.lastCheckpointReleaseMark) return
+    Python3.lastCheckpointReleaseMark = released
+
+    tState.checkpointsSuppressed = true
+    try {
+        Python3.reachEvalCheckpointHoldingGIL()
+    } finally {
+        tState.checkpointsSuppressed = false
+    }
+}
 
 public expect fun getThreadGILState(): ThreadGILState
 public expect fun setThreadGILState(state: ThreadGILState?)
@@ -37,6 +79,9 @@ public inline fun <T> withGIL(block: () -> T): T {
     }
     tState.depth++
     try {
+        // Attached and nested one level deep, so the checkpoint's own C API calls are cheap and
+        // cannot recurse back into this branch.
+        if (isOutermost) maybeReachEvalCheckpoint(tState)
         return block()
     } finally {
         tState.depth--

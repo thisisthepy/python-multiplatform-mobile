@@ -735,16 +735,16 @@ suite against `cpython-3.14.7+20260807-<target>-freethreaded-install_only`:
 
 | build | tests | failing | skipped |
 |---|---|---|---|
-| default (GIL) 3.14.7 | 208 | 0 | 1 |
-| free-threaded 3.14.7 | 208 | **2** | 1 |
+| default (GIL) 3.14.7 | 211 | 0 | 1 |
+| free-threaded 3.14.7 | 211 | **1** | 1 |
 
 This section used to say "3.15t" and "waiting on upstream"; neither was true. 3.14 free-threaded
 is what was measured here, and those artefacts have been on the python-build-standalone release
 all along.
 
-The two failures are the deliverable. Neither is a bug in this library, and neither is fixable by
-changing this library alone — they are properties of the free-threaded runtime that an embedder
-has to design around.
+It used to report two failures. One of them — deferred deallocation — turned out to be fixable
+after all, and is fixed; see below. What is left is `CycleCollectionTest`, whose *premise* the
+free-threaded runtime does not honour, and which no change to this library can repair.
 
 ### The flag did nothing at all until three silent defects were fixed
 
@@ -771,8 +771,10 @@ than what was asked.
 
 ### Free-threading defers deallocation to the owning thread, and a pure embedder never gets there
 
-`GCLeakTest.testCascadingReleaseOnGC` fails. This is the important finding in this section, and it
-is the free-threading counterpart of §1: turning the feature on exposed an assumption, not a typo.
+`GCLeakTest.testCascadingReleaseOnGC` used to fail. This is the important finding in this section,
+and it is the free-threading counterpart of §1: turning the feature on exposed an assumption, not a
+typo. **It now passes, unmodified**, because the library reaches the checkpoint the runtime is
+waiting for. The diagnosis below stands; the last subsection records the fix.
 
 The test builds 1000 Python lists each holding one target object, drops the Kotlin wrappers, and
 waits for the cleaner to release them. Measured on the free-threaded build (the cleaner is
@@ -799,12 +801,101 @@ reclaimed.** It is not a leak in the sense of a lost pointer — the refcount is
 line of Python flushes it — but a Kotlin process that only ever calls `PyObject_Call` will grow
 without bound.
 
-Nothing here fixes that yet. The shape of a fix is a periodic drain on the owning thread; what to
-call to force one, and from where, is the open question. Whatever it is, it must not be a
-"run some Python occasionally" hack buried in the cleaner.
+### The checkpoint is the fix, and the Stable ABI does not offer a way to reach one without bytecode
+
+The open question above was *what to call to force a drain, and from where*. Both halves have
+answers now, and the first one is a "no" that had to be established before the second made sense.
+
+**CPython exposes no non-bytecode way to merge the queue on the current thread.** The merge lives
+behind `_PY_EVAL_EXPLICIT_MERGE_BIT`, and `Python/ceval_gil.c` clears that bit in exactly one
+function:
+
+```c
+int _Py_HandlePending(PyThreadState *tstate) {
+    ...
+#ifdef Py_GIL_DISABLED
+    if ((breaker & _PY_EVAL_EXPLICIT_MERGE_BIT) != 0) {
+        _Py_unset_eval_breaker_bit(tstate, _PY_EVAL_EXPLICIT_MERGE_BIT);
+        _Py_brc_merge_refcounts(tstate);
+    }
+    if (_Py_qsbr_should_process(((_PyThreadStateImpl *)tstate)->qsbr)) {
+        _PyMem_ProcessDelayed(tstate);
+    }
+#endif
+    if ((breaker & _PY_GC_SCHEDULED_BIT) != 0) { ... _Py_RunGC(tstate); }
+    ...
+}
+```
+
+`_Py_HandlePending` has one caller family: the `_CHECK_PERIODIC` / `_CHECK_PERIODIC_IF_NOT_YIELD_FROM`
+uops in `Python/bytecodes.c`, which open every Python-level frame (`RESUME`) and close every call
+instruction. There is no public entry point.
+
+`Py_MakePendingCalls` is the obvious Stable ABI candidate and it **does not work**. Read the
+source and it cannot: it forwards to `_PyEval_MakePendingCalls`, which handles `handle_signals`
+and `make_pending_calls` and returns — the merge bit is not among them. Measured, on the
+free-threaded build with 1000 releases queued, it returns 0 and leaves `sys.getrefcount` at
+1002. `EvalCheckpointTest` asserts exactly that, so the day CPython changes its mind, the test
+says so.
+
+`PyGC_Collect` **does** work, and is the only Stable ABI function that does, because
+`gc_collect_internal` stops the world and walks every thread state:
+
+```c
+_Py_FOR_EACH_TSTATE_BEGIN(interp, p) {
+    _PyObject_MergePerThreadRefcounts((_PyThreadStateImpl *)p);
+    merge_queued_objects((_PyThreadStateImpl *)p, state);   //  <-- the drain
+}
+```
+
+That is the one option that reclaims on behalf of a thread *other* than the caller. It is also
+the most expensive thing here by three orders of magnitude, because it costs a heap walk rather
+than a queue pop. Both functions are now bound (`Py_MakePendingCalls`, `PyGC_Collect`); both are
+in `Misc/stable_abi.toml`.
+
+So the drain has to be an eval-loop entry, and the only question left is how cheap one can be
+made. `exec("pass")` recompiles a module every time. A *cached* zero-argument Python function
+whose body is `pass`, called through `PyObject_CallNoArgs`, does not — and it still reaches the
+checkpoint after specialisation, because `RESUME_CHECK` deopts back to `RESUME` whenever
+`eval_breaker != version`, and the merge bit makes them differ. Measured on the free-threaded
+build (`EvalCheckpointTest.testCheckpointCostAgainstTheAlternatives`, macOS arm64):
+
+| | ns/op | |
+|---|---:|---|
+| `withGIL { }` — attach and detach, nothing else | 154.6 | the floor |
+| `Python3.drainPendingReleases()` | 283.0 | **the checkpoint, ~128 ns over the floor** |
+| `withGIL { Py_MakePendingCalls() }` | 183.1 | cheap, and does not merge |
+| `Python3.exec("pass")` | 6 458.9 | 23× — it recompiles |
+| `withGIL { PyGC_Collect() }` | 256 447.1 | 906× — heap walk, but drains every thread |
+
+**Where it is called from.** Not the cleaner — that was ruled out before the mechanism was known
+and the measurement confirms the instinct was right for a second reason: the queue belongs to the
+thread that *owns* the object, and the cleaner owns nothing, so a checkpoint taken there would run
+Python on a cleaner thread (§1's deadlock) and drain an empty queue for it.
+`EvalCheckpointTest.testCleanerActivityAloneTakesNoCheckpoint` pins that suppression.
+
+It rides on the next ordinary call instead. `withGIL` takes a checkpoint at its outermost entry,
+behind two gates: at most one per `Python3.autoDrainInterval` outermost scopes (32), and skipped
+entirely unless `ReleaseCounter.released` has moved since the last one, so a workload that drops
+no wrappers pays a field compare. Amortised that is ~4 ns on a 155 ns scope. `drainPendingReleases()`
+is public for anyone who wants to force one, and `autoDrainInterval = 0` turns the automatic path
+off.
+
+The automatic path defaults **on for free-threaded builds and off otherwise**, which is why the
+default suite's numbers are unchanged. One guard is worth naming: the checkpoint declines to run
+when `PyErr_Occurred()` is non-null. Several call sites read the error indicator *after* their
+`withPython { }` scope closes — `PyObject.getAttr` is one — and entering the eval loop can replace
+it, since a pending signal handler or a finaliser raising is enough.
+
+**This is not only a free-threading problem.** `_PY_GC_SCHEDULED_BIT` is cleared in the same
+function, and `_Py_ScheduleGC` is how allocation triggers a collection on *both* builds since 3.12.
+An embedder that never reaches a checkpoint therefore never runs the cyclic collector either, on
+either build. That is not what §9 is about and nothing here depends on it, but it is the same root
+cause, and `drainPendingReleases()` covers it for anyone who turns the automatic path on.
 
 ### Heap types are not reference counted at all, which voids a test's premise
 
+This is the one remaining free-threaded failure.
 `CycleCollectionTest.testHandleReleasedWhenProxyDiesWithoutCycle` fails, and its own guard
 assertion is what caught it — the one documented as "not decoration: it is what proves the probe
 reads a real refcount". It refused to proceed, exactly as designed.
@@ -1113,10 +1204,55 @@ is the actual state of the Android object model, and that is the point of doing 
   verifying them would require is noted in `docs/python-version-acquisition.md`. The lockfile is
   keyed by version *and* flavour, so a `-freethreaded` or a 3.15 archive is a separate entry and
   cannot be silently accepted under an existing key.
-- **`PyList.subList`** returns a copy, not a live view. **`pyObjectToNative`**'s fallback branch
-  is not fully native. Both are marked `TODO` and neither is exercised by current tests.
-- **~50 `TODO` markers** remain in `commonMain`, including several questioning whether
-  `Py_IncRef` is the right call in `PyObject.init`.
+- ~~**`PyList.subList`** returns a copy, not a live view.~~ **Stale — it returns `PySubList`,
+  which delegates `get`/`set`/`add`/`removeAt` to the backing list, i.e. it is a live view.**
+  **`pyObjectToNative`**'s fallback branch is still not fully native; the open question is now
+  written out at the branch itself (three candidate answers, and what to measure first).
+- ~~**~50 `TODO` markers** remain in `commonMain`~~ **— triaged. 18 remained, not ~50; 15 are
+  closed, 2 are sharpened open questions, and the work items are the four bullets below.** The
+  `Py_IncRef`-in-`PyObject.init` question named here is answered in place: `borrowed = true` is a
+  statement that the wrapper must obtain its own reference, and both directions of getting it
+  wrong have now been paid for (§1's double free, §4's dropped reference, and the fixture leak
+  below). Two bugs came out of the pass:
+  - **`PyType.dict` handed a `mappingproxy` to `PyDict`.** `type.__dict__` is not a `dict`, and
+    `PyDict_Size`/`PyDict_Items` reject a non-dict with `PyErr_BadInternalCall()` — returning
+    `-1`/`NULL` *and leaving the error indicator set*. Measured: `int.__dict__` reported
+    `size == -1`, and the next unrelated `Python3.eval` in the same suite died with
+    `Objects/dictobject.c:4248: bad argument to internal function`. It now copies through
+    `PyDict_New` + `PyDict_Update` into a real dict. `PyType_GetDict()`, which the code comment
+    proposed instead, is **not** an option: it is declared in `cpython/object.h`, outside the
+    Limited API, so it is not in the Stable ABI subset this binding restricts itself to.
+  - **`PythonTestFixture.mainGlobals()` leaked one reference per call**, wrapping
+    `PyObject_GetAttrString`'s new reference with `borrowed = true`. Measured at exactly +50 over
+    50 calls — the inverse of §1's defect, in the fixture every functional test is built on.
+    `OwnershipLeakTest.theTestFixtureDoesNotLeakMainGlobals` is the guard.
+- **`Python3.runMain` is not usable as written**, and "add error handling" (the TODO it carried)
+  understated it. `sys.argv[1] = ...` assigns to an existing index, but `Py_Initialize()` does not
+  set `sys.argv`, so it raises `IndexError` — invisibly, because `PyRun_SimpleString` prints and
+  clears the indicator and its return value is discarded. Worse, `Py_RunMain()` **always finalizes
+  the interpreter**, so on return the runtime is gone while `Python3.isInitialized` is still
+  `true`. Its `Int` exit status is also discarded. No caller in `src/` or `sample/`, so it is a
+  landmine, not a live failure. Fixing it is a design decision: what should "run a module" mean
+  for an embedded interpreter that has to survive the call?
+- **`Python3.runApp` does nothing at all** — its only statement is commented out, as is the
+  `Py_BytesMain` `expect` it would call. It returns `Unit` either way, so a caller cannot tell.
+  Declaring `Py_BytesMain` is not a one-liner: it takes `(int argc, char **argv)`, so it needs an
+  array-of-C-strings marshalling path, which each of the four platforms does differently.
+- **`Python3.finalize` reports no error detail**, and cannot: `Py_Finalize()` returns void and
+  there is no interpreter left to hold an error indicator afterwards. The one improvement
+  available is `Py_FinalizeEx()`'s `int` (0, or -1 when flushing buffered data failed). Left
+  undone because finalization is untested — its only caller is `artMain/JniExport.kt`, and a test
+  that exercises it destroys the interpreter the rest of the suite shares.
+- **`EmbedAPI.kt`'s section numbers are append order, not the C API docs' chapter order.**
+  Sections 1–26 follow the docs; 27 (Type Objects), 28 (Tuple Objects) and 29 (Module Objects)
+  were appended as needed. Documented target order: Type before Integer Objects (§16), Tuple
+  before List Objects (§22), Module before Iterator Objects (§25). It is a ~370-line pure-comment
+  move with no behavioural effect, so it should be done alone, on a quiet tree, or not at all.
+- **Several `commonTest` file headers still describe their subjects as `TODO` stubs "expected to
+  fail with `NotImplementedError`"** — `PyObjectTest`, `Python3Test`, `PyBasicTypesTest`,
+  `PyModuleTest`, `PyDictTest`, `PyIteratorTest`, `PySetTest`, `PyTupleTest`, `PyListTest`,
+  `ConversionTest`. Every one of those is implemented, so the headers invite the next reader to
+  dismiss a real failure as expected. `PyTypeTest`'s was corrected; the rest were left.
 - **No CI.** The README badges point at a different repository.
 - ~~**Sample app** has not been revisited since the object model landed.~~ **Done — see §13.**
 

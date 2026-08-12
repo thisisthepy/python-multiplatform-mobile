@@ -5,6 +5,8 @@ import python.multiplatform.ffi.exceptions.errors.PyTypeError
 import python.multiplatform.ffi.types.collections.PyDict
 import python.multiplatform.ffi.types.iteration.PyIterator
 import python.native.ffi.NativePointer
+import python.native.ffi.PyDict_New
+import python.native.ffi.PyDict_Update
 import python.native.ffi.PyErr_Clear
 import python.native.ffi.PyObject_GetAttrString
 import python.native.ffi.PyObject_GetIter
@@ -146,10 +148,49 @@ class PyType private constructor(pointer: NativePointer): PyObject(pointer, fals
         }
     }
 
+    /**
+     * The type's own namespace, as a **snapshot copy** of `type.__dict__`.
+     *
+     * Two things force the copy rather than a wrapper over the pointer `__dict__` returns.
+     *
+     * A type's `__dict__` is a **`mappingproxy`**, not a `dict`. Wrapping that pointer in a
+     * [PyDict] does not fail loudly, it fails silently and then corrupts: `PyDict_Size` and
+     * `PyDict_Items` reject a non-dict with `PyErr_BadInternalCall()`, returning `-1`/`NULL`
+     * *and leaving the error indicator set*, so the call that reports the problem is some
+     * unrelated Python call further down. That was measured, not reasoned about -- reading
+     * `int.__dict__` gave `size == -1` and the next `Python3.eval` in the suite died with
+     * `Objects/dictobject.c:4248: bad argument to internal function`.
+     * `PyTypeTest.readingDictLeavesNoPendingError` is the guard against it coming back.
+     *
+     * `PyType_GetDict()`, which an earlier note here suggested instead, is not an option: it is
+     * declared in `cpython/object.h`, i.e. outside the Limited API, so it is not in the Stable
+     * ABI this binding restricts itself to. `PyObject_GetAttrString` + `PyDict_Update` are, and
+     * `mappingproxy` supports the `keys()`/`__getitem__` protocol `PyDict_Update` needs.
+     *
+     * A snapshot loses nothing a live view would have given: `mappingproxy` is read-only, so
+     * mutation through this wrapper was never going to reach the type. It *is* a point-in-time
+     * copy, so re-read the property after `setattr` on the type.
+     */
     val dict: PyDict by lazy {
-        // TODO: Add null check for PyObject_GetAttrString. And you should replace PyObject_GetAttrString to python.multiplatform.ffi.Python3.withPython { PyType_GetDict() }.
-        PyDict(python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(pointer, "__dict__") }!!, false)
-}
+        // PyObject_GetAttrString: new reference to the mappingproxy; released unconditionally
+        // below, since only the copy outlives this block.
+        val proxyPointer: NativePointer = python.multiplatform.ffi.Python3.withPython { PyObject_GetAttrString(pointer, "__dict__") }
+            ?: throw pyErrorOrGeneric("Failed to get __dict__")
+        try {
+            val copyPointer: NativePointer = python.multiplatform.ffi.Python3.withPython { PyDict_New() }
+                ?: throw pyErrorOrGeneric("Failed to allocate a dict to copy __dict__ into")
+            // The copy is a bare pointer until PyDict adopts it, and PyDict_Update runs arbitrary
+            // Python (mappingproxy.keys(), __getitem__) and so can fail -- see ROADMAP §4.
+            copyPointer.adoptingNewReference {
+                if (python.multiplatform.ffi.Python3.withPython { PyDict_Update(it, proxyPointer) } != 0) {
+                    throw pyErrorOrGeneric("Failed to copy __dict__ into a dict")
+                }
+                PyDict(it, false)
+            }
+        } finally {
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(proxyPointer) }
+        }
+    }
 
     /** `python.multiplatform.ffi.Python3.withPython { PyType_IsSubtype(this, other) }`, i.e. Python's `issubclass(self, other)`. */
     fun isSubtypeOf(other: PyType): Boolean = python.multiplatform.ffi.Python3.withPython { PyType_IsSubtype(pointer, other.pointer) } != 0

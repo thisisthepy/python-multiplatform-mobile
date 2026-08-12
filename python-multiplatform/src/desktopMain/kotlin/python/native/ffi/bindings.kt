@@ -48,6 +48,10 @@ object bindings {
     inline fun PyEval_SaveThread(): Long = PyEval_SaveThreadHandle.invokeExact() as Long
     val PyEval_RestoreThreadHandle: MethodHandle
     inline fun PyEval_RestoreThread(tstate: Long) = PyEval_RestoreThreadHandle.invokeExact(tstate) as Unit
+    val Py_MakePendingCallsHandle: MethodHandle
+    inline fun Py_MakePendingCalls(): Int = Py_MakePendingCallsHandle.invokeExact() as Int
+    val PyGC_CollectHandle: MethodHandle
+    inline fun PyGC_Collect(): Long = PyGC_CollectHandle.invokeExact() as Long
 
 
     // Section 2
@@ -930,6 +934,8 @@ inline fun PyDict_GetItemString(p: Long, key: String): Long {
         PyGILState_GetThisThreadStateHandle = find("PyGILState_GetThisThreadState", P)
         PyEval_SaveThreadHandle = find("PyEval_SaveThread", P)
         PyEval_RestoreThreadHandle = find("PyEval_RestoreThread", Void.TYPE, P)
+        Py_MakePendingCallsHandle = find("Py_MakePendingCalls", Integer.TYPE)
+        PyGC_CollectHandle = find("PyGC_Collect", LongLong.TYPE)
 
 
         // Section 2
