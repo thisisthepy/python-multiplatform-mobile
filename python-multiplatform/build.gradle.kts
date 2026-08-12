@@ -1250,6 +1250,13 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
     if (!name.startsWith("wasmJs")) return@configureEach
     dependsOn(verifyWasmAbiSignatures)
 
+    // ROADMAP §10 -- lifetimes. `GCLeakTest` and `WasmFinalizationTest` need to *ask* for a
+    // collection, and on this target the collector is the host engine's. `--expose-gc` is the only
+    // way to reach it; there is no library-callable equivalent, which is why `forceGC()` degrades to
+    // a no-op when it is absent rather than pretending. Node accepts it on the command line only --
+    // `NODE_OPTIONS` rejects V8 flags -- so it goes here.
+    nodeJsArgs.add("--expose-gc")
+
     val pythonDir = file(wasmPythonDir)
     // The npm project the Kotlin/Wasm node runner actually executes out of, which is under the
     // ROOT build directory rather than this module's.

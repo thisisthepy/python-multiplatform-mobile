@@ -58,11 +58,11 @@ class EvalCheckpointTest {
      * frees on the spot, which is its own invariant worth holding on to.
      */
     @Test
-    fun testDrainPendingReleasesReclaimsWhatTheCleanerGaveBack() {
+    fun testDrainPendingReleasesReclaimsWhatTheCleanerGaveBack(): CollectorTestResult {
         // No subject on a platform without a cleaner: nothing releases the wrappers, so the
         // question this test asks -- what the checkpoint does with what the cleaner gave back --
         // has nothing to act on. GCLeakTest fails there and names the real cause.
-        if (!cleanerReleasesAutomatically) return
+        if (!cleanerReleasesAutomatically) return collectorTest(0, { true }, { })
         if (!Python3.isInitialized) Python3.initialize()
 
         val previousInterval = Python3.autoDrainInterval
@@ -106,66 +106,78 @@ class EvalCheckpointTest {
             val releasedBefore = ReleaseCounter.released
             var attempts = 0
             var cleanerReleases = 0
-            while (cleanerReleases < OUTER && attempts < 200) {
-                forceGC()
+
+            // Driven rather than spun. On wasmJs the cleaner is a host finalisation callback that
+            // arrives on a task, so a `while` loop here would ask 200 times inside one job and see
+            // nothing; see `commonTest`'s CollectorTestResult.
+            return collectorTest(maxAttempts = 200, attempt = {
                 refCount(target)
                 attempts++
                 cleanerReleases = ReleaseCounter.released - releasedBefore - attempts * releasesPerProbe
-            }
-            assertTrue(
-                cleanerReleases >= OUTER,
-                "the cleaner has to have released the $OUTER outer wrappers before this test can " +
-                    "say anything about what happened to the memory " +
-                    "(released by the cleaner: $cleanerReleases, attempts: $attempts). " +
-                    "If this fires, the failure is in GC-driven release, not in checkpointing."
-            )
+                cleanerReleases >= OUTER
+            }, finish = {
+                try {
+                    assertTrue(
+                        cleanerReleases >= OUTER,
+                        "the cleaner has to have released the $OUTER outer wrappers before this test can " +
+                            "say anything about what happened to the memory " +
+                            "(released by the cleaner: $cleanerReleases, attempts: $attempts). " +
+                            "If this fires, the failure is in GC-driven release, not in checkpointing."
+                    )
 
-            val refAfterCleaner = refCount(target)
+                    val refAfterCleaner = refCount(target)
 
-            if (BuildConfig.pythonFreeThreaded) {
-                assertEquals(
-                    refAfterBuild,
-                    refAfterCleaner,
-                    "free-threaded: a Py_DecRef from a thread that does not own the object is " +
-                        "queued to its owner rather than run, so $OUTER completed decrefs must " +
-                        "leave the count exactly where it was. If this now differs, the runtime " +
-                        "has started merging somewhere else and the rest of this test is stale."
-                )
+                    if (BuildConfig.pythonFreeThreaded) {
+                        assertEquals(
+                            refAfterBuild,
+                            refAfterCleaner,
+                            "free-threaded: a Py_DecRef from a thread that does not own the object is " +
+                                "queued to its owner rather than run, so $OUTER completed decrefs must " +
+                                "leave the count exactly where it was. If this now differs, the runtime " +
+                                "has started merging somewhere else and the rest of this test is stale."
+                        )
 
-                // Py_MakePendingCalls is the Stable ABI function that looks like it should do
-                // this. It does not: it handles _PY_CALLS_TO_DO_BIT and _PY_SIGNALS_PENDING_BIT
-                // and returns, while the merge hangs off _PY_EVAL_EXPLICIT_MERGE_BIT, which only
-                // _Py_HandlePending clears.
-                val pendingResult = withGIL { Py_MakePendingCalls() }
-                assertEquals(0, pendingResult, "Py_MakePendingCalls should not have failed")
-                assertEquals(
-                    refAfterBuild,
-                    refCount(target),
-                    "Py_MakePendingCalls must not be mistaken for a checkpoint: it does not merge " +
-                        "the biased reference-counting queue"
-                )
+                        // Py_MakePendingCalls is the Stable ABI function that looks like it should do
+                        // this. It does not: it handles _PY_CALLS_TO_DO_BIT and _PY_SIGNALS_PENDING_BIT
+                        // and returns, while the merge hangs off _PY_EVAL_EXPLICIT_MERGE_BIT, which only
+                        // _Py_HandlePending clears.
+                        val pendingResult = withGIL { Py_MakePendingCalls() }
+                        assertEquals(0, pendingResult, "Py_MakePendingCalls should not have failed")
+                        assertEquals(
+                            refAfterBuild,
+                            refCount(target),
+                            "Py_MakePendingCalls must not be mistaken for a checkpoint: it does not merge " +
+                                "the biased reference-counting queue"
+                        )
 
-                Python3.drainPendingReleases()
-                val refAfterDrain = refCount(target)
-                assertTrue(
-                    refAfterDrain < refAfterBuild,
-                    "reaching an eval-loop checkpoint should have merged all $OUTER queued " +
-                        "releases (before: $refAfterBuild, after: $refAfterDrain)"
-                )
-            } else {
-                assertTrue(
-                    refAfterCleaner < refAfterBuild,
-                    "with the global lock there is no deferred-release queue, so the cleaner's " +
-                        "Py_DecRef should already have freed the outer lists " +
-                        "(before: $refAfterBuild, after: $refAfterCleaner)"
-                )
-            }
+                        Python3.drainPendingReleases()
+                        val refAfterDrain = refCount(target)
+                        assertTrue(
+                            refAfterDrain < refAfterBuild,
+                            "reaching an eval-loop checkpoint should have merged all $OUTER queued " +
+                                "releases (before: $refAfterBuild, after: $refAfterDrain)"
+                        )
+                    } else {
+                        assertTrue(
+                            refAfterCleaner < refAfterBuild,
+                            "with the global lock there is no deferred-release queue, so the cleaner's " +
+                                "Py_DecRef should already have freed the outer lists " +
+                                "(before: $refAfterBuild, after: $refAfterCleaner)"
+                        )
+                    }
 
-            target.close()
-            listType.close()
-            builtins.close()
-        } finally {
+                    target.close()
+                    listType.close()
+                    builtins.close()
+                } finally {
+                    Python3.autoDrainInterval = previousInterval
+                }
+            })
+        } catch (t: Throwable) {
+            // Only reached if the *setup* above threw; the happy path restores the interval in
+            // `finish`, which runs after the collector has been given its chances.
             Python3.autoDrainInterval = previousInterval
+            throw t
         }
     }
 
@@ -224,11 +236,11 @@ class EvalCheckpointTest {
      * pinned here by counting checkpoints while only cleaners are running.
      */
     @Test
-    fun testCleanerActivityAloneTakesNoCheckpoint() {
+    fun testCleanerActivityAloneTakesNoCheckpoint(): CollectorTestResult {
         // No subject on a platform without a cleaner: nothing releases the wrappers, so the
         // question this test asks -- what the checkpoint does with what the cleaner gave back --
         // has nothing to act on. GCLeakTest fails there and names the real cause.
-        if (!cleanerReleasesAutomatically) return
+        if (!cleanerReleasesAutomatically) return collectorTest(0, { true }, { })
         if (!Python3.isInitialized) Python3.initialize()
 
         val previousInterval = Python3.autoDrainInterval
@@ -246,39 +258,46 @@ class EvalCheckpointTest {
             val ranBefore = ReleaseCounter.ran
             val checkpointsBefore = Python3.CheckpointCounter.reached
             var attempts = 0
-            while (ReleaseCounter.ran - ranBefore < 100 && attempts < 200) {
-                forceGC()
+
+            return collectorTest(maxAttempts = 200, attempt = {
                 attempts++
-            }
-            val cleanerRuns = ReleaseCounter.ran - ranBefore
-            val checkpointsDuring = Python3.CheckpointCounter.reached - checkpointsBefore
+                ReleaseCounter.ran - ranBefore >= 100
+            }, finish = {
+                try {
+                    val cleanerRuns = ReleaseCounter.ran - ranBefore
+                    val checkpointsDuring = Python3.CheckpointCounter.reached - checkpointsBefore
 
-            assertTrue(
-                cleanerRuns > 0,
-                "no cleaner ran, so this test proved nothing (attempts: $attempts). " +
-                    "That is the GCLeakTest.testCleanerMechanismRuns failure, not this one."
-            )
-            assertEquals(
-                0L,
-                checkpointsDuring,
-                "cleaner threads released $cleanerRuns references and must not have taken a " +
-                    "single checkpoint while doing it (took: $checkpointsDuring)"
-            )
+                    assertTrue(
+                        cleanerRuns > 0,
+                        "no cleaner ran, so this test proved nothing (attempts: $attempts). " +
+                            "That is the GCLeakTest.testCleanerMechanismRuns failure, not this one."
+                    )
+                    assertEquals(
+                        0L,
+                        checkpointsDuring,
+                        "cleaner threads released $cleanerRuns references and must not have taken a " +
+                            "single checkpoint while doing it (took: $checkpointsDuring)"
+                    )
 
-            // And the same activity, seen from a thread that does enter Python, does take one.
-            val checkpointsBeforeUse = Python3.CheckpointCounter.reached
-            repeat(4) { withGIL { } }
-            assertTrue(
-                Python3.CheckpointCounter.reached > checkpointsBeforeUse,
-                "an ordinary caller entering withGIL after the cleaner has released something " +
-                    "should take the checkpoint the cleaner declined"
-            )
+                    // And the same activity, seen from a thread that does enter Python, does take one.
+                    val checkpointsBeforeUse = Python3.CheckpointCounter.reached
+                    repeat(4) { withGIL { } }
+                    assertTrue(
+                        Python3.CheckpointCounter.reached > checkpointsBeforeUse,
+                        "an ordinary caller entering withGIL after the cleaner has released something " +
+                            "should take the checkpoint the cleaner declined"
+                    )
 
-            target.close()
-            listType.close()
-            builtins.close()
-        } finally {
+                    target.close()
+                    listType.close()
+                    builtins.close()
+                } finally {
+                    Python3.autoDrainInterval = previousInterval
+                }
+            })
+        } catch (t: Throwable) {
             Python3.autoDrainInterval = previousInterval
+            throw t
         }
     }
 
