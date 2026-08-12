@@ -646,4 +646,18 @@ object bindings {
     @JvmStatic external fun PyDict_SetItemN(p: Long, key: Long, v: Long): Int
     @JvmStatic external fun PyDict_GetItemStringN(p: Long, key: Long): Long
 
+    //**************************************************
+    // Cycle-collecting proxy type.
+    //
+    // Composed on the native side (jni_onload.def), not one-per-C-API-call like the rest of this
+    // file. The type's tp_traverse and tp_clear have to be C function pointers, and Kotlin/JVM
+    // has no way to make one -- so C owns the type, and androidMain only asks for it and reads
+    // and writes the handle inside an instance. The traffic in the other direction (C calling
+    // Kotlin during a collection) goes to python.multiplatform.ffi.ProxyCallbacks.
+    //
+    // Ordinary JNI on all three: proxyCreateType runs type creation, and the accessors are cold.
+    @JvmStatic external fun proxyCreateType(): Long
+    @JvmStatic external fun proxyGetHandle(proxy: Long): Long
+    @JvmStatic external fun proxySetHandle(proxy: Long, handle: Long)
+
 }
