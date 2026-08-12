@@ -14,6 +14,36 @@ declarations here. Two reasons, both measured:
 - Registration removes the dependence on JNI name mangling, which is what produced the original
   argument-shift bug in the first place.
 
+### Every `external fun` here needs a table entry — no exceptions by reachability
+
+An unregistered declaration does not fail cleanly when it is finally reached. It falls back to a
+`@CName` export in `nativeMain` that has no `JNIEnv*`/`jclass` prologue, so the arguments arrive
+shifted by two registers, and the process dies on a truncated pointer (ROADMAP §2 records two:
+`PyImport_AddModule` at `0xc24110e8`, `PyErr_GetRaisedException` at `0xc2411160`). "Nothing calls
+it today" is not a defence — it is a description of when the crash happens, not whether.
+
+There are exactly four deliberate exceptions and they are named in ROADMAP §2. Adding a fifth
+means writing down why.
+
+Two mechanical rules fall out of this:
+
+- **Pointers cross as `Long`, never as `JNIPointer?`.** A nullable `Long` is a boxed
+  `java.lang.Long` on the JVM, and no C function taking `jlong` can be registered against that
+  descriptor. Return `Long` and convert with `.toNativePointer()` on the Kotlin side.
+- **Do not define a wrapper twice.** cinterop rejects the redefinition, and the error points at
+  the `.def` rather than at the merge that caused it. Before adding one:
+
+  ```bash
+  grep -oE "^static [a-z]+ (f_[A-Za-z0-9_]+)" jni_onload.def | awk '{print $3}' | sort | uniq -d
+  ```
+
+To audit the whole surface, join the compiled class against the table — the class, not the Kotlin
+source, because the descriptor the JVM will match on is the one in the bytecode:
+
+```bash
+javap -p -s build/tmp/kotlin-classes/debug/python/native/ffi/bindings.class
+```
+
 ## Pick the calling convention per API level *and* per function
 
 Two independent axes. Correctness first.

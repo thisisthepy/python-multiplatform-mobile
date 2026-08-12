@@ -6,7 +6,7 @@ import python.multiplatform.reflection.ObjectReference
 import python.native.ffi.bindings
 
 /**
- * The Kotlin half of the proxy type's `tp_traverse` and `tp_clear`.
+ * The Kotlin half of the proxy type's `tp_traverse`, `tp_clear` and `tp_dealloc`.
  *
  * ### Why this shape and not the desktop one
  *
@@ -82,9 +82,10 @@ object ProxyCallbacks {
     /**
      * Drops the [HandleTable] root for [handle], and nothing else.
      *
-     * The C side has already zeroed the proxy's handle slot, so a second call for the same
-     * object never reaches here. [HandleTable.release] is a no-op for a stale handle anyway,
-     * which is the property that makes a double release safe rather than a slot hijack.
+     * Called from both C slots. The C side zeroes the proxy's handle slot before calling, so an
+     * object that dies inside a cycle -- which runs `tp_clear` and then `tp_dealloc` -- reaches
+     * here exactly once. [HandleTable.release] is a no-op for a stale handle anyway, which is
+     * the backstop that makes a double release safe rather than a slot hijack.
      */
     @JvmStatic
     fun clear(handle: Long) {
@@ -99,7 +100,7 @@ object ProxyCallbacks {
 /**
  * Android's cycle-collecting proxy type.
  *
- * The type itself is built in C (`proxy_create_type` in `jni_onload.def`) because its two slots
+ * The type itself is built in C (`proxy_create_type` in `jni_onload.def`) because its three slots
  * have to be C function pointers. This is the Kotlin entry point to that, plus the accessors a
  * caller needs to put a handle into a proxy instance.
  *
@@ -111,10 +112,10 @@ object ProxyCallbacks {
  * been seen by ART. The C side handles that with `AttachCurrentThreadAsDaemon` and detaches
  * again before returning, but nothing tests it; Kotlin/Native leaves the same case open.
  *
- * There is also no `tp_dealloc`. A proxy that dies without a cycle -- refcount reaching zero the
- * ordinary way -- never runs `tp_clear`, so its [HandleTable] entry leaks. Desktop and
- * Kotlin/Native have the same hole; it belongs to the lifetime design rather than to this
- * platform.
+ * `tp_dealloc` (`pmp_proxy_dealloc` in `jni_onload.def`) closes what used to be the larger hole:
+ * a proxy that dies without a cycle never runs `tp_clear`, so its [HandleTable] entry leaked --
+ * and since cycles are the exception, almost every proxy died that way. All three platforms
+ * carry the slot now; desktop is where it is measured, in `CycleCollectionTest`.
  */
 actual object ProxyTypeFactory {
 

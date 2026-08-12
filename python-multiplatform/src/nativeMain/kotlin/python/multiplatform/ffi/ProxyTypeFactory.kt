@@ -12,7 +12,14 @@ import python.native.ffi.bindings.PyType_FromSpec
 import python.native.ffi.bindings.PyType_Slot
 import python.native.ffi.bindings.PyType_Spec
 import python.native.ffi.bindings.PyObject_GetTypeData
+import python.native.ffi.bindings.PyObject_GC_UnTrack
+import python.native.ffi.bindings.PyObject_Type
+import python.native.ffi.bindings.PyType_GetSlot
+import python.native.ffi.bindings.Py_DecRef
 import python.native.ffi.bindings.visitproc
+
+/** `Py_tp_free` from CPython's `typeslots.h`. Slot ids are ABI, not header-version-dependent. */
+private const val PY_TP_FREE = 74
 
 /**
  * The proxy type, as a raw address, or 0 before [ProxyTypeFactory.createProxyType] has run.
@@ -114,16 +121,86 @@ private fun proxyTraverse(self: CPointer<CPyObject>?, visit: visitproc?, arg: CO
  */
 private fun proxyClear(self: CPointer<CPyObject>?): Int {
     try {
-        val slot = handleSlot(self) ?: return 0
-        val handle = slot.pointed.value
-        if (handle != 0L) {
-            HandleTable.release(ObjectReference(handle))
-            slot.pointed.value = 0L
-        }
+        takeHandle(self)
     } catch (t: Throwable) {
         // Swallowed for the same reason as in proxyTraverse.
     }
     return 0
+}
+
+/**
+ * Takes the [HandleTable] root out of [self]'s handle slot and drops it.
+ *
+ * The slot is zeroed *before* the release, which is what lets [proxyClear] and [proxyDealloc]
+ * run one after the other without double-releasing. An object that dies in a cycle takes both
+ * paths: `tp_clear` breaks the loop, the refcount then falls to zero and `tp_dealloc` follows.
+ * The second call finds 0 and does nothing.
+ *
+ * [HandleTable.release] is independently idempotent -- it bumps the slot's generation, so a
+ * repeat of the same handle no longer matches -- which is the backstop rather than the mechanism,
+ * and is what stops a double release from freeing a slot already reissued to someone else.
+ */
+private fun takeHandle(self: CPointer<CPyObject>?) {
+    val slot = handleSlot(self) ?: return
+    val handle = slot.pointed.value
+    if (handle == 0L) return
+    slot.pointed.value = 0L
+    HandleTable.release(ObjectReference(handle))
+}
+
+/**
+ * `void tp_dealloc(PyObject *self)` -- the slot [proxyClear] is not a substitute for.
+ *
+ * `tp_clear` runs only when the cyclic collector decides to break a loop. A proxy whose refcount
+ * simply reaches zero never goes near it, and that is the ordinary case: cycles are the
+ * exception. Without this slot every such proxy left its [HandleTable] entry rooted for the life
+ * of the interpreter, holding a Kotlin object nothing could reach again.
+ *
+ * Unlike `tp_clear`, this one owns the object's memory. Installing it replaces CPython's
+ * `subtype_dealloc` outright, so everything that function does for a GC'd heap type has to happen
+ * here:
+ *
+ *  - **untrack first.** The type carries `Py_TPFLAGS_HAVE_GC`, so the instance is on the
+ *    collector's list; freeing it while still linked leaves the collector walking released memory.
+ *  - **free through the type's own `tp_free`.** `PyType_GetSlot` is the only abi3 route to it,
+ *    and the type must come from the *instance* rather than from [proxyTypeAddress]: the type is
+ *    declared `Py_TPFLAGS_BASETYPE`, so Python code may subclass it and inherit this function.
+ *  - **release the instance's reference to its type.** Since 3.8 an instance of a heap type holds
+ *    one and `subtype_dealloc` gives it back. Forgetting leaks the type once per instance; doing
+ *    it twice frees the type while it is still in use.
+ *
+ * `Py_TYPE` is a macro, so the type is fetched with `PyObject_Type`, a real stable-ABI function
+ * that returns a *new* reference. Hence the two decrements: one for that temporary, one for the
+ * instance's own.
+ *
+ * CPython holds the GIL here as it does for the other two slots; nothing here may take or
+ * release it.
+ */
+private fun proxyDealloc(self: CPointer<CPyObject>?) {
+    val obj = self ?: return
+
+    // Fetched before anything else is torn down, and kept alive across the free by the reference
+    // PyObject_Type just handed over.
+    val type = PyObject_Type(obj)
+
+    // An exception crossing back into C terminates the process on Kotlin/Native, and it would do
+    // so having untracked the object without freeing it. Only the handle release runs Kotlin
+    // logic that can throw, so only that part is guarded; the free below still happens.
+    try {
+        PyObject_GC_UnTrack(obj)
+        takeHandle(obj)
+    } catch (t: Throwable) {
+        // Nowhere to report it: the only channel out of a deallocation is not returning.
+    }
+
+    if (type != null) {
+        val tpFree = PyType_GetSlot(type.reinterpret<PyTypeObject>(), PY_TP_FREE)
+        if (tpFree != null) {
+            tpFree.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()(obj)
+            Py_DecRef(type) // the reference the instance held on its heap type
+        }
+        Py_DecRef(type) // the reference PyObject_Type just handed us
+    }
 }
 
 /**
@@ -167,14 +244,16 @@ actual object ProxyTypeFactory {
     actual fun createProxyType(): Long {
         if (proxyTypeAddress != 0L) return proxyTypeAddress
 
-        val slots = nativeHeap.allocArray<PyType_Slot>(3)
+        val slots = nativeHeap.allocArray<PyType_Slot>(4)
         // Slot ids from CPython's typeslots.h; they are ABI, not header-version-dependent.
         slots[0].slot = 71 // Py_tp_traverse
         slots[0].pfunc = staticCFunction(::proxyTraverse)
         slots[1].slot = 51 // Py_tp_clear
         slots[1].pfunc = staticCFunction(::proxyClear)
-        slots[2].slot = 0 // sentinel
-        slots[2].pfunc = null
+        slots[2].slot = 52 // Py_tp_dealloc
+        slots[2].pfunc = staticCFunction(::proxyDealloc)
+        slots[3].slot = 0 // sentinel
+        slots[3].pfunc = null
 
         val spec = nativeHeap.alloc<PyType_Spec>()
         spec.name = allocPermanentCString("KotlinProxy")

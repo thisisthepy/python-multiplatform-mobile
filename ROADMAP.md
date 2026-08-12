@@ -160,20 +160,77 @@ boundary went from **52 to 6**, and of those six none is a defect:
   anywhere in `src/` — `jvmMain`'s `ffiSymbol` that wraps it is itself unreferenced — so it is a
   landmine rather than a live crash. Fixing it means a `dlsym` wrapper taking a jlong, and it
   belongs with whatever revives the shape vocabulary on Android.
+  *(Done — see below. It is `ffiSymbolRawN(name: Long)` now, and the shape vocabulary went with it.)*
 
 The 42 functions migrated in this pass are listed with their per-argument intern/scratch
 judgement in `docs/marshalling-design.md`. Every symbol they bind was checked to exist in the
 shipped `libpython3.14.so` before registering (`llvm-nm -D --defined-only`), and the linked
 `libmultiplatform_python3.14.so` has no unresolved `Py*` symbol.
 
-What is left of §2 is the 178 unregistered non-string functions. `docs/android-unregistered-surface.md`
-carries the reachability analysis; its counts came from a script and were spot-checked, not
-audited line by line.
+### The unregistered surface is now empty
 
-Four are migrated so far (`PyImport_AddModule`, `PyErr_SetString`, `PyObject_SetAttrString`,
-`PyObject_DelAttrString`), which moved the suite from 10 tests to 12. **Progress on this item is
-measured by how far the 168 get, not by whether a chosen test passes** — that is the mistake that
-closed it prematurely.
+The 178 that were left are registered. Recounted the same way, against the compiled class this
+time rather than against the Kotlin source — `javap -p -s` on `build/tmp/kotlin-classes/debug/
+python/native/ffi/bindings.class`, joined to the `JNINativeMethod` table on the method name:
+
+```
+                             before    after
+bindings.kt external fun       369      367     (two dead declarations removed)
+registered                     191      363
+unregistered                   178        4
+descriptor mismatches            0        0     (all 363 agree with the compiled bytecode)
+non-static registrations         0        0
+```
+
+The four that remain are deliberate, and none of them is on the broken path:
+
+- `ffiAllocUtf8`, `ffiFreeUtf8`, `ffiReadUtf8` — name-linked, but hand-written in
+  `artMain/.../JNIOnLoadExporter.kt` with the correct `JNIEnv*`/`jclass` prologue and a real
+  `jstring`. They cannot move into `jni_onload.def`: the buffers they allocate and read belong to
+  Kotlin/Native.
+- `echoCriticalNamed` — the probe that exists *to* be name-linked, so that a benchmark can compare
+  name-based linking against `RegisterNatives` at the same calling convention. Registering it would
+  delete the measurement.
+
+Two declarations were removed rather than registered, both provably uncalled and both already
+having a registered equivalent: `PyObject_Call` (superseded by `PyObject_CallN`) and
+`PyList_GetItem` (superseded by the `PyList_GetItemRaw` / `PyList_GetItemRawF` pair).
+
+**All 157 CPython functions in this pass were unreachable from `commonMain`/`commonTest`.** That
+is not a reason it was safe to leave them — it is the finding that the earlier passes had already
+covered the whole reachable surface, so what remained was landmines only. The check: take the 312
+`expect fun` in `EmbedAPI.kt`, keep the 109 named anywhere in `commonMain`, `commonTest`,
+`androidInstrumentedTest` or `jvmMain`, map each through its `EmbedAPI.android.kt` actual to the
+`bindings.*` it calls, and intersect. The intersection with this pass is empty; the same procedure
+returns `true` for `PyDict_Clear`, `PyObject_Type` and `PyList_Append`, which were registered in
+the previous pass, so the procedure does find reachable functions when they exist.
+
+`docs/android-unregistered-surface.md` is kept for the call-graph traces, but its counts and its
+"71 reachable" framing are historical.
+
+The shape vocabulary went with it. The 14 `downcall_*` trampolines and `ffiSymbolRaw` used to reach
+`nativeMain`'s `@CName` exports by name, which is the same broken path and worse — a shape
+function's first argument is the *target function pointer*, so a shifted argument register is a
+wild call rather than a bad `PyObject*`. The indirect call is done in `jni_onload.def` now, which
+removes the fallback and the hop through Kotlin/Native at once. `ffiSymbolRaw` became
+`ffiSymbolRawN(name: Long)` over a `dlopen(NULL, RTLD_NOW)` handle, which is the jlong-taking
+`dlsym` wrapper this section asked for above.
+
+Verification actually run: `compileKotlinAndroidNativeArm64`, `compileDebugKotlinAndroid` and
+`linkMultiplatform_python3.14DebugSharedAndroidNativeArm64` all clean; the linked
+`libmultiplatform_python3.14.so` has 317 undefined `Py*` symbols and every one of them is defined
+in the shipped `libpython3.13.so` (`objdump -T`); desktop 171 tests, 0 failed.
+
+**Not yet run: the device suite.** §2's own measure is how far the 168 `commonTest` cases get on
+`pmp_api26`/`pmp_api36`, and that has not been re-run since this change — another agent held the
+emulators. The registration surface is complete and internally consistent; whether the suite
+advances past the 12th case is unmeasured. **Do not close this item on the strength of the
+consistency check alone** — that is the same mistake as closing it on `AssembledApiTest`.
+
+Earlier in this section: four were migrated first (`PyImport_AddModule`, `PyErr_SetString`,
+`PyObject_SetAttrString`, `PyObject_DelAttrString`), which moved the suite from 10 tests to 12.
+**Progress on this item is measured by how far the 168 get, not by whether a chosen test passes** —
+that is the mistake that closed it prematurely.
 
 The history below is kept because the three failure modes it records are exactly what the two
 crashes above are, and because §3 still has to classify whatever §2 binds.
