@@ -13,10 +13,15 @@ commonMain
  ├── jvmMain            중간 소스셋
  │    ├── androidMain   ART
  │    └── desktopMain   HotSpot
- └── nativeMain
-      ├── iosMain
-      └── artMain       androidNativeArm64 / androidNativeX64
+ ├── nativeMain
+ │    ├── iosMain
+ │    └── artMain       androidNativeArm64 / androidNativeX64
+ └── wasmJsMain         wasm32-emscripten (ROADMAP §10)
 ```
+
+`wasmJsMain` 은 **중간 소스셋 없이 `commonMain` 바로 아래에 둔다.** 공유할 상대가 없고(JNI·Panama·
+cinterop 어느 쪽과도 겹치지 않는다), 바로 아래에 적힌 `expect inline fun` 제약을 피하기 위해서이기도
+하다. `EmbedAPI.kt` 의 `inline` 132개가 그대로 `actual inline` 이 된다.
 
 `jvmMain` 은 정식 중간 소스셋이므로 **여기에 `expect` 를 두고 두 리프에서 `actual` 을 제공하는 것이
 가능하다.** 실험으로 확인했다.
@@ -28,14 +33,19 @@ commonMain
 ## FFI 계층
 
 ```
-commonMain/kotlin/python/native/ffi/EmbedAPI.kt      expect 약 330개
+commonMain/kotlin/python/native/ffi/EmbedAPI.kt      expect 315개 (C 심볼 310개)
  ├── nativeMain/.../EmbedAPI.native.kt               cinterop  (iOS, androidNative)
  ├── androidMain/.../EmbedAPI.android.kt + bindings.kt   JNI
- └── desktopMain/.../EmbedAPI.desktop.kt + bindings.kt + Panama.kt   Panama
+ ├── desktopMain/.../EmbedAPI.desktop.kt + bindings.kt + Panama.kt   Panama
+ └── wasmJsMain/.../EmbedAPI.wasmJs.kt + bindings.kt + Wasm.kt   @WasmImport
 ```
 
+`wasmJsMain` 의 `bindings.kt` 는 `object` 가 아니라 **`python.native.ffi.bindings` 패키지**다.
+`@WasmImport` 는 최상위 `external fun` 에만 붙기 때문이다. 호출부 표기(`python.native.ffi.bindings.X`)는
+desktop·native 와 동일하다.
+
 포인터는 `NativePointer` (value class, `address: Any`) 로 통일한다. 플랫폼별 실체는 `Long`(JVM),
-`CPointer<*>`(Native) 다.
+`CPointer<*>`(Native), `Int`(wasm32) 다.
 
 `Any` 래핑 때문에 변환마다 박싱이 일어난다. `@HighOverheadNativeCall` 애노테이션이 비싼 변환 지점을
 표시한다.

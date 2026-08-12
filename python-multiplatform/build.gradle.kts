@@ -552,27 +552,21 @@ val generateDesktopReachabilityMetadata by tasks.registering(GenerateReachabilit
 }
 
 kotlin {
-    /** Uncomment this block to enable WebAssembly support (currently not supported by Python Multiplatform)
-    @OptIn(ExperimentalWasmDsl::class)
+    // ROADMAP §10. The target is a leaf directly under `commonMain` -- deliberately not under an
+    // intermediate source set, because `EmbedAPI.kt`'s `expect inline fun`s crash the compiler when
+    // combined with an intermediate `expect`/`actual` (see docs/architecture.md).
+    //
+    // `nodejs()` rather than `browser()`: the tests have to drive a real CPython Emscripten build,
+    // and Node can load `python.wasm` off the filesystem. There is no webpack step to fight.
+    //
+    // What makes this target able to reach CPython at all is that Kotlin 2.4.20-Beta2 *imports* its
+    // linear memory (`intrinsics.memory`) instead of defining one. Emscripten's memory is handed in
+    // there, so a `PyObject*` is an address Kotlin can dereference directly. See docs/wasm-design.md
+    // and `wasm-experiment/`.
+    @OptIn(org.jetbrains.kotlin.gradle.targets.js.dsl.ExperimentalWasmDsl::class)
     wasmJs {
-        moduleName = "sample"
-        browser {
-            val rootDirPath = project.rootDir.path
-            val projectDirPath = project.projectDir.path
-            commonWebpackConfig {
-                outputFileName = "demo.js"
-                devServer = (devServer ?: KotlinWebpackConfig.DevServer()).apply {
-                    static = (static ?: mutableListOf()).apply {
-                        // Serve sources to debug inside browser
-                        add(rootDirPath)
-                        add(projectDirPath)
-                    }
-                }
-            }
-        }
-        binaries.executable()
+        nodejs()
     }
-     */
 
     androidTarget {
         @OptIn(ExperimentalKotlinGradlePluginApi::class)
@@ -854,6 +848,14 @@ kotlin {
             iosMain.dependsOn(nativeMain)
         }
 
+        // wasmJs sits directly under commonMain, as a sibling of jvmMain and nativeMain. It shares
+        // nothing with either: there is no JNI, no Panama and no cinterop here, only `@WasmImport`
+        // against CPython's own wasm exports.
+        val wasmJsMain by getting
+        wasmJsMain.dependsOn(commonMain)
+        val wasmJsTest by getting
+        wasmJsTest.dependsOn(commonTest)
+
         val artMain by creating {
             kotlin.srcDir("src/artMain/kotlin")
         }
@@ -892,6 +894,103 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
     // simctl only forwards variables into the spawned process when they carry this prefix.
     environment("SIMCTL_CHILD_PYTHONHOME", pythonHome)
     environment("PYTHONHOME", pythonHome)
+}
+
+// =================================================================================================
+// ROADMAP §10 -- staging CPython next to the wasmJs test bundle.
+//
+// Three things have to be true before a `wasmJs` test can reach the interpreter, and none of them
+// is something the Kotlin/Wasm toolchain does on its own:
+//
+//   1. `python.mjs`/`python.wasm` must sit next to the compiled Kotlin, because `cpython.mjs`
+//      (src/wasmJsMain/resources) imports the glue by relative specifier.
+//   2. `cpython.mjs` needs the *real* build directory, not the staging copy: Emscripten derives
+//      `sys.prefix` from `thisProgram` and mounts the host filesystem through NODEFS, so the stdlib
+//      is found at its original path. That path is handed over in a generated `cpython-config.mjs`
+//      rather than an environment variable, because `KotlinJsTest` does not forward one.
+//   3. The generated import object must hand Kotlin's `intrinsics.memory` import Emscripten's
+//      memory instead of the placeholder the compiler emits.
+//
+// (3) is the whole integration, and it is one expression. Kotlin 2.4.20-Beta2 *imports* its linear
+// memory declared `min=0, max=none`; a wasm memory import accepts any memory whose limits sit
+// inside its own, so an unbounded import accepts Emscripten's bounded one. Emscripten is built
+// exactly as it would be alone -- no `-sIMPORTED_MEMORY`, no binary patching. Kotlin adapts.
+// Ordering comes free from ES modules: the import-object module imports `cpython.mjs`, which has a
+// top-level `await`, so Emscripten is fully instantiated before the import object is built.
+//
+// The CPython build itself is not produced here. It is `/Volumes/macMini/wasm-build/
+// build-cpython-abi.sh` -- CPython 3.14.2 matched to `pyemscripten_2026_0` (PEP 783), relinked with
+// `wasmExports,wasmMemory` added to `-sEXPORTED_RUNTIME_METHODS`. Without those two the 8287 wasm
+// exports are present in the binary but unreachable from JS, so there is nothing to hand
+// `@WasmImport`; neither appears in PEP 783's ABI-sensitive list.
+// =================================================================================================
+
+val wasmPythonDir: String = (project.findProperty("wasmPythonDir")?.toString()
+    ?: System.getenv("PMP_PYTHON_DIR")
+    ?: "/Volumes/macMini/wasm-build/cpython314-abi/cross-build/wasm32-emscripten/build/python")
+
+tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().configureEach {
+    if (!name.startsWith("wasmJs")) return@configureEach
+
+    val pythonDir = file(wasmPythonDir)
+    // The npm project the Kotlin/Wasm node runner actually executes out of, which is under the
+    // ROOT build directory rather than this module's.
+    val stagingDir = rootProject.layout.buildDirectory
+        .dir("wasm/packages/${rootProject.name}-${project.name}-test/kotlin")
+
+    onlyIf {
+        val present = pythonDir.resolve("python.mjs").exists()
+        if (!present) {
+            logger.lifecycle(
+                "SKIPPING $name -- no CPython Emscripten build at $pythonDir. " +
+                    "Build one with /Volumes/macMini/wasm-build/build-cpython-abi.sh, or point " +
+                    "-PwasmPythonDir / PMP_PYTHON_DIR at an existing one."
+            )
+        }
+        present
+    }
+
+    doFirst {
+        val dir = stagingDir.get().asFile
+        copy {
+            from(pythonDir) { include("python.mjs", "python.wasm") }
+            into(dir)
+        }
+        dir.resolve("cpython-config.mjs").writeText(
+            "// Generated by build.gradle.kts. The interpreter's real build directory: Emscripten\n" +
+                "// derives sys.prefix from `thisProgram` and reaches the stdlib through NODEFS, so\n" +
+                "// this must be the original path and not the staging copy next to it.\n" +
+                "export const PYTHON_DIR = ${groovy.json.JsonOutput.toJson(pythonDir.absolutePath)};\n"
+        )
+
+        val importObject = dir.listFiles()?.firstOrNull { it.name.endsWith(".import-object.mjs") }
+            ?: throw GradleException("No *.import-object.mjs in $dir -- the Kotlin/Wasm output layout changed.")
+        val text = importObject.readText()
+
+        // The compiler names the namespace import after a base64 of the module specifier, so it is
+        // read out rather than assumed.
+        val ns = Regex("""import \* as (\w+) from ['"]\./cpython\.mjs['"];""").find(text)?.groupValues?.get(1)
+            ?: throw GradleException(
+                "${importObject.name} does not import ./cpython.mjs. That import is emitted because " +
+                    "bindings.kt declares @WasmImport against it; if it is gone, the binding module " +
+                    "changed."
+            )
+        val placeholder = Regex("""memory:\s*new WebAssembly\.Memory\(\{[^}]*}\)""")
+        if (!placeholder.containsMatchIn(text)) {
+            // Already patched (the task is not up-to-date-aware) or the glue shape changed. Only
+            // the latter is a problem, and it shows up as a LinkError on the memory import.
+            if (!text.contains("memory: $ns.wasmMemory")) {
+                throw GradleException(
+                    "${importObject.name} has no `intrinsics.memory` placeholder to replace. " +
+                        "Kotlin used to emit `new WebAssembly.Memory({ initial: 0 })` there; if that " +
+                        "changed, docs/wasm-design.md's integration step needs revisiting."
+                )
+            }
+        } else {
+            importObject.writeText(placeholder.replace(text, "memory: $ns.wasmMemory"))
+            logger.lifecycle("Pointed ${importObject.name}'s intrinsics.memory at Emscripten's wasmMemory")
+        }
+    }
 }
 
 android {
