@@ -1,5 +1,6 @@
 package python.native.ffi
 
+import python.multiplatform.Versions
 import python.multiplatform.ffi.PythonTestFixture
 import kotlin.test.Test
 import kotlin.test.assertTrue
@@ -21,6 +22,11 @@ class DesktopPythonTest {
     fun testPythonEndToEnd() {
         assertTrue(PythonTestFixture.available, "CPython could not be initialized: ${PythonTestFixture.failureReason}")
         val version = python.multiplatform.ffi.Python3.withPython { Py_GetVersion() }
-        assertTrue(version?.startsWith("3.14") == true, "Expected version to start with 3.14, got $version")
+        // The configured version, not a literal -- see EmbedApiLowLevelTest.
+        val expected = Versions.currentVersion.compactVersionString
+        assertTrue(
+            version?.startsWith(expected) == true,
+            "Expected version to start with $expected, got $version"
+        )
     }
 }

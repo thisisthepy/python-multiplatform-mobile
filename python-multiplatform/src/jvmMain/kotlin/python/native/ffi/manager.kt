@@ -19,7 +19,9 @@ internal object manager {
     @Synchronized
     fun loadLibPython() {
         val pyVer = Versions.currentVersion
-        var libName = "python" + pyVer.compactVersionString
+        // `taggedVersionString`, not `compactVersionString`: a free-threaded install ships
+        // `libpython3.14t.dylib` and has no `libpython3.14.dylib` at all.
+        var libName = "python" + pyVer.taggedVersionString
         val libList = mutableListOf<File>()
 
         when (currentPlatform.os) {

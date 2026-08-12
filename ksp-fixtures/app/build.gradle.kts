@@ -21,9 +21,10 @@ kotlin {
         // wiring: only linkDebugTestAndroidNativeArm64 needs it (docs/upcall-table-design.md
         // §11.1's tree-shaking measurement), not the ordinary JVM-only fixture test path.
         val downloadDir = project(":python-multiplatform").layout.buildDirectory.dir("python-standalone").get().asFile
-        val libVersion = (project.findProperty("pythonVersion")?.toString() ?: project.rootProject.version.toString())
-            .split('.').subList(0, 2).joinToString(".")
-        val targetExtractDir = "$downloadDir/extracted/android-aarch64/prefix"
+        val pyVersion = project.findProperty("pythonVersion")?.toString() ?: project.rootProject.version.toString()
+        val libVersion = pyVersion.split('.').subList(0, 2).joinToString(".")
+        // Version-keyed, matching python-multiplatform's `extractedDir`.
+        val targetExtractDir = "$downloadDir/extracted/$pyVersion/android-aarch64/prefix"
         binaries.getTest(org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType.DEBUG).linkerOpts.addAll(
             listOf("-L$targetExtractDir/lib/", "-lpython$libVersion", "-Wl,--allow-shlib-undefined"),
         )

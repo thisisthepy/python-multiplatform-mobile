@@ -1,5 +1,6 @@
 package python.multiplatform.ffi
 
+import python.multiplatform.Versions
 import python.multiplatform.ffi.exceptions.PyException
 import kotlin.test.Test
 import kotlin.test.assertFailsWith
@@ -72,8 +73,13 @@ class Python3Test {
     }
 
     @Test
-    fun versionReportsPython314() = PythonTestFixture.withInterpreter {
-        assertTrue(Python3.version.startsWith("3.14"), "expected embedded interpreter to be 3.14.x, got '${Python3.version}'")
+    fun versionReportsTheConfiguredRelease() = PythonTestFixture.withInterpreter {
+        // Was `versionReportsPython314`, asserting the literal. See EmbedApiLowLevelTest.
+        val expected = Versions.currentVersion.compactVersionString
+        assertTrue(
+            Python3.version.startsWith(expected),
+            "expected embedded interpreter to be $expected.x, got '${Python3.version}'"
+        )
     }
 
     @Test

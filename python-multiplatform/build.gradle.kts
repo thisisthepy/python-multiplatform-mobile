@@ -39,6 +39,13 @@ buildkonfig {
     defaultConfigs {
         buildConfigField(FieldSpec.Type.STRING, "pythonVersion", pythonVersion)
         buildConfigField(FieldSpec.Type.STRING, "libraryVersion", libraryVersion)
+        // The free-threaded build is not merely a differently-compiled binary: it renames every
+        // artefact the runtime looks up by name. The shared library is `libpython3.14t.dylib`, not
+        // `libpython3.14.dylib`, and the stdlib sits in `lib/python3.14t/`. Without this flag
+        // reaching Kotlin, `manager.loadLibPython` asks for a file that a free-threaded install
+        // does not contain, and the failure looks like a missing download rather than a flavour
+        // mismatch. See `Versions.abiFlags`.
+        buildConfigField(FieldSpec.Type.BOOLEAN, "pythonFreeThreaded", pythonFreeThreaded.toString())
     }
 }
 
@@ -53,6 +60,28 @@ val libPath = "src/nativeInterop/cinterop/lib"
 val libPathForDesktop = "$libPath/desktop"
 
 val downloadDir = layout.buildDirectory.dir("python-standalone").get().asFile
+
+/**
+ * Where archives are unpacked, keyed by the CPython version they contain.
+ *
+ * Every extraction below is guarded by "is the destination directory empty?", which is what makes
+ * repeated builds cheap. The guard is only sound if a directory can hold exactly one thing. It
+ * used to be a flat `extracted/<platform>`, so changing `-PpythonVersion` downloaded and
+ * checksummed the new archive and then *threw it away*: the destination was not empty, so the
+ * previous version's tree stayed, and the build compiled against it while every log line said
+ * otherwise. Same for [desktopFlavourSuffix]. Keying the path by what is inside it removes the
+ * whole class of error -- and switching back to a version already unpacked is still free.
+ */
+val extractedDir = file("$downloadDir/extracted/$configuredPythonVersion")
+
+/**
+ * Suffix that keeps the two desktop flavours apart within [extractedDir].
+ *
+ * The GIL and free-threaded builds of the *same* version are different trees containing
+ * differently-named libraries (`libpython3.14.dylib` vs `libpython3.14t.dylib`), so they need
+ * separating for the same reason the version does.
+ */
+val desktopFlavourSuffix = if (pythonFreeThreaded) "-freethreaded" else ""
 
 val checksumsFile = rootProject.file("python-checksums.properties")
 val pythonArchiveKeys = mutableMapOf<String, File>()
@@ -122,9 +151,14 @@ tasks.register("updatePythonChecksums") {
         
         if (updated) {
             checksumsFile.bufferedWriter().use { writer ->
-                writer.write("# Python Multiplatform Checksums\\n")
+                // These were `"\\n"` -- a literal backslash and an `n`, not a newline. The task
+                // therefore emitted the entire lockfile as one physical line starting with `#`,
+                // which `Properties` reads as a single comment: running it once deleted every
+                // checksum, and the next build failed with "Missing checksum" for all of them.
+                // The committed file survived only because nobody had run the task since.
+                writer.write("# Python Multiplatform Checksums\n")
                 props.stringPropertyNames().sorted().forEach { k ->
-                    writer.write("$k=${props.getProperty(k)}\\n")
+                    writer.write("$k=${props.getProperty(k)}\n")
                 }
             }
         }
@@ -143,8 +177,8 @@ val downloadTasks = desktopTargets.map { (platform, pbsTarget) ->
     val assetName = "cpython-$configuredPythonVersion+$pbsRelease-$pbsTarget-$flavour.tar.gz"
     val url = "https://github.com/astral-sh/python-build-standalone/releases/download/$pbsRelease/$assetName"
     val archive = file("$downloadDir/$assetName")
-    val extractDir = file("$downloadDir/extracted/$platform")
-    val lockKey = "$platform-$configuredPythonVersion-$pbsRelease" + (if (pythonFreeThreaded) "-freethreaded" else "")
+    val extractDir = file("$extractedDir/$platform$desktopFlavourSuffix")
+    val lockKey = "$platform-$configuredPythonVersion-$pbsRelease$desktopFlavourSuffix"
     pythonArchiveKeys[lockKey] = archive
 
     val taskName = "downloadPython_${platform.replace("-", "_")}"
@@ -215,7 +249,7 @@ val androidTargets = mapOf(
 val androidDownloadTasks = androidTargets.map { (platform, arch) ->
     val url = "https://www.python.org/ftp/python/$configuredPythonVersion/python-$configuredPythonVersion-$arch-linux-android.tar.gz"
     val archive = file("$downloadDir/python-$configuredPythonVersion-$arch-linux-android.tar.gz")
-    val extractDir = file("$downloadDir/extracted/$platform")
+    val extractDir = file("$extractedDir/$platform")
     val lockKey = "$platform-$configuredPythonVersion"
     pythonArchiveKeys[lockKey] = archive
     
@@ -251,10 +285,50 @@ val androidDownloadTasks = androidTargets.map { (platform, arch) ->
     }
 }
 
-val iosUrl = "https://github.com/beeware/Python-Apple-support/releases/download/$libVersion-$pythonAppleSupportBuild/Python-$libVersion-iOS-support.$pythonAppleSupportBuild.tar.gz"
-val iosArchive = file("$downloadDir/Python-$libVersion-iOS-support.$pythonAppleSupportBuild.tar.gz")
-val iosExtractDir = file("$downloadDir/extracted/ios")
-val iosLockKey = "ios-$libVersion-$pythonAppleSupportBuild"
+/**
+ * Which project publishes the iOS `Python.xcframework` for the configured version.
+ *
+ * python.org began publishing an official iOS XCframework with 3.15 (the first entries in
+ * `ftp/python/3.15.0/` are the 3.15.0b1 betas). BeeWare's Python-Apple-support, which was the
+ * only source before that, stops at `3.14-b10` and has no 3.15 tag. The two do not overlap:
+ * 3.14 and earlier can only come from BeeWare, 3.15 and later only from python.org. So this is a
+ * hard switch on the version, not a preference.
+ *
+ * Swapping is otherwise cheap, because the trees are layout-compatible everywhere this build
+ * reaches into them -- `Python.xcframework/<abi>/Python.framework/Headers`, `-F .../<abi>`,
+ * `Python.xcframework/lib/pythonX.Y` and `.../<abi>/lib-arm64/pythonX.Y` all exist in both.
+ * The differences are in parts nothing here reads: BeeWare adds a `platform-config/` directory
+ * (cross-compilation sysconfig data for building wheels) and a `VERSIONS` file, and its headers
+ * still carry `module.modulemap`, `lock.h`, `monitoring.h` and `typeslots.h` where 3.15 has
+ * `pyabi.h`, `slots.h` and `slots_generated.h` instead -- a 3.14-vs-3.15 difference, not a
+ * packaging one. Both ship a GIL-enabled build; neither publishes a free-threaded iOS variant.
+ */
+val iosFromPythonOrg = pythonVersion.split(".").let {
+    it[0].toInt() > 3 || (it[0].toInt() == 3 && it[1].toInt() >= 15)
+}
+
+/**
+ * The `ftp/python/<dir>/` directory holding a release, which drops any pre-release suffix:
+ * `3.15.0rc1` is published under `3.15.0`.
+ */
+val pythonOrgReleaseDir = pythonVersion.split(".").let { parts ->
+    val patch = parts.getOrNull(2)?.takeWhile { it.isDigit() } ?: "0"
+    "${parts[0]}.${parts[1]}.$patch"
+}
+
+val iosArchiveName = if (iosFromPythonOrg) {
+    "python-$pythonVersion-iOS-XCframework.tar.gz"
+} else {
+    "Python-$libVersion-iOS-support.$pythonAppleSupportBuild.tar.gz"
+}
+val iosUrl = if (iosFromPythonOrg) {
+    "https://www.python.org/ftp/python/$pythonOrgReleaseDir/$iosArchiveName"
+} else {
+    "https://github.com/beeware/Python-Apple-support/releases/download/$libVersion-$pythonAppleSupportBuild/$iosArchiveName"
+}
+val iosArchive = file("$downloadDir/$iosArchiveName")
+val iosExtractDir = file("$extractedDir/ios")
+val iosLockKey = if (iosFromPythonOrg) "ios-$pythonVersion-pythonorg" else "ios-$libVersion-$pythonAppleSupportBuild"
 pythonArchiveKeys[iosLockKey] = iosArchive
 
 val downloadPython_ios = tasks.register("downloadPython_ios") {
@@ -272,7 +346,10 @@ val downloadPython_ios = tasks.register("downloadPython_ios") {
             }
         }
         
-        // BeeWare does not provide any checksums or signatures for iOS artifacts, but we verify against our local lockfile.
+        // Neither source gives us something verifiable in pure Gradle: BeeWare publishes no
+        // checksums or signatures at all, and python.org publishes sigstore material (.sig/.crt/
+        // .sigstore) whose verification is not reasonable to implement here. Both are pinned by
+        // the local lockfile instead, same as every other archive.
         verifyChecksum(iosLockKey, iosArchive)
 
         val isEmpty = iosExtractDir.list()?.isEmpty() ?: true
@@ -584,7 +661,7 @@ kotlin {
                 into("$androidBuildDir/jniLibs/")
                 abiList.forEach { abi ->
                     val arch = if (abi == "arm64-v8a") "aarch64" else "x86_64"
-                    from("$downloadDir/extracted/android-$arch/prefix/lib") {
+                    from("$extractedDir/android-$arch/prefix/lib") {
                         include("libpython*.so")
                         include("lib*_python.so")
                         into(abi)
@@ -596,10 +673,10 @@ kotlin {
                 into("$androidBuildDir/assets/")
                 abiList.forEach { abi ->
                     val arch = if (abi == "arm64-v8a") "aarch64" else "x86_64"
-                    from("$downloadDir/extracted/android-$arch/prefix/include/python$libVersion") {
+                    from("$extractedDir/android-$arch/prefix/include/python$libVersion") {
                         into("$abi/include/python$libVersion")
                     }
-                    from("$downloadDir/extracted/android-$arch/prefix/lib/python$libVersion") {
+                    from("$extractedDir/android-$arch/prefix/lib/python$libVersion") {
                         exclude("config-$libVersion-$arch-linux-android/")
                         into("$abi/lib/python$libVersion")
                     }
@@ -660,11 +737,15 @@ kotlin {
                 }
             } else {
                 dependsOn(downloadAllPythonBuilds)
-                from("$downloadDir/extracted") {
-                    include("macos-*/python/lib/libpython*.dylib")
-                    include("linux-*/python/lib/libpython*.so*")
-                    include("windows-*/python/python*.dll")
-                    include("windows-*/python/vcruntime*.dll")
+                from("$extractedDir") {
+                    include("macos-*$desktopFlavourSuffix/python/lib/libpython*.dylib")
+                    include("linux-*$desktopFlavourSuffix/python/lib/libpython*.so*")
+                    include("windows-*$desktopFlavourSuffix/python/python*.dll")
+                    include("windows-*$desktopFlavourSuffix/python/vcruntime*.dll")
+                    // `macos-*` matches `macos-aarch64-freethreaded` too, so a default build whose
+                    // build directory has ever seen `-PpythonFreeThreaded=true` would otherwise
+                    // pack both flavours' libraries into the same platform directory.
+                    if (!pythonFreeThreaded) exclude("*-freethreaded/**")
                     eachFile {
                         // `path` here is already destination-relative -- `into("lib")` below is
                         // applied before eachFile sees the file, so the leading segment is "lib",
@@ -673,7 +754,11 @@ kotlin {
                         // library onto the same jar entry (DuplicatesStrategy.WARN then kept only
                         // the last one copied, breaking every platform but that one).
                         val parts = path.split("/")
-                        val platform = parts[1]
+                        // The flavour suffix exists only to keep the two extraction trees apart on
+                        // disk; the jar layout is what `manager.platformDirectory()` looks up, and
+                        // it names platforms alone. A free-threaded jar carries the same directory
+                        // names with a differently-named library inside.
+                        val platform = parts[1].removeSuffix(desktopFlavourSuffix)
                         val filename = parts.last()
                         path = "lib/$platform/$filename"
                     }
@@ -701,8 +786,8 @@ kotlin {
                 else -> throw RuntimeException("Unsupported ABI: $konanTarget")
             }
             val targetExtractDir = when(konanTarget.family) {
-                Family.ANDROID -> "$downloadDir/extracted/android-${if (targetABI == "arm64-v8a") "aarch64" else "x86_64"}/prefix"
-                Family.IOS -> "$downloadDir/extracted/ios/Python.xcframework"
+                Family.ANDROID -> "$extractedDir/android-${if (targetABI == "arm64-v8a") "aarch64" else "x86_64"}/prefix"
+                Family.IOS -> "$extractedDir/ios/Python.xcframework"
                 else -> throw RuntimeException("Unsupported target family: ${konanTarget.family}")
             }
             val targetIncludePath = when(konanTarget.family) {
@@ -878,10 +963,10 @@ kotlin {
  */
 val extractIosSimulatorStdlib by tasks.registering(Copy::class) {
     dependsOn(downloadAllPythonBuilds)
-    from("$downloadDir/extracted/ios/Python.xcframework/lib/python$libVersion") {
+    from("$extractedDir/ios/Python.xcframework/lib/python$libVersion") {
         into("lib/python$libVersion")
     }
-    from("$downloadDir/extracted/ios/Python.xcframework/ios-arm64_x86_64-simulator/lib-arm64/python$libVersion") {
+    from("$extractedDir/ios/Python.xcframework/ios-arm64_x86_64-simulator/lib-arm64/python$libVersion") {
         into("lib/python$libVersion")
     }
     into(layout.buildDirectory.dir("python-stdlib/ios-simulator"))
@@ -1089,14 +1174,15 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.CInteropProcess>().configureEac
 
 val copyDesktopPythonBinariesForTests by tasks.registering(Copy::class) {
     dependsOn(downloadAllPythonBuilds)
-    from("$downloadDir/extracted") {
-        include("macos-*/python/lib/libpython*.dylib")
-        include("linux-*/python/lib/libpython*.so*")
-        include("windows-*/python/python*.dll")
-        include("windows-*/python/vcruntime*.dll")
+    from("$extractedDir") {
+        include("macos-*$desktopFlavourSuffix/python/lib/libpython*.dylib")
+        include("linux-*$desktopFlavourSuffix/python/lib/libpython*.so*")
+        include("windows-*$desktopFlavourSuffix/python/python*.dll")
+        include("windows-*$desktopFlavourSuffix/python/vcruntime*.dll")
+        if (!pythonFreeThreaded) exclude("*-freethreaded/**")
         eachFile {
             val parts = path.split("/")
-            val platform = parts[0]
+            val platform = parts[0].removeSuffix(desktopFlavourSuffix)
             val filename = parts.last()
             path = "lib/$platform/$filename"
         }
@@ -1124,6 +1210,6 @@ tasks.named<Test>("desktopTest") {
         "linux-x86_64"
     }
     
-    val pythonHome = layout.buildDirectory.dir("python-standalone/extracted/$platform/python").get().asFile.absolutePath
+    val pythonHome = File(extractedDir, "$platform$desktopFlavourSuffix/python").absolutePath
     environment("PYTHONHOME", pythonHome)
 }

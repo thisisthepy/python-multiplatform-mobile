@@ -189,8 +189,15 @@ val hostPlatform = when {
     System.getProperty("os.name").contains("Windows") -> "windows-x86_64"
     else -> "linux-x86_64"
 }
+// The extraction tree is keyed by CPython version and desktop flavour (see python-multiplatform's
+// `extractedDir` / `desktopFlavourSuffix` for why the guard needs that), so this has to be derived
+// the same way rather than hardcoding a flat path -- otherwise the sample points PYTHONHOME at a
+// directory that only exists for the default configuration.
+val samplePythonVersion = project.findProperty("pythonVersion")?.toString() ?: rootProject.version.toString()
+val sampleFlavourSuffix =
+    if (project.findProperty("pythonFreeThreaded")?.toString()?.toBoolean() == true) "-freethreaded" else ""
 val pythonHomeForHost = project(":python-multiplatform").layout.buildDirectory
-    .dir("python-standalone/extracted/$hostPlatform/python")
+    .dir("python-standalone/extracted/$samplePythonVersion/$hostPlatform$sampleFlavourSuffix/python")
 
 tasks.register<JavaExec>("runNativeImageUpcallDemo") {
     group = "verification"

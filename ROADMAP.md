@@ -714,17 +714,189 @@ a compiler warning saying inlining gains nothing there), delete the two platform
 one in `jvmMain`. Keeping `inline` on an intermediate-source-set `expect` crashes Kotlin 2.0.20
 with `Internal error in file lowering`.
 
-## 9. Free-threading (3.15t)
+## 9. Free-threading
 
-**Waiting on upstream.** `abi3t` is Final for 3.15 (PEP 803); 3.14 free-threaded has no Limited
-API at all, so choosing it there would mean recompiling per Python version.
+**Nothing is being waited on. It builds, it runs, and what it breaks is now known.**
+`./gradlew :python-multiplatform:desktopTest -PpythonFreeThreaded=true` runs the whole desktop
+suite against `cpython-3.14.7+20260807-<target>-freethreaded-install_only`:
 
-Also missing: free-threaded prebuilts for Android (python.org ships GIL-only) and iOS (BeeWare
-likewise). Desktop free-threaded builds do exist in `python-build-standalone`.
+| build | tests | failing | skipped |
+|---|---|---|---|
+| default (GIL) 3.14.7 | 208 | 0 | 1 |
+| free-threaded 3.14.7 | 208 | **2** | 1 |
 
-`pythonFreeThreaded` is already a `gradle.properties` switch; nothing else is prepared.
-Verified as compatible: nothing in this codebase dereferences `PyObject`, so `abi3t` making it
-an incomplete type does not break us.
+This section used to say "3.15t" and "waiting on upstream"; neither was true. 3.14 free-threaded
+is what was measured here, and those artefacts have been on the python-build-standalone release
+all along.
+
+The two failures are the deliverable. Neither is a bug in this library, and neither is fixable by
+changing this library alone — they are properties of the free-threaded runtime that an embedder
+has to design around.
+
+### The flag did nothing at all until three silent defects were fixed
+
+None of these produced an error message; all three made the build quietly do something other
+than what was asked.
+
+- **Extraction was not keyed by what it extracted.** Every unpack is guarded by "is the
+  destination directory empty?", and the destination was a flat `extracted/<platform>`. Passing
+  `-PpythonFreeThreaded=true` therefore downloaded the free-threaded archive, verified its
+  checksum, and then *discarded* it, because the GIL build had already filled the directory. The
+  build then ran the GIL interpreter while every log line named the free-threaded tarball. The
+  identical hazard applied to `-PpythonVersion`. Extraction is now
+  `extracted/<version>/<platform>[-freethreaded]` (`extractedDir`, `desktopFlavourSuffix`).
+- **A free-threaded install renames everything looked up by name.** It ships
+  `libpython3.14t.dylib`, `lib/python3.14t/` and `bin/python3.14t`, and does *not* ship the
+  un-suffixed names. `manager.loadLibPython` asked for `libpython3.14.dylib`, which such an
+  install does not contain. `Versions.abiFlags` / `taggedVersionString` now carry the `t`, fed by
+  a new `BuildConfig.pythonFreeThreaded`.
+- **`updatePythonChecksums` would have destroyed the lockfile.** It wrote `"\\n"` — a literal
+  backslash and an `n`, not a newline — so the whole file came out as one physical line beginning
+  with `#`, which `Properties` reads as a single comment. One run would have deleted every
+  checksum and left the next build failing "Missing checksum" for all of them. The committed file
+  was intact only because nobody had run the task since it was written.
+
+### Free-threading defers deallocation to the owning thread, and a pure embedder never gets there
+
+`GCLeakTest.testCascadingReleaseOnGC` fails. This is the important finding in this section, and it
+is the free-threading counterpart of §1: turning the feature on exposed an assumption, not a typo.
+
+The test builds 1000 Python lists each holding one target object, drops the Kotlin wrappers, and
+waits for the cleaner to release them. Measured on the free-threaded build (the cleaner is
+confirmed to have run — `ReleaseCounter.released` rose by 2003):
+
+| after | `sys.getrefcount(target)` |
+|---|---|
+| 1000 lists built, each holding `target` | 1002 |
+| 50 forced JVM GCs; cleaner called `Py_DecRef` 2003 times | 1002 |
+| 500 further C API round trips on the owning thread | 1002 |
+| 2 s of wall clock | 1002 |
+| `Python3.exec("pass")` — one trivial bytecode frame | **2** |
+
+So the decrements happened, and the objects were not freed. Not time, and not C API traffic:
+entering the eval loop *once*, for a body that does nothing, released all thousand at once. That
+is the signature of the free-threaded build's biased reference counting — a decref from a thread
+that does not own the object cannot run `tp_dealloc` there, so the object is queued to its owner,
+and the owner drains that queue at an eval-loop checkpoint.
+
+Under the GIL there is no such queue and the cleaner's decref frees immediately. The consequence
+for this library is specific and unpleasant: **an embedder that drives CPython entirely through
+the C API never reaches a checkpoint, so memory released by the cleaner is never actually
+reclaimed.** It is not a leak in the sense of a lost pointer — the refcount is correct and one
+line of Python flushes it — but a Kotlin process that only ever calls `PyObject_Call` will grow
+without bound.
+
+Nothing here fixes that yet. The shape of a fix is a periodic drain on the owning thread; what to
+call to force one, and from where, is the open question. Whatever it is, it must not be a
+"run some Python occasionally" hack buried in the cleaner.
+
+### Heap types are not reference counted at all, which voids a test's premise
+
+`CycleCollectionTest.testHandleReleasedWhenProxyDiesWithoutCycle` fails, and its own guard
+assertion is what caught it — the one documented as "not decoration: it is what proves the probe
+reads a real refcount". It refused to proceed, exactly as designed.
+
+Two separate things are wrong with it free-threaded, and only the second matters:
+
+- The probe reads eight bytes at offset 0 of `PyObject`. Measured on 3.14.7: on the default build
+  that word is `ob_refcnt` and steps 1 → 2 with the count; on the free-threaded build it is
+  `ob_tid` and never moves, while the count lives in a `uint32` at offset 12 (`ob_ref_local`)
+  plus `ob_ref_shared >> 2` at offset 16. The failure reported `6173044960` for both "before" and
+  "alive" — a thread id, read as a refcount.
+- Fixing the offset would not save the test. Its premise is that "each live instance of a heap
+  type holds one reference to that type", and free-threaded CPython gives heap types **deferred
+  reference counting**: measured, a heap type's count reads `1152921504606846980` and does not
+  move when 100 instances are created or destroyed. The invariant simply does not exist there, so
+  `tp_dealloc`'s obligation to release the type reference cannot be checked this way at all.
+
+This also corrects what this section previously claimed: *"nothing in this codebase dereferences
+`PyObject`, so `abi3t` making it an incomplete type does not break us."* Something does — that
+test — and it is the one place that would have to change for `abi3t`. The library proper is still
+clean: `ProxyTypeFactory` writes only into memory it obtained from `PyObject_GetTypeData`, and
+nothing reads inside a `PyObject`.
+
+### What each platform can actually get
+
+Checked against the live release listings, 2026-08-12:
+
+| target | free-threaded prebuilt | source |
+|---|---|---|
+| desktop (macOS/Linux/Windows) | **yes** | `python-build-standalone` `20260807`, `…-freethreaded-install_only`, for 3.14.7 and 3.15.0rc1 alike |
+| Android | no | python.org's `python-<ver>-<arch>-linux-android.tar.gz` contains `libpython3.14.so` / `libpython3.15.so` only — checked in both 3.14.7 and 3.15.0rc1 |
+| iOS | no | neither BeeWare's Python-Apple-support nor python.org's XCframework defines `Py_GIL_DISABLED` |
+
+So free-threading is a desktop-only capability for as long as that holds, and the flag should stay
+off by default.
+
+### `abi3t` is not a blocker, because nothing here asks for the Limited API
+
+`abi3t` is Final for 3.15 (PEP 803), and 3.14 free-threaded has no Limited API at all. That was
+recorded as the reason to wait. It is not one: `Py_LIMITED_API` is never defined anywhere in this
+build — desktop binds symbols by name at runtime through Panama, and the native targets cinterop
+against the full headers. "abi3" in this codebase means a self-imposed rule about *which*
+functions to call, not a compilation mode. The rule is what keeps one binding working across
+versions, and it is unaffected.
+
+### 3.15.0rc1: desktop is already there; the native targets need three functions migrated
+
+`-PpythonVersion=3.15.0rc1` gives **208 tests, 0 failures, 1 skipped** on desktop — the same as
+the default. The first attempt failed 4, all of them assertions hardcoding `"3.14"` against the
+reported interpreter version (`EmbedApiLowLevelTest`, `InterpreterAvailabilityTest`,
+`Python3Test`, `DesktopPythonTest`). They now compare against
+`Versions.currentVersion.compactVersionString`, which is strictly stronger: it checks that the
+interpreter loaded is the one the build configured, instead of pinning a release line that has to
+be hand-edited on every bump. (Two other `"3.14"` literals nearby are `math.pi`, left alone.)
+
+`compileKotlinAndroidNativeArm64` and `compileKotlinIosSimulatorArm64` both fail on 3.15, with the
+*same* four errors, from three functions 3.15 removed:
+
+| removed in 3.15 | replacement |
+|---|---|
+| `PySys_ResetWarnOptions` | none — the `PyConfig` API covers it |
+| `PyImport_ImportModuleNoBlock` | `PyImport_ImportModule` (an alias since 3.3) |
+| `PyWeakref_GetObject` | `PyWeakref_GetRef` — **present in 3.14 too**, so the migration can be made without dropping 3.14 |
+
+Why desktop does not notice: the symbols are **still exported from the shared library** — checked
+with `nm` on `libpython3.15.dylib`, all three are there — and were removed only from the headers.
+Panama resolves by symbol name at run time, so nothing breaks; cinterop and the hand-written C in
+`jni_onload.def` compile against headers, so they do.
+
+That makes the porting cost concrete rather than open-ended: three functions, each appearing in
+the `commonMain` `expect`, four platform `actual`s, `jni_onload.def` (declaration, thunk and table
+entry) and the wasmJs `@WasmImport` block. Roughly 20 sites, no behavioural change on 3.14.
+
+**The default stays 3.14.7.** A release candidate is not a default. What is established is what
+raising it costs.
+
+### iOS: the source has to change with the version, and 3.15 is the switchover
+
+python.org began publishing an official iOS `Python.xcframework` with 3.15 —
+`ftp/python/3.15.0/python-3.15.0rc1-iOS-XCframework.tar.gz`, first appearing at 3.15.0b1.
+BeeWare's Python-Apple-support, the only previous source, stops at `3.14-b10` and has no 3.15
+release. The two do not overlap, so this is a hard switch on the version rather than a
+preference: **3.14 and earlier can only come from BeeWare, 3.15 and later only from python.org.**
+`iosFromPythonOrg` in the build now picks between them at ≥ 3.15, and both archives are pinned in
+`python-checksums.properties`.
+
+Swapping is otherwise free, because the trees are layout-compatible everywhere this build reaches
+into them — `Python.xcframework/<abi>/Python.framework/Headers`, `-F …/<abi>`,
+`Python.xcframework/lib/pythonX.Y` and `…/<abi>/lib-arm64/pythonX.Y` all exist in both. The
+differences are in parts nothing reads: BeeWare adds `platform-config/` (cross-compilation
+sysconfig data for building wheels) and a `VERSIONS` file. The header-set differences
+(`module.modulemap`, `lock.h`, `monitoring.h`, `typeslots.h` on one side; `pyabi.h`, `slots.h`,
+`slots_generated.h` on the other) are 3.14-vs-3.15, not packaging.
+
+Neither source publishes checksums this build can use — BeeWare publishes none at all, python.org
+publishes sigstore material that is not reasonable to verify in Gradle — so both stay pinned by
+the local lockfile.
+
+The swap is verified as far as it can be while 3.15 is not the default:
+`cinteropPythonIosSimulatorArm64` **succeeds** against the python.org framework, so its headers and
+`Python.framework` are consumed exactly like BeeWare's. The build then fails in
+`compileKotlinIosSimulatorArm64` — on the three removed functions above, with byte-identical errors
+to `androidNativeArm64`, i.e. in shared `nativeMain` source and not in anything iOS-specific.
+`compileKotlinIosSimulatorArm64` on the default 3.14 (BeeWare) still passes, so no regression was
+introduced for the version actually in use.
 
 ## 10. WASM
 
@@ -924,8 +1096,10 @@ is the actual state of the Android object model, and that is the point of doing 
 
 - **Download integrity**: desktop, Android and iOS archives are pinned in
   `python-checksums.properties` and verified. python.org publishes Sigstore bundles for the
-  Android archives that are not checked; what verifying them would require is noted in
-  `docs/python-version-acquisition.md`.
+  Android archives — and, from 3.15, for the iOS XCframework (§9) — that are not checked; what
+  verifying them would require is noted in `docs/python-version-acquisition.md`. The lockfile is
+  keyed by version *and* flavour, so a `-freethreaded` or a 3.15 archive is a separate entry and
+  cannot be silently accepted under an existing key.
 - **`PyList.subList`** returns a copy, not a live view. **`pyObjectToNative`**'s fallback branch
   is not fully native. Both are marked `TODO` and neither is exercised by current tests.
 - **~50 `TODO` markers** remain in `commonMain`, including several questioning whether

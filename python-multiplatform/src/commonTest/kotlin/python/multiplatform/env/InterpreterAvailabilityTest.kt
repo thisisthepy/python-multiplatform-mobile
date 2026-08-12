@@ -1,5 +1,6 @@
 package python.multiplatform.env
 
+import python.multiplatform.Versions
 import python.multiplatform.ffi.Python3
 import python.native.ffi.Py_GetVersion
 import python.native.ffi.Py_IsInitialized
@@ -34,9 +35,11 @@ class InterpreterAvailabilityTest {
 
         val version = Py_GetVersion()
         println("Embedded CPython version: $version")
+        // The configured version, not a literal -- see EmbedApiLowLevelTest for why.
+        val expected = Versions.currentVersion.compactVersionString
         assertTrue(
-            version != null && version.startsWith("3.14"),
-            "expected a 3.14.x version string, got: $version"
+            version != null && version.startsWith(expected),
+            "expected a $expected.x version string, got: $version"
         )
     }
 }
