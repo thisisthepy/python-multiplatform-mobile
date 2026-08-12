@@ -2,6 +2,33 @@ package python.multiplatform.reflection
 
 
 /**
+ * Which Kotlin declaration a [ReflectedClass] describes.
+ *
+ * The Python side cannot infer this from [ReflectedClass.memberNames]: a class with a private
+ * constructor and an interface both simply have no `<init>` entry, yet one may gain instances
+ * from a factory and the other never has a Python-constructible form at all. Each value here
+ * names a different proxy shape, so the decision is recorded at generation time rather than
+ * guessed at import time.
+ */
+enum class ReflectedClassKind {
+    /** An ordinary class. Constructible from Python if a `<init>` entry is present. */
+    CLASS,
+
+    /**
+     * An interface. Never constructible; its entries exist so that a Kotlin object handed to
+     * Python can be called through the interface even when its concrete class is not exposed.
+     */
+    INTERFACE,
+
+    /** A Kotlin `object`. Exactly one instance, so every member is reached without a receiver. */
+    OBJECT,
+
+    /** An `enum class`. [ReflectedClass.enumEntryNames] lists its members. */
+    ENUM,
+}
+
+
+/**
  * A build-time descriptor for one exposed Kotlin class: what to call it from Python, which
  * [UpcallTable] entries are its members, and how to walk the Python references it holds for
  * cycle collection.
@@ -17,6 +44,17 @@ class ReflectedClass(
     /** [UpcallTable]-resolvable names of this class's constructor, methods and accessors. */
     val memberNames: List<String>,
     traverse: ((Any, (Long) -> Unit) -> Unit)? = null,
+    /** Which Kotlin shape this came from; see [ReflectedClassKind]. */
+    val kind: ReflectedClassKind = ReflectedClassKind.CLASS,
+    /**
+     * For [ReflectedClassKind.ENUM], the entry names in declaration order -- everything a Python
+     * `enum.Enum` mirror needs, without the boundary having to marshal a collection. Empty for
+     * every other kind.
+     *
+     * Each name has a matching [CallableKind.STATIC_GETTER] entry `"$name.$entry"` that returns
+     * the single instance.
+     */
+    val enumEntryNames: List<String> = emptyList(),
 ) {
     private val traverseImpl = traverse
 
@@ -37,5 +75,5 @@ class ReflectedClass(
         traverseImpl?.invoke(obj, visit)
     }
 
-    override fun toString(): String = "ReflectedClass($name, ${memberNames.size} members)"
+    override fun toString(): String = "ReflectedClass($kind $name, ${memberNames.size} members)"
 }

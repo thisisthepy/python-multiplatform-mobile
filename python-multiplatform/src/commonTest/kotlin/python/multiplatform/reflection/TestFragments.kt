@@ -155,3 +155,84 @@ class BulkFragment(private val count: Int) : FunctionTableFragment {
         ) { args -> (args[0] as Long) + i }
     }
 }
+
+/** A Kotlin singleton and a Kotlin enum, the two shapes whose members have no receiver. */
+object TestRegistry {
+    var size: Long = 0
+
+    fun ping(): String = "pong"
+}
+
+enum class TestColor(val weight: Long) {
+    RED(1),
+    GREEN(2),
+    ;
+
+    fun describe(): String = "$name/$weight"
+}
+
+/**
+ * The declaration kinds whose members do not take a receiver -- companion/object members and
+ * enum entries -- plus the class descriptors that tell the Python side what shape to build.
+ * Written the way `python-multiplatform-ksp` emits them; `ksp-fixtures` proves the generator
+ * actually does.
+ */
+object TestStaticsFragment : FunctionTableFragment {
+    override val moduleName: String = "test_statics"
+
+    override fun entries(): List<ExposedCallable> = listOf(
+        ExposedCallable(
+            name = "test.statics.Registry.ping",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.STRING,
+            kind = CallableKind.FUNCTION,
+        ) { TestRegistry.ping() },
+        ExposedCallable(
+            name = "test.statics.Registry.size",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.INT,
+            kind = CallableKind.STATIC_GETTER,
+        ) { TestRegistry.size },
+        ExposedCallable(
+            name = "test.statics.Registry.size=",
+            arity = 1,
+            paramTypes = listOf(TypeTag.INT),
+            returnType = TypeTag.UNIT,
+            kind = CallableKind.STATIC_SETTER,
+        ) { args -> TestRegistry.size = args[0] as Long },
+        ExposedCallable(
+            name = "test.statics.Color.RED",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.OBJECT,
+            kind = CallableKind.STATIC_GETTER,
+        ) { TestColor.RED },
+        ExposedCallable(
+            name = "test.statics.Color.describe",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.STRING,
+            kind = CallableKind.METHOD,
+        ) { args -> (args[0] as TestColor).describe() },
+    )
+
+    override fun classes(): List<ReflectedClass> = listOf(
+        ReflectedClass(
+            name = "test.statics.Registry",
+            memberNames = listOf(
+                "test.statics.Registry.ping",
+                "test.statics.Registry.size",
+                "test.statics.Registry.size=",
+            ),
+            kind = ReflectedClassKind.OBJECT,
+        ),
+        ReflectedClass(
+            name = "test.statics.Color",
+            memberNames = listOf("test.statics.Color.RED", "test.statics.Color.describe"),
+            kind = ReflectedClassKind.ENUM,
+            enumEntryNames = listOf("RED", "GREEN"),
+        ),
+    )
+}

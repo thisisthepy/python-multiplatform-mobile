@@ -3,7 +3,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
-    alias(libs.plugins.ksp)
+    id("io.github.thisisthepy.python.multiplatform.bindings")
 }
 
 kotlin {
@@ -44,12 +44,9 @@ kotlin {
     }
 }
 
-dependencies {
-    add("kspDesktop", projects.pythonMultiplatformKsp)
-    add("kspAndroidNativeArm64", projects.pythonMultiplatformKsp)
-}
-
-ksp {
-    arg("python.multiplatform.role", "app")
-    arg("python.multiplatform.moduleName", "ksp_fixture_app")
+pythonBindings {
+    // This module applies neither `application` nor `com.android.application`, so the role that
+    // makes it aggregate has to be stated. Everything else is inferred.
+    role.set("app")
+    processor.set(projects.pythonMultiplatformKsp)
 }

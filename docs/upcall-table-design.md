@@ -59,18 +59,30 @@ Per [`binding-policy.md`](binding-policy.md):
 | Declaration | Included | Notes |
 |---|---|---|
 | `public` top-level functions | ✅ | |
-| `public` classes + constructors | ✅ | |
+| `public` top-level properties | ✅ | module attribute: `STATIC_GETTER`/`STATIC_SETTER` |
+| `public` classes + constructors | ✅ | constructor only if concrete, non-`inner` |
 | `public` member functions | ✅ | |
 | `public` properties | ✅ | getter; setter only for `var` |
-| `companion object` members | ✅ | exposed as static methods |
+| `companion object` members | ✅ | under the *owner's* name, no receiver |
+| `object` declarations | ✅ | the same shape; no constructor |
+| `interface` | ✅ | members only; no constructor, receiver arrives as a handle |
+| `enum class` | ✅ | one `STATIC_GETTER` per entry, plus `name`/`ordinal`/`valueOf` |
+| nested classes / interfaces / enums / objects | ✅ | under `Outer.Inner`; the walk stops at a non-exposed owner |
+| `annotation class` | ❌ | reading one back needs runtime reflection; an instance has nothing to attach to |
+| `enum` `values()` / `entries` | ❌ | return collections; `ReflectedClass.enumEntryNames` carries the same data |
+| generic declarations (`class Box<T>`, `fun <T> f`) | ❌ | `args[0] as T` / `as Box` do not compile |
+| abstract / sealed class constructors | ❌ | "Cannot create an instance of an abstract class" |
 | `internal` / `private` / `protected` | ❌ | `internal` is `Modifier.INTERNAL` in KSP |
 | `suspend` functions | ❌ | hidden `Continuation` parameter |
-| `inline` + `reified` | ❌ | reified type info lost after compilation |
 | extension functions | ❌ | no receiver available from Python |
-| compiler-generated (`copy`, `componentN`, ...) | ❌ | |
+| compiler-generated (`copy`, `componentN`) | ❌ | KSP reports these two for a `data class`; not `equals`/`hashCode`/`toString` |
 | `expect` declarations | ❌ | `actual` is found on the platform side |
 | annotated `@PythonInternal` | ❌ | opt-out annotation |
 | library's own packages (`python.multiplatform.*`) | ❌ | excluded by KSP option |
+
+Everything in this table is asserted against a KSP-generated fragment in
+`ksp-fixtures/app/src/desktopTest/.../GeneratedDeclarationKindsTest.kt`, not against a
+hand-written one.
 
 ### What the fragment holds
 
@@ -617,7 +629,41 @@ declarations from both sources.
 
 ---
 
-## 7  What a Gradle plugin would do
+## 7  The Gradle plugin
+
+**Built:** `python-multiplatform-gradle-plugin/`, an included build (registered in the root
+`settings.gradle.kts` under `pluginManagement`) publishing the id
+`io.github.thisisthepy.python.multiplatform.bindings`. A consumer writes:
+
+```kotlin
+plugins {
+    id("io.github.thisisthepy.python.multiplatform.bindings")
+}
+
+// only if the module produces the final binary without `application`/`com.android.application`:
+pythonBindings { role.set("app") }
+```
+
+and gets: the KSP plugin applied, the processor added to every target's main compilation
+(`kspDesktop`, `kspAndroidNativeArm64`, ... — never a `...Test` one, never
+`kspCommonMainMetadata`, both of which would emit a second fragment under the same name), the role
+inferred, and `moduleName` derived. `ksp-fixtures/{library,app}` are the worked example; their
+build files lost the two `add("ksp<Target>", ...)` lines and the `ksp { arg(...) }` block each.
+
+Two things the original sketch below did not anticipate:
+
+- **`moduleName` carries the Maven group, not just the project path.** Fragment objects from every
+  artifact share one package, so two independent libraries both called `:core` would emit the same
+  object name into it. `:ksp-fixtures:app` with group `io.github.thisisthepy` derives
+  `io_github_thisisthepy_ksp_fixtures_app`.
+- **The plugin does not compile against KSP's Gradle plugin.** `kotlin-dsl` builds against
+  Gradle's embedded Kotlin (1.9 on Gradle 8.9) and KSP 2.3.11 is compiled with Kotlin 2.3:
+  "Class 'com.google.devtools.ksp.gradle.KspExtension' was compiled with an incompatible version
+  of Kotlin". The dependency is `runtimeOnly` — a plugin id resolves from a classpath resource,
+  not from a compiled type — and the two `ksp { arg(...) }` calls go through one reflective
+  lookup of `arg(String, String)`.
+
+The original sketch, for the record:
 
 The KSP options (`role`, `moduleName`, `excludePackages`) are mechanical.
 A Gradle plugin (`python-multiplatform-bindings`) could:
@@ -777,14 +823,40 @@ reasoning survives without the implementation session. 5 is still open.
    excludes a function named `main` with zero parameters or a single `Array<...>`
    parameter.
 
-5. **Incremental KSP.** Still open, and turned out slightly different from how this
-   was framed: the aggregator now uses `Dependencies.ALL_FILES` rather than
-   `Dependencies(false)` -- the earlier phrasing had the failure mode backwards.
+5. **~~Incremental KSP.~~ Answered by measurement: the aggregator is not the cause,
+   and narrowing it changes nothing.**
+
    `Dependencies(false)` (no files, not aggregating) means "never regenerate this
    file", which would leave a newly-added fragment undiscovered; `ALL_FILES` is
-   correct but reprocesses on every change. Because discovery reads the whole
-   classpath rather than a fixed file set, there is no obviously-correct narrower
-   dependency list to hand it instead; still unaddressed.
+   correct but reprocesses on every change. The open question was whether something
+   narrower would restore incrementality. It does not.
+
+   Measured with `ksp.incremental.log=true` on `:ksp-fixtures:app`, a two-file module,
+   modifying one file:
+
+   | aggregator `Dependencies` | dirty / all |
+   |---|---|
+   | `ALL_FILES` | 100.00% |
+   | `Dependencies(aggregating = true, <generated fragment files>)` | 100.00% |
+
+   The source-to-output map explains it. A module's own `Fragment_<module>` is an
+   *aggregating* output over every source file in the module -- correctly so, because
+   blacklist exposure means any file can add an entry -- so it is keyed by KSP's
+   `AnyChanges` wildcard and by all sources. Any change regenerates it, and KSP then
+   marks every source that maps to it dirty. Whatever the aggregator declares is
+   downstream of that.
+
+   A classpath-only change behaves the same way: adding a function to
+   `:ksp-fixtures:library` dirtied both app files with `Modified` empty and
+   `CP changes` listing `Fragment_ksp_fixture_library`.
+
+   `ALL_FILES` therefore stays: the narrower form buys nothing measurable, and whether
+   it stays correct when a dependency's fragment appears with no local source change
+   was never established. The only route to real incrementality is **per-file
+   fragments** -- one isolating output per source file -- which changes fragment
+   naming, `UpcallTable`'s per-module idempotency (`moduleName`) and where duplicate
+   names are detected. That is a design change, and it would also be the lever for
+   §4's tree-shaking option B.
 
 6. **~~KSP for KMP.~~ Resolved for the targets this project applies it to.** Per-target
    configurations (`add("kspDesktop", ...)`, `add("kspAndroidNativeArm64", ...)`) work

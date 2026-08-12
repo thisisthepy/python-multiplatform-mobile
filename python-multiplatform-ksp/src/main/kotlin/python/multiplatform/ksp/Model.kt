@@ -22,6 +22,11 @@ data class ClassModel(
     /** The full lambda expression text for `traverse`, or `null` if the class has no
      * `PyObject`-typed fields and therefore needs no `tp_traverse` slot. */
     val traverseBody: String?,
+    /** Mirrors `python.multiplatform.reflection.ReflectedClassKind` by name, for the same reason
+     * [CallableEntryModel.kind] mirrors `CallableKind`. */
+    val kind: String = "CLASS",
+    /** Entry names in declaration order, for [kind] `"ENUM"`; empty otherwise. */
+    val enumEntryNames: List<String> = emptyList(),
 )
 
 data class FragmentModel(
@@ -29,3 +34,14 @@ data class FragmentModel(
     val entries: List<CallableEntryModel>,
     val classes: List<ClassModel>,
 )
+
+/**
+ * Drops entries whose name was already taken, keeping the first.
+ *
+ * Two declarations can legally share one exposed name -- an instance property and a
+ * companion-object property of the same name, or an `expect`/`actual` pair both visible to a
+ * platform compilation. `UpcallTable.register` only rejects collisions *between* fragments, so a
+ * duplicate inside one fragment would silently make `resolve` return whichever entry landed last.
+ * Scanning order puts instance members first, so the receiver-taking entry is the survivor.
+ */
+fun List<CallableEntryModel>.distinctByName(): List<CallableEntryModel> = distinctBy { it.name }
