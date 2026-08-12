@@ -1406,10 +1406,41 @@ exists only because of the version constraint** — one module is the shape a co
   sample avoids the shape. Worth a `BindingPolicy` check, since a read-only-to-callers `var` is an
   ordinary Kotlin idiom.
 
-### What the sample still cannot show
+### ~~What the sample still cannot show~~ — the trampoline exists now
 
-`UpcallStub` is desktop-only, and both its stubs are `(long) -> long`. That is why the entry the
-demo calls takes no arguments and returns a `Long`: the *table* carries arity and per-argument
-`TypeTag`s for anything, but the trampoline that would marshal them does not exist on any
-platform. iOS should be the cheapest place to write one — Python and Kotlin share a binary there —
-and nothing has been written. See §7.
+**What it was.** `UpcallStub` was desktop-only and both its stubs were `(long) -> long`, so the
+entry the demo called took no arguments and returned a `Long`. The *table* had carried arity and
+per-argument `TypeTag`s from the day it was written; nothing read them. Python could call Kotlin
+and could not pass it anything.
+
+**What it is.** `python.multiplatform.ffi.upcall.UpcallTrampoline` marshals both directions and is
+`commonMain` — the argument handling was never platform-specific, only the address publishing was.
+Desktop reaches it through one new Panama stub. Python now calls Kotlin with real arguments of
+every marshalled tag, constructs a Kotlin object and calls a method on it, and gets a Python
+exception when the Kotlin side raises: `python.native.ffi.UpcallArgumentsTest`, which drives the
+whole path from inside the interpreter, and `UpcallTrampolineTest` (commonTest, so it compiles for
+every target) which drives the marshaller directly. Desktop: 233 tests, 0 failed.
+
+Three things the work settled, each recorded in `docs/upcall-design.md`:
+
+- **One shape, not a family.** Argument passing needed exactly one new C shape,
+  `(long, long) -> long`. Arity and types ride in the tuple and in the table entry, never in the C
+  signature, so the stub count does not grow with the exposed surface. It is also, exactly,
+  `PyCFunction` — so the generated proxy type will not need a new shape either. Every other CPython
+  slot shape was already in `Panama`'s vocabulary.
+- **`ctypes.CFUNCTYPE` releases the GIL.** The first version segfaulted in `_PyThreadState_GET`
+  (`PyErr_Occurred+0x1c`) on a thread whose own `withGIL` depth counter said it held the GIL. That
+  counter records scopes *Kotlin* opened, and C is free to have dropped the GIL inside one. An
+  entry point reached from C must take its own `PyGILState_Ensure` unconditionally — which applies
+  to every platform's entry point, not only this one.
+- **`bytes` has no fast route in this ABI subset.** `PyBytes_AsString` is bound as a
+  NUL-terminated UTF-8 *string* read, which destroys exactly the payloads `ByteArray` exists for,
+  and `PyBytes_AsStringAndSize` is in no platform's `EmbedAPI`. The trampoline goes an item at a
+  time — correct, and the slowest path across this boundary by a wide margin.
+
+**What is still open.** The other platforms' entry points, which are the address-publishing step
+and nothing more: iOS/androidNative want a `@CName` pair reached through `ctypes.CDLL(None)` (still
+the cheapest — one binary, no C glue), Android a `RegisterNatives` method behind a `PyCFunction`
+shim, wasm a `@WasmExport` plus `Table.set` (3.1 ns, measured in §11). Per-platform detail is in
+`docs/upcall-design.md`'s "What each platform still owes". The generated proxy type that would let
+Python write `obj.method(x)` instead of resolving through a `ctypes` shim is §7's remaining half.

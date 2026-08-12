@@ -101,6 +101,112 @@ iOS 는 Python 과 Kotlin/Native 가 같은 바이너리에 **정적 링킹**되
 심볼 테이블에서 `@CName` 심볼에 바로 닿는다. **별도 C 글루 코드가 필요 없다.** Python 쪽 인터페이스가
 다른 플랫폼의 FFM 업콜과 동일해진다.
 
+---
+
+## The trampoline that carries arguments
+
+Written for desktop, settled for everyone. `python.multiplatform.ffi.upcall.UpcallTrampoline` is
+`commonMain` and depends on nothing platform-specific; what each platform still owes is only the
+few lines that give Python the *address* of an entry point.
+
+Before this, the table carried arity and a per-argument `TypeTag` and nothing read them. Both
+desktop stubs were `(long) -> long`, so the only entries Python could reach were zero-argument ones
+returning a `Long` — Python could call Kotlin but could not pass it anything (ROADMAP §13).
+
+### The shape count is one, and it was already implied
+
+Counted the way the downcall side was counted, and it converges harder: **argument passing needs
+exactly one new C shape.**
+
+    long pm_invoke(long callableHandle, PyObject *args) -> PyObject *      // (long, long) -> long
+
+Arity and types travel inside the tuple and inside the table entry, never in the C signature. A
+stub specialised per signature would need one per `(arity, tag-vector)` — unbounded, and
+impossible to pre-generate for a closed world. This is the same argument as
+[왜 트램폴린이 적어도 되는가](#왜-트램폴린이-적어도-되는가), applied one level down.
+
+The remaining CPython slots were already in the vocabulary, which is why the total is one and not
+five:
+
+| Slot | C signature | Carrier shape | Status |
+|---|---|---|---|
+| `PyCFunction` | `PyObject *(PyObject *self, PyObject *args)` | `(long, long) -> long` | **added** |
+| `getter` | `PyObject *(PyObject *self, void *closure)` | `(long, long) -> long` | same one |
+| `initproc` / `setter` / `traverse` | `int(long, long, long)` | `(long, long, long) -> int` | already there |
+| `inquiry` (`tp_clear`) | `int(PyObject *self)` | `(long) -> int` | already there |
+| `destructor` | `void(PyObject *self)` | `(long) -> void` | already there |
+| name → handle | `long(const char *)` | `(long) -> long` | already there |
+
+`newfunc` (`PyObject *(type, args, kwargs)`) is the only one still unaccounted for, and only if
+`tp_new` is ever bound directly rather than reached through `PyCFunction`.
+
+The `PyCFunction` correspondence is deliberate: when the generated proxy type lands, `self` takes
+the callable handle's place in the same stub and **no new shape appears then either**.
+
+### What crosses, per tag
+
+The `args: Array<Any?>` an `ExposedCallable` receives has exactly one representation per `TypeTag`,
+which is what `python-multiplatform-ksp`'s `TypeShape.castExpression` already narrows from:
+
+| `TypeTag` | Python side | Kotlin side |
+|---|---|---|
+| `INT` | `int` | `Long` (a declared `Int`/`Short`/`Byte` is narrowed by generated code) |
+| `FLOAT` | `float` | `Double` |
+| `BOOLEAN` | `bool` | `Boolean` — a distinct Python type, so not folded into `INT` |
+| `STRING` | `str` | `String` |
+| `BYTES` | `bytes` | `ByteArray` |
+| `UNIT` | `None` | `Unit` |
+| `OBJECT` | `int` handle, **or** any Python object | the Kotlin instance from `HandleTable`, **or** a `PyObject` |
+| — | `None` | `null`, whatever the tag |
+
+`OBJECT` is the one tag that is two things, and it is resolved by what Python actually sent rather
+than by the tag: Python cannot hold a Kotlin reference on any target, so a Kotlin object crosses as
+an `ObjectReference` integer; anything else is a Python object and reaches a parameter declared as
+`PyObject`.
+
+`BYTES` is correct and slow — an item at a time through `PyObject_GetItem`, because
+`PyBytes_AsString` is bound here as a NUL-terminated UTF-8 *string* read and destroys exactly the
+payloads `ByteArray` exists for. `PyBytes_AsStringAndSize` is in no platform's `EmbedAPI` yet; when
+it is, both directions collapse to one call.
+
+### Two conventions that are not negotiable
+
+- **Arguments are borrowed.** `PyTuple_GetItem` lends, so a `PyObject` built over one takes
+  `borrowed = true`. `borrowed = false` gives back a reference nobody ever took — one per call —
+  and the free lands somewhere unrelated. That is the bug that crashed this repo twice.
+- **The result is a new reference.** Python takes ownership. Measured end to end through ctypes
+  (`UpcallArgumentsTest.theReferenceReturnedToPythonIsTakenOverExactlyOnce`): a hundred calls move
+  the returned object's refcount by zero.
+
+And one that is not about references: **nothing may be thrown out of a trampoline.** The return
+path is C; a Kotlin exception crossing a Panama upcall stub terminates the VM and on Kotlin/Native
+terminates the process. Every failure leaves as `NULL` with the error indicator set.
+
+### The GIL is not the caller's to promise
+
+`withGIL` skips `PyGILState_Ensure` when the thread's nesting depth is already non-zero. That is
+right for Kotlin-side code and **wrong for an entry point from C**, because C may have dropped the
+GIL inside a scope that is still open. `ctypes.CFUNCTYPE` does precisely that — it releases the GIL
+around the foreign call, unlike `PYFUNCTYPE` — so the first version of this trampoline segfaulted
+in `_PyThreadState_GET` (`PyErr_Occurred+0x1c`) on a thread whose own counter said it held the GIL.
+
+A trampoline therefore takes its own `PyGILState_Ensure`/`Release` pair unconditionally. Every
+platform's entry point needs this, not just desktop's.
+
+### What each platform still owes
+
+Only the address-publishing step; the marshalling is shared.
+
+| Platform | What is needed | Cost |
+|---|---|---|
+| **Desktop** | done — `Panama.createUpcallStubII_L`, `UpcallStub.invokeWithArgsStubAddr` | — |
+| **iOS / androidNative** | `@CName("pm_upcall_invoke") fun(handle: Long, args: COpaquePointer?): COpaquePointer?` delegating to `UpcallTrampoline.invoke`, reached from Python via `ctypes.CDLL(None)`. Python and Kotlin/Native are one binary, so the symbol is already in the global table and no C glue is needed | cheapest of the three |
+| **Android** | a JNI `static jlong` native method registered with `RegisterNatives`, and a C shim of `PyCFunction` shape that calls it — the boundary is primitives only (`androidMain/README.md`), which `(jlong, jlong) -> jlong` already is | one shim per shape |
+| **wasm** | `@WasmExport` on the entry point plus `Table.set` to publish it, measured at 3.1 ns/call in `wasm-experiment` | already proven |
+
+Nothing in that list touches `UpcallTrampoline`; each is the platform's existing upcall mechanism
+pointed at it.
+
 ## 테이블 생성 — KSP
 
 - 우리가 **KSP 프로세서를 아티팩트로 배포**한다

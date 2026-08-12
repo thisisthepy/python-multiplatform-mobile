@@ -187,7 +187,13 @@ class ReachabilityMetadataTest {
             .toSortedSet()
 
         assertEquals(
-            setOf("createUpcallStubI_I", "createUpcallStubI_V", "createUpcallStubIII_I", "createUpcallStubLongToLong"),
+            setOf(
+                "createUpcallStubI_I",
+                "createUpcallStubI_V",
+                "createUpcallStubII_L",
+                "createUpcallStubIII_I",
+                "createUpcallStubLongToLong",
+            ),
             entryPoints.toSet(),
             "Panama's set of upcall stub entry points changed. Each one links a FunctionDescriptor " +
                 "that must appear under `foreign.upcalls`: add a `// @UpcallShape(...)` marker next " +
@@ -198,6 +204,9 @@ class ReachabilityMetadataTest {
         assertEquals(
             setOf(
                 Descriptor("long", listOf("long")),
+                // The argument-carrying trampoline, and the shape a PyCFunction slot takes:
+                // (callable handle, args tuple) -> new reference. See UpcallTrampoline.
+                Descriptor("long", listOf("long", "long")),
                 Descriptor("int", listOf("long")),
                 Descriptor("int", listOf("long", "long", "long")),
                 // tp_dealloc: destructor returns void, so this shape exists as of the
@@ -205,7 +214,7 @@ class ReachabilityMetadataTest {
                 Descriptor("void", listOf("long")),
             ),
             declared,
-            "the declared upcall descriptors no longer match the three stub shapes Panama builds"
+            "the declared upcall descriptors no longer match the stub shapes Panama builds"
         )
     }
 }
