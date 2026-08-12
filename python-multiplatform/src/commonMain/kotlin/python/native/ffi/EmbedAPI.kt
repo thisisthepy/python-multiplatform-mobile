@@ -4194,7 +4194,13 @@ expect fun PyType_GetModule(type: NativePointer): NativePointer?
 // Section 28
 // Tuple Objects
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// TODO: Section 27, 28은 필요에 의해 추가된 Section이므로 순서 재정렬 하기
+// NOTE: section numbers are append order, not the C API documentation's chapter order.
+// Sections 1-26 follow the docs; 27 (Type Objects), 28 (Tuple Objects) and 29 (Module Objects)
+// were added when they were first needed and so sit after Weak Reference Objects instead of at
+// their documented positions (Type before Integer Objects, Tuple before List Objects, Module
+// before Iterator Objects). Renumbering is a ~370-line pure-comment move with no behavioural
+// effect, and it conflicts with anything else editing this file; the target order is recorded in
+// ROADMAP §12 instead. Navigate this file by function name, not by section number.
 expect fun PyTuple_New(len: Long): NativePointer?
 expect inline fun PyTuple_Size(p: NativePointer): Long
 expect fun PyTuple_GetItem(p: NativePointer, pos: Long): NativePointer?
@@ -4206,7 +4212,7 @@ expect inline fun PyTuple_SetItem(p: NativePointer, pos: Long, o: NativePointer)
 // Section 29
 // Module Objects
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// TODO: Section 29 was previously entirely absent (see Section 27/28's note above on ad-hoc ordering).
+// NOTE: this section was added after 27/28; see the ordering note above. Nothing is outstanding.
 /**
  *  *Part of the Stable ABI.*
  *

@@ -1100,9 +1100,54 @@ is the actual state of the Android object model, and that is the point of doing 
   verifying them would require is noted in `docs/python-version-acquisition.md`. The lockfile is
   keyed by version *and* flavour, so a `-freethreaded` or a 3.15 archive is a separate entry and
   cannot be silently accepted under an existing key.
-- **`PyList.subList`** returns a copy, not a live view. **`pyObjectToNative`**'s fallback branch
-  is not fully native. Both are marked `TODO` and neither is exercised by current tests.
-- **~50 `TODO` markers** remain in `commonMain`, including several questioning whether
-  `Py_IncRef` is the right call in `PyObject.init`.
+- ~~**`PyList.subList`** returns a copy, not a live view.~~ **Stale — it returns `PySubList`,
+  which delegates `get`/`set`/`add`/`removeAt` to the backing list, i.e. it is a live view.**
+  **`pyObjectToNative`**'s fallback branch is still not fully native; the open question is now
+  written out at the branch itself (three candidate answers, and what to measure first).
+- ~~**~50 `TODO` markers** remain in `commonMain`~~ **— triaged. 18 remained, not ~50; 15 are
+  closed, 2 are sharpened open questions, and the work items are the four bullets below.** The
+  `Py_IncRef`-in-`PyObject.init` question named here is answered in place: `borrowed = true` is a
+  statement that the wrapper must obtain its own reference, and both directions of getting it
+  wrong have now been paid for (§1's double free, §4's dropped reference, and the fixture leak
+  below). Two bugs came out of the pass:
+  - **`PyType.dict` handed a `mappingproxy` to `PyDict`.** `type.__dict__` is not a `dict`, and
+    `PyDict_Size`/`PyDict_Items` reject a non-dict with `PyErr_BadInternalCall()` — returning
+    `-1`/`NULL` *and leaving the error indicator set*. Measured: `int.__dict__` reported
+    `size == -1`, and the next unrelated `Python3.eval` in the same suite died with
+    `Objects/dictobject.c:4248: bad argument to internal function`. It now copies through
+    `PyDict_New` + `PyDict_Update` into a real dict. `PyType_GetDict()`, which the code comment
+    proposed instead, is **not** an option: it is declared in `cpython/object.h`, outside the
+    Limited API, so it is not in the Stable ABI subset this binding restricts itself to.
+  - **`PythonTestFixture.mainGlobals()` leaked one reference per call**, wrapping
+    `PyObject_GetAttrString`'s new reference with `borrowed = true`. Measured at exactly +50 over
+    50 calls — the inverse of §1's defect, in the fixture every functional test is built on.
+    `OwnershipLeakTest.theTestFixtureDoesNotLeakMainGlobals` is the guard.
+- **`Python3.runMain` is not usable as written**, and "add error handling" (the TODO it carried)
+  understated it. `sys.argv[1] = ...` assigns to an existing index, but `Py_Initialize()` does not
+  set `sys.argv`, so it raises `IndexError` — invisibly, because `PyRun_SimpleString` prints and
+  clears the indicator and its return value is discarded. Worse, `Py_RunMain()` **always finalizes
+  the interpreter**, so on return the runtime is gone while `Python3.isInitialized` is still
+  `true`. Its `Int` exit status is also discarded. No caller in `src/` or `sample/`, so it is a
+  landmine, not a live failure. Fixing it is a design decision: what should "run a module" mean
+  for an embedded interpreter that has to survive the call?
+- **`Python3.runApp` does nothing at all** — its only statement is commented out, as is the
+  `Py_BytesMain` `expect` it would call. It returns `Unit` either way, so a caller cannot tell.
+  Declaring `Py_BytesMain` is not a one-liner: it takes `(int argc, char **argv)`, so it needs an
+  array-of-C-strings marshalling path, which each of the four platforms does differently.
+- **`Python3.finalize` reports no error detail**, and cannot: `Py_Finalize()` returns void and
+  there is no interpreter left to hold an error indicator afterwards. The one improvement
+  available is `Py_FinalizeEx()`'s `int` (0, or -1 when flushing buffered data failed). Left
+  undone because finalization is untested — its only caller is `artMain/JniExport.kt`, and a test
+  that exercises it destroys the interpreter the rest of the suite shares.
+- **`EmbedAPI.kt`'s section numbers are append order, not the C API docs' chapter order.**
+  Sections 1–26 follow the docs; 27 (Type Objects), 28 (Tuple Objects) and 29 (Module Objects)
+  were appended as needed. Documented target order: Type before Integer Objects (§16), Tuple
+  before List Objects (§22), Module before Iterator Objects (§25). It is a ~370-line pure-comment
+  move with no behavioural effect, so it should be done alone, on a quiet tree, or not at all.
+- **Several `commonTest` file headers still describe their subjects as `TODO` stubs "expected to
+  fail with `NotImplementedError`"** — `PyObjectTest`, `Python3Test`, `PyBasicTypesTest`,
+  `PyModuleTest`, `PyDictTest`, `PyIteratorTest`, `PySetTest`, `PyTupleTest`, `PyListTest`,
+  `ConversionTest`. Every one of those is implemented, so the headers invite the next reader to
+  dismiss a real failure as expected. `PyTypeTest`'s was corrected; the rest were left.
 - **No CI.** The README badges point at a different repository.
 - **Sample app** has not been revisited since the object model landed.

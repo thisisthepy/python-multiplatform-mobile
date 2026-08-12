@@ -43,8 +43,16 @@ object Python3 {
         if (isInitialized) return
         memScoped {
             Py_Initialize()
+            // There is nothing richer to report than this. `Py_Initialize()` returns void and,
+            // per its own contract, treats a failed start-up as a *fatal* error -- it calls
+            // Py_FatalError and aborts the process rather than returning, so a Kotlin frame that
+            // could inspect an error indicator is never reached, and there is no interpreter left
+            // to hold one anyway. The check below is therefore a belt-and-braces guard against a
+            // no-op second call, not an error channel. (The API that does report status is
+            // `Py_InitializeFromConfig`/`PyStatus`, which this binding does not use: it would
+            // mean carrying a `PyConfig` struct layout across four platforms, and struct layout
+            // is exactly what the Stable ABI does not promise.)
             if (Py_IsInitialized() == 0) {
-                // TODO: Add error handling
                 throw IllegalStateException("Python initialization failed")
             }
             if (!silent) println("INFO: Python initialized successfully!")
@@ -53,7 +61,6 @@ object Python3 {
         // Release the GIL so other threads (in particular cleaner threads running
         // Py_DecRef) can attach via PyGILState_Ensure. Every C API call reachable from
         // commonMain and commonTest is now inside withPython{} or withGIL{}, so this is safe.
-        // See ROADMAP §1 and §4 for the history and the previous revert.
         // See ROADMAP §1 and §4 for the history and the previous revert.
         if (mainThreadState == null) mainThreadState = PyEval_SaveThread()
     }
@@ -80,7 +87,14 @@ object Python3 {
         isInitialized = false
         memScoped {
             Py_Finalize()
-            // TODO: print error message if exists
+            // No error message is printable here, and that is a property of the C API rather than
+            // an omission. `Py_Finalize()` returns void; by the time it returns there is no
+            // interpreter left to hold an error indicator, so `PyErr_*` cannot be consulted. The
+            // only status available at all is `Py_FinalizeEx()`'s `int` -- 0, or -1 when flushing
+            // buffered data failed -- which carries no message either. Switching to it is a real
+            // (small) improvement and is recorded in ROADMAP §12 rather than done here, because
+            // finalization is untested: the only caller is `artMain/JniExport.kt`, and a test
+            // that exercises it destroys the interpreter the rest of the suite shares.
             if (Py_IsInitialized() != 0) {
                 isInitialized = true
                 throw IllegalStateException("Python finalization failed")
@@ -90,22 +104,48 @@ object Python3 {
     }
 
     /**
-     * Run Python main module
+     * Run Python main module.
+     *
+     * **Not usable as written, and the TODO this replaces ("add error handling") understated it.**
+     * Reading the code against the C API contracts turns up three defects, none of which is an
+     * error-handling gap:
+     *
+     * 1. `sys.argv[1] = ...` is an *assignment to an existing index*, so it needs `sys.argv` to
+     *    already have two entries. `Py_Initialize()` explicitly does not set `sys.argv` (its own
+     *    documentation says so), so this raises `IndexError` in an embedded interpreter --
+     *    silently, because `PyRun_SimpleString` prints and clears the indicator itself and its
+     *    return value is discarded here.
+     * 2. `Py_RunMain()` **always finalizes the interpreter**, whether it returns or exits. So the
+     *    interpreter is dead when this returns while [isInitialized] is still `true`, and the
+     *    next C API call from anywhere touches a torn-down runtime.
+     * 3. Its `Int` return is the process exit status and is thrown away, which is the part the
+     *    original TODO named.
+     *
+     * Nothing in `src/` or `sample/` calls this, so it is a landmine rather than a live failure.
+     * Fixing it is a design decision (what should "run a module" mean for an *embedded*
+     * interpreter that must survive the call?) and is recorded in ROADMAP §12.
      */
     fun runMain(moduleName: String) {
         withPython {
             PyRun_SimpleString("import sys\nsys.argv[1] = '$moduleName'\n")
             Py_RunMain()
-            // TODO: Add error handling
         }
     }
 
     /**
-     * Run Python script as an application (Automatically initializes Python)
+     * Run Python script as an application (Automatically initializes Python).
+     *
+     * **This function does nothing at all** -- its only statement is commented out, and so is the
+     * `Py_BytesMain` `expect` declaration it would call (`EmbedAPI.kt`, two commented-out lines).
+     * It neither initializes Python nor runs anything, and returns `Unit` regardless, so a caller
+     * cannot tell. It has no caller in `src/` or `sample/`.
+     *
+     * `Py_BytesMain` cannot simply be declared, either: it takes `(int argc, char **argv)`, so
+     * wiring it up means marshalling an array of C strings, which every platform in this build
+     * does differently. Recorded in ROADMAP §12 with what it would cost.
      */
     fun runApp(argv: Array<String>) {
         //Py_BytesMain(argv)
-        // TODO: Add error handling
     }
 
     /** `Py_file_input`, the compiler-mode token for a sequence of statements (as opposed to a single expression). */
