@@ -1807,6 +1807,16 @@ targets get it at once) publishes the same trampoline, and `UpcallEntryTest` (`n
 it from inside the interpreter: iOS simulator 230 tests, 0 failed, 8 of them new; androidNative
 compiles main and test. Desktop is unchanged at 236, 0 failed, 1 skipped.
 
+**androidNative now runs that suite rather than only compiling it.** `androidNativeArm64Test`
+(`python-multiplatform/build.gradle.kts`) pushes the Kotlin/Native test binary and the CPython
+prefix to `/data/local/tmp` and parses the runner's TeamCity output into JUnit XML, so the target is
+counted like every other: **252 tests, 0 failed, on `pmp_api26` and `pmp_api36`, over five runs
+each.** Nothing new broke — unlike §11b, where attaching this suite to ART for the first time killed
+it at the 2nd test and again at the 12th — and the reason is that `nativeMain` was already being
+exercised by the iOS simulator. What had never been executed was `artMain` and the androidNative
+`cinterop` bindings, and those came up clean. The empty androidNative row in
+`docs/upcall-design.md`'s five-platform upcall table is filled in from those runs.
+
 It is *not* the `@CName` + `ctypes.CDLL(None)` route this document and `docs/upcall-design.md`
 both predicted, and the reason is two independent measurements rather than a preference:
 

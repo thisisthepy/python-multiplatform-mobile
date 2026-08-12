@@ -1238,6 +1238,405 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
 }
 
 // =================================================================================================
+// androidNative -- giving the target a test *run*, not just a test *link*.
+//
+// Every other target in this build has a task that executes its tests. androidNative had
+// `androidNativeArm64TestBinaries` and nothing that ran the binary it produced, because KGP
+// registers an execution task only where it knows how to reach a host: `KotlinNativeTest` for the
+// build machine, `KotlinNativeSimulatorTest` for simctl. An Android device is neither, so the
+// whole of `commonTest` compiled for this target on every build and had never once been executed.
+//
+// That gap is visible in docs/upcall-design.md: the five-platform upcall table has an empty
+// androidNative row, and `537c1a0b` says it was left empty rather than estimated. It is also the
+// exact situation ROADMAP §11b was in for Android/ART, where attaching the suite to a target that
+// had only ever compiled it surfaced two real defects in the first twelve tests.
+//
+// What the run needs, and why each piece is here:
+//
+//   1. **The binary itself.** `test.kexe` is a normal ELF executable; `adb push` + `chmod 755` +
+//      exec from `/data/local/tmp` is enough. No APK, no instrumentation, no JVM.
+//   2. **libpython.** The test binary is linked `-lpython3.14` (see `getTest(DEBUG).linkerOpts`
+//      above), so `libpython3.14.so` and the extension modules' shared objects have to sit
+//      somewhere the dynamic loader looks -- hence `LD_LIBRARY_PATH`.
+//   3. **A standard library.** `Py_Initialize()` does not fail without one, it *aborts the
+//      process* ("Failed to import encodings module"), which would be reported as a run that
+//      produced no tests. Same reason `extractIosSimulatorStdlib` exists above and the same reason
+//      `PythonInstrumentationRunner` unpacks assets on Android/ART; here the prefix is pushed to
+//      the device and `PYTHONHOME` points at it.
+//   4. **Results in the same shape as every other target.** The Kotlin/Native runner's TeamCity
+//      logger is the only machine-readable output it has, so its service messages are parsed back
+//      into JUnit XML under `build/test-results/androidNative<Abi>Test/`. That is the directory
+//      CLAUDE.md says to count, and counting it is only trustworthy if a *crashed* run is
+//      distinguishable from a clean one -- so a `testStarted` with no `testFinished` is written
+//      out as a failure naming the exit code, rather than silently dropped. A native suite that
+//      dies takes the rest of the run with it, and the difference between "212 passed" and "212
+//      passed then the process died" is the whole point of running this at all.
+// =================================================================================================
+
+/** Where the payload is staged on the device. One directory per ABI; ABIs never share a run. */
+fun androidNativeTestDeviceDir(abi: String) = "/data/local/tmp/pmp-nativetest-$abi"
+
+/** Runs a command, returning its exit code and combined output. */
+fun runCommand(command: List<String>): Pair<Int, String> {
+    val process = ProcessBuilder(command).redirectErrorStream(true).start()
+    process.outputStream.close()
+    val text = process.inputStream.bufferedReader().readText()
+    return process.waitFor() to text
+}
+
+/**
+ * Undoes TeamCity's escaping: `|n` `|r` `|'` `|[` `|]` `||` and the `|0xNNNN` form.
+ * Anything else after `|` stands for itself.
+ */
+fun teamCityUnescape(value: String): String {
+    val out = StringBuilder(value.length)
+    var i = 0
+    while (i < value.length) {
+        val c = value[i]
+        if (c != '|' || i == value.length - 1) {
+            out.append(c); i++; continue
+        }
+        when (val e = value[i + 1]) {
+            'n' -> { out.append('\n'); i += 2 }
+            'r' -> { out.append('\r'); i += 2 }
+            // The three Unicode line separators the Kotlin/Native logger escapes by name.
+            'x' -> { out.append('\u0085'); i += 2 }
+            'l' -> { out.append('\u2028'); i += 2 }
+            'p' -> { out.append('\u2029'); i += 2 }
+            '0' -> {
+                // |0xNNNN -- a single UTF-16 unit written as hex.
+                if (i + 6 <= value.length && value[i + 2] == 'x') {
+                    out.append(value.substring(i + 3, minOf(i + 7, value.length)).toInt(16).toChar()); i += 7
+                } else { out.append(e); i += 2 }
+            }
+            else -> { out.append(e); i += 2 }
+        }
+    }
+    return out.toString()
+}
+
+/**
+ * Splits a service message body into its `key='value'` attributes.
+ *
+ * Values are scanned character by character rather than matched with a regex: `'` is a legal
+ * character inside a value (escaped as `|'`), and a value ending in `||` puts a literal `|`
+ * immediately before the closing quote, so "closing quote is the first `'` not preceded by `|`"
+ * is wrong on exactly the messages that carry an assertion message.
+ */
+fun parseServiceMessageAttributes(body: String): Map<String, String> {
+    val attributes = LinkedHashMap<String, String>()
+    var i = 0
+    while (i < body.length) {
+        while (i < body.length && body[i] != '=') {
+            i++
+        }
+        if (i >= body.length) break
+        val keyEnd = i
+        var keyStart = keyEnd
+        while (keyStart > 0 && !body[keyStart - 1].isWhitespace()) keyStart--
+        i++ // '='
+        if (i >= body.length || body[i] != '\'') continue
+        i++ // opening quote
+        val raw = StringBuilder()
+        while (i < body.length && body[i] != '\'') {
+            if (body[i] == '|' && i + 1 < body.length) {
+                raw.append(body[i]).append(body[i + 1]); i += 2
+            } else {
+                raw.append(body[i]); i++
+            }
+        }
+        i++ // closing quote
+        attributes[body.substring(keyStart, keyEnd)] = teamCityUnescape(raw.toString())
+    }
+    return attributes
+}
+
+/** XML text/attribute escaping. `<`, `&` and `"` are the only ones that can appear here. */
+fun xmlEscape(value: String): String = value
+    .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    .replace("\"", "&quot;").replace("'", "&apos;")
+    // The runner prints raw bytes from Python; a stray control character makes the XML unparseable.
+    .map { if (it.code < 0x20 && it != '\n' && it != '\r' && it != '\t') ' ' else it }
+    .joinToString("")
+
+/**
+ * Turns one run's TeamCity output into JUnit XML files under [resultsDir], and returns
+ * `Triple(total, failed, ignored)`.
+ *
+ * [exitCode] matters: a native test binary that aborts leaves a `testStarted` with no
+ * `testFinished`, and that has to become a *failure* rather than a missing row -- see the header
+ * comment.
+ */
+fun writeNativeTestResults(
+    output: String,
+    resultsDir: File,
+    exitCode: Int,
+    label: String,
+): Triple<Int, Int, Int> {
+    class Case(val suite: String, val name: String) {
+        var durationMs: Long = 0
+        var failureMessage: String? = null
+        var failureDetails: String? = null
+        var ignored = false
+        var finished = false
+        val output = StringBuilder()
+    }
+
+    val suites = LinkedHashMap<String, MutableList<Case>>()
+    var currentSuite: String? = null
+    var currentCase: Case? = null
+
+    for (line in output.lineSequence()) {
+        val trimmed = line.trim()
+        if (trimmed.startsWith("##teamcity[") && trimmed.endsWith("]")) {
+            val body = trimmed.removePrefix("##teamcity[").removeSuffix("]")
+            val kind = body.substringBefore(' ')
+            val attributes = parseServiceMessageAttributes(body)
+            val name = attributes["name"] ?: ""
+            when (kind) {
+                "testSuiteStarted" -> {
+                    currentSuite = name
+                    suites.getOrPut(name) { mutableListOf() }
+                }
+                "testSuiteFinished" -> currentSuite = null
+                "testStarted" -> currentCase = Case(currentSuite ?: "unknown", name)
+                    .also { suites.getOrPut(it.suite) { mutableListOf() }.add(it) }
+                "testFailed" -> currentCase?.apply {
+                    failureMessage = attributes["message"] ?: "failed"
+                    failureDetails = attributes["details"] ?: ""
+                }
+                "testIgnored" -> {
+                    val case = currentCase ?: Case(currentSuite ?: "unknown", name)
+                        .also { suites.getOrPut(it.suite) { mutableListOf() }.add(it) }
+                    case.ignored = true
+                    case.finished = true
+                    currentCase = null
+                }
+                "testFinished" -> currentCase?.apply {
+                    durationMs = attributes["duration"]?.toLongOrNull() ?: 0
+                    finished = true
+                }.also { currentCase = null }
+            }
+        } else {
+            // Not a service message: the test's own stdout. `UpcallBoundaryCostTest` reports
+            // through `println`, so this is not decoration -- it is the measurement.
+            // Anything printed outside a test is kept only in `run-output.txt`; attaching it to a
+            // testcase it did not come from would misattribute it.
+            currentCase?.output?.append(line)?.append('\n')
+        }
+    }
+
+    // A case still open at the end of the stream is a case the process died inside of.
+    for (case in suites.values.flatten()) {
+        if (!case.finished && case.failureMessage == null) {
+            case.failureMessage =
+                "the test process exited (code $exitCode) during this test and never reported a result"
+            case.failureDetails = buildString {
+                appendLine("androidNative test binary died mid-suite on $label.")
+                appendLine("Everything after this test in the run order was never executed.")
+                appendLine()
+                appendLine("--- tail of the run's output ---")
+                append(output.takeLast(4000))
+            }
+        }
+    }
+
+    resultsDir.deleteRecursively()
+    resultsDir.mkdirs()
+
+    var total = 0
+    var failed = 0
+    var ignored = 0
+    for ((suite, cases) in suites) {
+        if (cases.isEmpty()) continue
+        val suiteFailures = cases.count { it.failureMessage != null }
+        val suiteIgnored = cases.count { it.ignored }
+        total += cases.size
+        failed += suiteFailures
+        ignored += suiteIgnored
+        val xml = buildString {
+            appendLine("""<?xml version="1.0" encoding="UTF-8"?>""")
+            append("<testsuite name=\"${xmlEscape(suite)}\" tests=\"${cases.size}\"")
+            append(" skipped=\"$suiteIgnored\" failures=\"$suiteFailures\" errors=\"0\"")
+            appendLine(" time=\"${cases.sumOf { it.durationMs } / 1000.0}\">")
+            for (case in cases) {
+                append("  <testcase name=\"${xmlEscape(case.name)}\"")
+                append(" classname=\"${xmlEscape(case.suite)}\"")
+                append(" time=\"${case.durationMs / 1000.0}\"")
+                val failure = case.failureMessage
+                if (failure == null && !case.ignored && case.output.isEmpty()) {
+                    appendLine("/>")
+                    continue
+                }
+                appendLine(">")
+                if (case.ignored) appendLine("    <skipped/>")
+                if (failure != null) {
+                    appendLine("    <failure message=\"${xmlEscape(failure)}\" type=\"kotlin.AssertionError\">")
+                    appendLine(xmlEscape(case.failureDetails ?: ""))
+                    appendLine("    </failure>")
+                }
+                if (case.output.isNotEmpty()) {
+                    appendLine("    <system-out>${xmlEscape(case.output.toString())}</system-out>")
+                }
+                appendLine("  </testcase>")
+            }
+            appendLine("</testsuite>")
+        }
+        File(resultsDir, "TEST-$suite.xml").writeText(xml)
+    }
+    return Triple(total, failed, ignored)
+}
+
+listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) ->
+    val arch = if (abi == "arm64-v8a") "aarch64" else "x86_64"
+    val stagingDir = layout.buildDirectory.dir("androidNativeTest/$abi")
+
+    // The interpreter half of the payload: the shared objects the test binary is linked against,
+    // and the standard library `Py_Initialize()` refuses to start without. `config-*` is excluded
+    // for the same reason `copyAndroidPythonAssets` excludes it -- it is build machinery for
+    // compiling extensions, not runtime.
+    val stagePayload = tasks.register<Sync>("stageAndroidNative${targetSuffix}TestPayload") {
+        dependsOn(downloadAllPythonBuilds)
+        from("$extractedDir/android-$arch/prefix/lib") {
+            include("*.so")
+            include("*.so.*")
+            into("lib")
+        }
+        from("$extractedDir/android-$arch/prefix/lib/python$libVersion") {
+            exclude("config-$libVersion-*/")
+            into("lib/python$libVersion")
+        }
+        into(stagingDir)
+        includeEmptyDirs = false
+    }
+
+    tasks.register("androidNative${targetSuffix}Test") {
+        group = "verification"
+        description = "Runs the androidNative $abi test binary on a connected device or emulator."
+        dependsOn("linkDebugTestAndroidNative$targetSuffix", stagePayload)
+        // The device is not an input Gradle can fingerprint, and a green run says nothing about
+        // the next one on a different device.
+        outputs.upToDateWhen { false }
+
+        val testBinary = (kotlin.targets.getByName("androidNative$targetSuffix")
+            as org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget)
+            .binaries.getTest(NativeBuildType.DEBUG).outputFile
+        val resultsRoot = layout.buildDirectory.dir("test-results/androidNative${targetSuffix}Test")
+        val staged = stagingDir
+        val requestedSerial = (project.findProperty("androidNativeTestSerial")?.toString()
+            ?: System.getenv("ANDROID_SERIAL"))
+        val testFilter = project.findProperty("androidNativeTestFilter")?.toString()
+        val sdkDir = android.sdkDirectory
+
+        doLast {
+            val adb = File(sdkDir, "platform-tools/adb")
+            if (!adb.isFile) {
+                throw GradleException(
+                    "adb not found at $adb. Set ANDROID_HOME (or sdk.dir in local.properties) to an " +
+                        "SDK that has platform-tools installed."
+                )
+            }
+
+            // ---- pick the device(s) ----------------------------------------------------------
+            val (listCode, listOutput) = runCommand(listOf(adb.absolutePath, "devices"))
+            if (listCode != 0) throw GradleException("`adb devices` failed:\n$listOutput")
+            val online = listOutput.lineSequence()
+                .drop(1)
+                .mapNotNull { line ->
+                    val parts = line.trim().split(Regex("\\s+"))
+                    if (parts.size >= 2 && parts[1] == "device") parts[0] else null
+                }
+                .toList()
+            if (online.isEmpty()) {
+                throw GradleException(
+                    "No device or emulator is connected. `androidNative${targetSuffix}Test` runs the " +
+                        "test binary on a device -- there is no host to fall back to for this target."
+                )
+            }
+
+            // An x86_64 emulator cannot run the arm64 binary and vice versa, and the failure if it
+            // is tried is a bare "not executable" from the shell, so the ABI is checked up front.
+            val candidates = (if (requestedSerial != null) listOf(requestedSerial) else online).filter { serial ->
+                val (_, abiList) = runCommand(
+                    listOf(adb.absolutePath, "-s", serial, "shell", "getprop", "ro.product.cpu.abilist")
+                )
+                val supported = abiList.trim().split(",").map { it.trim() }
+                val matches = abi in supported
+                if (!matches) {
+                    logger.lifecycle("androidNative$targetSuffix: skipping $serial (supports ${abiList.trim()}, needs $abi)")
+                }
+                matches
+            }
+            if (candidates.isEmpty()) {
+                throw GradleException(
+                    "No connected device supports $abi (connected: ${online.joinToString()}). " +
+                        "Use -PandroidNativeTestSerial=<serial> to name one explicitly."
+                )
+            }
+
+            val binary = testBinary
+            if (!binary.isFile) throw GradleException("Test binary not found at $binary")
+
+            // CLAUDE.md: results are counted out of this directory, and a crashed run that leaves
+            // the previous run's XML behind gets counted as the previous run.
+            resultsRoot.get().asFile.deleteRecursively()
+
+            var totalFailures = 0
+            val summaries = mutableListOf<String>()
+            for (serial in candidates) {
+                val remote = androidNativeTestDeviceDir(abi)
+                val label = runCommand(
+                    listOf(adb.absolutePath, "-s", serial, "shell", "getprop", "ro.build.version.sdk")
+                ).second.trim().let { sdk -> "$serial (API $sdk, $abi)" }
+
+                logger.lifecycle("androidNative$targetSuffix: staging to $label")
+                runCommand(listOf(adb.absolutePath, "-s", serial, "shell", "mkdir", "-p", remote))
+                // `--sync` is what makes this usable in a loop: the 60 MB standard library is
+                // pushed once and then compared rather than re-sent (2506 files skipped in <0.1s).
+                for (arguments in listOf(
+                    listOf("push", "--sync", File(staged.get().asFile, "lib").absolutePath, "$remote/"),
+                    listOf("push", "--sync", binary.absolutePath, "$remote/test.kexe"),
+                )) {
+                    val (code, text) = runCommand(listOf(adb.absolutePath, "-s", serial) + arguments)
+                    if (code != 0) throw GradleException("adb ${arguments.first()} to $label failed:\n$text")
+                }
+                runCommand(listOf(adb.absolutePath, "-s", serial, "shell", "chmod", "755", "$remote/test.kexe"))
+
+                val filterArgument = testFilter?.let { " --ktest_gradle_filter='$it'" } ?: ""
+                val command = "cd $remote && LD_LIBRARY_PATH=$remote/lib PYTHONHOME=$remote " +
+                    "./test.kexe --ktest_logger=TEAMCITY$filterArgument"
+                logger.lifecycle("androidNative$targetSuffix: running on $label")
+                val (exitCode, runOutput) = runCommand(listOf(adb.absolutePath, "-s", serial, "shell", command))
+
+                // One subdirectory per device when there is more than one, so two emulators do not
+                // overwrite each other's XML and the run cannot be miscounted as a single pass.
+                val resultsDir = if (candidates.size > 1) File(resultsRoot.get().asFile, serial)
+                    else resultsRoot.get().asFile
+                val (total, failed, ignored) = writeNativeTestResults(runOutput, resultsDir, exitCode, label)
+                if (total == 0) {
+                    throw GradleException(
+                        "The androidNative $abi test binary reported no tests on $label (exit $exitCode). " +
+                            "That is what a process that aborts before the first test looks like:\n" +
+                            runOutput.takeLast(4000)
+                    )
+                }
+                totalFailures += failed
+                summaries += "$label: $total tests, $failed failed, $ignored ignored (exit $exitCode)"
+                File(resultsDir, "run-output.txt").writeText(runOutput)
+            }
+
+            summaries.forEach { logger.lifecycle("androidNative$targetSuffix: $it") }
+            if (totalFailures > 0) {
+                throw GradleException(
+                    "androidNative $abi tests failed: $totalFailures failure(s). " +
+                        "See ${resultsRoot.get().asFile}"
+                )
+            }
+        }
+    }
+}
+
+// =================================================================================================
 // ROADMAP §10 -- staging CPython next to the wasmJs test bundle.
 //
 // Three things have to be true before a `wasmJs` test can reach the interpreter, and none of them

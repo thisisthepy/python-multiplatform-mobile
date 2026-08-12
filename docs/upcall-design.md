@@ -202,7 +202,7 @@ Only the address-publishing step; the marshalling is shared.
 | Platform | What is needed | Cost |
 |---|---|---|
 | **Desktop** | done — `Panama.createUpcallStubII_L`, `UpcallStub.invokeWithArgsStubAddr` | — |
-| **iOS / androidNative** | done — `python.native.ffi.UpcallEntry` (`nativeMain`), a `PyMethodDef` whose `ml_meth` is a `staticCFunction` over `UpcallTrampoline.invoke` and whose `self` carries the handle. `UpcallEntryTest` (`nativeTest`) runs it on the simulator and compiles it for androidNative | cheapest of the three |
+| **iOS / androidNative** | done — `python.native.ffi.UpcallEntry` (`nativeMain`), a `PyMethodDef` whose `ml_meth` is a `staticCFunction` over `UpcallTrampoline.invoke` and whose `self` carries the handle. `UpcallEntryTest` (`nativeTest`) runs it on the iOS simulator and, since `androidNativeArm64Test` exists, on `pmp_api26` and `pmp_api36` as well | cheapest of the three |
 | **Android** | done — `python.native.ffi.UpcallEntry` / `UpcallCallbacks` (`androidMain`) plus the `pmp_upcall_*` shims in `artMain/cinterop/jni_onload.def`. `UpcallEntryTest` (`androidInstrumentedTest`) runs it on `pmp_api26` and `pmp_api36` | one shim per shape, plus a JNI upcall per call |
 | **wasm** | `@WasmExport` on the entry point plus `Table.set` to publish it, measured at 3.1 ns/call in `wasm-experiment` | already proven |
 
@@ -351,26 +351,52 @@ runs on every target.
 | **desktop** (JVM 21.0.12, macOS arm64) | 861–1313 ns | 315–527 ns | 170–269 ns | 2.49–2.89x | 4.88–5.51x |
 | **iOS simulator** (arm64) | 2263–2502 ns | 1599–1826 ns | 1928–2139 ns | 1.33–1.43x | 1.15–1.22x |
 | **wasmJs** (Node) | 703–1075 ns | 230–369 ns | 228–271 ns | 2.56–3.36x | 3.04–3.97x |
-| **androidNative** | — see below | — | — | — | — |
+| **androidNative** (`pmp_api36`, arm64) | 3339–3598 ns | 2170–2222 ns | 2805–3469 ns | 1.52–1.62x | 1.03–1.23x |
+| **androidNative** (`pmp_api26`, arm64) | 3314–4140 ns | 2636–5554 ns | 2843–4863 ns | 0.62–1.34x | 0.71–1.20x |
 | *Android API 26* †| *1209–1329 ns* | *not recorded* | *not recorded* | *0.99–1.09x* | *not recorded* |
 | *Android API 36* †| *2301–3086 ns* | *not recorded* | *not recorded* | *2.00–2.34x* | *not recorded* |
 
 Ranges are min–max over five runs of the whole suite (four for wasmJs); a single reading is not a
 measurement. **The rows in italics marked † are quoted, not re-measured** — from commit `409da6fc`
 and the two tables above, which is why the columns those did not record are blank rather than
-inferred. The two Android rows are two different emulators, not two runs of one.
+inferred. The two Android rows are two different emulators, not two runs of one, and so are the two
+androidNative rows — the same two emulators, in fact, which is why the ART and Kotlin/Native figures
+for one API level can be read against each other.
 
-Their upcall and ratio columns are both the *Python worker thread, steady state* row, taken together
-so the two halves of the ratio belong to the same measurement. That row is the right cross-platform
+The two italic rows' upcall and ratio columns are both the *Python worker thread, steady state* row,
+taken together so the two halves of the ratio belong to the same measurement. That row is the right cross-platform
 analogue precisely because of what the section above established: with the attach amortised, the
 difference between a Python worker and a thread ART already knows straddles zero (the
 instrumentation-thread figures are 1280–1327 ns and 2982–5086 ns), so the worker no longer carries a
 cost the other four platforms have no equivalent of. Its ratio is the one that was recorded.
 
-androidNative has no test-*run* task at all (the Kotlin/Native android targets produce
-`androidNativeArm64TestBinaries` and nothing that executes it), so measuring it means pushing a
-binary to a device. Its `UpcallEntry` is the same `nativeMain` `PyMethodDef` iOS uses, so the iOS row
-is the closest available proxy; `compileTestKotlinAndroidNativeArm64` is green.
+**`pmp_api26`'s androidNative row is noisy and is left noisy.** One of its five runs came in at
+5554 ns for the downcall and 4863 ns for the trampoline where the other four sat at 2636–3245 and
+2843–3672; that single run is what widens its two ratio columns to 0.62–1.34x and 0.71–1.20x. It is
+not dropped, because the min–max convention here exists precisely to show that an emulator's spread
+can be larger than the effect being measured. Read `pmp_api36`'s row for the shape and `pmp_api26`'s
+for how much confidence an emulator supports.
+
+**The androidNative row was empty because the target had no test *run* task**, only
+`androidNativeArm64TestBinaries` — KGP registers an execution task only where it knows how to reach
+a host (`KotlinNativeTest` for the build machine, `KotlinNativeSimulatorTest` for simctl), and an
+Android device is neither. `commonTest` compiled for the target on every build and had never once
+been executed on it.
+
+`:python-multiplatform:androidNativeArm64Test` (see `build.gradle.kts`) is that missing task. It
+pushes `test.kexe` to `/data/local/tmp`, pushes the CPython prefix beside it because
+`Py_Initialize()` aborts the process rather than failing without a standard library, runs the binary
+under the Kotlin/Native runner's TeamCity logger, and parses the service messages back into JUnit XML
+under `build/test-results/androidNativeArm64Test/` so this target is counted the same way as every
+other. With no serial given it runs on every connected device whose ABI matches, which is where the
+two rows above come from. The figures are five runs of the whole 252-test suite on each.
+
+**Nothing new broke when the suite finally ran there** — 252 tests, 0 failures, on both emulators,
+in all five runs. That is worth stating because the precedent pointed the other way: ROADMAP §11b
+attached this same suite to Android/ART for the first time and it died at the 2nd test and again at
+the 12th, surfacing two real defects. androidNative shares `nativeMain` with iOS, and iOS has been
+running the suite all along, so the shared code was already exercised; what had never been exercised
+was `artMain` and the androidNative `cinterop` bindings, and those came up clean.
 
 #### The trampoline column needed a control before it meant anything
 
@@ -384,18 +410,26 @@ expensive than the whole upcall through it, i.e. the boundary priced negative (0
 So it is measured twice, differing in exactly that one thing, with an empty `Python3.withPython { }`
 beside them for scale:
 
-| | desktop | iOS simulator | wasmJs |
-|---|---|---|---|
-| trampoline, caller holding nothing | 252–507 ns | 2764–3109 ns | 280–307 ns |
-| trampoline, GIL already held | 170–269 ns | 1928–2139 ns | 228–271 ns |
-| `Python3.withPython { }`, empty | 124–152 ns | 725–982 ns | 79–81 ns |
+| | desktop | iOS simulator | wasmJs | androidNative `pmp_api36` | androidNative `pmp_api26` |
+|---|---|---|---|---|---|
+| trampoline, caller holding nothing | 252–507 ns | 2764–3109 ns | 280–307 ns | 3861–4093 ns | 4383–5068 ns |
+| trampoline, GIL already held | 170–269 ns | 1928–2139 ns | 228–271 ns | 2805–3469 ns | 2843–4863 ns |
+| `Python3.withPython { }`, empty | 124–152 ns | 725–982 ns | 79–81 ns | 937–1010 ns | 1193–1298 ns |
 
 The **GIL-held** row is the one the table above uses, because it is the one the Python-driven
 numerator is comparable with.
 
+androidNative is the second target to make the case for this control on its own: without it the
+boundary prices negative there too (0.86–0.88x on `pmp_api36`, 0.68–0.86x on `pmp_api26`), for the
+same reason as iOS and not because anything about the boundary differs. The gap between its two
+trampoline rows — roughly a microsecond — is one uncontended GIL round trip on an emulator, and it
+is charged to downcalls exactly as much as to upcalls.
+
 #### Where the differences actually come from
 
-**iOS has the highest absolute upcall and the lowest ratio, and neither is about the boundary.**
+**iOS has the highest absolute upcall of the three originally measured here and the lowest ratio,
+and neither is about the boundary.** (androidNative, added later, is higher still on both counts of
+absolute cost — see below; the explanation is the same one, which is the point.)
 There is no runtime boundary on that target at all — a `PyMethodDef` whose `ml_meth` is a
 `staticCFunction` in the same binary. What is expensive is the per-call scaffolding every C API call
 shares: an empty `withPython` scope costs 725–982 ns there against 124–152 ns on desktop and 79–81 ns
@@ -424,6 +458,22 @@ different things — but the 3.1 ns figure must not be quoted for an upcall that
 **wasm's scaffolding is the cheapest and by far the most stable of the three** (79.50, 80.15, 80.50,
 80.69 ns for an empty scope across four runs), which follows from there being no OS thread machinery
 under it.
+
+**androidNative is iOS's shape, moved onto an emulator.** It has the highest absolute upcall
+measured here (3.3–4.1 µs) and, on `pmp_api36`, a ratio of 1.52–1.62x — and neither figure is about
+the boundary, because on this target there is no boundary either: the same `nativeMain`
+`PyMethodDef` whose `ml_meth` is a `staticCFunction` in the same binary. What it shares with iOS is
+the reason both are expensive: an empty `withPython` scope costs 937–1010 ns here against 124–152 ns
+on desktop, and `Py_IncRef + Py_DecRef` costs 2010–2132 ns against 165–326 ns. The per-call
+scaffolding is the whole story on both native targets, and it is where the work is if either number
+is to move.
+
+Two differences from iOS are worth keeping separate from that. Its ratio sits *above* iOS's
+1.33–1.43x rather than at it, because its downcall denominator (2170–2222 ns) is cheaper relative to
+its upcall than iOS's is — the numerator is inflated by scaffolding on both, the denominator less so
+here. And these figures are from an emulator on Apple Silicon, not hardware: `pmp_api26`'s spread
+(above) is the honest width of that, and no androidNative figure here should be quoted as a
+device number.
 
 Nothing in the test asserts a duration. A wall-clock threshold on a shared build machine, an
 emulator or a Node host is a flake generator, and this repo has had exactly that failure; what is
