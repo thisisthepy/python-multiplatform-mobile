@@ -1,4 +1,4 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, kotlin.native.runtime.NativeRuntimeApi::class)
 
 package python.multiplatform.ref
 
@@ -66,12 +66,26 @@ class UnregisteredCycleNode {
 object TraverseThreadProbe {
     var lastThread: Long = -1L
 
+    /** The thread the test is driving from, so [record] can classify what it sees as it sees it. */
+    var homeThread: Long = 0L
+
+    /** Traverses that arrived on [homeThread] since the last [reset]. */
+    var homeTraverses: Int = 0
+
+    /** Traverses that arrived on any other thread since the last [reset]. */
+    var foreignTraverses: Int = 0
+
     fun record() {
-        lastThread = platform.posix.pthread_self()?.rawValue?.toLong() ?: 0L
+        val t = platform.posix.pthread_self()?.rawValue?.toLong() ?: 0L
+        lastThread = t
+        if (t == homeThread) homeTraverses++ else foreignTraverses++
     }
 
-    fun reset() {
+    fun reset(home: Long) {
         lastThread = -1L
+        homeThread = home
+        homeTraverses = 0
+        foreignTraverses = 0
     }
 }
 
@@ -112,6 +126,59 @@ class CycleCollectionTest {
     @AfterTest
     fun tearDown() {
         HandleTable.releaseAll()
+    }
+
+    /**
+     * Drops the last reference to a proxy *now*, instead of leaving it to Kotlin's collector.
+     *
+     * Every test here that closes a cycle ends with the proxy held by a [CycleNode] and by nothing
+     * else. Once [tearDown] drops the handle table's root, that node is Kotlin garbage, and the
+     * `Py_DecRef` its [PyObject] owes is scheduled by Kotlin's collector and run on the cleaner
+     * thread -- at a moment no test chooses, and only once that thread can take the GIL.
+     *
+     * That is a live grenade for any later test that reads a reference count across a window in
+     * which it releases the GIL, and [testDeallocOnAThreadCPythonCreated] is exactly such a test.
+     * Measured: a Kotlin collection taken at the start of it dropped the proxy type's count from 4
+     * to 2 -- one proxy owed by [testCycleCollectionByGC], one by
+     * [testHandleSurvivesWhenTraverseReportsNothing].
+     *
+     * Calling this is not cleanup for tidiness. It is what makes the deallocation happen at a point
+     * the test controls, under the GIL it is already holding.
+     */
+    private fun disposeProxy(node: CycleNode) {
+        node.ref?.close()
+        node.ref = null
+        node.rawPtr = 0L
+    }
+
+    /**
+     * Blocks until a Kotlin collection stops changing the reference count at [typeAddr].
+     *
+     * The backstop for [disposeProxy]: it makes this test's opening reading independent of whatever
+     * any earlier test happened to leave owing, rather than merely correct while they all remember
+     * to tidy up.
+     *
+     * **Must not be called while this thread holds the GIL.** The collector has to suspend the
+     * cleaner thread to run, and that thread is blocked in `PyGILState_Ensure` on the GIL this one
+     * would be holding. Measured, by getting it wrong: 12 minutes at 0.2% CPU before it was killed.
+     *
+     * @return how far the count moved while settling -- 0 once every test disposes of its own
+     *   proxy, and the number of proxies that were still owed if one stops doing so.
+     */
+    private fun settleKotlinFinalisation(typeAddr: Long): Long {
+        val header = typeAddr.toCPointer<LongVar>() ?: return 0L
+        val started = header.pointed.value
+        var last = started
+        var quiet = 0
+        var turns = 0
+        while (quiet < 3 && turns < 50) {
+            kotlin.native.runtime.GC.collect()
+            platform.posix.usleep(2_000u)
+            val now = header.pointed.value
+            if (now == last) quiet++ else { quiet = 0; last = now }
+            turns++
+        }
+        return started - last
     }
 
     @Test
@@ -163,6 +230,11 @@ class CycleCollectionTest {
                 HandleTable.resolveRaw(handle),
                 "the cycle was not collected: the handle is still live after gc.collect()",
             )
+
+            // tp_clear broke the loop but did not free the proxy -- `node` still holds the last
+            // reference. See disposeProxy for why that reference is given back here rather than
+            // left to Kotlin's collector.
+            disposeProxy(node)
         }
     }
 
@@ -214,6 +286,10 @@ class CycleCollectionTest {
             // Keeps `node` (and with it the Python object) alive across the collection, so the
             // assertion above is about the collector's decision and not about Kotlin's GC.
             assertEquals(pyObjPtr.toLong(), node.rawPtr)
+
+            // The proxy survived on purpose, so this test is the one that owes its release.
+            node.ref?.close()
+            node.ref = null
         }
     }
 
@@ -332,6 +408,28 @@ class CycleCollectionTest {
      */
     @Test
     fun testDeallocOnAThreadCPythonCreated() = PythonTestFixture.withInterpreter {
+        // Sampled below: the proxy type's reference count, before and after a window in which this
+        // thread *gives up the GIL* -- `_t.start()` and `_t.join()` both release it, which is the
+        // whole point of the test. That makes this the one test here whose measurement a pending
+        // Kotlin finalisation can walk into: the cleaner thread wants the GIL, this is the only
+        // place it is offered, and a leftover proxy deallocated there takes one reference off the
+        // type between the two readings. The failure reads as "tp_dealloc did not balance the
+        // instance's reference to its heap type" while tp_dealloc has balanced it exactly.
+        //
+        // So nothing may still be owed when the first reading is taken. Called outside withGIL --
+        // see settleKotlinFinalisation for what happens if it is not.
+        //
+        // The assertion on the result is the guard on disposeProxy: it was 2 before the tests above
+        // released their own proxies, and 2 is precisely how many of them there were.
+        val stillOwed = settleKotlinFinalisation(ProxyTypeFactory.createProxyType())
+        assertEquals(
+            0L, stillOwed,
+            "$stillOwed proxy deallocation(s) were still owed to Kotlin's collector when this test " +
+                "began, which means some test above stopped releasing its own proxy. Left alone " +
+                "they land during the GIL-release window below and this test fails claiming " +
+                "tp_dealloc did not balance the heap type -- see disposeProxy",
+        )
+
         withGIL {
             val proxyTypeAddr = ProxyTypeFactory.createProxyType()
             val proxyType = assertNotNull(proxyTypeAddr.toCPointer<PyTypeObject>())
@@ -370,8 +468,8 @@ class CycleCollectionTest {
             // would not.
             //
             // t.join() releases the GIL, so the worker really does run both statements.
-            TraverseThreadProbe.reset()
             val here = platform.posix.pthread_self()?.rawValue?.toLong() ?: 0L
+            TraverseThreadProbe.reset(here)
             val rc = PyRun_SimpleString(
                 """
                 import gc, threading
@@ -396,7 +494,9 @@ class CycleCollectionTest {
                 seen != here,
                 "the slots ran on the thread that has been running Kotlin all along " +
                     "(pthread $here), so CPython's worker did not carry the callback and the " +
-                    "unattached-thread case is still untested",
+                    "unattached-thread case is still untested (traverses on this thread: " +
+                    "${TraverseThreadProbe.homeTraverses}, on others: " +
+                    "${TraverseThreadProbe.foreignTraverses})",
             )
 
             assertNull(
@@ -442,8 +542,8 @@ class CycleCollectionTest {
 
             assertNotNull(HandleTable.resolveRaw(handle), "handle did not resolve before collection")
 
-            TraverseThreadProbe.reset()
             val here = platform.posix.pthread_self()?.rawValue?.toLong() ?: 0L
+            TraverseThreadProbe.reset(here)
             val rc = PyRun_SimpleString(
                 """
                 import gc, threading
@@ -464,7 +564,9 @@ class CycleCollectionTest {
                 seen != here,
                 "tp_traverse ran on the thread that has been running Kotlin all along " +
                     "(pthread $here) rather than on CPython's worker, so the unattached-thread " +
-                    "case is still untested",
+                    "case is still untested (traverses on this thread: " +
+                    "${TraverseThreadProbe.homeTraverses}, on others: " +
+                    "${TraverseThreadProbe.foreignTraverses})",
             )
 
             assertNull(
@@ -473,6 +575,10 @@ class CycleCollectionTest {
                     "though it is on the thread that has been running Kotlin -- tp_traverse or " +
                     "tp_clear did not reach Kotlin from a thread with no attached runtime",
             )
+
+            // As in testCycleCollectionByGC: tp_clear broke the loop, `node` still holds the
+            // proxy's last reference, and this test gives it back rather than owing it.
+            disposeProxy(node)
         }
     }
 }

@@ -236,7 +236,11 @@ class GCLeakTest {
         repeat(WRAPPERS_LARGE) {
             val wrapperList = listType()
             val appendMethod = wrapperList.getAttr("append")
-            appendMethod(testTarget) // inner object refcount++
+            // The call returns a wrapper for `None`. Closed rather than dropped: WRAPPERS_LARGE
+            // dropped wrappers are a debt to the cleaner that outlives this test, and on a target
+            // where finalisation only arrives on a host turn the next test to yield pays it and
+            // counts it as its own. EvalCheckpointTest records what that cost.
+            appendMethod(testTarget).close() // inner object refcount++
             appendMethod.close()
             // We do NOT close wrapperList -- it is released by the collector, not by hand.
             held!!.add(wrapperList)
