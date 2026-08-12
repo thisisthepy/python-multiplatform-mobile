@@ -1,11 +1,13 @@
 package python.multiplatform.ksp
 
 import com.google.devtools.ksp.getVisibility
+import com.google.devtools.ksp.processing.KSPLogger
 import com.google.devtools.ksp.processing.Resolver
 import com.google.devtools.ksp.symbol.ClassKind
 import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSFile
 import com.google.devtools.ksp.symbol.KSFunctionDeclaration
+import com.google.devtools.ksp.symbol.KSNode
 import com.google.devtools.ksp.symbol.KSPropertyDeclaration
 import com.google.devtools.ksp.symbol.Visibility
 
@@ -62,7 +64,7 @@ private fun functionBody(function: KSFunctionDeclaration, resultExpr: String): S
  * same receiver slot, same [CallableEntryModel.returnTag] -- with its call wrapped in
  * `PendingCall.start { }` and [CallableEntryModel.isSuspend] set. See [functionBody].
  */
-class FragmentScanner(private val excludePackages: List<String>) {
+class FragmentScanner(private val excludePackages: List<String>, private val logger: KSPLogger) {
 
     fun scan(resolver: Resolver, moduleName: String): ScanResult {
         val files = resolver.getAllFiles().toList()
@@ -73,7 +75,9 @@ class FragmentScanner(private val excludePackages: List<String>) {
         files.flatMap { it.declarations }.forEach { declaration ->
             when (declaration) {
                 is KSFunctionDeclaration ->
-                    if (BindingPolicy.isExposedTopLevelFunction(declaration, excludePackages)) {
+                    if (BindingPolicy.isExposedTopLevelFunction(declaration, excludePackages) &&
+                        exposableOrWarn(declaration.qualifiedName!!.asString().substringBeforeLast('.'), declaration)
+                    ) {
                         entries += topLevelFunctionEntry(declaration)
                     }
 
@@ -82,7 +86,9 @@ class FragmentScanner(private val excludePackages: List<String>) {
                         // A top-level property is a module attribute in Python: no receiver, and
                         // the call site is the package rather than a type.
                         val packageName = declaration.qualifiedName!!.asString().substringBeforeLast('.')
-                        entries += staticPropertyEntries(packageName, packageName, declaration)
+                        if (exposableOrWarn(packageName, declaration)) {
+                            entries += staticPropertyEntries(packageName, packageName, declaration)
+                        }
                     }
 
                 is KSClassDeclaration -> scanClassTree(declaration, entries, classes)
@@ -92,6 +98,38 @@ class FragmentScanner(private val excludePackages: List<String>) {
         }
 
         return ScanResult(FragmentModel(moduleName, entries.distinctByName(), classes), files)
+    }
+
+    /**
+     * The type-usage counterpart to the silence [BindingPolicy.isSuspending]'s doc records for a
+     * plain shape rejection: a declaration that clears every shape check
+     * ([BindingPolicy.isExposedFunctionShape]-family) but names a type
+     * ([BindingPolicy.hasExposableTypes]) with no callable entry of its own is not an ordinary,
+     * expected exclusion the way `private`/`internal` visibility is -- it is the exact silent
+     * failure mode `docs/upcall-async-design.md` §2.1 measured for `suspend` function types, and
+     * the whole point of this task is that it should not go unlogged a second time.
+     */
+    private fun warnUnexposableType(name: String, declaration: KSNode) {
+        logger.warn(
+            "python-multiplatform-ksp: $name has a type with no exposable classifier (a `suspend` " +
+                "function type, or one nested in a generic argument) and is not exposed to Python -- " +
+                "see docs/upcall-async-design.md §2.1.",
+            declaration,
+        )
+    }
+
+    /** [BindingPolicy.hasExposableTypes], warning through [warnUnexposableType] on a `false`. */
+    private fun exposableOrWarn(owner: String, function: KSFunctionDeclaration): Boolean {
+        val exposable = BindingPolicy.hasExposableTypes(function)
+        if (!exposable) warnUnexposableType("$owner.${function.simpleName.asString()}", function)
+        return exposable
+    }
+
+    /** [exposableOrWarn] for a property's own type. */
+    private fun exposableOrWarn(owner: String, property: KSPropertyDeclaration): Boolean {
+        val exposable = BindingPolicy.hasExposableTypes(property)
+        if (!exposable) warnUnexposableType("$owner.${property.simpleName.asString()}", property)
+        return exposable
     }
 
     private fun isExposedTopLevelProperty(property: KSPropertyDeclaration): Boolean {
@@ -149,7 +187,13 @@ class FragmentScanner(private val excludePackages: List<String>) {
         if (BindingPolicy.isConstructible(classDeclaration)) {
             classDeclaration.primaryConstructor
                 ?.takeIf { it.getVisibility() == Visibility.PUBLIC && !BindingPolicy.hasPythonInternal(it) }
-                ?.let { entries += constructorEntry(qualifiedName, it) }
+                ?.let { ctor ->
+                    if (BindingPolicy.hasExposableTypes(ctor)) {
+                        entries += constructorEntry(qualifiedName, ctor)
+                    } else {
+                        warnUnexposableType("$qualifiedName.<init>", ctor)
+                    }
+                }
         }
 
         if (isEnum) entries += enumEntries(classDeclaration, qualifiedName)
@@ -158,6 +202,7 @@ class FragmentScanner(private val excludePackages: List<String>) {
             .filter { BindingPolicy.isExposedMemberFunction(it) }
             .filter { !isEnum || it.simpleName.asString() !in ENUM_SYNTHETIC_FUNCTIONS }
             .filter { !BindingPolicy.isCompilerGeneratedDataClassMember(classDeclaration, it) }
+            .filter { exposableOrWarn(qualifiedName, it) }
             .forEach { function ->
                 entries += if (isObject) {
                     staticFunctionEntry(qualifiedName, qualifiedName, function)
@@ -169,6 +214,7 @@ class FragmentScanner(private val excludePackages: List<String>) {
         val properties = classDeclaration.declarations.filterIsInstance<KSPropertyDeclaration>()
             .filter { BindingPolicy.isExposedProperty(it) }
             .filter { !isEnum || it.simpleName.asString() != ENUM_SYNTHETIC_ENTRIES_PROPERTY }
+            .filter { property -> exposableOrWarn(qualifiedName, property) }
             .toList()
         properties.forEach { property ->
             entries += if (isObject) {
@@ -282,9 +328,11 @@ class FragmentScanner(private val excludePackages: List<String>) {
         val entries = mutableListOf<CallableEntryModel>()
         companion.declarations.filterIsInstance<KSFunctionDeclaration>()
             .filter { BindingPolicy.isExposedMemberFunction(it) }
+            .filter { exposableOrWarn(ownerQualifiedName, it) }
             .forEach { entries += staticFunctionEntry(ownerQualifiedName, ownerQualifiedName, it) }
         companion.declarations.filterIsInstance<KSPropertyDeclaration>()
             .filter { BindingPolicy.isExposedProperty(it) }
+            .filter { exposableOrWarn(ownerQualifiedName, it) }
             .forEach { entries += staticPropertyEntries(ownerQualifiedName, ownerQualifiedName, it) }
         return entries
     }
