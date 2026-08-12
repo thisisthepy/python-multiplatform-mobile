@@ -1,5 +1,12 @@
 import com.codingfeline.buildkonfig.compiler.FieldSpec
 import java.net.URL
+// Imported rather than written fully-qualified at the use site: inside a Gradle build script
+// `java` resolves to the JavaPluginExtension, so `java.net.URLClassLoader` fails to compile with
+// "Unresolved reference: net". Same for every other `java.*` name used below.
+import java.net.URLClassLoader
+import java.nio.charset.Charset
+import java.nio.file.Path
+import java.lang.reflect.InvocationTargetException
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.Properties
@@ -50,6 +57,23 @@ buildkonfig {
 }
 
 val libVersion = pythonVersion.split('.').subList(0, 2).joinToString(".")
+
+/**
+ * The `ftp/python/<dir>/` directory holding a release, which drops any pre-release suffix:
+ * `3.15.0rc1` is published under `3.15.0`. Identical to the version itself for a final release,
+ * so it is always the right thing to build a python.org URL from.
+ *
+ * Declared here, above every consumer, because both the Android and the iOS download tasks need
+ * it. It used to sit below the Android tasks, which therefore built their URLs from the raw
+ * version and 404'd on any pre-release -- `ftp/python/3.15.0rc1/` does not exist. That stayed
+ * invisible because the archives were already sitting in the download directory, so the fetch was
+ * skipped; adding the `.sigstore` fetch is what surfaced it.
+ */
+val pythonOrgReleaseDir = pythonVersion.split(".").let { parts ->
+    val patch = parts.getOrNull(2)?.takeWhile { it.isDigit() } ?: "0"
+    "${parts[0]}.${parts[1]}.$patch"
+}
+
 println("----------------------------------------------------------------------------------------")
 println("                   Build Configuration for Python version $libVersion                   ")
 println("----------------------------------------------------------------------------------------")
@@ -117,6 +141,180 @@ fun verifyChecksum(key: String, archive: File) {
                 "Actual:   $actualHash"
         )
     }
+}
+
+// =================================================================================================
+// Sigstore verification of the python.org archives (ROADMAP §12, "Download integrity").
+//
+// This is a SECOND gate, not a replacement for `verifyChecksum` above. The two prove different
+// things and neither implies the other:
+//
+//   the lockfile  "these are the exact bytes this repository reviewed and pinned"
+//   Sigstore      "these are the bytes the CPython release manager actually signed"
+//
+// The lockfile is also the only one of the two that works offline, and the only one that covers
+// every source. So it stays unconditional and Sigstore is layered on top of it.
+//
+// ### Why this is opt-in
+//
+// `sigstore-java` drags in grpc-netty-shaded, protobuf, bouncycastle and guava -- tens of
+// megabytes that nothing else in this build needs -- and `sigstorePublicDefaults()` fetches a TUF
+// trust root over the network on first use, which would turn an offline build from "works" into
+// "fails". Declaring the dependency costs nothing because Gradle resolves a configuration lazily;
+// it is only fetched if `verifySigstore` is actually true and a download task runs. Enable with:
+//
+//     ./gradlew <task> -PverifyPythonSignatures=true
+//
+// ### What is covered, and what is not
+//
+//   python.org Android aarch64/x86_64   COVERED -- sibling `<archive>.sigstore` bundle
+//   python.org iOS XCframework (3.15+)  COVERED -- same
+//   astral-sh/python-build-standalone   NOT covered. It publishes no sibling signature at all:
+//                                       853 release assets, and the only non-archive among them
+//                                       is `SHA256SUMS` (checked directly against the release).
+//                                       Its provenance lives in GitHub's attestations API, keyed
+//                                       by artifact *digest* rather than filename, and that API
+//                                       is rate-limited to 60 requests/hour unauthenticated. That
+//                                       is a different mechanism, not this one. The desktop path
+//                                       already verifies against the release's own SHA256SUMS in
+//                                       addition to the lockfile.
+//   beeware/Python-Apple-support        NOT coverable. The release publishes five tar.gz assets
+//                                       and nothing else -- no checksums, no signatures -- and it
+//                                       has no attestations either. The SHA-256 pin is the only
+//                                       honest instrument available for iOS <= 3.14.
+val verifySigstore = project.findProperty("verifyPythonSignatures")?.toString()?.toBoolean() ?: false
+
+val sigstoreVerifierClasspath: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isVisible = false
+}
+
+dependencies {
+    add("sigstoreVerifierClasspath", "dev.sigstore:sigstore-java:2.2.0")
+}
+
+/** The Fulcio certificate identity a python.org bundle must carry. */
+data class SigstoreIdentity(val subjectAlternativeName: String, val issuer: String)
+
+/**
+ * Which release manager signed a given CPython version, per https://www.python.org/download/sigstore/
+ *
+ * This is a map rather than a constant on purpose. The signing identity is a property of the
+ * *release manager*, and it changes between release series: 3.13 was Thomas Wouters signing via
+ * Google, 3.14 and 3.15 are Hugo van Kemenade signing via GitHub. A hardcoded identity would keep
+ * verifying happily on the version it was written for and then either fail confusingly or -- far
+ * worse -- be loosened by the next person to "just make it pass" on an older one.
+ *
+ * An unknown series is a hard failure rather than a skip. A verification step that silently
+ * declines to verify is the thing this whole section exists to avoid.
+ */
+fun pythonOrgSigstoreIdentity(version: String): SigstoreIdentity {
+    val series = version.split(".").take(2).joinToString(".")
+    return when (series) {
+        "3.14", "3.15" -> SigstoreIdentity("hugo@python.org", "https://github.com/login/oauth")
+        "3.12", "3.13" -> SigstoreIdentity("thomas@python.org", "https://accounts.google.com")
+        else -> throw GradleException(
+            "No Sigstore signing identity is recorded for CPython $series. Add it from " +
+                "https://www.python.org/download/sigstore/ rather than disabling verification."
+        )
+    }
+}
+
+/**
+ * Verifies `archive` against its sibling `.sigstore` bundle, pinning the signer identity.
+ *
+ * Reflection, and a classloader whose parent is the *platform* loader rather than Gradle's, is
+ * what keeps this opt-in: nothing here is on the buildscript classpath, so a build that does not
+ * set `-PverifyPythonSignatures=true` never resolves or downloads any of it. The platform parent
+ * also isolates sigstore-java's guava/protobuf from the versions Gradle itself runs on.
+ *
+ * Pinning the identity is the whole point. `verify()` without certificate matchers proves only
+ * that *somebody* with a Sigstore certificate signed these bytes, which is a check anyone on the
+ * internet can pass.
+ */
+fun verifySigstoreBundle(archive: File, bundleUrl: String, bundleFile: File, identity: SigstoreIdentity) {
+    if (!bundleFile.exists()) {
+        println("Downloading $bundleUrl")
+        bundleFile.parentFile.mkdirs()
+        URL(bundleUrl).openStream().use { input ->
+            FileOutputStream(bundleFile).use { output -> input.copyTo(output) }
+        }
+    }
+
+    val loader = URLClassLoader(
+        sigstoreVerifierClasspath.files.map { it.toURI().toURL() }.toTypedArray(),
+        ClassLoader.getPlatformClassLoader()
+    )
+
+    fun load(name: String): Class<*> = Class.forName(name, true, loader)
+
+    // sigstore-java ships its TUF trust root as a resource and reaches it through Guava's
+    // `Resources.getResource`, which asks the *thread context* classloader -- not the loader that
+    // loaded the calling class. Without this swap the verifier builds and then dies with
+    // "resource dev/sigstore/tuf/sigstore-tuf-root/root.json not found", which reads like a
+    // packaging bug rather than a classloader one. Observed, not anticipated.
+    val previousContextLoader = Thread.currentThread().contextClassLoader
+    Thread.currentThread().contextClassLoader = loader
+
+    try {
+        val stringMatcher = load("dev.sigstore.strings.StringMatcher")
+        val matchString = stringMatcher.getMethod("string", String::class.java)
+
+        val certificateMatcher = load("dev.sigstore.VerificationOptions\$CertificateMatcher")
+        val fulcioBuilder = certificateMatcher.getMethod("fulcio").invoke(null)
+        fulcioBuilder.javaClass.getMethod("subjectAlternativeName", stringMatcher)
+            .invoke(fulcioBuilder, matchString.invoke(null, identity.subjectAlternativeName))
+        fulcioBuilder.javaClass.getMethod("issuer", stringMatcher)
+            .invoke(fulcioBuilder, matchString.invoke(null, identity.issuer))
+        val matcher = fulcioBuilder.javaClass.getMethod("build").invoke(fulcioBuilder)
+
+        val verificationOptions = load("dev.sigstore.VerificationOptions")
+        val optionsBuilder = verificationOptions.getMethod("builder").invoke(null)
+        optionsBuilder.javaClass.getMethod("addCertificateMatchers", certificateMatcher)
+            .invoke(optionsBuilder, matcher)
+        val options = optionsBuilder.javaClass.getMethod("build").invoke(optionsBuilder)
+
+        val bundleClass = load("dev.sigstore.bundle.Bundle")
+        val bundle = bundleClass
+            .getMethod("from", Path::class.java, Charset::class.java)
+            .invoke(null, bundleFile.toPath(), Charsets.UTF_8)
+
+        val verifierClass = load("dev.sigstore.KeylessVerifier")
+        val verifierBuilder = verifierClass.getMethod("builder").invoke(null)
+        verifierBuilder.javaClass.getMethod("sigstorePublicDefaults").invoke(verifierBuilder)
+        val verifier = verifierBuilder.javaClass.getMethod("build").invoke(verifierBuilder)
+
+        verifierClass
+            .getMethod("verify", Path::class.java, bundleClass, verificationOptions)
+            .invoke(verifier, archive.toPath(), bundle, options)
+
+        println("Sigstore OK: ${archive.name} signed by ${identity.subjectAlternativeName} via ${identity.issuer}")
+    } catch (e: InvocationTargetException) {
+        // Unwrap: the reflective frame is noise, the cause is the verification failure.
+        val cause = e.targetException ?: e
+        throw GradleException(
+            "Sigstore verification FAILED for ${archive.name}\n" +
+                "  bundle:   ${bundleFile.name}\n" +
+                "  expected: SAN=${identity.subjectAlternativeName} issuer=${identity.issuer}\n" +
+                "  cause:    ${cause::class.java.name}: ${cause.message}",
+            cause
+        )
+    } finally {
+        Thread.currentThread().contextClassLoader = previousContextLoader
+        loader.close()
+    }
+}
+
+/** Verifies a python.org archive if `-PverifyPythonSignatures=true`, otherwise says it skipped. */
+fun maybeVerifySigstore(archive: File, archiveUrl: String) {
+    if (!verifySigstore) return
+    verifySigstoreBundle(
+        archive = archive,
+        bundleUrl = "$archiveUrl.sigstore",
+        bundleFile = file("$downloadDir/${archive.name}.sigstore"),
+        identity = pythonOrgSigstoreIdentity(configuredPythonVersion)
+    )
 }
 
 tasks.register("updatePythonChecksums") {
@@ -247,7 +445,7 @@ val androidTargets = mapOf(
 )
 
 val androidDownloadTasks = androidTargets.map { (platform, arch) ->
-    val url = "https://www.python.org/ftp/python/$configuredPythonVersion/python-$configuredPythonVersion-$arch-linux-android.tar.gz"
+    val url = "https://www.python.org/ftp/python/$pythonOrgReleaseDir/python-$configuredPythonVersion-$arch-linux-android.tar.gz"
     val archive = file("$downloadDir/python-$configuredPythonVersion-$arch-linux-android.tar.gz")
     val extractDir = file("$extractedDir/$platform")
     val lockKey = "$platform-$configuredPythonVersion"
@@ -269,9 +467,14 @@ val androidDownloadTasks = androidTargets.map { (platform, arch) ->
                 }
             }
             
-            // python.org provides sigstore signatures (.sig, .crt, .sigstore) but no plain SHA256SUMS.
-            // Full Sigstore verification is unreasonable in pure Gradle, but we verify against our local lockfile.
+            // python.org publishes no SHA256SUMS, so the lockfile is what pins these bytes. It also
+            // publishes a sibling `<archive>.sigstore` bundle, which `maybeVerifySigstore` checks
+            // against the release manager's pinned identity when `-PverifyPythonSignatures=true`.
+            // (An earlier comment here claimed Sigstore verification was "unreasonable in pure
+            // Gradle". It is not -- `dev.sigstore:sigstore-java` does it in-process; see the
+            // section above `updatePythonChecksums` for why it is opt-in rather than always on.)
             verifyChecksum(lockKey, archive)
+            maybeVerifySigstore(archive, url)
             
             val isEmpty = extractDir.list()?.isEmpty() ?: true
             if (isEmpty) {
@@ -307,15 +510,6 @@ val iosFromPythonOrg = pythonVersion.split(".").let {
     it[0].toInt() > 3 || (it[0].toInt() == 3 && it[1].toInt() >= 15)
 }
 
-/**
- * The `ftp/python/<dir>/` directory holding a release, which drops any pre-release suffix:
- * `3.15.0rc1` is published under `3.15.0`.
- */
-val pythonOrgReleaseDir = pythonVersion.split(".").let { parts ->
-    val patch = parts.getOrNull(2)?.takeWhile { it.isDigit() } ?: "0"
-    "${parts[0]}.${parts[1]}.$patch"
-}
-
 val iosArchiveName = if (iosFromPythonOrg) {
     "python-$pythonVersion-iOS-XCframework.tar.gz"
 } else {
@@ -346,11 +540,19 @@ val downloadPython_ios = tasks.register("downloadPython_ios") {
             }
         }
         
-        // Neither source gives us something verifiable in pure Gradle: BeeWare publishes no
-        // checksums or signatures at all, and python.org publishes sigstore material (.sig/.crt/
-        // .sigstore) whose verification is not reasonable to implement here. Both are pinned by
-        // the local lockfile instead, same as every other archive.
+        // The two iOS sources are not equally verifiable, and the difference is worth stating.
+        //
+        // BeeWare (<= 3.14) publishes five tar.gz assets and nothing else -- no checksums, no
+        // signatures, no GitHub attestations. The lockfile pin is the only honest instrument
+        // there, and no amount of build wiring changes that.
+        //
+        // python.org (3.15+) publishes a sibling `<archive>.sigstore` bundle, which IS verifiable
+        // here. An earlier comment claimed otherwise; it was wrong.
+        //
+        // The lockfile applies to both regardless, because it is the only check that works
+        // offline and the only one that covers every source.
         verifyChecksum(iosLockKey, iosArchive)
+        if (iosFromPythonOrg) maybeVerifySigstore(iosArchive, iosUrl)
 
         val isEmpty = iosExtractDir.list()?.isEmpty() ?: true
         if (isEmpty) {

@@ -7,9 +7,12 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * Red-phase functional tests for [PyDict]: construction, key lookup,
- * mutation, membership and conversion to/from Kotlin maps. All members are
- * `TODO`.
+ * Functional tests for [PyDict]: construction from a Kotlin map, key lookup
+ * (present and missing), insertion, removal, membership, and conversion back
+ * to a Kotlin map.
+ *
+ * This header used to say all members were `TODO` stubs. They are implemented
+ * now, so every test here is a regression test and any failure is a real one.
  */
 class PyDictTest {
 

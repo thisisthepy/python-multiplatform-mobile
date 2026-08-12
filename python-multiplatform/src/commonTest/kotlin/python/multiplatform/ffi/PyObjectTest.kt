@@ -9,13 +9,13 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * Red-phase functional tests for [PyObject]: attribute access, equality,
- * string conversion and calling.
+ * Functional tests for [PyObject]: attribute get/set/delete, equality and
+ * hashing, `str`/`repr`, the object's Python type, calling via `invoke`,
+ * `isCallable`, truthiness and `richCompare`.
  *
- * Attribute get/set/delete are already implemented on [PyObject] (unlike
- * most of the rest of the object model), so those are expected to genuinely
- * pass against a live interpreter; [PyObject.invoke] and friends are still
- * `TODO` and are expected to fail with [NotImplementedError].
+ * This header used to say [PyObject.invoke] and friends were `TODO` stubs
+ * expected to fail with [NotImplementedError]. They are all implemented now,
+ * so every test here is a regression test and any failure is a real one.
  */
 class PyObjectTest {
 

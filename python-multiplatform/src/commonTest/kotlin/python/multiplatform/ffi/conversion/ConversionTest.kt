@@ -6,14 +6,17 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 
 /**
- * Red-phase functional tests for the conversion layer (`ConversionStrategy`,
- * `PyContext`, `PyValue`).
+ * Functional tests for the conversion layer (`ConversionStrategy`,
+ * `PyContext`, `PyValue`): the strategy variants, [PyValue] both returning a
+ * pre-supplied native value and deriving one lazily when none was given,
+ * `convertValue` under the active strategy, `withContext` restoring the
+ * previous strategy on exit, and the `str(obj)` fallback that NATIVE
+ * conversion of a user-defined object currently lands on.
  *
- * [PyValue] itself is a thin, already-functional holder (it just stores
- * whatever was handed to its constructor), so the "already populated" case
- * genuinely passes; everything that requires *deriving* a conversion from a
- * live [python.multiplatform.ffi.PyObject] (via [PyContext]) is `TODO` and
- * is expected to fail.
+ * This header used to say everything that *derives* a conversion from a live
+ * [python.multiplatform.ffi.PyObject] via [PyContext] was `TODO` and expected
+ * to fail. That path is implemented now, so every test here is a regression
+ * test and any failure is a real one.
  */
 class ConversionTest {
 
@@ -63,7 +66,11 @@ class ConversionTest {
         val obj = PythonTestFixture.eval("[1, 2, 3]")
         val raw = PyContext(ConversionStrategy.RAW).convertValue(obj)
         val native = PyContext(ConversionStrategy.NATIVE).convertValue(obj)
-        // Once implemented: RAW should hand back a PyObject/pointer-ish value, NATIVE a Kotlin List.
+        // Both routes are implemented. RAW hands back the bare `NativePointer` -- no wrapper
+        // materialised at all, which is what keeps it distinct from UNMANAGED (see
+        // `PyContext.convertValue`); NATIVE walks the object through `pyObjectToNative` and
+        // returns a Kotlin `List`. What is asserted is that the two stay distinguishable, not
+        // what either shape happens to be.
         assertNotEquals(raw, native)
     }
 

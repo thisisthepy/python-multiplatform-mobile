@@ -17,8 +17,19 @@ class BenchmarkTest {
         fun setupPython() {
             if (initialized) return
             initialized = true
-            // Py_Initialize() causes a fatal crash (abort) due to missing 'encodings'
-            // module inside the test binary environment.
+            // Deliberately asks whether an interpreter is already up rather than bringing one up:
+            // a benchmark should not be the thing that owns interpreter lifecycle for the suite.
+            //
+            // This used to be justified by "Py_Initialize() causes a fatal crash (abort) due to
+            // missing 'encodings' module inside the test binary environment", which is no longer
+            // true of the environments this runs in. It is a real failure mode, but it belongs to
+            // a platform whose stdlib has not been staged: desktop and the iOS simulator get a
+            // PYTHONHOME from the build (`InterpreterAvailabilityTest` initialises successfully),
+            // and on Android `PythonInstrumentationRunner` unpacks the stdlib before any test
+            // class loads.
+            //
+            // The consequence of only asking is that these benchmarks measure nothing unless some
+            // earlier test has already initialised. On desktop they do run.
             interpreterAvailable = python.multiplatform.ffi.Python3.isInitialized
             if (!interpreterAvailable) {
                 println("SKIPPED: Python interpreter unavailable (cannot initialize safely). Tests requiring the interpreter will be skipped.")

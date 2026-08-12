@@ -9,11 +9,15 @@ import kotlin.test.assertTrue
 /**
  * Checks that operations leave CPython's reference counts where they found them.
  *
- * This is a different question from [GCLeakTest]. That one asks whether the collector
- * eventually releases what nobody holds any more, which is currently blocked by the GIL still
- * being held by the initialising thread. These tests close every wrapper explicitly, so they
- * exercise the accounting itself: does each operation take the references it claims to take,
- * and give back exactly those?
+ * This is a different question from [GCLeakTest]. That one asks whether the collector eventually
+ * releases what nobody holds any more. This header used to add that it was blocked by the GIL
+ * still being held by the initialising thread -- it is not any more. ROADMAP §1 is closed:
+ * `Python3.initialize()` parks its thread state with `PyEval_SaveThread()`, cleaner threads can
+ * attach through `PyGILState_Ensure`, and [GCLeakTest] passes.
+ *
+ * The two files still ask different things. These tests close every wrapper explicitly, so they
+ * exercise the accounting itself: does each operation take the references it claims to take, and
+ * give back exactly those?
  *
  * Both failure directions matter and both are silent without a test like this. Releasing one
  * too few leaks; releasing one too many frees an object still in use, and the crash surfaces
