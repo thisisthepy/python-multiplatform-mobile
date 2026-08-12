@@ -94,7 +94,7 @@ CPython 콜백 규약은 **전부 관련 객체를 인자로 넘긴다.** 헤더
 | 플랫폼 | 진입 방법 |
 |---|---|
 | Desktop | FFM `Linker.upcallStub` |
-| Android | FFM/JNI upcall |
+| Android | `PyMethodDef` whose `ml_meth` is a C shim in `jni_onload.def`, calling Kotlin/JVM through JNI |
 | iOS / androidNative | `PyMethodDef` + `PyCMethod_New` (`@CName` 심볼은 androidNative 에서만 유효) |
 
 원래 여기에는 "iOS 는 Python 과 Kotlin/Native 가 같은 바이너리이므로 `ctypes.CDLL(None)` 으로 `@CName`
@@ -203,11 +203,47 @@ Only the address-publishing step; the marshalling is shared.
 |---|---|---|
 | **Desktop** | done — `Panama.createUpcallStubII_L`, `UpcallStub.invokeWithArgsStubAddr` | — |
 | **iOS / androidNative** | done — `python.native.ffi.UpcallEntry` (`nativeMain`), a `PyMethodDef` whose `ml_meth` is a `staticCFunction` over `UpcallTrampoline.invoke` and whose `self` carries the handle. `UpcallEntryTest` (`nativeTest`) runs it on the simulator and compiles it for androidNative | cheapest of the three |
-| **Android** | a JNI `static jlong` native method registered with `RegisterNatives`, and a C shim of `PyCFunction` shape that calls it — the boundary is primitives only (`androidMain/README.md`), which `(jlong, jlong) -> jlong` already is | one shim per shape |
+| **Android** | done — `python.native.ffi.UpcallEntry` / `UpcallCallbacks` (`androidMain`) plus the `pmp_upcall_*` shims in `artMain/cinterop/jni_onload.def`. `UpcallEntryTest` (`androidInstrumentedTest`) runs it on `pmp_api26` and `pmp_api36` | one shim per shape, plus a JNI upcall per call |
 | **wasm** | `@WasmExport` on the entry point plus `Table.set` to publish it, measured at 3.1 ns/call in `wasm-experiment` | already proven |
 
 Nothing in that list touches `UpcallTrampoline`; each is the platform's existing upcall mechanism
 pointed at it.
+
+### Android's boundary runs the other way round, and `RegisterNatives` is not it
+
+The Android row above used to read "a JNI `static jlong` native method registered with
+`RegisterNatives`, and a C shim of `PyCFunction` shape that calls it". `RegisterNatives` binds a
+JVM `external fun` to a C function — it is the **downcall** direction, and no arrangement of it
+lets C call Kotlin. What Python needs here is the opposite: a `PyMethodDef`'s `ml_meth` has to be a
+real C function pointer, and Kotlin/JVM on ART can produce none.
+
+So on Android the entry points are C functions in `artMain/cinterop/jni_onload.def`
+(`pmp_upcall_invoke_meth` and the `_pm_resolve` / `_pm_bind` / `_pm_release` trio), and *they* call
+Kotlin, with `CallStaticLongMethod` against `python/native/ffi/UpcallCallbacks` — a class looked up
+once in `JNI_OnLoad` and held as a global ref. `RegisterNatives` still appears, but only for the
+one cold `upcallPublish(long)` that installs the bootstrap into a namespace dict.
+
+That is not a new mechanism. It is exactly the inversion the cycle-collecting proxy type already
+makes for `tp_traverse`/`tp_clear` (`ProxyCallbacks`), down to reusing `pmp_attach` — so the third
+consequence falls out with it: **a Python worker thread is a bare pthread ART has never seen**.
+Every `threading.Thread` is one, so `GetEnv` fails and the shim must
+`AttachCurrentThreadAsDaemon` and detach again on the way out. Skipping the detach is not an
+option — ART aborts the process when a thread it knows about exits without detaching, and a CPython
+worker exits outside our control. `UpcallEntryTest.anUpcallArrivesOnAThreadCPythonCreatedRatherThanFailingToFindTheJvm`
+runs the upcall inside a `threading.Thread` and asserts the thread it landed on is not the
+instrumentation thread, so a pass cannot come from `GetEnv` having succeeded after all.
+
+The GIL rule is unchanged and is what makes this safe: CPython holds the GIL when it calls a
+`PyCFunction`, so the C shims take nothing, and `UpcallTrampoline` still takes its own
+`PyGILState_Ensure`/`Release` pair unconditionally on the Kotlin side. `PyGILState_Ensure` is bound
+as **ordinary JNI** on Android (`PyGILState_EnsureN`), which is what keeps a thread blocked on the
+GIL from stalling the JVM collector — a `@FastNative` or `@CriticalNative` binding of it would
+deadlock the two runtimes against each other the moment upcalls exist. `androidMain/README.md`
+step 3 says this in the abstract; this is the path that makes it concrete.
+
+Cost, which the row's "one shim per shape" understated: one JNI upcall per call, plus an
+attach/detach pair whenever Python calls from a thread it created. Neither is on the marshalling
+path, and neither has been measured yet.
 
 ### The `@CName` + `ctypes.CDLL(None)` route, measured
 
