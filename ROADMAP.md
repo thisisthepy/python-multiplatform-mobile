@@ -388,8 +388,10 @@ extract list items in one call without shipping our own native code.
 
 The runtime is in `reflection/` — `HandleTable` (slot plus generation, so a released handle
 cannot alias onto whatever takes its slot), `UpcallTable`, `ExposedCallable`, `ObjectReference`.
-The generator is `python-multiplatform-ksp/`. Fixture modules under `ksp-fixtures/` run 11 tests
-against a table KSP actually generated, not a hand-written one.
+The generator is `python-multiplatform-ksp/`, wired into a user module by
+`python-multiplatform-gradle-plugin/` (one `id(...)`, no per-target `add("ksp<Target>", ...)`).
+Fixture modules under `ksp-fixtures/` run 29 tests against a table KSP actually generated, not a
+hand-written one.
 
 **It survives a GraalVM native image**, which is the condition the whole design was chosen for:
 
@@ -410,9 +412,12 @@ needed no reflection registration, because it uses none. `sample` carries the bu
 - `tp_traverse` functions are generated and tested, but nothing wires them into CPython's actual
   `tp_traverse` slot, and `tp_clear` and Kotlin-side cycle closing are untouched. Cycles are
   therefore still unsolved in practice — see `docs/object-lifetime.md`.
-- Companion-object members, interfaces, enums and annotation classes are not exposed.
-- The aggregator uses `Dependencies.ALL_FILES`, correct but reprocessed every build.
-- No convenience Gradle plugin; user modules wire KSP per target by hand.
+- ~~Companion-object members, interfaces, enums and annotation classes are not exposed.~~
+  **Closed**, except annotation classes, which are now deliberately excluded — see below.
+- ~~The aggregator uses `Dependencies.ALL_FILES`, correct but reprocessed every build.~~
+  **Measured, and the aggregator turned out not to be the cause** — see below.
+- ~~No convenience Gradle plugin; user modules wire KSP per target by hand.~~
+  **Closed:** `python-multiplatform-gradle-plugin/`, applied by id.
 
 **Was:** entirely unimplemented — `ClassLookup.kt`, `ObjectReference.kt` and `ReflectedClass.kt`
 held 1–3 lines each, and this was README's only unchecked box.
@@ -452,10 +457,39 @@ trivial one-liners and a real function's body adds its own size on top. Whether 
 real library's bodies is acceptable is a product judgement the measurement informs but does not
 settle. See `docs/upcall-table-design.md` §4.
 
-**Companion object members, interfaces, enums and annotation classes are not exposed yet.** The
-generator currently walks top-level functions and `ClassKind.CLASS` declarations (their primary
-constructor, member functions, and properties). `binding-policy.md`'s "companion object members
-exposed as static methods" line is not implemented.
+**The declaration surface is now the whole one, and what is left out is left out on purpose.**
+Companion members and `object` members become receiver-less entries under the *owner's* name
+(`Owner.member`, two new `CallableKind`s: `STATIC_GETTER`/`STATIC_SETTER`); interfaces get entries
+and no constructor, so a Kotlin object reaching Python through a handle is callable through the
+interface even when its concrete class does not redeclare the member; an `enum class` gets one
+`STATIC_GETTER` per entry plus `name`, `ordinal` and `valueOf`, and its `ReflectedClass` carries
+`enumEntryNames` so the Python side can build an `enum.Enum` mirror without the boundary having to
+marshal a collection. Nested declarations and top-level properties came along with it.
+**Annotation classes are exposed nowhere**: applying one is a compile-time act and reading one
+back needs runtime reflection, which is the single thing this design cannot have, so an instance
+Python could construct would have nothing to attach to. `values()`/`entries` are out for the same
+kind of reason — they return collections the boundary cannot carry.
+
+Three latent generator bugs surfaced while widening the surface, each of which produced a
+*generated file that did not compile* rather than anything the processor could detect: a cast to a
+generic type without its arguments (`args[0] as kotlin.collections.List`), a constructor entry for
+an abstract class, and a declaration over a type parameter (`args[0] as T`). Parameter types now
+render their arguments; abstract, sealed and `inner` classes get no constructor entry; generic
+declarations are not exposed at all. `data class` `copy`/`componentN` are dropped too — KSP does
+report them (it does not report `equals`/`hashCode`/`toString`), and `binding-policy.md` already
+said compiler-generated members stay out.
+
+**Incremental aggregation: measured, and the aggregator was never the problem.** KSP's own dirty
+set (`ksp.incremental.log=true`, `build/kspCaches/.../kspDirtySet.log`) reports **100% dirty on a
+one-file change in a two-file module both before and after** narrowing the aggregator's
+`Dependencies` from `ALL_FILES` to the fragment files it actually reads. The cause is one level
+down: a module's own `Fragment_<module>` is legitimately an aggregating output over *every* source
+file — blacklist exposure means any file can add an entry — so any change regenerates it, and KSP
+then marks every file that maps to it dirty. `ALL_FILES` on the aggregator stays, because the
+narrower form buys nothing measurable and its safety under a classpath-only change was never
+established. The only route to real incrementality is per-file fragments (one isolating output per
+source file), which changes fragment naming, `UpcallTable`'s per-module idempotency and duplicate
+detection — a design change, not a tweak. Recorded in `docs/upcall-table-design.md` §11.5.
 
 **Cycle collection: the generator's half is done.** `tp_traverse` on the Python proxy must reach
 through the handle into the Kotlin object's `PyObject`-typed fields, which means the generator

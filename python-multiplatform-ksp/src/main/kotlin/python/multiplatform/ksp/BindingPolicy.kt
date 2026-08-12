@@ -2,6 +2,7 @@ package python.multiplatform.ksp
 
 import com.google.devtools.ksp.getVisibility
 import com.google.devtools.ksp.isConstructor
+import com.google.devtools.ksp.symbol.ClassKind
 import com.google.devtools.ksp.symbol.KSAnnotated
 import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSDeclaration
@@ -34,15 +35,11 @@ object BindingPolicy {
 
     private fun isPublic(declaration: KSDeclaration): Boolean = declaration.getVisibility() == Visibility.PUBLIC
 
-    /** Top-level functions only; member functions go through [isExposedMember]. */
+    /** Top-level functions only; member functions go through [isExposedMemberFunction]. */
     fun isExposedTopLevelFunction(function: KSFunctionDeclaration, excludePackages: List<String>): Boolean {
         val qualifiedName = function.qualifiedName?.asString() ?: return false
         if (isExcludedByPackage(qualifiedName, excludePackages)) return false
-        if (!isPublic(function)) return false
-        if (hasPythonInternal(function)) return false
-        if (Modifier.SUSPEND in function.modifiers) return false
-        if (Modifier.INLINE in function.modifiers && function.typeParameters.isNotEmpty()) return false
-        if (function.extensionReceiver != null) return false
+        if (!isExposedFunctionShape(function)) return false
         val params = function.parameters
         val isEntryPoint = function.simpleName.asString() == "main" &&
             (params.isEmpty() || (params.size == 1 && params[0].type.toShape().qualifiedName == "kotlin.Array"))
@@ -50,30 +47,106 @@ object BindingPolicy {
         return true
     }
 
+    /**
+     * The class-like declarations that get a `ReflectedClass`: classes, interfaces, enum classes
+     * and objects. What is deliberately *not* here:
+     *
+     * - **`ANNOTATION_CLASS`** -- reading an annotation off a declaration needs runtime
+     *   reflection, which is the one thing this design cannot have (Kotlin/Native has none,
+     *   GraalVM's closed world forbids it), and an annotation instance constructed from Python
+     *   could not be attached to anything. There is nothing usable on the other end of the call.
+     * - **`ENUM_ENTRY`** -- not a type of its own to Python, but one value of its enum; exposed
+     *   as a `STATIC_GETTER` on the enum instead.
+     * - **companion objects** -- folded into their owner's entries under the owner's name
+     *   (`docs/binding-policy.md`: "companion 객체 자체를 따로 노출할 필요는 없다").
+     * - **generic declarations** -- see [hasRenderableSignature].
+     */
     fun isExposedClass(classDeclaration: KSClassDeclaration, excludePackages: List<String>): Boolean {
         val qualifiedName = classDeclaration.qualifiedName?.asString() ?: return false
         if (isExcludedByPackage(qualifiedName, excludePackages)) return false
         if (!isPublic(classDeclaration)) return false
         if (hasPythonInternal(classDeclaration)) return false
-        return classDeclaration.classKind == com.google.devtools.ksp.symbol.ClassKind.CLASS
+        if (Modifier.EXPECT in classDeclaration.modifiers) return false
+        if (classDeclaration.isCompanionObject) return false
+        if (!hasRenderableSignature(classDeclaration)) return false
+        return classDeclaration.classKind in EXPOSED_CLASS_KINDS
+    }
+
+    /**
+     * Whether Python may build an instance: only an ordinary, concrete, non-`inner` class.
+     *
+     * An abstract or sealed class cannot be constructed at all -- "Cannot create an instance of
+     * an abstract class", observed as a compile failure of the *generated* fragment, because the
+     * generator emitted a constructor entry for any class with a public primary constructor. An
+     * `inner` class needs an outer instance the boundary has nowhere to put. Interfaces, objects
+     * and enums have no Python-callable constructor by construction.
+     */
+    fun isConstructible(classDeclaration: KSClassDeclaration): Boolean {
+        if (classDeclaration.classKind != ClassKind.CLASS) return false
+        if (Modifier.ABSTRACT in classDeclaration.modifiers) return false
+        if (Modifier.SEALED in classDeclaration.modifiers) return false
+        if (Modifier.INNER in classDeclaration.modifiers) return false
+        return true
     }
 
     /** Member function of an already-[isExposedClass] class. Constructors are handled
      * separately via [KSClassDeclaration.primaryConstructor]. */
     fun isExposedMemberFunction(function: KSFunctionDeclaration): Boolean {
-        if (!isPublic(function)) return false
-        if (hasPythonInternal(function)) return false
-        if (Modifier.SUSPEND in function.modifiers) return false
-        if (Modifier.INLINE in function.modifiers && function.typeParameters.isNotEmpty()) return false
-        if (function.extensionReceiver != null) return false
         if (function.isConstructor()) return false
-        return true
+        return isExposedFunctionShape(function)
     }
+
+    /**
+     * `copy` and `componentN` on a `data class`.
+     *
+     * `docs/binding-policy.md` lists compiler-generated members as not exposed, and this is the
+     * subset KSP actually reports -- observed, not assumed: a generated fragment for
+     * `data class Point(val x: Long, val y: Long)` carried `Point.copy`, `Point.component1` and
+     * `Point.component2`, but no `equals`, `hashCode` or `toString`. `componentN` has no meaning
+     * on the Python side (the properties are already exposed by name) and `copy` loses the
+     * default arguments that are its whole point, so both are noise in the table.
+     */
+    fun isCompilerGeneratedDataClassMember(owner: KSClassDeclaration, function: KSFunctionDeclaration): Boolean {
+        if (Modifier.DATA !in owner.modifiers) return false
+        val name = function.simpleName.asString()
+        return name == "copy" || COMPONENT_N.matches(name)
+    }
+
+    private val COMPONENT_N = Regex("component\\d+")
 
     fun isExposedProperty(property: KSPropertyDeclaration): Boolean {
         if (!isPublic(property)) return false
         if (hasPythonInternal(property)) return false
+        if (Modifier.EXPECT in property.modifiers) return false
         if (property.extensionReceiver != null) return false
         return true
     }
+
+    private fun isExposedFunctionShape(function: KSFunctionDeclaration): Boolean {
+        if (!isPublic(function)) return false
+        if (hasPythonInternal(function)) return false
+        if (Modifier.SUSPEND in function.modifiers) return false
+        if (Modifier.EXPECT in function.modifiers) return false
+        if (function.extensionReceiver != null) return false
+        if (!hasRenderableSignature(function)) return false
+        return true
+    }
+
+    /**
+     * Generic declarations are not exposed, whatever their visibility.
+     *
+     * A generated entry is a lambda over `Array<Any?>`, so every parameter and every receiver
+     * needs a cast to a type spelled out in source. A type parameter has no such spelling:
+     * `args[0] as T` is an unresolved reference from the fragment's file, and a cast to the raw
+     * `Box` is "One type argument expected". Both were observed as compile failures of generated
+     * code, not as anything the processor itself could detect.
+     *
+     * This is wider than `docs/binding-policy.md` records -- that excluded only
+     * `inline` + `reified`, the subset where the type is erased. Erasing to `Box<*>` instead was
+     * rejected: the receiver would still not satisfy a member declared over `T`.
+     */
+    private fun hasRenderableSignature(declaration: KSDeclaration): Boolean = declaration.typeParameters.isEmpty()
+
+    private val EXPOSED_CLASS_KINDS =
+        setOf(ClassKind.CLASS, ClassKind.INTERFACE, ClassKind.ENUM_CLASS, ClassKind.OBJECT)
 }

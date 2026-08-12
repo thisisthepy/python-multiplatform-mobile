@@ -13,7 +13,18 @@ enum class Tag { INT, FLOAT, BOOLEAN, STRING, BYTES, UNIT, OBJECT }
  * A `KSType` is reduced to this before any codegen decision is made, so [tagFor],
  * [castExpression] and [wrapReturnExpression] can be unit-tested without a real `Resolver`.
  */
-data class TypeShape(val qualifiedName: String, val nullable: Boolean)
+data class TypeShape(
+    val qualifiedName: String,
+    val nullable: Boolean,
+    /**
+     * The type as it must appear in generated source, **without** the trailing `?` --
+     * [qualifiedName] plus its type arguments where it has them, e.g.
+     * `kotlin.collections.List<kotlin.String>`. A cast to the bare qualified name of a generic
+     * type is not valid Kotlin ("One type argument expected"), and that surfaced as a compile
+     * failure of the *generated* file rather than as anything the processor could notice.
+     */
+    val rendered: String = qualifiedName,
+)
 
 /** Which [Tag] a Kotlin type is marshalled as. Anything not one of the seven primitives crosses
  * as [Tag.OBJECT] -- a raw Kotlin reference, not a boxed value. */
@@ -50,7 +61,7 @@ fun castExpression(shape: TypeShape, argsExpr: String): String {
         "kotlin.Short" -> if (shape.nullable) "($argsExpr as Long?)?.toShort()" else "($argsExpr as Long).toShort()"
         "kotlin.Byte" -> if (shape.nullable) "($argsExpr as Long?)?.toByte()" else "($argsExpr as Long).toByte()"
         "kotlin.Float" -> if (shape.nullable) "($argsExpr as Double?)?.toFloat()" else "($argsExpr as Double).toFloat()"
-        else -> "$argsExpr as ${shape.qualifiedName}$q"
+        else -> "$argsExpr as ${shape.rendered}$q"
     }
 }
 

@@ -47,6 +47,19 @@ enum class CallableKind(val hasReceiver: Boolean) {
 
     /** Property setter, `var` only. `args[0]` is the receiver, `args[1]` the new value. */
     SETTER(true),
+
+    /**
+     * A property read that needs no instance: a `companion object` or `object` property, or an
+     * enum entry. `args` is empty.
+     *
+     * Distinct from [FUNCTION] with arity 0 because Python renders it as an attribute on the
+     * type rather than as a callable, and distinct from [GETTER] because there is no receiver to
+     * put in `args[0]` -- treating it as one shifts every argument by a slot.
+     */
+    STATIC_GETTER(false),
+
+    /** The `var` counterpart of [STATIC_GETTER]. `args[0]` is the new value, not a receiver. */
+    STATIC_SETTER(false),
 }
 
 

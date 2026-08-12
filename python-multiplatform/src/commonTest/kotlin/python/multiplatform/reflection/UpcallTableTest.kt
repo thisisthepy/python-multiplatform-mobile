@@ -317,4 +317,59 @@ class UpcallTableTest {
         assertTrue(HandleTable.release(ref))
         assertNull(HandleTable.resolve(ref))
     }
+
+    // ----------------------------------------- declaration kinds whose members have no receiver
+
+    @Test
+    fun staticAccessorsCarryNoReceiverSlot() {
+        // A companion/object property and an enum entry are read without an instance, so unlike
+        // GETTER/SETTER their args array has no receiver in slot 0. Getting that wrong shifts
+        // every argument by one, which is exactly the failure the arity metadata exists to stop.
+        UpcallTable.install(listOf(TestStaticsFragment))
+
+        val getter = UpcallTable.callable(UpcallTable.resolve("test.statics.Registry.size"))
+        assertEquals(CallableKind.STATIC_GETTER, getter.kind)
+        assertFalse(getter.kind.hasReceiver)
+        assertEquals(0, getter.expectedArgCount)
+
+        val setter = UpcallTable.callable(UpcallTable.resolve("test.statics.Registry.size="))
+        assertEquals(CallableKind.STATIC_SETTER, setter.kind)
+        assertFalse(setter.kind.hasReceiver)
+        assertEquals(1, setter.expectedArgCount)
+
+        UpcallTable.invoke(UpcallTable.resolve("test.statics.Registry.size="), arrayOf(7L))
+        assertEquals(7L, UpcallTable.invoke(UpcallTable.resolve("test.statics.Registry.size"), arrayOf()))
+        assertEquals("pong", UpcallTable.invoke(UpcallTable.resolve("test.statics.Registry.ping"), arrayOf()))
+    }
+
+    @Test
+    fun anEnumEntryResolvesToTheOneInstanceAndItsMethodsTakeItAsReceiver() {
+        // The Python side builds an `enum.Enum` mirror from the entry names and reaches each
+        // member through its accessor; identity has to hold or `Color.RED is Color.RED` fails.
+        UpcallTable.install(listOf(TestStaticsFragment))
+
+        val red = UpcallTable.invoke(UpcallTable.resolve("test.statics.Color.RED"), arrayOf())
+        assertSame(TestColor.RED, red)
+        assertSame(red, UpcallTable.invoke(UpcallTable.resolve("test.statics.Color.RED"), arrayOf()))
+
+        val describe = UpcallTable.resolve("test.statics.Color.describe")
+        assertEquals("RED/1", UpcallTable.invoke(describe, arrayOf(red)))
+    }
+
+    @Test
+    fun aClassDescriptorRecordsWhichKotlinShapeItCameFrom() {
+        // An interface has no constructor, an object has exactly one instance and an enum has a
+        // fixed set of them: the Python side cannot pick a proxy shape from member names alone.
+        UpcallTable.install(listOf(TestAppFragment, TestStaticsFragment))
+
+        val counter = ClassLookup.require("test.app.Counter")
+        assertEquals(ReflectedClassKind.CLASS, counter.kind)
+        assertEquals(emptyList(), counter.enumEntryNames)
+
+        assertEquals(ReflectedClassKind.OBJECT, ClassLookup.require("test.statics.Registry").kind)
+
+        val color = ClassLookup.require("test.statics.Color")
+        assertEquals(ReflectedClassKind.ENUM, color.kind)
+        assertEquals(listOf("RED", "GREEN"), color.enumEntryNames)
+    }
 }

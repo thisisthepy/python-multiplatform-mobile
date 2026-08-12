@@ -72,4 +72,32 @@ class TypeShapeTest {
         assertEquals("x.add()", wrapReturnExpression(TypeShape("kotlin.Long", false), "x.add()"))
         assertEquals("x.build()", wrapReturnExpression(TypeShape("com.example.Widget", false), "x.build()"))
     }
+
+    @Test
+    fun castOfAGenericTypeKeepsItsTypeArgumentsOrTheGeneratedCodeDoesNotCompile() {
+        // `args[0] as kotlin.collections.List` is not valid Kotlin -- "One type argument
+        // expected". Observed as a real compile failure of a generated fragment before the
+        // renderer carried arguments through.
+        val listOfString = TypeShape(
+            qualifiedName = "kotlin.collections.List",
+            nullable = false,
+            rendered = "kotlin.collections.List<kotlin.String>",
+        )
+        assertEquals("args[0] as kotlin.collections.List<kotlin.String>", castExpression(listOfString, "args[0]"))
+
+        val nullableMap = TypeShape(
+            qualifiedName = "kotlin.collections.Map",
+            nullable = true,
+            rendered = "kotlin.collections.Map<kotlin.String, kotlin.Long>",
+        )
+        assertEquals(
+            "args[0] as kotlin.collections.Map<kotlin.String, kotlin.Long>?",
+            castExpression(nullableMap, "args[0]"),
+        )
+    }
+
+    @Test
+    fun shapeWithoutAnExplicitRenderingFallsBackToItsQualifiedName() {
+        assertEquals("com.example.Counter", TypeShape("com.example.Counter", false).rendered)
+    }
 }

@@ -41,9 +41,17 @@ class GeneratedTableTest {
     fun everyModuleParticipatesInTheAggregatedTable() {
         // Proves the two-round aggregation: the app's own fragment (round 1) and the library's
         // (found on the compiled classpath in round 2) both land in one FunctionTable.
-        assertEquals(setOf("ksp_fixture_library", "ksp_fixture_app"), UpcallTable.moduleNames)
+        //
+        // The names are what `python-multiplatform-gradle-plugin` derives from each module's
+        // group and path -- neither fixture states a module name any more, and the group is in
+        // there because every fragment object in every artifact shares one package.
+        assertEquals(
+            setOf("io_github_thisisthepy_ksp_fixtures_library", "io_github_thisisthepy_ksp_fixtures_app"),
+            UpcallTable.moduleNames,
+        )
         assertTrue(UpcallTable.resolve("fixture.library.add").isValid)
         assertTrue(UpcallTable.resolve("fixture.app.double").isValid)
+        assertTrue(UpcallTable.resolve("fixture.app.triple").isValid, "every file in a module feeds its one fragment")
     }
 
     @Test
