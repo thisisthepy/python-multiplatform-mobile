@@ -3,6 +3,7 @@ package python.multiplatform.ffi.upcall
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.exceptions.PyException
+import python.multiplatform.ffi.types.basic.PyBool
 import python.multiplatform.ffi.types.basic.PyString
 import python.multiplatform.ffi.withGIL
 import python.multiplatform.reflection.ExposedCallable
@@ -31,8 +32,15 @@ import python.native.ffi.toRawValue
  *
  * The cost of that choice is that the boundary returns two different Python types for one Kotlin
  * declaration, so the Python-side proxy has to be an `async def` that awaits its result only when
- * the result is awaitable. That is what makes `await kotlin_fn(x)` uniform to the caller while
- * leaving the fast path free.
+ * the result is awaitable. [PythonProxySource] generates exactly that.
+ *
+ * ### Cancellation
+ *
+ * `Future.cancel()` settles the `Future` immediately and tells the Kotlin coroutine nothing, so a
+ * completion can arrive for a call nobody is waiting for any more. Delivering it would raise
+ * `InvalidStateError` inside a loop callback; [resolve] documents what that was measured to cost and
+ * what is done about it. The Kotlin side of cancellation -- what [PendingCall.cancel] can and cannot
+ * do -- is on [PendingCall].
  *
  * ### What requires the application to be async
  *
@@ -99,10 +107,14 @@ internal object AsyncUpcall {
         val loop = runningLoop()
         val future = loop.getAttr("create_future").invoke()
         val tag = entry.returnType
+        // Resolved here, on the upcall thread, rather than inside the completion: the completing
+        // thread may be one CPython has never seen, and this keeps its GIL scope down to the calls
+        // that have to be there. `PythonProxySource` installs it if nothing else has.
+        val settle = PythonProxySource.settleFunction()
         // Registering after the future exists: a completion that lands between the isDone check
         // above and this line fires the listener inline, on this thread, with the GIL already held
         // -- which is exactly what the listener is written to tolerate.
-        call.onCompleted { completed -> resolve(loop, future, tag, completed) }
+        call.onCompleted { completed -> resolve(loop, future, settle, tag, completed) }
 
         // The trampoline's contract: the result is a new reference. The wrapper keeps its own,
         // because the completion still needs it.
@@ -128,8 +140,29 @@ internal object AsyncUpcall {
      * from its own loop's thread, and this is the documented hand-off. It is also the only part of
      * candidate (C) that is not simply candidate (B) -- and it is itself a downcall, which is the
      * design doc's point.
+     *
+     * ### Delivering to a `Future` that has stopped waiting
+     *
+     * `Future.cancel()` is complete the instant Python calls it: the awaiting coroutine already has
+     * its `CancelledError` and the `Future` is settled forever. The Kotlin coroutine knew nothing
+     * about that and finished anyway, so its outcome arrives at a `Future` that will not take it,
+     * and `set_result` on a settled `Future` raises `InvalidStateError`.
+     *
+     * **Measured, before this was guarded** (`AsyncUpcallCancellationTest`): the raise lands inside
+     * the loop callback, where asyncio hands it to `call_exception_handler` -- one
+     * `InvalidStateError: invalid state` reported against an application that did nothing wrong and
+     * can do nothing about it, since the value being reported was abandoned deliberately. It did
+     * *not* leak the error indicator and did *not* damage the next call; both were checked, because
+     * this repository has twice been bitten by an indicator left set by one call and charged to
+     * another. So the cost was noise, not corruption -- but noise nobody can act on.
+     *
+     * Two things are done about it, and the second is the one that actually holds. Scheduling is
+     * skipped when the `Future` is already settled, which is the cheap common case; and what gets
+     * scheduled is `_pm_settle`, which re-checks `done()` **inside the loop callback**. Only the
+     * second is a guarantee: the check here and the callback are separated by a hand-off to another
+     * thread, and the cancellation can land in between.
      */
-    private fun resolve(loop: PyObject, future: PyObject, tag: TypeTag, call: PendingCall) {
+    private fun resolve(loop: PyObject, future: PyObject, settle: PyObject, tag: TypeTag, call: PendingCall) {
         withGIL {
             // A loop that has been closed cannot be handed anything; `call_soon_threadsafe` would
             // raise, and that exception has nowhere useful to go from here. Checking is not a
@@ -137,10 +170,25 @@ internal object AsyncUpcall {
             // possible, and PendingCall.deliver parks it in `deliveryFailure`.
             if (loop.getAttr("is_closed").invoke().toString() == "True") return@withGIL
 
+            // Already settled: cancelled, or resolved by something else. Nothing to deliver, and
+            // recording it on the call keeps `isCancelled` honest for anyone who reads it after the
+            // fact. This is a shortcut, not the guard -- see the class-level note above.
+            if (future.getAttr("done").invoke().toString() == "True") {
+                call.cancel()
+                return@withGIL
+            }
+
+            // A body that cooperated with `PendingCall.cancel` unwinds with CancellationException.
+            // Turning that into a `set_exception` would be answering a question nobody is still
+            // asking -- and the Future it would answer is the settled one that caused the
+            // cancellation. Dropped here rather than in the guard so no Python exception object is
+            // built for it at all.
+            if (call.isCancelled) return@withGIL
+
             val callSoonThreadsafe = loop.getAttr("call_soon_threadsafe")
             val failure = call.failure
             if (failure != null) {
-                callSoonThreadsafe.invoke(future.getAttr("set_exception"), pythonExceptionFor(failure))
+                callSoonThreadsafe.invoke(settle, future, PyBool.from(false), pythonExceptionFor(failure))
                 return@withGIL
             }
 
@@ -151,10 +199,10 @@ internal object AsyncUpcall {
                 val raw = UpcallTrampoline.marshalResult(tag, call.value)
                 PyObject(raw.toNativePointer() ?: error("marshalling ${call.value} produced NULL"), borrowed = false)
             } catch (t: Throwable) {
-                callSoonThreadsafe.invoke(future.getAttr("set_exception"), pythonExceptionFor(t))
+                callSoonThreadsafe.invoke(settle, future, PyBool.from(false), pythonExceptionFor(t))
                 return@withGIL
             }
-            callSoonThreadsafe.invoke(future.getAttr("set_result"), marshalled)
+            callSoonThreadsafe.invoke(settle, future, PyBool.from(true), marshalled)
         }
     }
 

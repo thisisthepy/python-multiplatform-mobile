@@ -1,7 +1,9 @@
 package python.multiplatform.ffi.upcall
 
 import kotlin.coroutines.Continuation
-import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.cancellation.CancellationException
+import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.startCoroutine
 
 /**
@@ -31,9 +33,11 @@ import kotlin.coroutines.startCoroutine
  * exposed is the *user's*, and whatever dispatcher it uses is already on their classpath. Starting
  * it takes nothing more than the stdlib.
  *
- * ### [EmptyCoroutineContext], and the fast path that falls out of it
+ * ### No dispatcher, and the fast path that falls out of it
  *
- * With no dispatcher, the body runs on the calling thread until it actually suspends. So a
+ * The coroutine's context is this object and nothing else -- no dispatcher, no [Continuation]
+ * interceptor of any kind (see [cancel] for why the context is not simply empty). So the body runs
+ * on the calling thread until it actually suspends. So a
  * `suspend fun` that never reaches a real suspension point -- which is most of them, most of the
  * time -- is **already complete when [start] returns**, and the boundary can hand Python the real
  * value with no async convention involved at all. `PendingCallTest` pins that.
@@ -56,7 +60,14 @@ import kotlin.coroutines.startCoroutine
  * [python.multiplatform.reflection.HandleTable] already gives it a generational handle and
  * [UpcallTrampoline.releaseObject] already gives Python the way to drop it.
  */
-class PendingCall private constructor() {
+class PendingCall private constructor() : CoroutineContext.Element {
+
+    /**
+     * Makes this reachable from inside the coroutine as `coroutineContext[PendingCall]`, which is
+     * what [ensureActive] and [currentPendingCall] read. Modelled on `kotlinx.coroutines`' `Job`,
+     * whose companion is its own key for the same reason.
+     */
+    override val key: CoroutineContext.Key<PendingCall> get() = PendingCall
 
     /** True once the coroutine has finished, whether with a value or with a [failure]. */
     var isDone: Boolean = false
@@ -80,7 +91,63 @@ class PendingCall private constructor() {
     var deliveryFailure: Throwable? = null
         private set
 
+    /**
+     * True once someone on the Python side has stopped waiting for this -- see [cancel].
+     *
+     * Independent of [isDone]: a cancelled call is normally still running, and a call that
+     * completes after being cancelled is both done and cancelled.
+     */
+    var isCancelled: Boolean = false
+        private set
+
     private var listener: ((PendingCall) -> Unit)? = null
+
+    /**
+     * Records that whoever was waiting for this call has stopped, and returns whether that was news.
+     *
+     * ### What this is not
+     *
+     * **It does not stop the coroutine.** It cannot, and the reason is structural rather than a
+     * missing feature. [start] hands its own [Continuation] to `startCoroutine` as the coroutine's
+     * *completion*, which is resumed exactly once, when the whole body is finished. The
+     * continuation that represents the body's current suspension point is a different object
+     * entirely, and it belongs to whoever created the suspension -- the user's
+     * `suspendCoroutine`, or their dispatcher, or `kotlinx.coroutines` machinery this library has
+     * no dependency on. Nothing here ever sees it, and the stdlib offers no way to reach it.
+     *
+     * Resuming a continuation twice is undefined, so there is no back door either. Forcible
+     * cancellation is what a `Job` tree is *for*, and building one is `kotlinx.coroutines`'
+     * job; `docs/upcall-async-design.md` §6 states the no-dependency rule this obeys.
+     *
+     * ### What it is
+     *
+     * A cancellation flag published where a *cooperating* body can read it. Because the coroutine
+     * runs with this object as its [CoroutineContext], the body reaches it as
+     * `coroutineContext[PendingCall]`, and [ensureActive] is the one-line form:
+     *
+     *     suspend fun slowSum(n: Long): Long {
+     *         var total = 0L
+     *         for (i in 0 until n) { ensureActive(); total += step(i) }
+     *         return total
+     *     }
+     *
+     * That is the same bargain `kotlinx.coroutines` makes -- cancellation is cooperative there too,
+     * and a body that never suspends and never checks is uncancellable there as well. The
+     * difference is only that `kotlinx.coroutines`' own suspending functions do the checking for
+     * you, and there are none here.
+     *
+     * A body that does not cooperate keeps running to completion, and its outcome is simply
+     * dropped: [AsyncUpcall] refuses to deliver a result to a `Future` that is already settled.
+     * That is the guarantee this half is actually responsible for.
+     *
+     * @return `true` if this call was live and is now cancelled; `false` if it had already
+     *   completed (there was nothing left to stop) or was already cancelled.
+     */
+    fun cancel(): Boolean {
+        if (isDone || isCancelled) return false
+        isCancelled = true
+        return true
+    }
 
     /**
      * Registers the one thing that gets told when this completes.
@@ -121,12 +188,13 @@ class PendingCall private constructor() {
     }
 
     override fun toString(): String = when {
-        !isDone -> "PendingCall(pending)"
+        !isDone -> if (isCancelled) "PendingCall(cancelled, still running)" else "PendingCall(pending)"
         failure != null -> "PendingCall(failed: ${failure?.message})"
         else -> "PendingCall(done: $value)"
     }
 
-    companion object {
+    /** The key `coroutineContext[PendingCall]` resolves through, and the home of [start]. */
+    companion object : CoroutineContext.Key<PendingCall> {
 
         /**
          * Starts [block] and returns immediately, complete or not.
@@ -134,10 +202,15 @@ class PendingCall private constructor() {
          * Nothing is thrown out of here. [block]'s own failure is parked in [failure] the same way
          * its value would be parked in [value], because the caller is a C frame with no unwinding
          * above it -- the same rule [UpcallTrampoline] states for itself.
+         *
+         * The coroutine's context is the [PendingCall] itself rather than `EmptyCoroutineContext`,
+         * which is what makes [ensureActive] reachable from inside [block]. It adds no dispatcher
+         * and intercepts nothing, so the fast path this class exists for is untouched: an element
+         * that is not a `ContinuationInterceptor` cannot change where the body runs.
          */
         fun start(block: suspend () -> Any?): PendingCall {
             val call = PendingCall()
-            val completion = Continuation<Any?>(EmptyCoroutineContext) { result -> call.complete(result) }
+            val completion = Continuation<Any?>(call) { result -> call.complete(result) }
             try {
                 block.startCoroutine(completion)
             } catch (t: Throwable) {
@@ -148,4 +221,30 @@ class PendingCall private constructor() {
             return call
         }
     }
+}
+
+/**
+ * The [PendingCall] the calling coroutine was started by, or `null` if it was not started by one.
+ *
+ * `null` is the ordinary answer for a `suspend fun` called from anywhere other than the boundary --
+ * a unit test, or one exposed function calling another directly. Exposed code that wants to be
+ * cancellable has to tolerate that, which is why [ensureActive] treats it as "not cancelled"
+ * rather than as an error.
+ */
+suspend fun currentPendingCall(): PendingCall? = coroutineContext[PendingCall]
+
+/**
+ * Throws [CancellationException] if the Python side has stopped waiting for this call.
+ *
+ * The cooperation point [PendingCall.cancel] describes: an exposed `suspend fun` calls this
+ * wherever it could usefully stop, and a call whose `Future` was cancelled unwinds instead of
+ * running to the end for a result nobody will read.
+ *
+ * The throw is recorded in [PendingCall.failure] like any other failure, and goes no further --
+ * [AsyncUpcall] does not deliver it, because the `Future` it would be delivered to is the settled
+ * one that caused the cancellation in the first place.
+ */
+suspend fun ensureActive() {
+    val call = coroutineContext[PendingCall] ?: return
+    if (call.isCancelled) throw CancellationException("the Python side cancelled this call")
 }
