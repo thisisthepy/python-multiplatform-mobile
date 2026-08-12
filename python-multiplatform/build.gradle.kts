@@ -1205,6 +1205,17 @@ kotlin {
             "iosX64Test", "iosArm64Test", "iosSimulatorArm64Test",
             "androidNativeX64Test", "androidNativeArm64Test",
         ).forEach { getByName(it).dependsOn(nativeTest) }
+
+        // ...and `artTest` completes the mirror for the other half: things true of androidNative
+        // but not of iOS. Without it such a test has nowhere to live except duplicated into both
+        // androidNative target source sets, which is the arrangement the comment above describes
+        // as the problem.
+        val artTest by creating {
+            kotlin.srcDir("src/artTest/kotlin")
+        }
+        artTest.dependsOn(nativeTest)
+        listOf("androidNativeX64Test", "androidNativeArm64Test")
+            .forEach { getByName(it).dependsOn(artTest) }
     }
 }
 
@@ -1585,9 +1596,31 @@ listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) 
             val summaries = mutableListOf<String>()
             for (serial in candidates) {
                 val remote = androidNativeTestDeviceDir(abi)
-                val label = runCommand(
-                    listOf(adb.absolutePath, "-s", serial, "shell", "getprop", "ro.build.version.sdk")
-                ).second.trim().let { sdk -> "$serial (API $sdk, $abi)" }
+
+                // Read from outside the process what the process is supposed to discover about
+                // itself. `AndroidNativePlatform` used to be three hardcoded placeholders, and a
+                // hardcoded value is only distinguishable from a real read by comparing against a
+                // source the binary does not control -- these three properties are that source, and
+                // they differ per device, so the same binary is held to a different expectation on
+                // each emulator it is pushed to. See `AndroidNativeDeviceIdentityTest`.
+                fun deviceProperty(name: String): String {
+                    val (code, value) = runCommand(
+                        listOf(adb.absolutePath, "-s", serial, "shell", "getprop", name)
+                    )
+                    val trimmed = value.trim()
+                    if (code != 0 || trimmed.isEmpty()) {
+                        throw GradleException(
+                            "`adb -s $serial shell getprop $name` returned nothing (exit $code). " +
+                                "The androidNative test binary is checked against this value, so " +
+                                "the run cannot proceed without it."
+                        )
+                    }
+                    return trimmed
+                }
+                val deviceSdk = deviceProperty("ro.build.version.sdk")
+                val deviceRelease = deviceProperty("ro.build.version.release")
+                val deviceAbi = deviceProperty("ro.product.cpu.abi")
+                val label = "$serial (API $deviceSdk, $abi)"
 
                 logger.lifecycle("androidNative$targetSuffix: staging to $label")
                 runCommand(listOf(adb.absolutePath, "-s", serial, "shell", "mkdir", "-p", remote))
@@ -1604,6 +1637,8 @@ listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) 
 
                 val filterArgument = testFilter?.let { " --ktest_gradle_filter='$it'" } ?: ""
                 val command = "cd $remote && LD_LIBRARY_PATH=$remote/lib PYTHONHOME=$remote " +
+                    "PMP_DEVICE_API_LEVEL='$deviceSdk' PMP_DEVICE_RELEASE='$deviceRelease' " +
+                    "PMP_DEVICE_ABI='$deviceAbi' " +
                     "./test.kexe --ktest_logger=TEAMCITY$filterArgument"
                 logger.lifecycle("androidNative$targetSuffix: running on $label")
                 val (exitCode, runOutput) = runCommand(listOf(adb.absolutePath, "-s", serial, "shell", command))
