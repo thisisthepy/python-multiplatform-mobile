@@ -602,7 +602,7 @@ Python proxy's instance data, KSP running in user modules too.
 generate fragments into a well-known package; the app module's KSP finds them with
 `getDeclarationsFromPackage` and emits an aggregator holding explicit references. No
 `ServiceLoader`, no reflection, no `@EagerInitialization`. A three-module experiment under
-`ksp-experiment/` compiles and runs, discovering fragments across a module boundary. Two caveats
+`ksp-fixtures/` compiles and runs, discovering fragments across a module boundary. Two caveats
 carried over: `.klib` discovery on a Native target is inferred rather than tested, and
 `getDeclarationsFromPackage` is `@KspExperimental`, so keep that step swappable. See
 `docs/upcall-table-design.md`.

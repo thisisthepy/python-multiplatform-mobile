@@ -11,7 +11,7 @@ This document resolves the two open questions from
 
 | Claim | Basis |
 |---|---|
-| KSP in app module sees generated code from library modules | **Demonstrated.** See `ksp-experiment/`, then the real processor at `python-multiplatform-ksp/` |
+| KSP in app module sees generated code from library modules | **Shipped.** `python-multiplatform-ksp/`, with `ksp-fixtures/` running its generated table |
 | `getDeclarationsFromPackage` is the discovery API | **Demonstrated** |
 | Two-round processing lets the app discover its own fragment too | **Demonstrated** |
 | `.klib` fragment discovery works on a real Kotlin/Native target | **Demonstrated.** `ksp-fixtures/{library,app}` on `androidNativeArm64`: `AppProcessor` round 2 found `Fragment_ksp_fixture_library` from the library's compiled `.klib`, `FunctionTable` compiled, and a real test binary linked (`linkDebugTestAndroidNativeArm64`). Compiled and linked only -- not run, since `androidNativeArm64` targets a device this workspace does not execute tests against |
@@ -141,7 +141,9 @@ The fragments must be referenced explicitly by something that *is* reachable.
 
 This was the suspected answer. **It is now verified experimentally.**
 
-A throwaway project at `ksp-experiment/` (outside `python-multiplatform/src`)
+A throwaway project once stood at `ksp-experiment/`. It was removed once the real processor
+shipped; what it demonstrated is now carried by `ksp-fixtures/`, whose tests run against a table
+KSP actually generated. The shape it established
 demonstrates the complete flow:
 
 ```
