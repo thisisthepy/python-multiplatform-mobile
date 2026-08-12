@@ -5,15 +5,12 @@
 [![Platforms](https://img.shields.io/badge/platforms-Android%20%7C%20iOS%20%7C%20macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20wasmJs-lightgrey.svg)](#supporting-multiplatforms)
 
 <!--
-There is deliberately no build/CI badge here: this repository has no CI. Adding one would
-assert a green build that nothing produces. The three badges removed in favour of the above
-were all broken and pointed away from this project:
-  - a `Build` workflow badge for github.com/thisisthepy/toolchain — a *different* repository,
-    and one with no `Build` workflow either (the badge URL served the text "Not Found").
-  - two JetBrains Marketplace badges still carrying the literal `MARKETPLACE_ID` placeholder
-    from the IntelliJ Platform Plugin Template; they rendered "jetbrains plugin: not found",
-    and this project is a Kotlin Multiplatform library, not an IDE plugin.
-If CI is added later, add its badge then — pointing at this repository.
+CI workflows have been added to this repository, but a build/CI badge is intentionally omitted for now.
+The workflows have not yet been observed running successfully on GitHub Actions.
+Adding a badge before verifying a green build would be asserting a state we haven't seen.
+Once the CI is proven to run and pass, the badge can be added here — pointing at this repository.
+
+(Previously, there were broken badges here pointing to different repositories or carrying template placeholders).
 -->
 
 
