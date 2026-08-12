@@ -257,3 +257,11 @@ collections §3b requires: ~0.45 ms for the whole test, free-threaded only.
   the matching increment went through the deferred-aware `_Py_INCREF_TYPE` and did not happen. That
   balances out once a collection has materialised the references — measured above — but it is
   balanced by the collector, not by the two calls.
+
+## 7. GC Accumulation and Reentrancy Measurement
+
+Measurements taken to verify the consequences of §1 and the safety of the checkpoint confirm:
+
+- **Cyclic Garbage Accumulation (GIL Build)**: A workload creating 10,000 cyclic object groups entirely through the C API (never running a Python bytecode evaluation loop) with `autoDrainInterval = 0` accumulates **20,000+** cyclic garbage objects indefinitely. Because no evaluation loop runs, `_Py_ScheduleGC`'s scheduled bit is never checked by `_CHECK_PERIODIC`, and cyclic GC never occurs.
+- **`autoDrainInterval` Effectiveness**: When running the exact same C API workload but with `autoDrainInterval = 32`, `python-multiplatform` evaluates a dummy function (`__pmp_eval_checkpoint__`) to force the evaluation loop to run periodically. This allows `_CHECK_PERIODIC` to see the scheduled bit, trigger `_Py_RunGC()`, and reclaim the cyclic garbage (leaving only the few objects accumulated since the last checkpoint, rather than 20,000+).
+- **`__del__` Reentrancy Risk**: Executing `PyGC_Collect()` or processing a checkpoint can invoke `__del__` methods. A scenario where `__del__` directly calls back into Kotlin (via Panama upcalls) was executed (`GCSchedulingMeasurementTest.testReentrancyDuringCheckpoint`). The reentrancy is safe on the GIL build: it does not deadlock, it does not loop infinitely, and it successfully executes the Kotlin upcall while the garbage collection is in progress.
