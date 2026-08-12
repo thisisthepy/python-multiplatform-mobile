@@ -123,6 +123,7 @@ extern const char* Py_GetCompiler(void);
 extern const char* Py_GetCopyright(void);
 extern const char* Py_GetPlatform(void);
 extern jint Py_RunMain(void);
+extern jlong PySys_GetObject(const char*);
 
 extern void Py_DecRef(jlong);
 extern void Py_IncRef(jlong);
@@ -149,6 +150,63 @@ extern jlong PyObject_CallNoArgs(jlong);
 extern jlong PyObject_CallObject(jlong, jlong);
 extern const char* PyUnicode_AsUTF8(jlong);
 extern jlong PyUnicode_FromString(const char*);
+
+
+/*
+ * The remaining string-carrying surface.
+ *
+ * Every one of these used to be reached with a Kotlin `String` argument through the name-linked
+ * @CName export, which does not fail cleanly -- it corrupts a pointer and kills the process
+ * (ROADMAP §2). The Kotlin side now hands over an already-encoded C string address as a jlong,
+ * from the intern cache for repeated identifiers and from the per-thread scratch pool for
+ * arbitrary content, so these wrappers only have to cast.
+ *
+ * All ordinary JNI, per §3's default: several of them run arbitrary Python (module top-level
+ * code, __getattr__, codec lookup), and the rest are cold enough that a promotion would buy
+ * nothing.
+ */
+extern jlong Py_CompileString(const char*, const char*, jint);
+extern jlong PyErr_SetFromErrnoWithFilename(jlong, const char*);
+extern void PyErr_SyntaxLocationEx(const char*, jint, jint);
+extern void PyErr_SyntaxLocation(const char*, jint);
+extern jint PyErr_WarnExplicit(jlong, const char*, const char*, jint, const char*, jlong);
+extern jlong PyErr_NewException(const char*, jlong, jlong);
+extern jlong PyErr_NewExceptionWithDoc(const char*, const char*, jlong, jlong);
+extern jint PyUnicodeTranslateError_SetReason(jlong, const char*);
+extern jint Py_EnterRecursiveCall(const char*);
+extern jlong PySys_GetObject(const char*);
+extern jint PySys_SetObject(const char*, jlong);
+extern jint PySys_AuditTuple(const char*, jlong);
+extern void Py_FatalError(const char*);
+extern jlong PyImport_ImportModuleNoBlock(const char*);
+extern jlong PyImport_ImportModuleLevel(const char*, jlong, jlong, jlong, jint);
+extern jlong PyImport_ExecCodeModule(const char*, jlong);
+extern jlong PyImport_ExecCodeModuleEx(const char*, jlong, const char*);
+extern jlong PyImport_ExecCodeModuleWithPathnames(const char*, jlong, const char*, const char*);
+extern const char* PyImport_GetMagicTag(void);
+extern jint PyImport_ImportFrozenModule(const char*);
+extern const char* PyEval_GetFuncName(jlong);
+extern const char* PyEval_GetFuncDesc(jlong);
+extern jint PyObject_HasAttrStringWithError(jlong, const char*);
+extern jint PyObject_HasAttrString(jlong, const char*);
+extern jlong PySequence_Fast(jlong, const char*);
+extern jlong PyMapping_GetItemString(jlong, const char*);
+extern jint PyMapping_SetItemString(jlong, const char*, jlong);
+extern jint PyMapping_HasKeyStringWithError(jlong, const char*);
+extern jint PyMapping_HasKeyString(jlong, const char*);
+extern jlong PyBytes_FromString(const char*);
+extern char* PyBytes_AsString(jlong);
+extern char* PyByteArray_AsString(jlong);
+extern jlong PyUnicode_FromEncodedObject(jlong, const char*, const char*);
+extern jlong PyUnicode_DecodeLocale(const char*, const char*);
+extern jlong PyUnicode_EncodeLocale(jlong, const char*);
+extern jlong PyUnicode_DecodeFSDefault(const char*);
+extern jlong PyUnicode_AsEncodedString(jlong, const char*, const char*);
+extern jlong PyUnicode_Translate(jlong, jlong, const char*);
+extern jint PyUnicode_EqualToUTF8(jlong, const char*);
+extern jint PyUnicode_CompareWithASCIIString(jlong, const char*);
+extern jlong PyUnicode_InternFromString(const char*);
+extern jint PyDict_DelItemString(jlong, const char*);
 
 
 jlong critical_echo0(jlong x) { return x; }
@@ -197,6 +255,16 @@ static jlong f_PyImport_ImportN(JNIEnv *e, jclass c, jlong n) { return PyImport_
 static jlong f_PyObject_GetAttrString(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_GetAttrString(o, (const char*)n); }
 static jlong f_PyErr_Occurred(JNIEnv *e, jclass c) { return PyErr_Occurred(); }
 
+/*
+ * PyList_GetItem had no @FastNative twin, which left it @CriticalNative on every API level -- the
+ * one place in the table that ignores the device axis. That is backwards above API 33: the net
+ * cost of @CriticalNative there is 24.35 ns (34) and 44.05 ns (36 hardware) against @FastNative's
+ * 1.97 and 3.55. It is also the per-element call of bulk list iteration, so the penalty multiplies
+ * by N -- the measured 50065.89 ns for a 1000-element list on API 36 is ~50 ns per element against
+ * a @CriticalNative net cost of 44.05.
+ */
+static jlong f_PyList_GetItemRaw(JNIEnv *e, jclass c, jlong list, jlong i) { return PyList_GetItem(list, i); }
+
 static void f_Py_DecRefN(JNIEnv *e, jclass c, jlong o) { Py_DecRef((jlong)o); }
 static void f_Py_IncRefN(JNIEnv *e, jclass c, jlong o) { Py_IncRef((jlong)o); }
 static jlong f_Py_NewRefN(JNIEnv *e, jclass c, jlong o) { return Py_NewRef((jlong)o); }
@@ -227,6 +295,15 @@ static jlong f_PyImport_AddModuleRefN(JNIEnv *e, jclass c, jlong n) { return PyI
  * The two are not interchangeable at the call site and the Kotlin actual keeps that distinction.
  */
 static jlong f_PyImport_AddModuleN(JNIEnv *e, jclass c, jlong n) { return PyImport_AddModule((const char*)n); }
+/*
+ * Borrowed reference into the interpreter's sys module dict; the caller must not release it.
+ *
+ * Left on the name-linked @CName fallback it did not fail loudly -- it returned a null pointer,
+ * which surfaced as an NPE in GilParkingTest rather than as a crash, so it read like a missing
+ * "modules" entry instead of missing wiring. Ordinary JNI, not @FastNative: sys.__dict__ lookups
+ * go through PyDict_GetItemWithError, which can run a __eq__ or __hash__.
+ */
+static jlong f_PySys_GetObjectN(JNIEnv *e, jclass c, jlong n) { return PySys_GetObject((const char*)n); }
 static void f_PyErr_SetStringN(JNIEnv *e, jclass c, jlong t, jlong m) { PyErr_SetString(t, (const char*)m); }
 static jint f_PyObject_SetAttrStringN(JNIEnv *e, jclass c, jlong o, jlong n, jlong v) { return PyObject_SetAttrString(o, (const char*)n, v); }
 static jint f_PyObject_DelAttrStringN(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_DelAttrString(o, (const char*)n); }
@@ -307,6 +384,49 @@ static jlong f_Py_GetCopyrightN(JNIEnv *e, jclass c) { return (jlong)Py_GetCopyr
 static jlong f_Py_GetPlatformN(JNIEnv *e, jclass c) { return (jlong)Py_GetPlatform(); }
 static jint f_Py_RunMainN(JNIEnv *e, jclass c) { return Py_RunMain(); }
 
+/* ---- string-carrying surface, jlong C-string addresses in and out ---- */
+static jlong f_Py_CompileStringN(JNIEnv *e, jclass c, jlong str, jlong filename, jint start) { return Py_CompileString((const char*)str, (const char*)filename, start); }
+static jlong f_PyErr_SetFromErrnoWithFilenameN(JNIEnv *e, jclass c, jlong type, jlong filename) { return PyErr_SetFromErrnoWithFilename(type, (const char*)filename); }
+static void f_PyErr_SyntaxLocationExN(JNIEnv *e, jclass c, jlong filename, jint lineno, jint col) { PyErr_SyntaxLocationEx((const char*)filename, lineno, col); }
+static void f_PyErr_SyntaxLocationN(JNIEnv *e, jclass c, jlong filename, jint lineno) { PyErr_SyntaxLocation((const char*)filename, lineno); }
+static jint f_PyErr_WarnExplicitN(JNIEnv *e, jclass c, jlong category, jlong message, jlong filename, jint lineno, jlong module, jlong registry) { return PyErr_WarnExplicit(category, (const char*)message, (const char*)filename, lineno, (const char*)module, registry); }
+static jlong f_PyErr_NewExceptionN(JNIEnv *e, jclass c, jlong name, jlong base, jlong dict) { return PyErr_NewException((const char*)name, base, dict); }
+static jlong f_PyErr_NewExceptionWithDocN(JNIEnv *e, jclass c, jlong name, jlong doc, jlong base, jlong dict) { return PyErr_NewExceptionWithDoc((const char*)name, (const char*)doc, base, dict); }
+static jint f_PyUnicodeTranslateError_SetReasonN(JNIEnv *e, jclass c, jlong exc, jlong reason) { return PyUnicodeTranslateError_SetReason(exc, (const char*)reason); }
+static jint f_Py_EnterRecursiveCallN(JNIEnv *e, jclass c, jlong where) { return Py_EnterRecursiveCall((const char*)where); }
+static jint f_PySys_SetObjectN(JNIEnv *e, jclass c, jlong name, jlong v) { return PySys_SetObject((const char*)name, v); }
+static jint f_PySys_AuditTupleN(JNIEnv *e, jclass c, jlong event, jlong args) { return PySys_AuditTuple((const char*)event, args); }
+static void f_Py_FatalErrorN(JNIEnv *e, jclass c, jlong message) { Py_FatalError((const char*)message); }
+static jlong f_PyImport_ImportModuleNoBlockN(JNIEnv *e, jclass c, jlong name) { return PyImport_ImportModuleNoBlock((const char*)name); }
+static jlong f_PyImport_ImportModuleLevelN(JNIEnv *e, jclass c, jlong name, jlong globals, jlong locals, jlong fromlist, jint level) { return PyImport_ImportModuleLevel((const char*)name, globals, locals, fromlist, level); }
+static jlong f_PyImport_ExecCodeModuleN(JNIEnv *e, jclass c, jlong name, jlong co) { return PyImport_ExecCodeModule((const char*)name, co); }
+static jlong f_PyImport_ExecCodeModuleExN(JNIEnv *e, jclass c, jlong name, jlong co, jlong pathname) { return PyImport_ExecCodeModuleEx((const char*)name, co, (const char*)pathname); }
+static jlong f_PyImport_ExecCodeModuleWithPathnamesN(JNIEnv *e, jclass c, jlong name, jlong co, jlong pathname, jlong cpathname) { return PyImport_ExecCodeModuleWithPathnames((const char*)name, co, (const char*)pathname, (const char*)cpathname); }
+static jlong f_PyImport_GetMagicTagN(JNIEnv *e, jclass c) { return (jlong)PyImport_GetMagicTag(); }
+static jint f_PyImport_ImportFrozenModuleN(JNIEnv *e, jclass c, jlong name) { return PyImport_ImportFrozenModule((const char*)name); }
+static jlong f_PyEval_GetFuncNameN(JNIEnv *e, jclass c, jlong func) { return (jlong)PyEval_GetFuncName(func); }
+static jlong f_PyEval_GetFuncDescN(JNIEnv *e, jclass c, jlong func) { return (jlong)PyEval_GetFuncDesc(func); }
+static jint f_PyObject_HasAttrStringWithErrorN(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_HasAttrStringWithError(o, (const char*)n); }
+static jint f_PyObject_HasAttrStringN(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_HasAttrString(o, (const char*)n); }
+static jlong f_PySequence_FastN(JNIEnv *e, jclass c, jlong o, jlong m) { return PySequence_Fast(o, (const char*)m); }
+static jlong f_PyMapping_GetItemStringN(JNIEnv *e, jclass c, jlong o, jlong key) { return PyMapping_GetItemString(o, (const char*)key); }
+static jint f_PyMapping_SetItemStringN(JNIEnv *e, jclass c, jlong o, jlong key, jlong v) { return PyMapping_SetItemString(o, (const char*)key, v); }
+static jint f_PyMapping_HasKeyStringWithErrorN(JNIEnv *e, jclass c, jlong o, jlong key) { return PyMapping_HasKeyStringWithError(o, (const char*)key); }
+static jint f_PyMapping_HasKeyStringN(JNIEnv *e, jclass c, jlong o, jlong key) { return PyMapping_HasKeyString(o, (const char*)key); }
+static jlong f_PyBytes_FromStringN(JNIEnv *e, jclass c, jlong v) { return PyBytes_FromString((const char*)v); }
+static jlong f_PyBytes_AsStringN(JNIEnv *e, jclass c, jlong o) { return (jlong)PyBytes_AsString(o); }
+static jlong f_PyByteArray_AsStringN(JNIEnv *e, jclass c, jlong b) { return (jlong)PyByteArray_AsString(b); }
+static jlong f_PyUnicode_FromEncodedObjectN(JNIEnv *e, jclass c, jlong obj, jlong encoding, jlong errors) { return PyUnicode_FromEncodedObject(obj, (const char*)encoding, (const char*)errors); }
+static jlong f_PyUnicode_DecodeLocaleN(JNIEnv *e, jclass c, jlong str, jlong errors) { return PyUnicode_DecodeLocale((const char*)str, (const char*)errors); }
+static jlong f_PyUnicode_EncodeLocaleN(JNIEnv *e, jclass c, jlong unicode, jlong errors) { return PyUnicode_EncodeLocale(unicode, (const char*)errors); }
+static jlong f_PyUnicode_DecodeFSDefaultN(JNIEnv *e, jclass c, jlong str) { return PyUnicode_DecodeFSDefault((const char*)str); }
+static jlong f_PyUnicode_AsEncodedStringN(JNIEnv *e, jclass c, jlong unicode, jlong encoding, jlong errors) { return PyUnicode_AsEncodedString(unicode, (const char*)encoding, (const char*)errors); }
+static jlong f_PyUnicode_TranslateN(JNIEnv *e, jclass c, jlong unicode, jlong table, jlong errors) { return PyUnicode_Translate(unicode, table, (const char*)errors); }
+static jint f_PyUnicode_EqualToUTF8N(JNIEnv *e, jclass c, jlong unicode, jlong string) { return PyUnicode_EqualToUTF8(unicode, (const char*)string); }
+static jint f_PyUnicode_CompareWithASCIIStringN(JNIEnv *e, jclass c, jlong unicode, jlong string) { return PyUnicode_CompareWithASCIIString(unicode, (const char*)string); }
+static jlong f_PyUnicode_InternFromStringN(JNIEnv *e, jclass c, jlong str) { return PyUnicode_InternFromString((const char*)str); }
+static jint f_PyDict_DelItemStringN(JNIEnv *e, jclass c, jlong p, jlong key) { return PyDict_DelItemString(p, (const char*)key); }
+
 
 /*
  * Composition probes.
@@ -350,7 +470,11 @@ static jint asm_list_to_array(JNIEnv *e, jclass c, jlong list, jlongArray out) {
  * Unlike the echo probes this runs real Python, so the parse/compile/execute work is in both
  * numbers and the ratio shows what fraction of a realistic binder call the boundary actually is.
  */
-#define NUM_METHODS 127
+/*
+ * No NUM_METHODS constant lives here on purpose. There used to be one, it drifted out of step
+ * with the table, and RegisterNatives silently bound a prefix of it. The count is taken with
+ * sizeof at the call site instead, which cannot drift.
+ */
 #define PMP_FILE_INPUT 257
 
 static jint asm_exec(JNIEnv *e, jclass c, jstring code) {
@@ -433,6 +557,217 @@ static jlong test_thread_create_floor(JNIEnv *env, jclass clazz, jlong x) {
     return x;
 }
 
+/*
+ * ===========================================================================
+ * Cycle-collecting proxy type.
+ * ===========================================================================
+ *
+ * Desktop builds tp_traverse/tp_clear as Panama upcall stubs; Kotlin/Native builds them with
+ * staticCFunction. Android has neither -- androidMain is Kotlin/JVM without Panama -- so the two
+ * slots are plain C functions here, and they reach Kotlin the same way everything else on this
+ * path does: through JNI, against a class registered in JNI_OnLoad.
+ *
+ * That inversion decides the division of labour. `visit` is a C function pointer that the JVM
+ * side has no way to call, so C keeps the visiting: Kotlin is asked only "which raw PyObject
+ * pointers does the object behind this handle hold?" and answers with a jlong[]. The loop over
+ * that array, and every call to `visit`, happens on this side.
+ *
+ * CPython holds the GIL when it calls both slots. Nothing here takes it and nothing here may
+ * release it.
+ *
+ * Layout note: the type is declared with a NEGATIVE basicsize, so the 8-byte handle lives in
+ * relative type data reached through PyObject_GetTypeData. Nothing here reads inside PyObject,
+ * which is what keeps the abi3 assumption the rest of the FFI layer makes.
+ */
+
+typedef int (*pmp_visitproc)(void *, void *);
+
+/* Mirrors CPython's PyType_Slot / PyType_Spec. Declared rather than included: this .def has no
+ * Python.h on its include path (only the `python` cinterop does), and both structs are part of
+ * the stable ABI, so their layout is fixed. */
+typedef struct { int slot; void *pfunc; } pmp_type_slot;
+typedef struct {
+    const char *name;
+    int basicsize;
+    int itemsize;
+    unsigned int flags;
+    pmp_type_slot *slots;
+} pmp_type_spec;
+
+extern jlong PyType_FromSpec(void *spec);
+extern void *PyObject_GetTypeData(jlong obj, jlong type);
+
+static jlong g_proxyType = 0;
+static pmp_type_slot g_proxySlots[3];
+static pmp_type_spec g_proxySpec;
+
+static jclass g_proxyCallbacks = NULL;
+static jmethodID g_proxyTraverse = NULL;
+static jmethodID g_proxyClear = NULL;
+
+/*
+ * A JNIEnv for a thread CPython may or may not have entered from the JVM.
+ *
+ * On every path this project currently exercises, the collector runs on the thread that called
+ * into Python, and that thread came *from* ART -- so GetEnv succeeds and nothing is attached.
+ * The exception is a thread CPython created itself (threading.Thread is a bare pthread), where
+ * an allocation can trip the generational threshold and run a collection on a thread ART has
+ * never seen. That is the case AttachCurrentThreadAsDaemon covers.
+ *
+ * The caller must detach again if *attached is set on return. Leaving an attachment behind is
+ * not an option: ART aborts the process when a thread it knows about exits without detaching
+ * ("Native thread exiting without having called DetachCurrentThread"), and a CPython worker
+ * thread is exactly a thread that will exit outside our control. The cost is an attach and a
+ * detach per callback on such threads, which is only paid there.
+ */
+static JNIEnv *pmp_attach(int *attached) {
+    JNIEnv *env = NULL;
+    *attached = 0;
+    if (g_vm == NULL) return NULL;
+    jint r = (*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6);
+    if (r == JNI_OK) return env;
+    if (r == JNI_EDETACHED &&
+        (*g_vm)->AttachCurrentThreadAsDaemon(g_vm, &env, NULL) == JNI_OK) {
+        *attached = 1;
+        return env;
+    }
+    return NULL;
+}
+
+/* The 8 bytes of relative type data on a proxy instance, or NULL if this is not one. */
+static jlong *pmp_handle_slot(jlong obj) {
+    if (g_proxyType == 0 || obj == 0) return NULL;
+    return (jlong *)PyObject_GetTypeData(obj, g_proxyType);
+}
+
+/*
+ * int tp_traverse(PyObject *self, visitproc visit, void *arg)
+ *
+ * The early returns are silent by design -- an object whose class is not registered with
+ * ClassLookup simply has nothing to report. That silence is worth knowing about: it reads
+ * exactly like "the object was never GC-tracked". If a cycle is not collected, check the
+ * registration before suspecting the slots.
+ *
+ * A pending JVM exception is cleared rather than propagated. There is no error channel back
+ * into a running collection except the return value, and a non-zero return aborts the traversal
+ * instead of reporting anything.
+ */
+static int pmp_proxy_traverse(void *self, pmp_visitproc visit, void *arg) {
+    if (visit == NULL) return 0;
+    jlong *slot = pmp_handle_slot((jlong)self);
+    if (slot == NULL) return 0;
+    jlong handle = *slot;
+    if (handle == 0) return 0;
+    if (g_proxyCallbacks == NULL || g_proxyTraverse == NULL) return 0;
+
+    int attached = 0;
+    JNIEnv *env = pmp_attach(&attached);
+    if (env == NULL) return 0;
+
+    int rc = 0;
+    jlongArray targets =
+        (jlongArray)(*env)->CallStaticObjectMethod(env, g_proxyCallbacks, g_proxyTraverse, handle);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        targets = NULL;
+    }
+    if (targets != NULL) {
+        jsize n = (*env)->GetArrayLength(env, targets);
+        if (n > 0) {
+            jlong *buf = (*env)->GetLongArrayElements(env, targets, NULL);
+            if (buf != NULL) {
+                for (jsize i = 0; i < n; i++) {
+                    if (buf[i] == 0) continue;
+                    int r = visit((void *)buf[i], arg);
+                    if (r != 0) { rc = r; break; }
+                }
+                (*env)->ReleaseLongArrayElements(env, targets, buf, JNI_ABORT);
+            }
+        }
+        (*env)->DeleteLocalRef(env, targets);
+    }
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+    return rc;
+}
+
+/*
+ * int tp_clear(PyObject *self)
+ *
+ * Releases the HandleTable entry and nothing else. That entry is the Kotlin-side half of the
+ * cycle and dropping it is what breaks the loop; calling PyObject.close() on the Kotlin object's
+ * fields from here would decrement references the collector is in the middle of accounting for,
+ * which double-frees. The collector reclaims the Python side on its own.
+ *
+ * The slot is zeroed before the upcall, so a second tp_clear on the same object -- or a
+ * tp_dealloc-time release, once one exists -- is a no-op rather than a double release.
+ */
+static int pmp_proxy_clear(void *self) {
+    jlong *slot = pmp_handle_slot((jlong)self);
+    if (slot == NULL) return 0;
+    jlong handle = *slot;
+    if (handle == 0) return 0;
+    *slot = 0;
+    if (g_proxyCallbacks == NULL || g_proxyClear == NULL) return 0;
+
+    int attached = 0;
+    JNIEnv *env = pmp_attach(&attached);
+    if (env == NULL) return 0;
+
+    (*env)->CallStaticVoidMethod(env, g_proxyCallbacks, g_proxyClear, handle);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+    return 0;
+}
+
+/*
+ * Creates the proxy type once and returns its address.
+ *
+ * The spec, its slot array and the name are statics rather than heap allocations, because
+ * PyType_FromSpec stores spec->name directly as tp_name instead of copying it -- a freed name
+ * would leave the type pointing at released memory. The type lives for the process anyway.
+ *
+ * Ordinary JNI: it runs type creation, which can execute arbitrary Python.
+ */
+static jlong proxy_create_type(JNIEnv *e, jclass c) {
+    if (g_proxyType != 0) return g_proxyType;
+
+    /* Slot ids from CPython's typeslots.h; they are ABI, not header-version-dependent. */
+    g_proxySlots[0].slot = 71; /* Py_tp_traverse */
+    g_proxySlots[0].pfunc = (void *)&pmp_proxy_traverse;
+    g_proxySlots[1].slot = 51; /* Py_tp_clear */
+    g_proxySlots[1].pfunc = (void *)&pmp_proxy_clear;
+    g_proxySlots[2].slot = 0;  /* sentinel */
+    g_proxySlots[2].pfunc = NULL;
+
+    g_proxySpec.name = "KotlinProxy";
+    g_proxySpec.basicsize = -8; /* 8 bytes of relative type data: the handle */
+    g_proxySpec.itemsize = 0;
+    /* Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC */
+    g_proxySpec.flags = (1u << 10) | (1u << 14);
+    g_proxySpec.slots = g_proxySlots;
+
+    g_proxyType = PyType_FromSpec(&g_proxySpec);
+    return g_proxyType;
+}
+
+/*
+ * Handle accessors, composed on this side.
+ *
+ * androidMain could not do this itself: writing 8 bytes at a raw address from Kotlin/JVM needs
+ * sun.misc.Unsafe, which is a restricted non-SDK interface on Android. Crossing once with both
+ * the object and the value is also cheaper than exposing PyObject_GetTypeData and poking at the
+ * result, which is what artMain/README.md means by composed functions.
+ */
+static jlong proxy_get_handle(JNIEnv *e, jclass c, jlong obj) {
+    jlong *slot = pmp_handle_slot(obj);
+    return slot == NULL ? 0 : *slot;
+}
+
+static void proxy_set_handle(JNIEnv *e, jclass c, jlong obj, jlong handle) {
+    jlong *slot = pmp_handle_slot(obj);
+    if (slot != NULL) *slot = handle;
+}
+
 int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -448,6 +783,25 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         g_upcallPrimitive = (*env)->GetStaticMethodID(env, g_upcallClass, "upcallPrimitive", "(J)J");
         g_upcallString = (*env)->GetStaticMethodID(env, g_upcallClass, "upcallString", "(Ljava/lang/String;)J");
     }
+
+    /*
+     * The Kotlin half of tp_traverse/tp_clear. A global ref, because the slots are called from
+     * whichever thread the collector runs on, long after this frame is gone.
+     *
+     * Every failure here is cleared rather than propagated: FindClass and GetStaticMethodID both
+     * leave a pending exception on failure, and RegisterNatives below must not run with one set.
+     * A missing class leaves the slots as no-ops, which surfaces as an uncollected cycle rather
+     * than as a crash -- and, unlike an abort during library load, leaves the rest of the
+     * bindings usable.
+     */
+    jclass proxyClazz = (*env)->FindClass(env, "python/multiplatform/ffi/ProxyCallbacks");
+    if (proxyClazz != NULL) {
+        g_proxyCallbacks = (jclass)(*env)->NewGlobalRef(env, proxyClazz);
+        g_proxyTraverse = (*env)->GetStaticMethodID(env, g_proxyCallbacks, "traverse", "(J)[J");
+        g_proxyClear = (*env)->GetStaticMethodID(env, g_proxyCallbacks, "clear", "(J)V");
+        (*env)->DeleteLocalRef(env, proxyClazz);
+    }
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 
     JNINativeMethod methods[] = {
         {"Py_Initialize", "()V", (void *)&Py_Initialize},
@@ -481,6 +835,7 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyObject_GetAttrStringF", "(JJ)J", (void *)&f_PyObject_GetAttrString},
         {"PyErr_OccurredF", "()J", (void *)&f_PyErr_Occurred},
         {"PyList_GetItemRaw", "(JJ)J", (void *)&PyList_GetItem},
+        {"PyList_GetItemRawF", "(JJ)J", (void *)&f_PyList_GetItemRaw},
         {"ffiDirectBufferAddress", "(Ljava/nio/ByteBuffer;)J", (void *)&ffi_direct_addr},
         {"asmExec", "(Ljava/lang/String;)I", (void *)&asm_exec},
         {"asmGetAttr", "(JLjava/lang/String;)J", (void *)&asm_getattr},
@@ -525,6 +880,7 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
 
         {"PyImport_AddModuleRefN", "(J)J", (void *)&f_PyImport_AddModuleRefN},
         {"PyImport_AddModuleN", "(J)J", (void *)&f_PyImport_AddModuleN},
+        {"PySys_GetObjectN", "(J)J", (void *)&f_PySys_GetObjectN},
         {"PyErr_SetStringN", "(JJ)V", (void *)&f_PyErr_SetStringN},
         {"PyObject_SetAttrStringN", "(JJJ)I", (void *)&f_PyObject_SetAttrStringN},
         {"PyObject_DelAttrStringN", "(JJ)I", (void *)&f_PyObject_DelAttrStringN},
@@ -603,6 +959,57 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"Py_GetPlatformN", "()J", (void *)&f_Py_GetPlatformN},
         {"Py_RunMainN", "()I", (void *)&f_Py_RunMainN},
 
+        /*
+         * The rest of the string-carrying surface. Every C string crosses as a jlong address the
+         * Kotlin side already encoded, so none of these takes a jstring.
+         */
+        {"Py_CompileStringN", "(JJI)J", (void *)&f_Py_CompileStringN},
+        {"PyErr_SetFromErrnoWithFilenameN", "(JJ)J", (void *)&f_PyErr_SetFromErrnoWithFilenameN},
+        {"PyErr_SyntaxLocationExN", "(JII)V", (void *)&f_PyErr_SyntaxLocationExN},
+        {"PyErr_SyntaxLocationN", "(JI)V", (void *)&f_PyErr_SyntaxLocationN},
+        {"PyErr_WarnExplicitN", "(JJJIJJ)I", (void *)&f_PyErr_WarnExplicitN},
+        {"PyErr_NewExceptionN", "(JJJ)J", (void *)&f_PyErr_NewExceptionN},
+        {"PyErr_NewExceptionWithDocN", "(JJJJ)J", (void *)&f_PyErr_NewExceptionWithDocN},
+        {"PyUnicodeTranslateError_SetReasonN", "(JJ)I", (void *)&f_PyUnicodeTranslateError_SetReasonN},
+        {"Py_EnterRecursiveCallN", "(J)I", (void *)&f_Py_EnterRecursiveCallN},
+        {"PySys_SetObjectN", "(JJ)I", (void *)&f_PySys_SetObjectN},
+        {"PySys_AuditTupleN", "(JJ)I", (void *)&f_PySys_AuditTupleN},
+        {"Py_FatalErrorN", "(J)V", (void *)&f_Py_FatalErrorN},
+        {"PyImport_ImportModuleNoBlockN", "(J)J", (void *)&f_PyImport_ImportModuleNoBlockN},
+        {"PyImport_ImportModuleLevelN", "(JJJJI)J", (void *)&f_PyImport_ImportModuleLevelN},
+        {"PyImport_ExecCodeModuleN", "(JJ)J", (void *)&f_PyImport_ExecCodeModuleN},
+        {"PyImport_ExecCodeModuleExN", "(JJJ)J", (void *)&f_PyImport_ExecCodeModuleExN},
+        {"PyImport_ExecCodeModuleWithPathnamesN", "(JJJJ)J", (void *)&f_PyImport_ExecCodeModuleWithPathnamesN},
+        {"PyImport_GetMagicTagN", "()J", (void *)&f_PyImport_GetMagicTagN},
+        {"PyImport_ImportFrozenModuleN", "(J)I", (void *)&f_PyImport_ImportFrozenModuleN},
+        {"PyEval_GetFuncNameN", "(J)J", (void *)&f_PyEval_GetFuncNameN},
+        {"PyEval_GetFuncDescN", "(J)J", (void *)&f_PyEval_GetFuncDescN},
+        {"PyObject_HasAttrStringWithErrorN", "(JJ)I", (void *)&f_PyObject_HasAttrStringWithErrorN},
+        {"PyObject_HasAttrStringN", "(JJ)I", (void *)&f_PyObject_HasAttrStringN},
+        {"PySequence_FastN", "(JJ)J", (void *)&f_PySequence_FastN},
+        {"PyMapping_GetItemStringN", "(JJ)J", (void *)&f_PyMapping_GetItemStringN},
+        {"PyMapping_SetItemStringN", "(JJJ)I", (void *)&f_PyMapping_SetItemStringN},
+        {"PyMapping_HasKeyStringWithErrorN", "(JJ)I", (void *)&f_PyMapping_HasKeyStringWithErrorN},
+        {"PyMapping_HasKeyStringN", "(JJ)I", (void *)&f_PyMapping_HasKeyStringN},
+        {"PyBytes_FromStringN", "(J)J", (void *)&f_PyBytes_FromStringN},
+        {"PyBytes_AsStringN", "(J)J", (void *)&f_PyBytes_AsStringN},
+        {"PyByteArray_AsStringN", "(J)J", (void *)&f_PyByteArray_AsStringN},
+        {"PyUnicode_FromEncodedObjectN", "(JJJ)J", (void *)&f_PyUnicode_FromEncodedObjectN},
+        {"PyUnicode_DecodeLocaleN", "(JJ)J", (void *)&f_PyUnicode_DecodeLocaleN},
+        {"PyUnicode_EncodeLocaleN", "(JJ)J", (void *)&f_PyUnicode_EncodeLocaleN},
+        {"PyUnicode_DecodeFSDefaultN", "(J)J", (void *)&f_PyUnicode_DecodeFSDefaultN},
+        {"PyUnicode_AsEncodedStringN", "(JJJ)J", (void *)&f_PyUnicode_AsEncodedStringN},
+        {"PyUnicode_TranslateN", "(JJJ)J", (void *)&f_PyUnicode_TranslateN},
+        {"PyUnicode_EqualToUTF8N", "(JJ)I", (void *)&f_PyUnicode_EqualToUTF8N},
+        {"PyUnicode_CompareWithASCIIStringN", "(JJ)I", (void *)&f_PyUnicode_CompareWithASCIIStringN},
+        {"PyUnicode_InternFromStringN", "(J)J", (void *)&f_PyUnicode_InternFromStringN},
+        {"PyDict_DelItemStringN", "(JJ)I", (void *)&f_PyDict_DelItemStringN},
+
+
+        /* Cycle-collecting proxy type. See the block above pmp_proxy_traverse. */
+        {"proxyCreateType", "()J", (void *)&proxy_create_type},
+        {"proxyGetHandle", "(J)J", (void *)&proxy_get_handle},
+        {"proxySetHandle", "(JJ)V", (void *)&proxy_set_handle},
 
         {"testUpcallPrimitive", "(J)J", (void *)&test_upcall_primitive},
         {"testUpcallString", "(Ljava/lang/String;)J", (void *)&test_upcall_string},

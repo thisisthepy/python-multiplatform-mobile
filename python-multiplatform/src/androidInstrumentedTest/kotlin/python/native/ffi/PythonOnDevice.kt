@@ -2,6 +2,7 @@ package python.native.ffi
 
 import android.content.res.AssetManager
 import androidx.test.platform.app.InstrumentationRegistry
+import python.multiplatform.ffi.Python3
 import java.io.File
 import java.io.FileOutputStream
 
@@ -23,13 +24,43 @@ object PythonOnDevice {
     @Volatile
     private var stdlibStaged = false
 
+    /**
+     * Stages the stdlib, then brings the interpreter up **through [Python3.initialize]** rather
+     * than through a bare `Py_Initialize()`.
+     *
+     * The difference is the GIL, and it was worth three GCLeakTest failures on both API levels.
+     * `Py_Initialize()` returns with the GIL held by its caller. [Python3.initialize] parks that
+     * thread state with `PyEval_SaveThread()` immediately afterwards, which is what lets a cleaner
+     * thread attach through `PyGILState_Ensure` and call `Py_DecRef` (ROADMAP §1).
+     *
+     * Calling the C function directly here skipped the parking, and then made the omission
+     * permanent: `Python3.isInitialized` is seeded from `Py_IsInitialized()` the first time the
+     * object is touched, so it latched to `true` and [Python3.initialize] returned early for the
+     * rest of the process. The instrumentation thread — which is also the thread every test body
+     * runs on — held the GIL for the entire run, and every cleaner blocked on the first
+     * `PyGILState_Ensure` it reached.
+     *
+     * That state is invisible while nothing releases the GIL, which is why it survived: the old
+     * `forceGC()` called `PyEval_SaveThread()`/`PyEval_RestoreThread` around its sleep, and that
+     * accidental 200 ms window was the only thing letting cleaners through at all.
+     */
     fun ensureInitialised() {
         stageStdlibOnce()
-        if (Py_IsInitialized() == 0) {
-            Py_Initialize()
-        }
+        Python3.initialize(silent = true)
         check(Py_IsInitialized() != 0) { "Py_Initialize() did not take effect" }
     }
+
+    /**
+     * Attaches the calling thread for the body of a test that reaches [bindings] directly.
+     *
+     * The object model takes the GIL for itself on every call, so tests written against `Python3`
+     * and `PyObject` need nothing. Tests that call the raw JNI surface bypass that, and since
+     * [ensureInitialised] now parks the main thread state they would otherwise run the C API with
+     * no thread state attached, which is undefined behaviour rather than a clean failure.
+     */
+    fun attach(): Int = PyGILState_Ensure()
+
+    fun detach(state: Int) = PyGILState_Release(state)
 
     /** Allocates a C string the caller must release with [freeUtf8]. */
     fun utf8(s: String): Long = bindings.ffiAllocUtf8(s)

@@ -3,8 +3,10 @@ package python.native.ffi
 import android.os.Build
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -33,6 +35,28 @@ class CompositionBenchmark {
     }
 
     private var sink = 0L
+
+    /**
+     * Every measurement here calls [bindings] directly, so nothing takes the GIL on its behalf
+     * the way the object model does. The interpreter's main thread state is parked (see
+     * [PythonOnDevice.ensureInitialised]), so the thread has to attach explicitly or these run
+     * the C API with no thread state at all.
+     *
+     * Once per test rather than once per call: an attach inside the timed loop would be the
+     * thing being measured.
+     */
+    private var gilState = 0
+
+    @Before
+    fun attachToInterpreter() {
+        PythonOnDevice.ensureInitialised()
+        gilState = PythonOnDevice.attach()
+    }
+
+    @After
+    fun detachFromInterpreter() {
+        PythonOnDevice.detach(gilState)
+    }
 
     private inline fun best(iters: Int, body: () -> Long): Double {
         var b = Double.MAX_VALUE

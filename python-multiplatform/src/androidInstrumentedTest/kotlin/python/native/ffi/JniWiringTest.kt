@@ -1,7 +1,9 @@
 package python.native.ffi
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -21,6 +23,25 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class JniWiringTest {
 
+    /**
+     * These reach the C API directly rather than through the object model, and the interpreter's
+     * main thread state is parked (see [PythonOnDevice.ensureInitialised]), so the thread has to
+     * attach for itself. The echo probes do not need it, but attaching for the whole class costs
+     * one `PyGILState_Ensure` per test and removes the question.
+     */
+    private var gilState = 0
+
+    @Before
+    fun attachToInterpreter() {
+        PythonOnDevice.ensureInitialised()
+        gilState = PythonOnDevice.attach()
+    }
+
+    @After
+    fun detachFromInterpreter() {
+        PythonOnDevice.detach(gilState)
+    }
+
     @Test
     fun argumentsArriveUnshifted() {
         // echo0/echo1/echo2 are three separate registrations of the same C body,
@@ -38,8 +59,61 @@ class JniWiringTest {
     fun zeroArgCallsWorkRegardless() {
         // Expected to pass even with a broken convention — recorded so the contrast with
         // argumentsArriveUnshifted is visible in the results.
-        val state = bindings.Py_IsInitialized()
-        assertEquals("Py_IsInitialized should report 0 before initialisation", 0, state)
+        //
+        // This used to assert 0, "before initialisation". That premise died when commonTest was
+        // connected to Android: 176 tests share one process, and whether the interpreter is
+        // already up when this runs is decided by class ordering, not by wiring. It failed on
+        // both API levels for exactly that reason — the interpreter was already up, so it read 1.
+        //
+        // Pinning the interpreter to a known state first and asserting the exact value is the
+        // stronger check anyway: a zero-arg call under a shifted convention returns whatever
+        // happened to be in the return register, which is not reliably 1.
+        python.multiplatform.ffi.PythonTestFixture.withInterpreter {
+            assertEquals(
+                "Py_IsInitialized should report 1 once the interpreter is up",
+                1, bindings.Py_IsInitialized()
+            )
+            // @CriticalNative and @FastNative are two separate registrations of the same C
+            // function, and EmbedAPI picks between them per API level. Both must agree with the
+            // actual, or one of them is bound to the wrong wrapper on this device.
+            assertEquals("the @FastNative twin must agree", 1, bindings.Py_IsInitializedF())
+            assertEquals("the EmbedAPI actual must agree", 1, Py_IsInitialized())
+        }
+    }
+
+    /**
+     * `PyList_GetItemRawF` is the @FastNative twin added so the per-element call of bulk list
+     * iteration follows the device axis instead of being pinned to @CriticalNative (see
+     * `docs/jni-call-convention-audit.md`). It is a second registration of the same CPython
+     * function, so the two must be indistinguishable at every index.
+     *
+     * This is a wiring check, not a benchmark. Two ways to get it wrong are both caught here: a
+     * missing or misspelled table entry leaves the method unregistered and the call throws, and a
+     * wrapper written without the leading `JNIEnv*, jclass` shifts both arguments, which makes the
+     * returned pointers disagree rather than merely being slow.
+     */
+    @Test
+    fun bothListGetItemConventionsAgree() {
+        PythonOnDevice.ensureInitialised()
+
+        val sys = PythonOnDevice.withUtf8("sys") { bindings.PyImport_ImportModuleN(it) }
+        org.junit.Assert.assertTrue("could not import sys", sys != 0L)
+        val path = PythonOnDevice.withUtf8("path") { bindings.PyObject_GetAttrStringN(sys, it) }
+        org.junit.Assert.assertTrue("could not read sys.path", path != 0L)
+
+        val len = bindings.PyList_SizeNormal(path)
+        org.junit.Assert.assertTrue("sys.path should be a non-empty list, got len=$len", len > 0)
+
+        for (i in 0 until len) {
+            val critical = bindings.PyList_GetItemRaw(path, i)
+            val fast = bindings.PyList_GetItemRawF(path, i)
+            org.junit.Assert.assertTrue("PyList_GetItemRaw returned null at index $i", critical != 0L)
+            assertEquals(
+                "PyList_GetItemRawF disagrees with PyList_GetItemRaw at index $i",
+                critical,
+                fast,
+            )
+        }
     }
 
     @Test

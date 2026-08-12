@@ -1,5 +1,17 @@
 # Reachability Analysis: Android Unregistered Surface
 
+> **Status: the string half of this report is closed; the counts below are stale.**
+>
+> Recounted from the two files: 187 registered, 178 unregistered (was 145 / 224). Declarations
+> still carrying a `jstring` across the boundary went from 52 to 6, and none of those six is on
+> the broken path except `ffiSymbolRaw`, which has no caller anywhere in `src/`. The
+> "Critical Risk: Functions taking `String`" section below is therefore resolved in full — not
+> just the four functions it happens to list. What remains is the pointer-only surface, and the
+> reachability reasoning for that still holds.
+>
+> See ROADMAP §2 for the current numbers and `docs/marshalling-design.md` for the per-argument
+> intern/scratch rule the migration followed.
+
 This report analyzes the reachability of the 304 unregistered functions in the Android JNI surface (`bindings.kt`). An unregistered function relies on name-based `@CName` linking which on Android leads to arguments arriving shifted, Kotlin `String`s being passed incorrectly, and `java.lang.Long` boxing issues. Hitting any of these functions is a latent `SIGSEGV` or similar crash.
 
 We traced the call graph backwards from the public API wrappers in `commonMain` (specifically under `ffi/`) through `EmbedAPI.kt` to the actual Android bindings.

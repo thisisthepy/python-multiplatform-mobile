@@ -3,7 +3,9 @@ package python.native.ffi
 import android.os.Build
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.After
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -58,6 +60,25 @@ class JniOverheadBenchmark {
 
     /** Kept live across the whole test so the JIT cannot fold any call away. */
     private var sink = 0L
+
+    /**
+     * The echo probes touch no interpreter state, but `realCPythonCallByCallingConvention` calls
+     * CPython for real, and the main thread state is parked (see
+     * [PythonOnDevice.ensureInitialised]) — so this thread has to attach for itself. Done once
+     * per test, outside the timed loops, so the attach is not what gets measured.
+     */
+    private var gilState = 0
+
+    @Before
+    fun attachToInterpreter() {
+        PythonOnDevice.ensureInitialised()
+        gilState = PythonOnDevice.attach()
+    }
+
+    @After
+    fun detachFromInterpreter() {
+        PythonOnDevice.detach(gilState)
+    }
 
     private fun kotlinEcho(x: Long): Long = x
 

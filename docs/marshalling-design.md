@@ -78,11 +78,43 @@ Centre the abstraction on **interning**, not on a general allocator.
 `internedUtf8` returns a stable address that stays valid for the process. Callers never free
 it. On a miss it encodes once and caches.
 
-`encodeScratchUtf8` writes into a per-thread scratch buffer and returns its address. Valid only
-until the next call on the same thread, which is enough for the "pass it straight to a C
-function" pattern that covers nearly every use. Nothing to free.
+`encodeScratchUtf8` writes into a per-thread scratch buffer and returns its address. Nothing to
+free.
+
+**The scratch pool holds four slots per thread**, handed out round-robin, on both desktop and
+Android. One slot would have been enough for the "encode, then immediately pass to C" pattern,
+but not for a call that needs two arbitrary strings at once —
+`PyImport_ExecCodeModuleWithPathnames` needs two, `PyUnicode_DecodeLocale` needs two. Four
+leaves headroom without pretending the addresses last. The fifth consecutive encode on a thread
+invalidates the first, and `StringMarshallingTest.testMultiSlotScratchReuseLimit` pins exactly
+that boundary, so it is a tested guarantee rather than an implementation detail.
 
 `freeUtf8` exists for the cases that genuinely need an independent lifetime.
+
+### Which argument takes which path
+
+**The judgement is per argument, not per function.** `Py_CompileString(source, filename)` interns
+`filename` and scratches `source`; they are arguments to the same call. Desktop and Android make
+the same split for the same argument, and `desktopMain/.../bindings.kt` is the reference.
+
+| interned — the argument is a name | scratched — the argument is content |
+|---|---|
+| attribute names (`PyObject_*AttrString*`) | source text (`Py_CompileString.str`, `PyRun_*`) |
+| dict / mapping keys (`PyDict_*ItemString`, `PyMapping_*String`) | exception and warning messages |
+| module names (`PyImport_*`, `PySys_*`, `PyErr_NewException.name`) | file paths a module was loaded *from* (`pathname`, `cpathname`) |
+| codec names (`encoding`) | error-handler names (`errors`), comparands, docstrings, `PySequence_Fast.m` |
+| `PyUnicode_InternFromString.str` — the caller is asserting it repeats | `PyBytes_FromString.v` — payload |
+
+Two cases are worth stating because they read the wrong way at a glance:
+
+- `PyErr_WarnExplicit`'s `filename` and `module` **intern** even though its `message` does not:
+  CPython uses those two as keys in the once-registry that decides whether a warning has already
+  been shown, so they repeat by construction.
+- `PyErr_SyntaxLocation`'s `filename` **scratches**, unlike the `filename` above. It labels one
+  error being reported, not a registry key.
+
+No migrated function holds more than two scratch encodes live at once, so none of them can reach
+the four-slot boundary.
 
 ### Cache policy
 

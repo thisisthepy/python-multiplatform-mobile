@@ -63,14 +63,19 @@ open class PyList(pointer: NativePointer, borrowed: Boolean) :
         fun fromList(elements: List<PyObject>): PyList {
             val tuplePtr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate tuple() scratch buffer")
-            elements.forEachIndexed { i, el ->
-                // PyTuple_SetItem steals the reference to its 3rd argument -- incref first so
-                // `el`'s own, independently-managed reference stays valid afterwards.
-                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(el.pointer) }
-                python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
+            // The scratch tuple is owned by nobody until it is released here, so the release
+            // covers the fill loop as well as the conversion.
+            val listPtr = try {
+                elements.forEachIndexed { i, el ->
+                    // PyTuple_SetItem steals the reference to its 3rd argument -- incref first so
+                    // `el`'s own, independently-managed reference stays valid afterwards.
+                    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(el.pointer) }
+                    python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
+                }
+                python.multiplatform.ffi.Python3.withPython { PySequence_List(tuplePtr) }
+            } finally {
+                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(tuplePtr) } // scratch tuple, no longer needed once copied into the list
             }
-            val listPtr = python.multiplatform.ffi.Python3.withPython { PySequence_List(tuplePtr) }
-            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(tuplePtr) } // scratch tuple, no longer needed once copied into the list
             if (listPtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to build list()")
             return PyList(listPtr, false)
         }

@@ -3,7 +3,10 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
-    alias(libs.plugins.ksp)
+    // One line in place of the KSP plugin, two per-target `add("ksp<Target>", ...)` lines and a
+    // `ksp { arg(...) }` block. The role defaults to `library`; the module name is derived from
+    // the project's group and path.
+    id("io.github.thisisthepy.python.multiplatform.bindings")
 }
 
 kotlin {
@@ -27,15 +30,8 @@ kotlin {
     }
 }
 
-dependencies {
-    // KSP on Kotlin/Multiplatform is applied per target
-    // (docs/upcall-table-design.md §11 "KSP for KMP") -- there is no single `ksp(...)` that
-    // reaches every target at once.
-    add("kspDesktop", projects.pythonMultiplatformKsp)
-    add("kspAndroidNativeArm64", projects.pythonMultiplatformKsp)
-}
-
-ksp {
-    arg("python.multiplatform.role", "library")
-    arg("python.multiplatform.moduleName", "ksp_fixture_library")
+pythonBindings {
+    // In-repo consumer: the processor is a project here, not a published artifact. Outside this
+    // repo the default coordinates apply and this line is not needed.
+    processor.set(projects.pythonMultiplatformKsp)
 }

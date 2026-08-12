@@ -1,6 +1,7 @@
 package python.multiplatform.ksp
 
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class SourceRenderingTest {
@@ -91,5 +92,76 @@ class SourceRenderingTest {
         val src = renderAggregatorSource(emptyList())
 
         assertTrue(src.contains("val fragments: List<python.multiplatform.reflection.FunctionTableFragment> = listOf(\n    )"))
+    }
+
+    @Test
+    fun fragmentSourceSuppressesUncheckedCastsBecauseEveryArgumentReadIsOne() {
+        // Reading `args[0] as List<String>` out of an `Array<Any?>` is unchecked by
+        // construction; without the file-level suppression every generated fragment with a
+        // generic parameter buries the build in warnings.
+        val src = renderFragmentSource(FragmentModel("my_lib", emptyList(), emptyList()))
+
+        assertTrue(src.startsWith("@file:Suppress(\"UNCHECKED_CAST\")"))
+    }
+
+    @Test
+    fun classSourceCarriesTheKotlinShapeAndAnEnumsEntryNames() {
+        // An interface has no constructor and an enum has a fixed instance set: the Python side
+        // picks a different proxy shape for each, and cannot infer it from member names.
+        val model = FragmentModel(
+            moduleName = "my_lib",
+            entries = emptyList(),
+            classes = listOf(
+                ClassModel(
+                    name = "my.lib.Greeter",
+                    memberNames = listOf("my.lib.Greeter.greet"),
+                    traverseBody = null,
+                    kind = "INTERFACE",
+                ),
+                ClassModel(
+                    name = "my.lib.Color",
+                    memberNames = listOf("my.lib.Color.RED"),
+                    traverseBody = null,
+                    kind = "ENUM",
+                    enumEntryNames = listOf("RED", "GREEN"),
+                ),
+            ),
+        )
+
+        val src = renderFragmentSource(model)
+
+        assertTrue(src.contains("kind = python.multiplatform.reflection.ReflectedClassKind.INTERFACE"))
+        assertTrue(src.contains("kind = python.multiplatform.reflection.ReflectedClassKind.ENUM"))
+        assertTrue(src.contains("enumEntryNames = listOf(\"RED\", \"GREEN\")"))
+    }
+
+    @Test
+    fun anOrdinaryClassRendersTheDefaultKindAndNoEntryNames() {
+        val src = renderFragmentSource(
+            FragmentModel(
+                moduleName = "my_lib",
+                entries = emptyList(),
+                classes = listOf(ClassModel("my.lib.Counter", listOf("my.lib.Counter.<init>"), null)),
+            ),
+        )
+
+        assertTrue(src.contains("kind = python.multiplatform.reflection.ReflectedClassKind.CLASS"))
+        assertTrue(!src.contains("enumEntryNames"))
+    }
+
+    @Test
+    fun duplicateEntryNamesAreDroppedBeforeTheyReachTheTable() {
+        // Legal Kotlin: `class Foo { val x = 1; companion object { val x = 2 } }` yields two
+        // entries called `pkg.Foo.x` once companion members are folded into the owner. Two
+        // entries under one name make UpcallTable.resolve return whichever won the race; the
+        // instance member is the one that keeps its receiver contract, so it wins deliberately.
+        val instance = CallableEntryModel("p.Foo.x", 0, emptyList(), Tag.INT, "GETTER", "{ args -> 1L }")
+        val static = CallableEntryModel("p.Foo.x", 0, emptyList(), Tag.INT, "STATIC_GETTER", "{ 2L }")
+        val other = CallableEntryModel("p.Foo.y", 0, emptyList(), Tag.INT, "GETTER", "{ args -> 3L }")
+
+        val deduped = listOf(instance, static, other).distinctByName()
+
+        assertEquals(listOf("p.Foo.x", "p.Foo.y"), deduped.map { it.name })
+        assertEquals("GETTER", deduped[0].kind)
     }
 }

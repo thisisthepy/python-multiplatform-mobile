@@ -4,12 +4,38 @@ import com.google.devtools.ksp.getAllSuperTypes
 import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSType
 import com.google.devtools.ksp.symbol.KSTypeReference
+import com.google.devtools.ksp.symbol.Variance
 
 private const val PY_OBJECT_QUALIFIED_NAME = "python.multiplatform.ffi.PyObject"
 
 /** Reduces a resolved KSP type to the plain data [castExpression]/[wrapReturnExpression] work on. */
-fun KSType.toShape(): TypeShape =
-    TypeShape(qualifiedName = declaration.qualifiedName?.asString() ?: "kotlin.Any", nullable = isMarkedNullable)
+fun KSType.toShape(): TypeShape {
+    val qualifiedName = declaration.qualifiedName?.asString() ?: "kotlin.Any"
+    return TypeShape(qualifiedName, isMarkedNullable, rendered = renderWithArguments(qualifiedName))
+}
+
+/**
+ * `pkg.Type` for a plain type, `pkg.Type<pkg.Arg, *>` for a generic one -- what a cast in
+ * generated source needs, since `x as kotlin.collections.List` does not compile.
+ *
+ * Use-site variance (`Array<out String>`) is deliberately dropped: the cast is unchecked either
+ * way, and an invariant cast target still satisfies a projected parameter. A star projection
+ * stays a star, because there is nothing else to write for it. A type argument that is itself a
+ * type *parameter* (`T`) has no qualified name and would render as an unresolved reference;
+ * [BindingPolicy] rejects every declaration that can produce one before this is reached, and the
+ * fallbacks to `*` here are the belt to that pair of braces.
+ */
+private fun KSType.renderWithArguments(qualifiedName: String): String {
+    if (arguments.isEmpty()) return qualifiedName
+    val renderedArguments = arguments.joinToString(", ") { argument ->
+        if (argument.variance == Variance.STAR) return@joinToString "*"
+        val argumentType = argument.type?.resolve() ?: return@joinToString "*"
+        if (argumentType.declaration !is KSClassDeclaration) return@joinToString "*"
+        val inner = argumentType.declaration.qualifiedName?.asString() ?: return@joinToString "*"
+        argumentType.renderWithArguments(inner) + if (argumentType.isMarkedNullable) "?" else ""
+    }
+    return "$qualifiedName<$renderedArguments>"
+}
 
 fun KSTypeReference.toShape(): TypeShape = resolve().toShape()
 

@@ -137,16 +137,36 @@ PyErr_GetRaisedException  fault addr 0xc2411160   PyException.fromCurrentError -
 Both truncated pointers, which is the signature of the name-linked `@CName` fallback described
 below. An unregistered call does not fail cleanly; it corrupts a pointer and kills the process.
 
-**The real numbers:**
+**The real numbers**, recounted from the two files rather than carried forward (parse
+`external fun` out of `androidMain/.../bindings.kt`, parse the `JNINativeMethod` table out of
+`artMain/cinterop/jni_onload.def`, join on the method name and compare JNI signatures):
 
 ```
-bindings.kt external fun    366
-registered                   71
-unregistered                295
-  ...reachable from commonMain with an Android actual    68     every one a latent process kill
+                          was      now
+bindings.kt external fun  369      365
+registered                145      187
+unregistered              224      178
+signature mismatches        0        0     (all 187 entries agree with their Kotlin declaration)
 ```
 
-So the surface is roughly a fifth done, not finished. `docs/android-unregistered-surface.md`
+**The string half of it is finished.** Declarations that still carry a `jstring` across the
+boundary went from **52 to 6**, and of those six none is a defect:
+
+- `asmExec`, `asmGetAttr`, `testUpcallString` are registered *with* a jstring signature and their
+  C wrappers use `GetStringUTFChars` — that is the composition-probe design, not the broken path
+- `ffiAllocUtf8`, `ffiReadUtf8` are name-linked but hand-written in `artMain/JNIOnLoadExporter.kt`
+  with the correct `JNIEnv*`/`jclass` prologue, so the convention matches
+- `ffiSymbolRaw` is the one genuine leftover on the name-linked `@CName` path. It has no caller
+  anywhere in `src/` — `jvmMain`'s `ffiSymbol` that wraps it is itself unreferenced — so it is a
+  landmine rather than a live crash. Fixing it means a `dlsym` wrapper taking a jlong, and it
+  belongs with whatever revives the shape vocabulary on Android.
+
+The 42 functions migrated in this pass are listed with their per-argument intern/scratch
+judgement in `docs/marshalling-design.md`. Every symbol they bind was checked to exist in the
+shipped `libpython3.14.so` before registering (`llvm-nm -D --defined-only`), and the linked
+`libmultiplatform_python3.14.so` has no unresolved `Py*` symbol.
+
+What is left of §2 is the 178 unregistered non-string functions. `docs/android-unregistered-surface.md`
 carries the reachability analysis; its counts came from a script and were spot-checked, not
 audited line by line.
 
@@ -186,19 +206,39 @@ hundred still carry the original wiring.
 
 ## 3. Classify the remaining functions leaf vs re-entrant
 
-**Depends on:** §2.
+**Closed.** The classification is in `docs/jni-call-convention-audit.md`; the decision procedure a
+new call site has to pass is in `androidMain/README.md`.
 
 `@CriticalNative` and `@FastNative` both stop the collector for the call, and `@CriticalNative`
 has no `JNIEnv`, so nothing under it can re-enter the runtime. A function that can execute
 arbitrary Python — a module's top-level code, a `__getattr__`, a `__del__` reached by dropping
 the last reference — must therefore stay on ordinary JNI.
 
-Of the 11 migrated so far, 5 are leaves and 6 are re-entrant. `PyErr_Clear` and
-`PyObject_GetAttrString` both look like leaves and are not.
+**No function was promoted, and that is the finding.** The audit proposed eight promotions to
+`@CriticalNative` on the argument that it is expensive below API 34 and cheap above. Measured here
+it is the reverse: promoting costs **+16.54 ns on API 34 and +25.73 ns on 36**, against savings of
+43-73 ns on 26-31. Three of the eight are not leaves either — `PyGILState_Release` deletes the
+thread state on the last release and runs `__del__` through it, `PyThreadState_GetDict` allocates
+the thread dict lazily, and `PyEval_InitThreads` is a no-op kept for the stable ABI.
 
-The default should be ordinary JNI, with promotion only for functions audited as unable to run
-Python. Guessing wrong toward ordinary costs nanoseconds; guessing wrong the other way is a
-crash once upcalls exist.
+The 116 registrations added since the audit (71 → 187) are **all ordinary, with no `@CriticalNative`
+or `@FastNative` twin registered for any of them**, so the crash this section warns about cannot be
+reached through the new surface.
+
+One change came out of it, in the opposite direction to the audit's: `PyList_GetItem` was pinned to
+`@CriticalNative` with no `preferFastNative` branch — the only binding ignoring the device axis, and
+the per-element call of bulk iteration, where §5 measured 50 ns per element on API 36 against a
+`@CriticalNative` net cost of 44.05 ns there. It now has a `@FastNative` twin and branches like
+every other pair. Compile-verified; the device assertion
+(`JniWiringTest.bothListGetItemConventionsAgree`) is written but has not been run.
+
+The default is ordinary JNI, and the promoted set stays enumerated rather than derived: every C API
+function can fail, and CPython reports failure by allocating a GC-tracked exception, so "provably
+cannot run Python" is not a property any of them has. Guessing wrong toward ordinary costs 6-41 ns;
+guessing wrong the other way is a crash once upcalls exist.
+
+**Was:** depends on §2. Of the 11 migrated at that point, 5 were leaves and 6 re-entrant;
+`PyErr_Clear` and `PyObject_GetAttrString` both look like leaves and are not.
 
 ## 4. Automatic reference release
 
@@ -208,10 +248,45 @@ destroyed. Verified on both collectors — desktop through `java.lang.ref.Cleane
 Kotlin/Native's `createCleaner`. Android below API 33 uses the `PhantomReference` path and is not
 covered yet.
 
-**Three things still cannot be freed**, and no amount of testing fixes them: a raw pointer leaks
-if an exception lands between the C call returning it and the wrapper taking ownership; wrappers
-outliving `Py_Finalize()` are skipped deliberately, leaving stale pointers if the interpreter is
-restarted; and cross-boundary cycles need §7's `tp_traverse` wiring, which now exists on desktop.
+**Two things still cannot be freed**: wrappers outliving `Py_Finalize()` are skipped
+deliberately, leaving stale pointers if the interpreter is restarted; and cross-boundary cycles
+need §7's `tp_traverse` wiring, which now exists on desktop.
+
+**The third — the exception window — was not structural, and is closed.** "A raw pointer leaks
+if an exception lands between the C call returning it and the wrapper taking ownership"
+described real bugs, not a property of the architecture. `OwnershipLeakTest` forces two of them
+and measures the count; both were red before the fix by exactly the number of attempts — **+50
+references over 50 attempts in each case**, one lost per attempt, and no collector can reach
+them because no Kotlin object ever owned them.
+
+- `PyDict.fromMap` allocated the dict and populated it afterwards. One unhashable key makes
+  `PyDict_SetItem` fail partway, and the half-built dict — by then holding a reference to every
+  key and value already stored — was still a bare pointer. Measured on both the stored value and
+  the already-stored key: +50 each.
+- `PyType.getInstance` is handed a new reference on every call and, on a **cache hit**, dropped
+  it. The comment argued this was harmless because types are immortal — true of `int` and
+  `list`, false of every user-defined class, which leaked one reference per `PyObject.Type`
+  read. Measured against a class defined in Python: +50 over 50 reads.
+
+The fix is `adoptingNewReference` in `PyObject.kt` — release the reference if, and only if, the
+block that was going to adopt it throws — plus `try/finally` at the sites that hold a new
+reference across a second C call: `repr`, `toString`, `richCompare`, `PyType.name`,
+`snapshotElements`, `PyDict.snapshotEntries`, the four `fromList`/`fromSet` scratch tuples,
+`deriveTypeAndRelease` (which abandoned its scratch instance outright when `PyObject_Type`
+failed), `PyException.messageOf` and `isNoneObject`. `PyException.fromExceptionInstance` now
+wraps the exception instance **first**, so a failure while building the message or walking
+`__context__`/`__cause__` can no longer strand the exception itself — in the one path that
+exists to report failures.
+
+One rule came out of it, and it is written on the helper: **it must never wrap a constructor
+that can throw.** `PyAutoCloseable` registers the cleaner in its own constructor, before any
+subclass initialiser runs, so a wrapper that throws from `init` has *already* queued a release;
+releasing again would be the double free of §1. `PyType.getInstance` therefore validates before
+it constructs rather than from `init`.
+
+Only the two above are proven by a red-then-green test; the rest are windows that no current
+call site can force (they need `PyUnicode_AsUTF8` or `PyTuple_GetItem` to fail on a live
+object). They are fixed as structure, not as measured leaks, and are marked as such here.
 
 **Was:** depends on §1.
 
@@ -227,7 +302,7 @@ Measurements prove that GC-driven release actually drops CPython reference count
 - **Android (`androidMain`)**: Uses `Cleaner` where available (API 33+), with a fallback to `PhantomReference` requiring background polling on older devices. (Testing on device requires `androidInstrumentedTest` setup — see §11b).
 
 **What fundamentally cannot be released in this architecture:**
-1. **Uncaught exceptions during FFI allocation**: If Kotlin code calls a C-API function that returns a new reference (e.g., `PyObject_GetAttrString`), and a Kotlin exception disrupts the control flow *before* that raw pointer is wrapped in `PyObject(..., borrowed = false)` or explicitly `Py_DecRef`'d via a `finally` block, the CPython reference leaks permanently.
+1. ~~**Uncaught exceptions during FFI allocation**: If Kotlin code calls a C-API function that returns a new reference (e.g., `PyObject_GetAttrString`), and a Kotlin exception disrupts the control flow *before* that raw pointer is wrapped in `PyObject(..., borrowed = false)` or explicitly `Py_DecRef`'d via a `finally` block, the CPython reference leaks permanently.~~ **Closed — see above.** This was a list of missing `finally` blocks, not a limit of the architecture.
 2. **Post-Finalize GC**: When `Py_Finalize()` executes, it frees CPython's heap. If Kotlin wrappers are GC'd *after* this, their cleaners see `!Python3.isInitialized` and exit early to avoid segfaults. While safe for shutdown, if the interpreter is later re-initialized via `Py_Initialize()`, those dangling wrappers will retain pointers that either point to unmapped memory or alias newly allocated CPython objects.
 3. **Cross-boundary cycles**: A Python object holding an upcall proxy to a Kotlin object, which in turn holds a `PyObject` pointing back to the Python object. Neither language's GC can trace through the other, leading to a permanent leak unless broken manually or addressed via `tp_traverse` (see §7).
 
@@ -388,8 +463,10 @@ extract list items in one call without shipping our own native code.
 
 The runtime is in `reflection/` — `HandleTable` (slot plus generation, so a released handle
 cannot alias onto whatever takes its slot), `UpcallTable`, `ExposedCallable`, `ObjectReference`.
-The generator is `python-multiplatform-ksp/`. Fixture modules under `ksp-fixtures/` run 11 tests
-against a table KSP actually generated, not a hand-written one.
+The generator is `python-multiplatform-ksp/`, wired into a user module by
+`python-multiplatform-gradle-plugin/` (one `id(...)`, no per-target `add("ksp<Target>", ...)`).
+Fixture modules under `ksp-fixtures/` run 29 tests against a table KSP actually generated, not a
+hand-written one.
 
 **It survives a GraalVM native image**, which is the condition the whole design was chosen for:
 
@@ -410,9 +487,12 @@ needed no reflection registration, because it uses none. `sample` carries the bu
 - `tp_traverse` functions are generated and tested, but nothing wires them into CPython's actual
   `tp_traverse` slot, and `tp_clear` and Kotlin-side cycle closing are untouched. Cycles are
   therefore still unsolved in practice — see `docs/object-lifetime.md`.
-- Companion-object members, interfaces, enums and annotation classes are not exposed.
-- The aggregator uses `Dependencies.ALL_FILES`, correct but reprocessed every build.
-- No convenience Gradle plugin; user modules wire KSP per target by hand.
+- ~~Companion-object members, interfaces, enums and annotation classes are not exposed.~~
+  **Closed**, except annotation classes, which are now deliberately excluded — see below.
+- ~~The aggregator uses `Dependencies.ALL_FILES`, correct but reprocessed every build.~~
+  **Measured, and the aggregator turned out not to be the cause** — see below.
+- ~~No convenience Gradle plugin; user modules wire KSP per target by hand.~~
+  **Closed:** `python-multiplatform-gradle-plugin/`, applied by id.
 
 **Was:** entirely unimplemented — `ClassLookup.kt`, `ObjectReference.kt` and `ReflectedClass.kt`
 held 1–3 lines each, and this was README's only unchecked box.
@@ -452,10 +532,39 @@ trivial one-liners and a real function's body adds its own size on top. Whether 
 real library's bodies is acceptable is a product judgement the measurement informs but does not
 settle. See `docs/upcall-table-design.md` §4.
 
-**Companion object members, interfaces, enums and annotation classes are not exposed yet.** The
-generator currently walks top-level functions and `ClassKind.CLASS` declarations (their primary
-constructor, member functions, and properties). `binding-policy.md`'s "companion object members
-exposed as static methods" line is not implemented.
+**The declaration surface is now the whole one, and what is left out is left out on purpose.**
+Companion members and `object` members become receiver-less entries under the *owner's* name
+(`Owner.member`, two new `CallableKind`s: `STATIC_GETTER`/`STATIC_SETTER`); interfaces get entries
+and no constructor, so a Kotlin object reaching Python through a handle is callable through the
+interface even when its concrete class does not redeclare the member; an `enum class` gets one
+`STATIC_GETTER` per entry plus `name`, `ordinal` and `valueOf`, and its `ReflectedClass` carries
+`enumEntryNames` so the Python side can build an `enum.Enum` mirror without the boundary having to
+marshal a collection. Nested declarations and top-level properties came along with it.
+**Annotation classes are exposed nowhere**: applying one is a compile-time act and reading one
+back needs runtime reflection, which is the single thing this design cannot have, so an instance
+Python could construct would have nothing to attach to. `values()`/`entries` are out for the same
+kind of reason — they return collections the boundary cannot carry.
+
+Three latent generator bugs surfaced while widening the surface, each of which produced a
+*generated file that did not compile* rather than anything the processor could detect: a cast to a
+generic type without its arguments (`args[0] as kotlin.collections.List`), a constructor entry for
+an abstract class, and a declaration over a type parameter (`args[0] as T`). Parameter types now
+render their arguments; abstract, sealed and `inner` classes get no constructor entry; generic
+declarations are not exposed at all. `data class` `copy`/`componentN` are dropped too — KSP does
+report them (it does not report `equals`/`hashCode`/`toString`), and `binding-policy.md` already
+said compiler-generated members stay out.
+
+**Incremental aggregation: measured, and the aggregator was never the problem.** KSP's own dirty
+set (`ksp.incremental.log=true`, `build/kspCaches/.../kspDirtySet.log`) reports **100% dirty on a
+one-file change in a two-file module both before and after** narrowing the aggregator's
+`Dependencies` from `ALL_FILES` to the fragment files it actually reads. The cause is one level
+down: a module's own `Fragment_<module>` is legitimately an aggregating output over *every* source
+file — blacklist exposure means any file can add an entry — so any change regenerates it, and KSP
+then marks every file that maps to it dirty. `ALL_FILES` on the aggregator stays, because the
+narrower form buys nothing measurable and its safety under a classpath-only change was never
+established. The only route to real incrementality is per-file fragments (one isolating output per
+source file), which changes fragment naming, `UpcallTable`'s per-module idempotency and duplicate
+detection — a design change, not a tweak. Recorded in `docs/upcall-table-design.md` §11.5.
 
 **Cycle collection: the generator's half is done.** `tp_traverse` on the Python proxy must reach
 through the handle into the Kotlin object's `PyObject`-typed fields, which means the generator
@@ -523,62 +632,116 @@ an incomplete type does not break us.
 
 ## 10. WASM
 
-**Deferred, but no longer for the reason first written here.** The original claim — that
-Kotlin/Wasm cannot reach C at all, so everything must go through JS — is false, and
-`wasm-experiment/` disproves both halves of it by building and running the thing:
+**There is no JS bridge, and the interpreter is running.** Every framing this section previously
+carried — that Kotlin/Wasm cannot reach C, that the data path must be copied through JS, that
+direct calls and shared memory cannot be had together — is disproved by running code.
+`wasm-experiment/` reproduces all of it; `docs/wasm-design.md` has the detail.
 
-- `@WasmImport` binds to a function exported by an Emscripten module. Kotlin called
-  `emcc`-compiled `add_two` and got 42, through a real wasm import, with no JS frame.
-- Emscripten built with `-sIMPORTED_MEMORY` accepts the linear memory Kotlin exports, and the
-  sharing works both ways: an address from C reads back in Kotlin as the bytes C wrote, and a
-  string Kotlin writes into a `malloc`'d buffer reads back through C's `strlen`. **No copying and
-  no JS in the data path** — which removes the cost every other platform measured as dominant.
+**Test D — Kotlin/Wasm against CPython 3.14.2, built here for `wasm32-emscripten`:**
 
-One constant blocks it: Kotlin emits `WasmLimits(0, null)`, a memory with no maximum, and wasm
-requires a supplied memory to sit inside the importer's limits, so no Emscripten import can ever
-accept it. Patching the six-byte memory section to `{min: 0, max: 32768}` makes everything link.
-That belongs in a YouTrack issue, not in this design.
+```
+python.wasm exports  8191      Kotlin's intrinsics.memory  ==  CPython's memory
+Kotlin: pyExec("answer = 6 * 7; greeting = ...")        -> 0        PASS
+Kotlin: pyGlobalInt("answer")                           -> 42       PASS
+Kotlin: pyGlobalString("greeting") -> "hello-from-cpython-42"       PASS
+Kotlin: pyExec("bytearray(48 MiB)")   320 -> 934 pages, reads still correct   PASS
+```
 
-One structural constraint remains: Kotlin needs Emscripten's exports at instantiation and
-Emscripten needs Kotlin's memory before that, and wasm imports are supplied up front, so the two
-halves cannot yet be combined in one graph. The clean fix is the master-only
-`importWasmMemoryInsteadOfExport`, which inverts ownership; the available fix is JS trampolines
-for calls with the data path still shared, which keeps the half that matters.
+Kotlin wrote the Python source straight into CPython's heap and dereferenced
+`PyUnicode_AsUTF8`'s `char*` out of it. Direct wasm-to-wasm calls, one linear memory, no copying
+and no JS in either direction — and it survives the interpreter growing its memory by 600 pages.
 
-A rule falls out for `wasmJsMain`: **`withScopedMemoryAllocator` must never be called.** Measured
-— it grows the memory and allocates at address `0x0`, on top of Emscripten's static data.
+What made it possible: Kotlin **2.4.20-Beta2 imports** its linear memory instead of exporting it.
+That reverses the ownership behind the instantiation cycle, so Emscripten instantiates first and
+Kotlin receives both the memory and the exports. The integration is one substitution in the
+generated glue — `intrinsics.memory` from a placeholder `new WebAssembly.Memory({initial: 0})` to
+`Module.wasmMemory`. `patch-memory-max.py` and the YouTrack issue it was going to justify are both
+obsolete: the memory *import* declares no maximum, so any memory satisfies it.
 
-See `docs/wasm-design.md`. What still defers §10 is that `wasmJsMain`'s `actual`s cannot be
-written until §1/§4 and §7 settle, plus CPython's Emscripten build only becoming supported in
-3.14 (PEP 776, Tier 3), with binaries still coming from downstream rather than python.org.
+**Composition is closed, the same way §6 closed it on desktop.** Reading a global from `__main__`,
+measured against the real interpreter:
+
+| | ns |
+|---|---|
+| naive | 259.5 |
+| + interned C strings | 185.4 |
+| + module/dict hoisted | **65.2** |
+| one crossing (`PyErr_Occurred`, direct) | **2.9** |
+
+75% of the naive cost comes off with pure Kotlin. What is left is CPython's own work; a composed
+`pmp_getattr` could merge two calls into one and save 2.9 ns. Bulk ends the same way — 2.9 ns per
+crossing against 0.7 ns per shared-memory read. **No C shim, and therefore no second build
+pipeline.**
+
+**Rules for `wasmJsMain`**, both measured:
+
+- **`withScopedMemoryAllocator` must never be called.** It allocates from address `0x0`, on top of
+  Emscripten's static data. CPython allocates; Kotlin only dereferences addresses it was handed.
+- **`char*` → `String`: `CharArray` + `concatToString()` for ASCII, Emscripten's `UTF8ToString`
+  otherwise. Never `ByteArray.decodeToString()` on a large buffer** — 13 ns/byte at 4 KB, ten times
+  `concatToString`. The earlier claim that "string marshalling disappears" was wrong: Kotlin/Wasm
+  strings *are* JS strings under the `js-string` builtins, so the JS route was never paying for the
+  copy the design assumed it paid for.
+
+**The CPython build works and does not yet claim the platform tag.** PEP 783's
+`pyemscripten_2026_0` pins Emscripten **5.0.3** (Pyodide `Makefile.envs` at tag `314.0.4`), which
+is what was used. The stock Tier 3 build (`Tools/wasm/emscripten`, PEP 776) already matches on
+`-sWASM_BIGINT`, no `-pthread`, `-fPIC` and `MAIN_MODULE`/`SIDE_MODULE`. It diverges on the
+unwinding ABI (`-fwasm-exceptions -sSUPPORT_LONGJMP=wasm` absent), on static libs (no lzma, zstd or
+OpenSSL), and on `PYEMSCRIPTEN_PLATFORM_VERSION`, which does not exist anywhere in CPython 3.14.2 —
+so a stock build cannot advertise the tag even where the flags line up. Also settled:
+`-sMAIN_MODULE` is `LINKABLE` and exports all 8191 symbols, so **no custom `EXPORTED_FUNCTIONS`
+list is needed** for the Stable ABI. Only `wasmExports` and `wasmMemory` have to be added to
+`-sEXPORTED_RUNTIME_METHODS`, and neither is ABI-sensitive.
+
+**What still defers §10** is upcalls: `addFunction` re-entering WasmGC still goes through JS and is
+unmeasured, so §7's shape has to settle before `wasmJsMain`'s `actual`s are written. The `wasmJs`
+target in `python-multiplatform/build.gradle.kts` is still commented out.
 
 Kotlin/Native once had a `wasm32` target that could have shared CPython's linear memory; it was
-deprecated in 1.8.20 and removed in 1.9.20. So the JS bridge is a consequence of the current
-toolchain, not of WASM itself.
-
-Starting now means building on a JS bridge that a future C-interop story would discard.
-
-**Packaging is settled upstream, and constrains our build.** PEP 783 (Accepted) defines the
-`pyemscripten_<year>_<patch>_wasm32` platform tag, one version per Python feature release —
-`pyemscripten_2026_0` is 3.14. Any interpreter built with the specified Emscripten version and
-ABI-sensitive flags (no `-pthread`, `-sWASM_BIGINT`, fixed static libs and unwinding ABI) can
-claim it, so our own build and PyPI C-extension wheels are compatible goals. Match the flag set
-from the first build script — retrofitting means rebuilding the interpreter. The exact flag
-list still needs a manual read of Pyodide's ABI page. See `docs/wasm-design.md`.
+deprecated in 1.8.20 and removed in 1.9.20. That history no longer costs anything — `@WasmImport`
+plus an imported memory reaches the same place.
 
 ## 11. Build wiring
 
-`connectedDebugAndroidTest` does not force `linkAndroidNative*` or the
-`copyAndroidPythonBinaries` / `copyAndroidPythonAssets` staging. A changed `.def` or a cleaned
-`build/` therefore produces an APK with a stale or missing library, surfacing as
-`UnsatisfiedLinkError` that reads like a code bug. This cost three debugging cycles.
+**Closed.** The dependencies are declared now, and the graph was read rather than assumed:
+`./gradlew :python-multiplatform:connectedDebugAndroidTest --dry-run` plans 93 tasks, and every
+staging step is in it, in the right order:
 
-The configuration-time `copy {}` that staged the *previous* build's library has been fixed
-(moved into `doLast`), but the task dependencies themselves are still not declared. Until they
-are, run before any instrumented test:
+```
+16, 20  linkMultiplatform_python3.14DebugSharedAndroidNativeArm64 / X64   (before preBuild at 23)
+49      copyAndroidPythonAssets        (before generateDebugAndroidTestAssets 52, merge…Assets 58)
+76, 81  linkAndroidNativeArm64 / X64
+82      copyAndroidPythonBinaries      (before mergeDebugJniLibFolders 83, …AndroidTest… 86)
+```
 
-    ./gradlew :python-multiplatform:linkAndroidNativeArm64 :python-multiplatform:linkAndroidNativeX64 \
-              :python-multiplatform:copyAndroidPythonBinaries :python-multiplatform:copyAndroidPythonAssets
+`:sample:assembleDebug --dry-run` pulls the same four in, so the app path is covered too, not
+just the instrumented tests. The manual pre-step this section used to prescribe is no longer
+needed.
+
+Three edges do the work, all of them lazy-safe:
+
+- `copyAndroidPythonBinaries` declares `dependsOn(linkAndroidNativeArm64, linkAndroidNativeX64,
+  downloadAllPythonBuilds)`
+- `tasks.configureEach` attaches it to every `merge*JniLibFolders` / `merge*NativeLibs`, and
+  attaches `copyAndroidPythonAssets` to every task whose name ends in `Assets`. This is
+  `configureEach`, not the `whenTaskAdded` that used to miss tasks registered later — which is
+  how the stdlib went unpackaged and `Py_Initialize()` aborted.
+- `preBuild.dependsOn(linkTaskProvider)` for each shared-library binary, so the `.so` is relinked
+  and staged into `build/android/<type>/jniLibs/<abi>/` before AGP looks there.
+
+The configuration-time `copy {}` that staged the *previous* build's library was fixed earlier by
+moving it into `doLast`; that fix is still in place and is the only `copy {}` in the script that
+is not already inside a task action (checked: lines 201, 245, 281 and 475 are all `doLast`).
+
+**One hardcoded count of the same family was removed.** `jni_onload.def` still carried
+`#define NUM_METHODS 127` after `RegisterNatives` had been switched to `sizeof(methods) /
+sizeof(methods[0])`. It was dead, but it is exactly the constant that once drifted out of step
+with the table and silently bound a prefix of it, so it is gone and a comment says why.
+
+No other drifting constant or configuration-time side effect was found in
+`python-multiplatform/build.gradle.kts` or `sample/build.gradle.kts`; there are no
+`whenTaskAdded` uses left in the repository.
 
 ## 11b. Android does not run the object-model tests
 
