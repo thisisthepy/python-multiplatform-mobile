@@ -233,6 +233,101 @@ class PythonProxySourceTest {
         assertFalse(source.contains("(type):"), "an object is not rendered as a class, so it has no metaclass")
     }
 
+    // -------------------------------------------------------------------------- static functions
+
+    @Test
+    fun aCompanionFunctionOfARenderedClassGoesOnTheMetaclassInsteadOfAModuleTheClassThenOverwrites() {
+        // The defect this pins out: a companion function is a `CallableKind.FUNCTION` named
+        // `pkg.Owner.fn`, so the module path published it into a module called `pkg.Owner` -- and
+        // the class rendering then bound `pkg.Owner` on the *parent* module to the class, leaving
+        // the function reachable only through a `sys.modules` entry nothing points at any more.
+        val ctor = entry("p.Foo.<init>", kind = CallableKind.CONSTRUCTOR)
+        val create = entry("p.Foo.create", arity = 1)
+        val cls = ReflectedClass(name = "p.Foo", memberNames = listOf(ctor.name, create.name))
+
+        val source = PythonProxySource.render(listOf(ctor, create), listOf(cls))
+
+        val metaclass = Regex("class (_pm_t_\\d+)\\(type\\):").find(source)?.groupValues?.get(1)
+        assertTrue(metaclass != null, "a class with a static function needs a metaclass to hold it:\n$source")
+        assertContains(source, "class Foo(metaclass=$metaclass):")
+        assertContains(source, "    def create(cls, a0):")
+        // No receiver: a companion function's args start at args[0], exactly like a STATIC_SETTER's.
+        assertFalse(source.contains("(cls._pm_handle"), "a static function has no receiver to pass")
+        assertFalse(
+            source.contains("_pm_module('p.Foo')"),
+            "publishing it on a module named after the class puts it where the class rendering " +
+                "then overwrites:\n$source",
+        )
+        assertFalse(
+            source.contains("def _pm_f_"),
+            "a claimed companion function must not also be rendered as a module function",
+        )
+    }
+
+    @Test
+    fun aStaticPropertyAndAStaticFunctionOnTheSameClassBothSurvive() {
+        // The real test of the fix: the two halves of one companion are rendered by two different
+        // loops onto one metaclass, and either loop could have clobbered the other's name space or
+        // its handle numbering.
+        val ctor = entry("p.Foo.<init>", kind = CallableKind.CONSTRUCTOR)
+        val create = entry("p.Foo.create", arity = 1)
+        val getter = entry("p.Foo.count", kind = CallableKind.STATIC_GETTER)
+        val setter = entry("p.Foo.count=", arity = 1, kind = CallableKind.STATIC_SETTER)
+        val cls = ReflectedClass(
+            name = "p.Foo",
+            memberNames = listOf(ctor.name, create.name, getter.name, setter.name),
+        )
+
+        val source = PythonProxySource.render(listOf(ctor, create, getter, setter), listOf(cls))
+
+        val metaclassNames = Regex("^class (_pm_t_\\d+)\\(type\\):", RegexOption.MULTILINE)
+            .findAll(source).map { it.groupValues[1] }.toList()
+        assertEquals(1, metaclassNames.size, "one companion, so one metaclass carries both halves")
+        assertContains(source, "class Foo(metaclass=${metaclassNames[0]}):")
+        assertContains(source, "    def create(cls, a0):")
+        assertContains(source, "    def count(cls):")
+        assertContains(source, "    @count.setter")
+
+        val handleNames = Regex("^(_pm_h_\\d+) = _pm_bind", RegexOption.MULTILINE)
+            .findAll(source).map { it.groupValues[1] }.toList()
+        assertEquals(handleNames.distinct(), handleNames, "every bound handle name must be unique")
+        assertEquals(4, handleNames.size, "one handle per entry, and every entry is reachable")
+    }
+
+    @Test
+    fun aSuspendingCompanionFunctionGetsTheSameConditionalAwaitAsEveryOtherSuspendingSurface() {
+        val fetch = entry("p.Foo.fetchLater", arity = 1, isSuspend = true)
+        val cls = ReflectedClass(name = "p.Foo", memberNames = listOf(fetch.name))
+
+        val source = PythonProxySource.render(listOf(fetch), listOf(cls))
+
+        assertContains(source, "    async def fetchLater(cls, a0):")
+        assertContains(source, "if hasattr(_pm_r, '__await__'):")
+        assertContains(source, "return await _pm_r")
+    }
+
+    @Test
+    fun aKotlinObjectsFunctionStaysOnTheModuleBecauseTheObjectIsNotRenderedAsAClass() {
+        // The counterpart of the companion case, and the reason the fix cannot simply be "a
+        // FUNCTION whose name is a class member goes on the class": an `object` is *not* rendered
+        // as a Python class, so there is nothing to overwrite its module and nothing to put the
+        // function on. `Registry.ping()` and `Registry.size` must keep resolving against the same
+        // module object.
+        val ping = entry("p.Registry.ping")
+        val size = entry("p.Registry.size", kind = CallableKind.STATIC_GETTER)
+        val cls = ReflectedClass(
+            name = "p.Registry",
+            memberNames = listOf(ping.name, size.name),
+            kind = ReflectedClassKind.OBJECT,
+        )
+
+        val source = PythonProxySource.render(listOf(ping, size), listOf(cls))
+
+        assertContains(source, "setattr(_pm_module('p.Registry'), 'ping', _pm_f_0)")
+        assertContains(source, "_pm_static_property(_pm_module('p.Registry'), 'size', _pm_h_1, None)")
+        assertFalse(source.contains("(type):"), "an object is not rendered as a class, so it has no metaclass")
+    }
+
     @Test
     fun aTableHoldingNothingButStaticPropertiesStillRendersThem() {
         // Before they were rendered this table produced the "nothing to render" comment, which is

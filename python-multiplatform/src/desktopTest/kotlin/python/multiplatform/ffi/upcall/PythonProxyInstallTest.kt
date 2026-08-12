@@ -171,6 +171,76 @@ class PythonProxyInstallTest {
         }
 
     @Test
+    fun aCompanionFunctionIsCallableThroughTheClassObjectAlongsideItsStaticProperties() =
+        PythonTestFixture.withInterpreter {
+            PythonProxySource.install()
+
+            Python3.exec(
+                """
+                from proxycls import Counter
+                _p_sf = {'made': Counter.make(3), 'created_after': Counter.created}
+                # the same class object still carries its instance surface
+                _p_sf['instance'] = Counter(2).increment(1)
+                try:
+                    _p_sf['on_instance'] = Counter(1).make(3)
+                except AttributeError:
+                    _p_sf['on_instance'] = 'AttributeError'
+                """.trimIndent(),
+            )
+
+            assertEquals("300", PythonTestFixture.eval("_p_sf['made']").toString())
+            // The point of the coexistence check: the function and the property are two renderings
+            // on one class object, and they have to be looking at the same Kotlin state.
+            assertEquals("1", PythonTestFixture.eval("_p_sf['created_after']").toString())
+            assertEquals(1L, ProxyFragment.created, "the call from Python has to reach Kotlin")
+            assertEquals("3", PythonTestFixture.eval("_p_sf['instance']").toString())
+            // Kotlin reaches a companion member through the class and never through an instance;
+            // the metaclass reproduces that for functions the same way it does for properties.
+            assertEquals("AttributeError", PythonTestFixture.eval("_p_sf['on_instance']").toString())
+        }
+
+    @Test
+    fun aClassWhoseOnlyMemberIsACompanionFunctionStillRendersRunnablePython() =
+        PythonTestFixture.withInterpreter {
+            // Everything this class has lives on the metaclass, so its own body is empty -- which
+            // is only legal Python because the renderer emits `pass`. `exec` failing on the whole
+            // generated module is how a missing one would show up, so this is checked by a call.
+            PythonProxySource.install()
+
+            Python3.exec("from proxycls import Factory\n_p_factory = Factory.spawn(41)")
+
+            assertEquals("42", PythonTestFixture.eval("_p_factory").toString())
+        }
+
+    @Test
+    fun aRenderedClassIsNotShadowedByAModuleNamedAfterItsCompanionFunctions() =
+        PythonTestFixture.withInterpreter {
+            PythonProxySource.install()
+
+            // Before the fix `proxycls.Counter` was published twice: once as a module (by the
+            // function path, for `make`) and once as the class. Whichever came last won, so this
+            // asserts which of the two the name resolves to at all.
+            Python3.exec(
+                """
+                import proxycls, sys
+                _p_shadow = {
+                    'is_module': isinstance(proxycls.Counter, type(sys)),
+                    'is_class': isinstance(proxycls.Counter, type),
+                    'module_left_behind': 'proxycls.Counter' in sys.modules,
+                    'has_make': hasattr(proxycls.Counter, 'make'),
+                }
+                """.trimIndent(),
+            )
+
+            assertEquals("False", PythonTestFixture.eval("_p_shadow['is_module']").toString())
+            assertEquals("True", PythonTestFixture.eval("_p_shadow['is_class']").toString())
+            assertEquals("True", PythonTestFixture.eval("_p_shadow['has_make']").toString())
+            // and no half-populated module is left in sys.modules for `from proxycls.Counter
+            // import make` to find, which would be a second, contradictory answer for one name.
+            assertEquals("False", PythonTestFixture.eval("_p_shadow['module_left_behind']").toString())
+        }
+
+    @Test
     fun aTopLevelStaticPropertyIsReadAndWrittenAsAnOrdinaryModuleAttribute() =
         PythonTestFixture.withInterpreter {
             PythonProxySource.install()
@@ -470,6 +540,10 @@ object ProxyFragment : FunctionTableFragment {
     ) + counterEntries()
 
     override fun classes(): List<ReflectedClass> = listOf(
+        // A class whose *only* member is a companion function: the metaclass carries everything and
+        // the class body is empty, which is the one rendered shape that has to fall back to `pass`
+        // to be legal Python at all.
+        ReflectedClass(name = FACTORY, memberNames = listOf("$FACTORY.spawn")),
         ReflectedClass(
             name = COUNTER,
             memberNames = listOf(
@@ -482,13 +556,23 @@ object ProxyFragment : FunctionTableFragment {
                 "$COUNTER.KIND",
                 "$COUNTER.created",
                 "$COUNTER.created=",
+                "$COUNTER.make",
             ),
         ),
     )
 
     private const val COUNTER = "proxycls.Counter"
 
+    private const val FACTORY = "proxycls.Factory"
+
     private fun counterEntries(): List<ExposedCallable> = listOf(
+        ExposedCallable(
+            name = "$FACTORY.spawn",
+            arity = 1,
+            paramTypes = listOf(TypeTag.INT),
+            returnType = TypeTag.INT,
+            kind = CallableKind.FUNCTION,
+        ) { args -> (args[0] as Long) + 1 },
         ExposedCallable(
             name = "$COUNTER.<init>",
             arity = 1,
@@ -555,6 +639,21 @@ object ProxyFragment : FunctionTableFragment {
             returnType = TypeTag.UNIT,
             kind = CallableKind.STATIC_SETTER,
         ) { args -> created = args[0] as Long },
+        // The other half of the companion shape, and the one the class rendering used to bury: a
+        // companion *function* is a `CallableKind.FUNCTION` whose name is `Owner.fn`, exactly what
+        // `FragmentScanner.companionEntries` emits for `WithCompanion.create`. It bumps `created`
+        // so that the static property and the static function can be observed to be looking at the
+        // same Kotlin state.
+        ExposedCallable(
+            name = "$COUNTER.make",
+            arity = 1,
+            paramTypes = listOf(TypeTag.INT),
+            returnType = TypeTag.INT,
+            kind = CallableKind.FUNCTION,
+        ) { args ->
+            created += 1
+            (args[0] as Long) * 100
+        },
     )
 }
 
