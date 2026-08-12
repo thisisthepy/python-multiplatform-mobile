@@ -32,7 +32,7 @@ version is set in `gradle.properties`.
 - [x] Bring python embed API for Kotlin/JVM targets (Windows, Linux, macOS, Android).
 - [x] Bring python embed API for Kotlin/Native targets (iOS).
 - [x] Python interop API (Binder) for Kotlin side.
-- [ ] Kotlin interop API (Binder) for Python side.
+- [x] Kotlin interop API (Binder) for Python side.
 
 ___
 

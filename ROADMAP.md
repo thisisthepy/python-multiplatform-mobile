@@ -118,7 +118,25 @@ removes contention, not the rule that a thread must be attached before touching 
 
 ## 2. Finish the Android JNI surface
 
-**Reopened. Marking this closed was wrong.**
+**Closed, on the measure the section itself set.** Both emulators run 213 tests with zero
+failures, and the registration surface is complete: 363 of 367 `external fun` are bound through
+`RegisterNatives`, with the four exceptions deliberate — `ffiAllocUtf8`/`ffiFreeUtf8`/`ffiReadUtf8`
+are hand-written with the correct `JNIEnv*`/`jclass` prologue and cannot move into C because the
+buffers belong to Kotlin/Native, and `echoCriticalNamed` exists in order to be name-linked, so
+registering it would delete the measurement.
+
+Descriptor consistency is checked against the compiled bytecode rather than the Kotlin source —
+`javap` on `bindings.class` joined to the table by name, zero mismatches — and there are no
+duplicate wrappers or table names, which is a failure that broke cinterop once during this work.
+
+**The history below is why this took three passes**, and it is worth keeping. The section was
+closed once on `AssembledApiTest` passing, which measured its own scope: those 19 tests only
+exercised the 71 functions that had been registered. Wiring `commonTest` into Android (§11b) took
+discovery from 19 tests to 168 and the suite died on its 2nd, then its 12th. Two defects behind
+that had been invisible because nothing on Android had ever run those tests — an unpackaged stdlib
+and a `RegisterNatives` count hardcoded to 138 against a table of 145.
+
+**Reopened once. Marking it closed the first time was wrong.**
 
 It was closed on the strength of `AssembledApiTest` passing — 19 tests on `pmp_api26` and
 `pmp_api36`, 0 failed. That was true and it did not mean what it was taken to mean. Those 19 tests

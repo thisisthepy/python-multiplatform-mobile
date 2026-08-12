@@ -674,4 +674,20 @@ object bindings {
     @JvmStatic external fun proxyGetHandle(proxy: Long): Long
     @JvmStatic external fun proxySetHandle(proxy: Long, handle: Long)
 
+    /**
+     * `ob_refcnt` of the object at [obj], read straight out of the header.
+     *
+     * `Py_REFCNT` is a macro and `sys.getrefcount` adds its argument's own temporary to the
+     * answer, so neither can say whether `tp_dealloc` released the instance's reference to its
+     * heap type exactly once. `ob_refcnt` is the first field of `PyObject` and its offset is
+     * fixed by the stable ABI, which is the one layout fact this file is allowed to know.
+     *
+     * Composed on the C side for the same reason [proxySetHandle] is: reading 8 bytes at a raw
+     * address from Kotlin/JVM would need `sun.misc.Unsafe`, a restricted non-SDK interface here.
+     *
+     * A probe, not a production call -- nothing outside the cycle-collection tests uses it, and
+     * a caller that passes a non-`PyObject` address gets whatever is at that address.
+     */
+    @JvmStatic external fun obRefCnt(obj: Long): Long
+
 }

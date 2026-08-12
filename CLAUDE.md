@@ -193,6 +193,42 @@ agy -p "<프롬프트>" --model gemini-3.1-pro-high --print-timeout 30m
 
 `agy agents` 는 현재 비어 있다 — 별도 등록된 에이전트 프로필은 없다.
 
+### 머지는 조율 세션에서만, 그리고 거부를 놓치지 마라
+
+`git merge` 는 **커밋되지 않은 변경이 있으면 조용히 거부한다.** 출력을 파일로 보내고 `CONFLICT` 만
+grep 하면 그 거부를 못 본다 — 그러면 머지된 줄 알고 **옛 기준선에서 검증하게 된다.** 실제로 그렇게
+한 번 당했고, 나중에 develop 머지에서 충돌이 나서야 알았다.
+
+    git merge --no-edit develop && echo OK || { 로그를 직접 읽어라 }
+
+**worktree 안에서 `git merge <자기 브랜치>` 는 no-op 이다.** 머지는 메인 저장소에서 develop 을
+체크아웃한 상태로만 한다.
+
+**머지 후 반드시 다시 빌드하라.** 각 브랜치가 따로 통과해도 합친 결과가 깨질 수 있다 — 두 에이전트가
+같은 함수를 독립적으로 마이그레이션해 C 래퍼가 중복 정의되고 cinterop 이 재정의 에러로 거부한 적이 있다.
+추가 전 중복 검사:
+
+    grep -oE "^static [a-z]+ (f_[A-Za-z0-9_]+)" jni_onload.def | awk '{print $3}' | sort | uniq -d
+    grep -oE '\{"[A-Za-z0-9_]+"' jni_onload.def | sort | uniq -d
+
+### 에이전트 작업을 되돌려 볼 때는 stash 를 쓴다
+
+에이전트가 "이 테스트는 고치기 전에 빨갛다"고 하면 확인할 가치가 있다. 다만 되돌리는 방법이 중요하다.
+
+    git stash push -- <파일>     # 보존
+    ...확인...
+    git stash pop                # 복구
+
+**`git checkout -- <디렉터리>` 를 쓰지 마라.** 커밋되지 않은 에이전트 작업은 복구 대상이 없어 그대로
+사라진다. 그렇게 9개 파일을 날린 적이 있다(에이전트를 재개시켜 복구했다).
+
+### 검증에 androidNative 컴파일을 포함한다
+
+`nativeMain` 은 iOS 와 androidNative 가 공유한다. **iOS 만 확인하면 androidNative 가 깨진 채로 지나간다** —
+`iosMain` 에만 `actual` 을 두어 실제로 그렇게 됐고, 아무도 그 타깃을 컴파일하지 않아 며칠 갔다.
+
+    ./gradlew :python-multiplatform:compileKotlinAndroidNativeArm64
+
 ### 에이전트 결과는 반드시 직접 검증한다
 
 에이전트는 지시를 어긴다. 실제로 겪은 사례:
