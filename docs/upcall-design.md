@@ -209,6 +209,11 @@ Only the address-publishing step; the marshalling is shared.
 Nothing in that list touches `UpcallTrampoline`; each is the platform's existing upcall mechanism
 pointed at it.
 
+The "Cost" column above is per-platform prose, not a comparison. For one measured next to the others
+— desktop, iOS, wasmJs and Android in the same units, from the same test — see "One upcall, across
+all five platforms" below. In particular the wasm row's **3.1 ns is the bare `call_indirect`
+mechanism with no arguments** and is not what an upcall carrying an argument tuple costs.
+
 ### Android's boundary runs the other way round, and `RegisterNatives` is not it
 
 The Android row above used to read "a JNI `static jlong` native method registered with
@@ -324,6 +329,107 @@ step 3 says this in the abstract; this is the path that makes it concrete.
 Cost, which the row's "one shim per shape" understated: one JNI upcall per call, plus an attach the
 *first* time Python calls from a thread it created. Both are now measured — see the table above and
 `UpcallOverheadTest`. Neither is on the marshalling path.
+
+### One upcall, across all five platforms
+
+Everything above prices Android, because Android had a question the others do not: whether the
+attach a Python worker needs is paid once per thread or once per call. That left the upcall path
+measured on exactly one target, while the downcall path has been comparable across all of them since
+`overhead/BenchmarkTest` — so "is the upcall expensive?" had no answer that could be given per
+platform.
+
+`UpcallBoundaryCostTest` (`commonTest`) is `UpcallOverheadTest` with the attach half removed and
+nothing else changed: same loop shape, same warmup counts (10 000 iterations after 3 000 of warmup),
+the same three baselines measured in the same run (plus the two controls the next heading
+introduces), and the same printed-not-asserted policy. It sits
+in `commonTest` because every seam it needs is already common — `bindUpcallOrNull` (the per-platform
+binding step `UpcallEntryTest` introduced), `UpcallTrampoline`, and the `expect` C API — so one copy
+runs on every target.
+
+| Platform | upcall | downcall, same shape | trampoline alone | upcall / downcall | upcall / trampoline |
+|---|---|---|---|---|---|
+| **desktop** (JVM 21.0.12, macOS arm64) | 861–1313 ns | 315–527 ns | 170–269 ns | 2.49–2.89x | 4.88–5.51x |
+| **iOS simulator** (arm64) | 2263–2502 ns | 1599–1826 ns | 1928–2139 ns | 1.33–1.43x | 1.15–1.22x |
+| **wasmJs** (Node) | 703–1075 ns | 230–369 ns | 228–271 ns | 2.56–3.36x | 3.04–3.97x |
+| **androidNative** | — see below | — | — | — | — |
+| *Android API 26* †| *1209–1329 ns* | *not recorded* | *not recorded* | *0.99–1.09x* | *not recorded* |
+| *Android API 36* †| *2301–3086 ns* | *not recorded* | *not recorded* | *2.00–2.34x* | *not recorded* |
+
+Ranges are min–max over five runs of the whole suite (four for wasmJs); a single reading is not a
+measurement. **The rows in italics marked † are quoted, not re-measured** — from commit `409da6fc`
+and the two tables above, which is why the columns those did not record are blank rather than
+inferred. The two Android rows are two different emulators, not two runs of one.
+
+Their upcall and ratio columns are both the *Python worker thread, steady state* row, taken together
+so the two halves of the ratio belong to the same measurement. That row is the right cross-platform
+analogue precisely because of what the section above established: with the attach amortised, the
+difference between a Python worker and a thread ART already knows straddles zero (the
+instrumentation-thread figures are 1280–1327 ns and 2982–5086 ns), so the worker no longer carries a
+cost the other four platforms have no equivalent of. Its ratio is the one that was recorded.
+
+androidNative has no test-*run* task at all (the Kotlin/Native android targets produce
+`androidNativeArm64TestBinaries` and nothing that executes it), so measuring it means pushing a
+binary to a device. Its `UpcallEntry` is the same `nativeMain` `PyMethodDef` iOS uses, so the iOS row
+is the closest available proxy; `compileTestKotlinAndroidNativeArm64` is green.
+
+#### The trampoline column needed a control before it meant anything
+
+"Upcall minus trampoline is the boundary" is only true if the two differ by the boundary alone, and
+in the obvious arrangement they do not. `UpcallTrampoline` takes its own `PyGILState_Ensure`/
+`Release` pair **unconditionally** — see "The GIL is not the caller's to promise" — so driving it
+from a bare Kotlin thread pays a real GIL acquisition per call, while Python drives it already
+holding the GIL. The first run made that concrete: on iOS the trampoline alone came out *more*
+expensive than the whole upcall through it, i.e. the boundary priced negative (0.77–0.81x).
+
+So it is measured twice, differing in exactly that one thing, with an empty `Python3.withPython { }`
+beside them for scale:
+
+| | desktop | iOS simulator | wasmJs |
+|---|---|---|---|
+| trampoline, caller holding nothing | 252–507 ns | 2764–3109 ns | 280–307 ns |
+| trampoline, GIL already held | 170–269 ns | 1928–2139 ns | 228–271 ns |
+| `Python3.withPython { }`, empty | 124–152 ns | 725–982 ns | 79–81 ns |
+
+The **GIL-held** row is the one the table above uses, because it is the one the Python-driven
+numerator is comparable with.
+
+#### Where the differences actually come from
+
+**iOS has the highest absolute upcall and the lowest ratio, and neither is about the boundary.**
+There is no runtime boundary on that target at all — a `PyMethodDef` whose `ml_meth` is a
+`staticCFunction` in the same binary. What is expensive is the per-call scaffolding every C API call
+shares: an empty `withPython` scope costs 725–982 ns there against 124–152 ns on desktop and 79–81 ns
+on wasm, and `Py_IncRef + Py_DecRef` — two calls, two GIL scopes, no marshalling — costs 1551–2032 ns
+against 165–326 ns and 166–228 ns. The denominator is inflated by the same thing as the numerator,
+which is exactly why the ratio comes out near 1: an iOS upcall is barely more than an iOS downcall,
+and both are expensive for a reason that has nothing to do with upcalls. This is where the work is
+if the iOS number is to move, not in `UpcallEntry`.
+
+**Desktop is the opposite shape.** Its trampoline with the GIL held is 170–269 ns, and the
+Python-driven figure is 861–1313 ns, so 600–1000 ns per call is the Panama upcall stub plus the
+`ctypes` shim in front of it — a real boundary, and the largest one measured here in *relative*
+terms (4.88–5.51x). One caveat is genuine and is not measured away: on desktop `_pm_bound` is a
+Python `lambda *a: _pm_invoke(_pm_h, a)` over a `ctypes.CFUNCTYPE`, where the other targets bind a
+`PyCFunction` directly. Desktop therefore pays one extra Python call (26.7–27.2 ns, printed as the
+pure-Python callee) plus ctypes' own argument conversion inside every figure in its row. **Desktop's
+row is an upper bound on its boundary cost**, not a measurement of the boundary alone.
+
+**wasm's 3.1 ns is not this number, and was never claiming to be.** The "already proven" row in the
+platform table quotes `wasm-experiment`'s `call_indirect` figure, which is the *mechanism* with no
+arguments. The argument-passing path measured here is 703–1075 ns, of which 228–271 ns is the
+trampoline; the remaining 470–800 ns is the Python-side callable plus the crossing with a real
+argument tuple. Two orders of magnitude between the two is not a contradiction — they measure
+different things — but the 3.1 ns figure must not be quoted for an upcall that carries arguments.
+
+**wasm's scaffolding is the cheapest and by far the most stable of the three** (79.50, 80.15, 80.50,
+80.69 ns for an empty scope across four runs), which follows from there being no OS thread machinery
+under it.
+
+Nothing in the test asserts a duration. A wall-clock threshold on a shared build machine, an
+emulator or a Node host is a flake generator, and this repo has had exactly that failure; what is
+asserted is structural — the name bound, the loop demonstrably reached Kotlin, and every figure came
+back positive rather than zero from a clock with no resolution, which is the failure mode that would
+otherwise report the upcall as free.
 
 ### The `@CName` + `ctypes.CDLL(None)` route, measured
 
