@@ -350,11 +350,51 @@ implements the tag handling, [pypi/warehouse #19804](https://github.com/pypi/war
 adds PyPI support, [maturin #3163](https://github.com/pyo3/maturin/pull/3163) adds it to a build
 backend, and [pydantic publishes Emscripten wheels to PyPI under it](https://pydantic.dev/articles/emscripten-wheels-pydantic).
 
-#### Still unverified
+#### Resolved: the flag list, read off the source rather than the rendered page
 
-The exact flag list for `pyemscripten_2026_0` — Emscripten version above all — has not been read
-off Pyodide's ABI page; it returned 403 to automated fetching and needs a manual read before the
-build script is written. Until then, treat "we can match the platform" as a plan, not a fact.
+`pyodide.org/en/stable/development/abi.html` still returns 403 to automated fetching. The same
+documents are in the repository and `raw.githubusercontent.com` serves them, which is how the
+following was read. Sources are `github.com/pyodide/pyodide` at tag **`314.0.4`** —
+`docs/development/abi/314.md`, `docs/development/abi/flags.md`, `Makefile.envs` — and
+`github.com/pyodide/pyodide-build` `pyodide_build/config.py`.
+
+`Makefile.envs` at that tag pins the whole platform in four lines:
+
+```
+PYODIDE_VERSION ?= 314.0.4
+PYODIDE_ABI_VERSION ?= 2026_0
+PYVERSION ?= 3.14.2
+PYODIDE_EMSCRIPTEN_VERSION ?= 5.0.3
+```
+
+| | `pyemscripten_2026_0` (3.14) | for comparison, `2025_0` (3.13) |
+|---|---|---|
+| Emscripten | **5.0.3** | 4.0.9 |
+| unwinding | `-fwasm-exceptions -sSUPPORT_LONGJMP=wasm`, at **compile and link** | same |
+| `-sWASM_BIGINT` | required, but **default since Emscripten 4.0.0** — not typed explicitly | same |
+| `-pthread` | prohibited; "if `-pthread` is used, the resulting libraries will not load" | same |
+| dependency lookup | full `RPATH` support, and `RPATH` is the *only* mechanism | same |
+| Rust | stable `1.93.0`; no nightly, no custom sysroot | nightly + custom sysroot |
+| new static libs | `sqlite3` 3.39.0, `lzma`/xz 5.2.2 | — |
+
+Statically linked into the main binary: `zlib`, `bzip2`, `sqlite3`, `lzma`, `zstd`, `libffi`,
+`libhiwire`, and the Emscripten JS libraries (`libGL`, `libegl.js`, `libwebgl.js`, `libhtml5*.js`,
+`libsdl.js`, `libwebsocket.js`, `libeventloop.js`, `liblz4`, the filesystem backends). **OpenSSL is
+not** — Pyodide builds it as a shared side module (`libssl.so`/`libcrypto.so`, OpenSSL 1.1.1w)
+found through `RPATH`.
+
+Extension modules are side modules. Pyodide documents `-sSIDE_MODULE=2` plus an explicit
+`-sEXPORTED_FUNCTIONS=["_PyInit_…"]` as the recommendation, though its own C default is
+`-sSIDE_MODULE=1`. That is exactly the shape the packaging decision above already chose for our
+shim.
+
+**PEP 783 itself does not enumerate any of this.** It lists the ABI-sensitive *surface* and then
+defers normatively to Pyodide's documentation for the values. It does specify how the tag is
+derived, and that is the part that bites: `packaging` reads
+`sysconfig.get_config_var("PYEMSCRIPTEN_PLATFORM_VERSION")`. **That variable does not exist
+anywhere in CPython 3.14.2** — `grep -r PYEMSCRIPTEN` over the whole checkout returns nothing. So a
+stock CPython Emscripten build cannot advertise the platform even if it matches the flags; the
+variable is something Pyodide's build injects.
 
 ---
 
@@ -717,3 +757,269 @@ memory on its own — measured across strings, collections, exceptions, a 10 MiB
 100k-object graph, the `ArrayBuffer` bridge and coroutines — so handing it to Emscripten costs
 nothing. And `withScopedMemoryAllocator` must never appear in `wasmJsMain`, because it allocates
 from address 0 upward, on top of Emscripten's static data.
+
+---
+
+## Test C: run, and the cycle is gone
+
+The section above predicted this from reading the binary. `wasm-experiment/` now builds and runs
+it. `native/run.sh` reproduces; Test C is `native/combined-test.mjs`.
+
+### The binary confirms the shape
+
+Parsing `wasm-experiment.wasm` built on 2.4.20-Beta2:
+
+```
+import  './probeA-wrapper.mjs' . 'add_two'    kind=0  func         <- direct wasm call
+import  'intrinsics' . 'tag'                  kind=4  tag
+import  'intrinsics' . 'memory'               kind=3  global externref
+import  'intrinsics' . 'memory'               kind=2  memory  min=0  max=none
+memory definitions                            0
+non-function exports                          none
+```
+
+`max=none` on the *import* is what makes this direction work. A wasm import must be satisfied by
+a memory whose limits sit inside the declared ones, so an unbounded import accepts anything —
+including Emscripten's bounded memory. The old direction was unsatisfiable for exactly the
+mirror-image reason, and `patch-memory-max.py` existed to force it. It is no longer used.
+
+### The integration is one substitution
+
+`patch-import-object.py` rewrites one expression in the generated glue:
+
+```js
+intrinsics: { memory: new WebAssembly.Memory({ initial: 0 }), tag: wasmTag }
+                    -> memory: <probeA-wrapper>.wasmMemory
+```
+
+Ordering comes free from ES modules. `wasm-experiment.import-object.mjs` imports the wrapper, the
+wrapper has a top-level `await factory()`, so Emscripten is fully instantiated before Kotlin's
+import object is built. Emscripten is compiled exactly as it would be alone — no
+`-sIMPORTED_MEMORY`, no binary patching. Kotlin is the side that adapts.
+
+### Both halves hold at once
+
+```
+Emscripten's memory object     Memory, 258 pages
+Kotlin's intrinsics.memory     Memory, 258 pages          PASS  same buffer
+Kotlin called cAddTwo(40, 2) -> 42                        PASS  @WasmImport, memory shared
+C:  get_static_message() -> 0x400
+Kotlin: readCStringAt(that address) -> "hello-from-the-cpython-side"   PASS
+Kotlin: writeCStringAt(malloc'd addr, "written-by-kotlin")
+C:  str_len -> 17, UTF8ToString -> "written-by-kotlin"     PASS
+```
+
+The value handed to the import still prints as `function 2() { [native code] }` — a raw wasm
+export, no JS wrapper — so the control path is wasm-to-wasm with the memory shared.
+
+### And it survives the memory growing
+
+Not previously checked, and it is not optional: CPython links with `-sALLOW_MEMORY_GROWTH
+-sINITIAL_MEMORY=20971520`, so the memory *will* grow underneath Kotlin in production. A JS
+TypedArray view detaches when that happens. Kotlin holds the memory as a wasm import rather than
+a view, and does not:
+
+```
+C: malloc(64 MiB) -> 0x10638,  258 pages -> 1026 pages
+   PASS -- the shared memory actually grew
+   PASS -- Kotlin still reads the pre-growth address correctly
+   PASS -- Kotlin writes into memory that did not exist when it was instantiated
+```
+
+### Measured: the control path
+
+10,000,000 calls of the same trivial C function, one process, Node 24, Emscripten 5.0.3.
+
+| | ns/call |
+|---|---|
+| direct `@WasmImport` | **5.0** (stable across runs) |
+| JS trampoline | 13.6 – 16.9 (2.7x – 3.4x) |
+
+So removing the cycle is worth about 9–12 ns per crossing. That is the whole benefit of option 1
+over option 2, and it is now available.
+
+### Measured: the data path — and the earlier conclusion was wrong
+
+Everything above said string marshalling "does not merely get cheaper, it disappears". **It does
+not.** Both loops below run in Kotlin and end with a Kotlin `String` built from the same C
+address; only the route differs.
+
+| ns per read | 27 bytes | 4000 bytes |
+|---|---|---|
+| shared: scan to NUL, build nothing | 193 | 1 649 |
+| shared: `ByteArray` copy, no decode | 399 | 4 875 |
+| shared: `ByteArray` + `decodeToString()` | 405 | **58 271** |
+| shared: `CharArray` + `concatToString()` (ASCII) | **103** | 5 875 |
+| shared: `StringBuilder.append(Char)` per byte | 311 | 51 348 |
+| copied: `UTF8ToString` through JS | 125 | **3 827** |
+
+Two things account for it, and neither is the boundary:
+
+1. **Kotlin/Wasm strings already *are* JS strings.** The generated glue compiles with
+   `builtins: ['js-string']`. `UTF8ToString` produces a JS string, and handing that to Kotlin is
+   not a conversion. The "copy through JS" path was assumed to pay for a copy that no longer
+   exists.
+2. **`ByteArray.decodeToString()` is pathological on long input** — 53 µs of the 58 µs figure at
+   4000 bytes, about 13 ns per byte, against 0.2 ns per byte at 27 bytes. `concatToString()` on a
+   `CharArray` costs a tenth of it. Worth a separate report upstream.
+
+The honest rule that comes out of this is not "marshalling disappears" but:
+
+- **`char*` → `String`: use the ASCII `CharArray` + `concatToString()` route, and fall back to
+  `UTF8ToString` for anything long or non-ASCII.** Never `decodeToString()` on a large buffer.
+- **`char*` → `ByteArray` (the `PyBytes` case): shared memory, unambiguously.** No decode, and no
+  JS-side equivalent that avoids a copy.
+- Shared memory is still what makes writing *into* C buffers free, which has no JS equivalent at
+  all short of `Module.HEAPU8.set`.
+
+### Measured: bulk, which is what the composed shim was for
+
+1000 `i32` out of a C-owned array, 20,000 repetitions:
+
+| | ns per element |
+|---|---|
+| shared memory, `Pointer.loadInt()` | **0.7** |
+| through JS, `Module.HEAP32[a >> 2]` | 7.1 |
+
+So the composition arithmetic is now fully determined. Walking a list without a shim means N
+direct `PyList_GetItem` calls at **5.0 ns** of crossing each. With a shim it is one crossing plus
+N shared reads at **0.7 ns**. **Composition buys ~4.3 ns per element and nothing else** — the
+CPython-side work is identical either way.
+
+ROADMAP §6 closed desktop composition at a 10% saving. Test D below measures the same question
+against the real interpreter and answers it more sharply.
+
+---
+
+## Test D: it works against real CPython, and it closes the composition question
+
+Tests A and C run against a 4 KB toy compiled by `emcc`. Test D runs against **CPython 3.14.2
+built for `wasm32-emscripten`** — 10 MB of wasm, 8191 exports, `-sMAIN_MODULE`, a growable memory,
+instantiated by Emscripten's own glue. The build is `Tools/wasm/emscripten` (PEP 776, Tier 3 from
+3.14) under Emscripten 5.0.3; see the build notes below.
+
+```
+python.wasm exports        8191
+CPython's memory           320 pages
+Kotlin's intrinsics.memory 320 pages                                    PASS  same buffer
+
+Kotlin: pyExec("answer = 6 * 7; greeting = ...") -> 0                   PASS
+Kotlin: pyGlobalInt("answer") -> 42                                     PASS
+Kotlin: pyGlobalString("greeting") -> "hello-from-cpython-42"           PASS
+Kotlin: pyExec("bytearray(48 MiB)") -> 0,  320 -> 934 pages             PASS
+        Kotlin still reads CPython correctly after the growth           PASS
+        a pre-growth string still reads correctly                       PASS
+```
+
+Kotlin wrote the Python source **directly into CPython's heap** with `Pointer.storeByte` on an
+address `malloc` returned, called `PyRun_SimpleString` as a direct wasm import, then dereferenced
+`PyUnicode_AsUTF8`'s `char*` to get the string back. No copying, no JS in either direction, and it
+survives the interpreter growing its own memory by 600 pages underneath.
+
+### The one build change CPython needed, and it is not ABI-sensitive
+
+The Stable ABI symbols are all there — `-sMAIN_MODULE` is `LINKABLE`, so Emscripten exports
+everything and emits `EXPORTED_FUNCTIONS is not valid with LINKABLE set` for CPython's own list.
+**This retires the recorded worry that "CPython must be built with an explicit
+`EXPORTED_FUNCTIONS` list; a stock Pyodide build strips the C API by dead-code elimination."** The
+supported CPython build already exports the whole surface.
+
+What it does *not* do is let JavaScript reach them. `Module` carries 36 keys and none of the
+interesting ones, so there is nothing to hand to `@WasmImport`. One flag fixes it:
+
+```
+-sEXPORTED_RUNTIME_METHODS=FS,callMain,ENV,HEAPU32,TTY,wasmExports,wasmMemory
+                                                       ^^^^^^^^^^^^^^^^^^^^^^
+```
+
+After a relink, `Module.wasmExports.PyRun_SimpleString` prints as `function 4426() { [native
+code] }` — a raw wasm export — and `Module.wasmMemory` is the `WebAssembly.Memory` Kotlin's
+`intrinsics.memory` needs. Both are JS-glue settings and neither appears in PEP 783's
+ABI-sensitive list, so this costs nothing against the platform tag.
+
+### Composition, measured against the interpreter
+
+Reading one global out of `__main__`, 200,000 times, on the same shared-memory direct-call setup.
+Each row adds a pure-Kotlin optimisation:
+
+| | ns | |
+|---|---|---|
+| naive | 259.5 | 2 `malloc` + 2 `free` + 2 string writes + 4 API calls |
+| + interned C strings | 185.4 | names allocated once — the Android fix, for free here |
+| + module/dict hoisted | **65.2** | 2 API calls — the floor |
+| one crossing (`PyErr_Occurred`) | **2.9** | direct `@WasmImport`, real interpreter |
+
+**75% of the naive cost is removable without shipping a single line of C.** What is left is 65 ns
+of two CPython calls, of which the crossings are 5.8 ns — 9% of the floor, 2% of the naive figure.
+A composed `pmp_getattr` could merge those two calls into one and save **2.9 ns**.
+
+The bulk case ends the same way. Composition there buys the difference between a crossing and a
+shared-memory read, 2.9 ns against 0.7 ns per element, and CPython does identical work either way.
+The constraint that kept the case alive — `PySequence_Fast_ITEMS` is a macro over
+`PyListObject->ob_item` and `abi3t` makes `PyObject` incomplete, so shared memory does *not* let
+Kotlin walk a list's storage — turns out not to matter, because N calls at 2.9 ns is cheap.
+
+**Verdict: no composed shim on WASM.** Same answer as ROADMAP §6 gave desktop, reached the same
+way, and with a wider margin: desktop's composition was worth 10%, this is worth 1–2% after the
+free wins are taken. The signatures sketched earlier — `pmp_getattr`, `pmp_exec`, `pmp_list_items`,
+`pmp_str_utf8`, `pmp_decref`, `pmp_scratch` — were motivated by amortising JS hops, and the hops
+are gone. What replaces them is ordinary `wasmJsMain` Kotlin: `@WasmImport` per Stable ABI
+function, an interning cache for repeated names, and `Pointer` reads for everything else.
+
+That also removes the second build pipeline. No extension module to build, version and ship
+against a specific interpreter — which was the largest recurring cost in the plan.
+
+### What is still not answered
+
+Upcalls. `addFunction` re-entering WasmGC still goes through JS and is still unmeasured; §7's
+shape has to settle before `wasmJsMain` is written. Nothing in Tests C or D touches it.
+
+---
+
+## Building CPython 3.14.2 for Emscripten: what worked
+
+`/Volumes/macMini/wasm-build/build-cpython-emscripten.sh` reproduces it. The driver is CPython's
+own `Tools/wasm/emscripten` (`build` runs configure-build-python → make-build-python → libffi →
+mpdecimal → configure-host → make-host). It succeeded end to end on the first attempt against
+Emscripten 5.0.3, and `python.sh --version` prints `Python 3.14.2`.
+
+```
+sysconfig.get_platform()                      emscripten-5.0.3-wasm32
+sysconfig.get_config_var('PYEMSCRIPTEN_PLATFORM_VERSION')   None
+Checked 114 modules (85 built-in, 6 shared, 17 n/a, 1 disabled, 5 missing, 0 failed on import)
+python.wasm  10 MB      python.mjs  570 KB
+```
+
+### What the stock build passes, and how far it is from `pyemscripten_2026_0`
+
+Read off the actual command lines, not the documentation:
+
+| | stock CPython 3.14.2 | `pyemscripten_2026_0` |
+|---|---|---|
+| Emscripten | 5.0.3 (we pinned it) | **5.0.3** — matches |
+| `-sWASM_BIGINT` | passed explicitly in `LDFLAGS_NODIST` | required; default since Emscripten 4.0 — matches |
+| `-pthread` | absent; `configure` even reports `emcc accepts -pthread... no` | prohibited — matches |
+| `-fPIC` | yes (required by `MAIN_MODULE`) | yes — matches |
+| dynamic linking | `--enable-wasm-dynamic-linking` → `-sMAIN_MODULE`; extensions built `-shared -sSIDE_MODULE=1` | `MAIN_MODULE=1` / side modules — matches |
+| **unwinding** | **nothing** — no `-fwasm-exceptions`, no `-sSUPPORT_LONGJMP=wasm` | **required at compile and link** — **DIVERGES** |
+| **static libs** | zlib, bzip2, sqlite3, libffi, mpdecimal; **no lzma, no zstd** | + lzma 5.2.2, zstd — **DIVERGES** |
+| **OpenSSL** | **absent** — "Could not build the ssl module" | shared side module, OpenSSL 1.1.1w — **DIVERGES** |
+| platform variable | `PYEMSCRIPTEN_PLATFORM_VERSION` is **not defined anywhere in CPython 3.14.2** | `packaging` reads it to emit the tag — **DIVERGES** |
+
+So the stock Tier 3 build is close but cannot claim the tag, and the gap is real work rather than a
+flag flip: the unwinding ABI has to be added at both compile and link, `lzma`/`zstd`/OpenSSL have to
+be built as ports or side modules, and something has to define `PYEMSCRIPTEN_PLATFORM_VERSION`.
+
+A practical trap for whoever does it: the driver hardcodes `CFLAGS=-DPY_CALL_TRAMPOLINE
+-sUSE_BZIP2` in its `configure` argv and appends user arguments *after*, and autoconf takes the
+last assignment — so passing `CFLAGS=…` to add `-fwasm-exceptions` silently drops
+`-DPY_CALL_TRAMPOLINE`. The full string has to be repeated.
+
+**Not verified:** that the ABI-matching build succeeds, or that a PyPI `pyemscripten_2026_0` wheel
+loads into it. Only the stock build was run.
+
+### Environment note
+
+Installing Emscripten 5.0.3 through `emsdk install` **replaces `~/emsdk/upstream` in place** — the
+previously active 6.0.6 now reports as not installed and would have to be re-downloaded. The active
+version is a global, shared setting, not per-project.

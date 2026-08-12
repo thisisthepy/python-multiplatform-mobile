@@ -21,3 +21,12 @@ EMSCRIPTEN_KEEPALIVE char* alloc_message(const char* src) {
 EMSCRIPTEN_KEEPALIVE int str_len(const char* p) { return (int)strlen(p); }
 
 EMSCRIPTEN_KEEPALIVE void poke(char* p, int i, int v) { p[i] = (char)v; }
+
+// Stands in for the bulk case -- PyList_GET_ITEM over a list, or any C-owned array of i32 that
+// Kotlin wants to walk. This is the one place the composed-shim argument was still expected to
+// survive, so it needs a measurement rather than an assumption.
+EMSCRIPTEN_KEEPALIVE int* alloc_int_array(int n) {
+    int* a = (int*)malloc((size_t)n * sizeof(int));
+    for (int i = 0; i < n; i++) a[i] = i;
+    return a;
+}

@@ -523,48 +523,75 @@ an incomplete type does not break us.
 
 ## 10. WASM
 
-**Deferred, but no longer for the reason first written here.** The original claim — that
-Kotlin/Wasm cannot reach C at all, so everything must go through JS — is false, and
-`wasm-experiment/` disproves both halves of it by building and running the thing:
+**There is no JS bridge, and the interpreter is running.** Every framing this section previously
+carried — that Kotlin/Wasm cannot reach C, that the data path must be copied through JS, that
+direct calls and shared memory cannot be had together — is disproved by running code.
+`wasm-experiment/` reproduces all of it; `docs/wasm-design.md` has the detail.
 
-- `@WasmImport` binds to a function exported by an Emscripten module. Kotlin called
-  `emcc`-compiled `add_two` and got 42, through a real wasm import, with no JS frame.
-- Emscripten built with `-sIMPORTED_MEMORY` accepts the linear memory Kotlin exports, and the
-  sharing works both ways: an address from C reads back in Kotlin as the bytes C wrote, and a
-  string Kotlin writes into a `malloc`'d buffer reads back through C's `strlen`. **No copying and
-  no JS in the data path** — which removes the cost every other platform measured as dominant.
+**Test D — Kotlin/Wasm against CPython 3.14.2, built here for `wasm32-emscripten`:**
 
-One constant blocks it: Kotlin emits `WasmLimits(0, null)`, a memory with no maximum, and wasm
-requires a supplied memory to sit inside the importer's limits, so no Emscripten import can ever
-accept it. Patching the six-byte memory section to `{min: 0, max: 32768}` makes everything link.
-That belongs in a YouTrack issue, not in this design.
+```
+python.wasm exports  8191      Kotlin's intrinsics.memory  ==  CPython's memory
+Kotlin: pyExec("answer = 6 * 7; greeting = ...")        -> 0        PASS
+Kotlin: pyGlobalInt("answer")                           -> 42       PASS
+Kotlin: pyGlobalString("greeting") -> "hello-from-cpython-42"       PASS
+Kotlin: pyExec("bytearray(48 MiB)")   320 -> 934 pages, reads still correct   PASS
+```
 
-One structural constraint remains: Kotlin needs Emscripten's exports at instantiation and
-Emscripten needs Kotlin's memory before that, and wasm imports are supplied up front, so the two
-halves cannot yet be combined in one graph. The clean fix is the master-only
-`importWasmMemoryInsteadOfExport`, which inverts ownership; the available fix is JS trampolines
-for calls with the data path still shared, which keeps the half that matters.
+Kotlin wrote the Python source straight into CPython's heap and dereferenced
+`PyUnicode_AsUTF8`'s `char*` out of it. Direct wasm-to-wasm calls, one linear memory, no copying
+and no JS in either direction — and it survives the interpreter growing its memory by 600 pages.
 
-A rule falls out for `wasmJsMain`: **`withScopedMemoryAllocator` must never be called.** Measured
-— it grows the memory and allocates at address `0x0`, on top of Emscripten's static data.
+What made it possible: Kotlin **2.4.20-Beta2 imports** its linear memory instead of exporting it.
+That reverses the ownership behind the instantiation cycle, so Emscripten instantiates first and
+Kotlin receives both the memory and the exports. The integration is one substitution in the
+generated glue — `intrinsics.memory` from a placeholder `new WebAssembly.Memory({initial: 0})` to
+`Module.wasmMemory`. `patch-memory-max.py` and the YouTrack issue it was going to justify are both
+obsolete: the memory *import* declares no maximum, so any memory satisfies it.
 
-See `docs/wasm-design.md`. What still defers §10 is that `wasmJsMain`'s `actual`s cannot be
-written until §1/§4 and §7 settle, plus CPython's Emscripten build only becoming supported in
-3.14 (PEP 776, Tier 3), with binaries still coming from downstream rather than python.org.
+**Composition is closed, the same way §6 closed it on desktop.** Reading a global from `__main__`,
+measured against the real interpreter:
+
+| | ns |
+|---|---|
+| naive | 259.5 |
+| + interned C strings | 185.4 |
+| + module/dict hoisted | **65.2** |
+| one crossing (`PyErr_Occurred`, direct) | **2.9** |
+
+75% of the naive cost comes off with pure Kotlin. What is left is CPython's own work; a composed
+`pmp_getattr` could merge two calls into one and save 2.9 ns. Bulk ends the same way — 2.9 ns per
+crossing against 0.7 ns per shared-memory read. **No C shim, and therefore no second build
+pipeline.**
+
+**Rules for `wasmJsMain`**, both measured:
+
+- **`withScopedMemoryAllocator` must never be called.** It allocates from address `0x0`, on top of
+  Emscripten's static data. CPython allocates; Kotlin only dereferences addresses it was handed.
+- **`char*` → `String`: `CharArray` + `concatToString()` for ASCII, Emscripten's `UTF8ToString`
+  otherwise. Never `ByteArray.decodeToString()` on a large buffer** — 13 ns/byte at 4 KB, ten times
+  `concatToString`. The earlier claim that "string marshalling disappears" was wrong: Kotlin/Wasm
+  strings *are* JS strings under the `js-string` builtins, so the JS route was never paying for the
+  copy the design assumed it paid for.
+
+**The CPython build works and does not yet claim the platform tag.** PEP 783's
+`pyemscripten_2026_0` pins Emscripten **5.0.3** (Pyodide `Makefile.envs` at tag `314.0.4`), which
+is what was used. The stock Tier 3 build (`Tools/wasm/emscripten`, PEP 776) already matches on
+`-sWASM_BIGINT`, no `-pthread`, `-fPIC` and `MAIN_MODULE`/`SIDE_MODULE`. It diverges on the
+unwinding ABI (`-fwasm-exceptions -sSUPPORT_LONGJMP=wasm` absent), on static libs (no lzma, zstd or
+OpenSSL), and on `PYEMSCRIPTEN_PLATFORM_VERSION`, which does not exist anywhere in CPython 3.14.2 —
+so a stock build cannot advertise the tag even where the flags line up. Also settled:
+`-sMAIN_MODULE` is `LINKABLE` and exports all 8191 symbols, so **no custom `EXPORTED_FUNCTIONS`
+list is needed** for the Stable ABI. Only `wasmExports` and `wasmMemory` have to be added to
+`-sEXPORTED_RUNTIME_METHODS`, and neither is ABI-sensitive.
+
+**What still defers §10** is upcalls: `addFunction` re-entering WasmGC still goes through JS and is
+unmeasured, so §7's shape has to settle before `wasmJsMain`'s `actual`s are written. The `wasmJs`
+target in `python-multiplatform/build.gradle.kts` is still commented out.
 
 Kotlin/Native once had a `wasm32` target that could have shared CPython's linear memory; it was
-deprecated in 1.8.20 and removed in 1.9.20. So the JS bridge is a consequence of the current
-toolchain, not of WASM itself.
-
-Starting now means building on a JS bridge that a future C-interop story would discard.
-
-**Packaging is settled upstream, and constrains our build.** PEP 783 (Accepted) defines the
-`pyemscripten_<year>_<patch>_wasm32` platform tag, one version per Python feature release —
-`pyemscripten_2026_0` is 3.14. Any interpreter built with the specified Emscripten version and
-ABI-sensitive flags (no `-pthread`, `-sWASM_BIGINT`, fixed static libs and unwinding ABI) can
-claim it, so our own build and PyPI C-extension wheels are compatible goals. Match the flag set
-from the first build script — retrofitting means rebuilding the interpreter. The exact flag
-list still needs a manual read of Pyodide's ABI page. See `docs/wasm-design.md`.
+deprecated in 1.8.20 and removed in 1.9.20. That history no longer costs anything — `@WasmImport`
+plus an imported memory reaches the same place.
 
 ## 11. Build wiring
 
