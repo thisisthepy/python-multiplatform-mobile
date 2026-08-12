@@ -262,8 +262,9 @@ Kotlin 이 `Future` 를 만들어 Python 이벤트 루프에 넘기고, 완료 �
 4. **`suspend` 가 걸러졌음을 사용자에게 알리는 것.** §2 의 침묵은 §8 이 덮지 못하는 형태
    (확장 수신자를 가진 `suspend fun`, 제네릭 `suspend fun`) 에 **그대로 남아 있다.** KSP 경고가
    맞는 자리다.
-5. ~~**취소.** §8 의 범위에서 빠졌다.~~ **§9.1–9.3 이 답했다.** 남은 것은 이른 통지 하나이고,
-   §9.3 이 그것에 무엇이 필요한지 적어 두었다.
+5. ~~**취소.** §8 의 범위에서 빠졌다.~~ **§9.1–9.3 이 답했고, 이른 통지는 §10 이 만들었다.**
+   남은 것은 §10.5 의 두 가지 — 다섯 타깃 중 desktop 외의 실행 확인, 그리고 루프가 죽어 done 콜백이
+   돌지 못한 경우의 회수.
 
 ---
 
@@ -449,14 +450,16 @@ stdlib 에는 그것에 닿는 수단이 없다. continuation 을 두 번 재개
 디스패처를 추가한 것이 아니라는 점이 중요하다. `ContinuationInterceptor` 가 아닌 element 는 본문이
 어디서 도는지 바꾸지 못하므로, **§5 의 빠른 경로는 그대로다.**
 
-**되지 않는 것: 이른 통지.** `cancel()` 을 파이썬이 취소하는 그 순간에 부를 방법이 없다. Kotlin 이
-Python 의 취소를 알 수 있는 지점은 완료 시점뿐이고, 그때는 이미 늦다. 그러려면 Python→Kotlin 호출이
-하나 더 필요하다 — 구체적으로는 (a) `_pm_release` 와 같은 `(long) -> int` 스텁 하나(모양이 이미
-있으므로 새 스텁 *형태* 는 아니다), (b) `Future` 에 실어 보낼 `PendingCall` 핸들, (c) 다섯 타깃의
-바인딩, (d) 그 핸들의 수명 관리. **이번 범위에서 하지 않았고, 되는 척하지 않는다.**
+~~**되지 않는 것: 이른 통지.**~~ **§10 이 만들었다.** 아래 원문은 무엇이 바뀌었는지 대조하기 위해 남긴다.
 
-그래서 지금 협조하지 않는 본문은 끝까지 돌고, 그 결과는 §9.2 가 조용히 버린다. 이 절반이 실제로
-책임지는 보장은 그것이다.
+> **되지 않는 것: 이른 통지.** `cancel()` 을 파이썬이 취소하는 그 순간에 부를 방법이 없다. Kotlin 이
+> Python 의 취소를 알 수 있는 지점은 완료 시점뿐이고, 그때는 이미 늦다. 그러려면 Python→Kotlin 호출이
+> 하나 더 필요하다 — 구체적으로는 (a) `_pm_release` 와 같은 `(long) -> int` 스텁 하나(모양이 이미
+> 있으므로 새 스텁 *형태* 는 아니다), (b) `Future` 에 실어 보낼 `PendingCall` 핸들, (c) 다섯 타깃의
+> 바인딩, (d) 그 핸들의 수명 관리. **이번 범위에서 하지 않았고, 되는 척하지 않는다.**
+
+협조하지 않는 본문이 끝까지 도는 것은 §10 이후에도 그대로다. 바뀐 것은 **협조하는 본문이 언제
+멈추는가** 뿐이다.
 
 ### 9.4 파이썬 프록시 생성 — 런타임 `exec`, 빌드 타임 리소스가 아니라
 
@@ -518,3 +521,125 @@ suspend 이전 실패 — 그 둘은 다섯 타깃에서 실제로 돈다. wasm 
 
 **뒤집지 않은 것:** 루프가 도는 상태에서 진짜로 suspend 했을 때의 교착은 여전히 추론이다. 그 실험은
 프로세스를 죽이거나 매달리므로 하지 않았고, 하지 않은 것을 했다고 적지 않는다.
+
+---
+
+## 10. 이른 통지 — 측정
+
+§9.3 이 "되지 않는다" 고 적은 것을, §9.3 이 지목한 그 모양 그대로 만들었다. 결과부터:
+**파이썬이 `Future.cancel()` 하면 Kotlin 코루틴은 완료를 기다리지 않고 다음 `ensureActive()` 에서
+멈춘다.**
+
+`AsyncUpcallEarlyCancellationTest`(desktopTest, 4개) 가 이것을 고정한다.
+
+### 10.1 고치기 전에 빨갰다 — 측정
+
+먼저 테스트를 쓰고 구현 전에 돌렸다. 실패 메시지가 그대로 옛 동작의 서술이다:
+
+    Kotlin did not learn about the cancellation until the call completed
+    -- the flag was clear and isDone was false
+       when Python had already cancelled and yielded to its loop
+
+**단언의 핵심은 `isCancelled` 가 아니라 그것을 *언제* 읽었는가다.** 옛 동작도 결국 같은 플래그를
+세웠다 — 완료 시점에, `AsyncUpcall.resolve` 의 `done()` 검사가. 그러므로 나중에 읽는 테스트는
+고치기 전에도 초록이다. 이 테스트는 **취소 이후 한 번도 재개되지 않은 호출** 에 대해
+`isCancelled && !isDone` 을 읽는다. 그 조합은 옛 동작에서 성립할 수 없다.
+
+두 번째 단언은 협조 지점이 실제로 발사되는가다: 통지 이후 **딱 한 번** 재개시키고, 그 틱에서
+`ensureActive()` 가 던져 본문이 끝나는 것(`failure is CancellationException`, `isDone`)을 본다.
+고치기 전에는 본문이 다시 park 했다.
+
+### 10.2 만든 경로
+
+    Python:  fut.cancel()
+      → Future 의 done 콜백 (call_soon 으로 예약됨)
+      → _pm_cancel(handle)                     (long) -> int
+      → UpcallTrampoline.cancelCall            PyGILState_Ensure 무조건
+      → HandleTable.resolveRaw → PendingCall.cancel()
+      → 본문의 다음 ensureActive() 가 던진다
+
+§9.3 이 적어 둔 네 가지를 그대로 따랐고, 두 가지가 예상보다 싸게 끝났다.
+
+| §9.3 이 필요하다고 한 것 | 실제 |
+|---|---|
+| (a) `(long) -> int` 스텁 | `_pm_release` 와 **같은 모양**이라 새 스텁 형태 없음. 각 타깃에서 이미 있는 빌더를 한 번 더 부른다 |
+| (b) `Future` 에 실을 핸들 | `HandleTable` 핸들. **속성으로 붙이지 않고** done 콜백의 기본 인자로 캡처했다 — `asyncio.Future` 가 임의 속성을 받는지에 의존하지 않게 된다 |
+| (c) 다섯 타깃의 바인딩 | `_pm_cancel` 하나. 해제는 `_pm_release` 를 **재사용**한다 (핸들이 평범한 객체 핸들이므로) |
+| (d) 핸들 수명 | §10.3 |
+
+바인딩이 붙은 곳: desktop(`UpcallStub.cancelCallStubAddr`), nativeMain(`_pm_cancel` `PyMethodDef`,
+iOS·androidNative 공용), android(`jni_onload.def` 의 `pmp_upcall_cancel_meth` + `UpcallCallbacks.cancel`).
+wasmJs 는 `_pm_release` 조차 Python 에 게시하지 않고 Kotlin 에서 직접 부르는 구조라 붙이지 않았다 —
+§9.5 대로 그 타깃에서는 `import asyncio` 가 애초에 trap 한다.
+
+**바인딩이 없는 호스트는 깨지지 않는다.** `AsyncUpcall.armCancellationNotice` 가 `_pm_cancel` 과
+`_pm_release` 가 `__main__` 에 있는지 먼저 보고, 없으면 **핸들을 등록하지도 않는다.** 그런 타깃은
+§9 의 동작(완료 시점 관측)을 그대로 유지하고 아무것도 새지 않는다. 콜백 안에서 `NameError` 가 나는
+쪽을 고르지 않은 이유는, 그것이 `call_exception_handler` 로 가서 아무도 보지 않고 아무도 고칠 수 없는
+로그가 되기 때문이다 — §9.1 이 이미 한 번 겪은 실패 형태다.
+
+### 10.3 핸들 수명 — 놓는 쪽이 둘인 것이 설계다
+
+`add_done_callback` 이 **취소·성공·실패 전부에서** 불린다는 점을 그대로 썼다. 그래서 통지와 해제가
+한 콜백이다:
+
+    def _pm_done(_f, _h=_handle):
+        try:
+            if _f.cancelled():
+                _pm_cancel(_h)
+        finally:
+            _pm_release(_h)
+
+여기에 Kotlin 쪽 해제를 하나 더 뒀다 — `AsyncUpcall.resolve` 의 `finally`. **중복이 아니라 서로 다른
+구멍을 막는다.**
+
+| 놓는 쪽 | 그것만이 막는 경우 |
+|---|---|
+| Python done 콜백 | **협조하지 않는 본문이 취소된 경우.** 코루틴이 영원히 안 끝나므로 Kotlin 완료 경로가 돌 기회가 없다 |
+| Kotlin `resolve` | **콜백이 돌기 전에 루프가 멈춘 경우.** 예약만 되고 실행되지 않은 done 콜백은 아무것도 놓지 않는다 |
+
+둘 중 무엇이 먼저 와도 되고, 서로를 알 필요도 없다. `HandleTable` 의 해제가 세대 기반이라 **두 번째는
+no-op** 이고, 슬롯이 이미 남에게 재발급된 뒤라도 세대가 어긋나 남의 것을 놓지 않는다. 같은 이유로
+늦게 도착한 `_pm_cancel(stale)` 도 아무 일도 하지 않는다.
+
+**여전히 회수되지 않는 것:** `Future` 가 영원히 settle 되지 않고 코루틴도 영원히 끝나지 않는 호출.
+그 호출은 continuation 자체를 이미 흘린 상태이고, 그것을 알아채는 것은 핸들 기계의 일이 아니다.
+
+### 10.4 누수 확인 — 양쪽 다 측정
+
+`HandleTable.liveCount` 로 본다.
+
+| 경우 | 관측 |
+|---|---|
+| 진짜 suspend 한 호출이 미결인 동안 | `baseline + 1` — 핸들이 실제로 등록된다 |
+| 취소된 뒤, **코루틴이 아직 안 끝난 시점** | `baseline` — Python done 콜백이 이미 놓았다 |
+| 취소 → 본문 종료까지 끝난 뒤 | `baseline` |
+| 정상 완료 뒤 | `baseline` |
+| **빠른 경로** | `baseline` — 등록 자체가 없다 |
+
+두 번째 줄이 이 표에서 가장 정보량이 많다. 그 시점에는 Kotlin 쪽에서 이 호출에 대해 아무것도 실행된
+적이 없으므로, **회수한 것이 Python 쪽이라는 것이 그 하나로 확정된다.** 첫 줄이 없으면 나머지가
+"핸들을 애초에 안 만들었다" 와 구별되지 않으므로, 미결 중의 `baseline + 1` 을 함께 단언한다.
+
+### 10.5 빠른 경로는 건드리지 않았다
+
+핸들 등록은 `deliver` 의 `isDone` 조기 반환 **뒤에** 있다. 즉 suspend 하지 않은 호출은 `HandleTable`
+쓰기도, `__main__` 조회도, `add_done_callback` 도 지나지 않는다. 셋으로 확인했다:
+
+- `theFastPathRegistersNoHandleAtAll` — `liveCount` 불변
+- `AsyncUpcallDeliveryTest.aSuspendingEntryThatNeverSuspendsHandsBackTheRealValueAndBuildsNoFuture`
+  — **실행 중인 루프가 아예 없는 스레드에서** 통과한다. asyncio 에 손을 댔다면 실패했을 것이다
+- `PythonProxyInstallTest.theSameGeneratedProxyBuildsNoFutureWhenTheKotlinBodyNeverSuspends`
+  — `create_future` 호출 수 `0`
+
+느린 경로는 `__main__` 조회 두 번(`_pm_cancel`, `_pm_release`)과 `_pm_watch` 호출 하나가 늘었다.
+`runningLoop()` 와 `settleFunction()` 이 이미 같은 종류의 조회를 하고 있고, 진짜로 suspend 한 호출은
+속성 조회를 세는 처지가 아니다(§8.3 과 같은 논거).
+
+### 10.6 확인하지 않은 것
+
+- **desktop 외의 실행.** 통지 경로는 `expect`/`actual` 이 하나도 없는 `commonMain` 이고 바인딩만
+  타깃별이다. androidNative(cinterop 포함)와 wasmJs 는 **컴파일만** 확인했다. iOS·Android 기기에서
+  돌려보지 않았다 — §7.1 이 (B) 의 완료 스레드에 대해 남겨 둔 질문이 여기에도 그대로 남는다.
+- **루프가 죽은 채로 남은 핸들.** Kotlin 쪽 `finally` 해제가 그것을 막도록 되어 있지만, 그 경우를
+  일부러 만들어 관측하지는 않았다.
