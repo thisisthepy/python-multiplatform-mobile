@@ -7,8 +7,12 @@ Two things this document is careful about, because it corrects a previous docume
   source trace against the 3.14 series (which is what this build pins —
   `gradle.properties: pythonVersion=3.14.7`). Treat them as pointers, not as evidence. Where a
   claim matters, §3 and §4 back it with a measurement taken here instead.
-- **Every number in §3 and §5 was measured on this machine**, on `desktopTest`, macOS arm64,
+- **Every number in §3, §5 and §8 was measured on this machine**, on `desktopTest`, macOS arm64,
   CPython 3.14.7, both the default and the `-PpythonFreeThreaded=true` builds.
+- **§8 corrects §7.** A measurement probe in `GCSchedulingMeasurementTest` was leaking the list
+  returned by `gc.get_objects()`, which holds the whole tracked heap, and that leak is what
+  produced the earlier free-threaded conclusion. The correction was itself measured; the
+  hypothesis it replaced was measured and rejected rather than merely doubted.
 
 ## 0. Summary
 
@@ -27,6 +31,11 @@ not.
 - **`CycleCollectionTest`'s free-threaded failure is *not* the same thing**, and an eval-loop
   checkpoint provably does not fix it. It is deferred reference counting on the heap type, and what
   materialises a deferred reference is a collection, not a checkpoint. (§3)
+- **The checkpoint fixes §1 on the build with the global lock, and on the free-threaded build it
+  often does not.** It fires exactly as designed there and still reclaims nothing. This is *not*
+  caused by the FFI wrapper's per-call GIL scopes — that hypothesis was tested by holding the
+  checkpoint count fixed and widening the scope, and rejected. It is an open question about the
+  free-threaded collector, and it is stated as one. (§8)
 
 ## 1. `_Py_ScheduleGC` only sets a bit
 
@@ -263,5 +272,108 @@ collections §3b requires: ~0.45 ms for the whole test, free-threaded only.
 Measurements taken to verify the consequences of §1 and the safety of the checkpoint confirm:
 
 - **Cyclic Garbage Accumulation (GIL Build)**: A workload creating 10,000 cyclic object groups entirely through the C API (never running a Python bytecode evaluation loop) with `autoDrainInterval = 0` accumulates **20,000+** cyclic garbage objects indefinitely. Because no evaluation loop runs, `_Py_ScheduleGC`'s scheduled bit is never checked by `_CHECK_PERIODIC`, and cyclic GC never occurs.
-- **`autoDrainInterval` Effectiveness**: When running the exact same C API workload but with `autoDrainInterval = 32`, `python-multiplatform` evaluates a dummy function (`__pmp_eval_checkpoint__`) to force the evaluation loop to run periodically. This allows `_CHECK_PERIODIC` to see the scheduled bit, trigger `_Py_RunGC()`, and reclaim the cyclic garbage (leaving only the few objects accumulated since the last checkpoint, rather than 20,000+).
+- **`autoDrainInterval` Effectiveness (GIL build)**: When running the exact same C API workload but with `autoDrainInterval = 32`, `python-multiplatform` evaluates a dummy function (`__pmp_eval_checkpoint__`) to force the evaluation loop to run periodically. This allows `_CHECK_PERIODIC` to see the scheduled bit, trigger `_Py_RunGC()`, and reclaim the cyclic garbage (leaving ~1,970 of ~20,000). **This result is specific to the build with the global lock.** Free-threaded, the same checkpoints frequently reclaim nothing at all — §8.
 - **`__del__` Reentrancy Risk**: Executing `PyGC_Collect()` or processing a checkpoint can invoke `__del__` methods. A scenario where `__del__` directly calls back into Kotlin (via Panama upcalls) was executed (`GCSchedulingMeasurementTest.testReentrancyDuringCheckpoint`). The reentrancy is safe on the GIL build: it does not deadlock, it does not loop infinitely, and it successfully executes the Kotlin upcall while the garbage collection is in progress.
+
+## 8. Free-threaded: the checkpoint fires and reclaims nothing, and it is not the scope shape
+
+Everything in this section was measured here, on `desktopTest`, macOS arm64, CPython 3.14.7, both
+builds. The workload is `GCSchedulingMeasurementTest.buildAndDropCycles`: 10,000 unreachable
+`list` cycles, 20,000 objects, built entirely through the C API.
+
+### 8a. The probe was holding the evidence
+
+The measurement chain used to be written inline as
+
+```kotlin
+gc.getAttr("get_objects").invoke().getAttr("__len__").invoke().toString().toInt()
+```
+
+which closes none of its temporaries. `gc.get_objects()` returns a list holding **a strong
+reference to every tracked object in the interpreter**, so a leaked one roots the very garbage the
+next measurement is trying to see.
+
+That leak is where §7's earlier free-threaded conclusion came from — the claim that "a trailing
+explicit `gc.collect()` finds nothing further to reclaim, so the residue is not simply garbage
+waiting for the next checkpoint," and the inference from it that free-threaded CPython was failing
+to *reclaim* something. With the temporaries released, **an explicit `gc.collect()` reclaims the
+residue essentially completely, on both builds, in every configuration tried**: 60+ repetitions,
+post-collection residue between −13 and +2 objects out of ~20,000.
+
+So the residue is ordinary collectable cyclic garbage. What differs free-threaded is what makes the
+collector *run*, not what it can take. `GCSchedulingMeasurementTest` now asserts this on both
+builds (`assertResidueIsOrdinaryCollectableGarbage`), which is the opposite of what the previous
+text asserted about it.
+
+### 8b. Rejected: "per-call `PyGILState_Ensure`/`Release` destroys the scheduled GC bit"
+
+The standing hypothesis was that because free-threading keeps `eval_breaker` per thread state, an
+FFI wrapper that attaches and detaches around every C API call destroys and recreates the thread
+state, discarding the scheduled GC bit with it — and that widening the scope would therefore fix
+collection.
+
+**Measured and rejected.** Holding the checkpoint count fixed at 2,000 explicit
+`Python3.drainPendingReleases()` calls (`autoDrainInterval = 0`, one drain every 5 rounds) and
+varying *only* the enclosing scope, free-threaded, residue out of 20,000:
+
+| enclosing scope | reps | residue |
+|---|---:|---|
+| none — one `withGIL` per C API call | 5 | 20,000 ×5 |
+| one per round (~12 C API calls) | 5 | 20,000 ×5 |
+| one per 100 rounds | 10 | 20,000 ×10 |
+| one for the whole 10,000-round workload | 10 | 11,562 / 1,280 / 1,280, then 20,000 ×7 |
+
+Widening the scope to 100 rounds — which gives the thread state a long life and hundreds of
+allocations before it is destroyed — changes nothing whatsoever. The hypothesis predicts the
+opposite, so it is wrong.
+
+The single-scope row does not rescue it either: **it is bimodal within one JVM.** Those ten
+repetitions are consecutive and identical; it reclaimed on the first three and then never again.
+The configuration latches, which is a property of accumulated interpreter state, not of the scope
+shape the call happens to be made under.
+
+With the automatic checkpoint instead (`autoDrainInterval = 32`), free-threaded:
+
+| enclosing scope | checkpoints taken | residue |
+|---|---:|---|
+| none — one `withGIL` per C API call | 1,875 | 20,000 ×5; also 7,427 and 11,523 in two single-repetition JVMs |
+| one per round | 312–313 | 20,000 ×5 |
+| one per 100 rounds | 3 | 20,000 ×5 |
+| one for the whole workload | **0** | 20,000 ×3 |
+
+The last row is a property of the gate, not of the collector: a single outermost scope decrements
+`checkpointCountdown` once, so at interval 32 no automatic checkpoint is ever reached. An embedder
+that wraps a long batch in one `withPython` therefore gets *fewer* automatic checkpoints, not more.
+
+### 8c. The contrast that is actually there
+
+The same sweep on the build with the global lock is stable and near-complete in **every** shape:
+
+| configuration | checkpoints | residue |
+|---|---:|---|
+| per C API call, `autoDrainInterval = 32` | 1,875 | 1,964–1,972 |
+| per C API call, 2,000 explicit drains | 2,000 | 1,920 ×5 |
+| one per 100 rounds, 2,000 explicit drains | 2,000 | 1,920 ×5 |
+| whole workload in one scope, 2,000 explicit drains | 2,000 | 1,920–1,962 |
+| one per round, `autoDrainInterval = 32` | 312–313 | 1,556–1,616 |
+| one per 100 rounds, `autoDrainInterval = 32` | **3** | 1,600–3,200 |
+
+Three checkpoints reclaim ~90% on the GIL build. Two thousand reclaim nothing free-threaded. That
+gap — not the scope shape, which is irrelevant on both builds — is the whole finding.
+
+### 8d. The open question, stated precisely
+
+Why does an eval-loop checkpoint that demonstrably runs (`CheckpointCounter.reached` climbs by an
+identical, deterministic amount every run) fail to trigger a generational collection on the
+free-threaded build, when the same number of checkpoints — or three of them — suffices with the
+global lock? And why does the same configuration latch from "reclaims" to "never reclaims" partway
+through a single JVM's life?
+
+Answering it needs CPython 3.14's `gc_free_threading.c`, in particular whatever gates
+`gc_should_collect` and how per-thread allocation counters reach the interpreter-wide one. **No
+CPython source is vendored in this workspace and none was fetched**, so no mechanism is claimed
+here. What is recorded above is only what was measured.
+
+Until it is answered, the supported way to collect cycles in an embedder that runs no Python
+bytecode is the one that works identically on both builds and is already documented in §4:
+`PyGC_Collect()`, at a cost proportional to the heap.
