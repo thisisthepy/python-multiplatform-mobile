@@ -84,6 +84,24 @@ class ExposedCallable(
     val paramTypes: List<TypeTag>,
     val returnType: TypeTag,
     val kind: CallableKind = CallableKind.FUNCTION,
+    /**
+     * Whether the Kotlin declaration behind this entry is a `suspend fun`, and therefore whether
+     * [callable] returns the result or a
+     * [python.multiplatform.ffi.upcall.PendingCall] standing in for one.
+     *
+     * A flag rather than a [CallableKind] of its own, because the two are orthogonal: a suspending
+     * *method* still has its receiver in `args[0]` and a suspending companion member still has
+     * none, so folding suspension into [CallableKind] would make every [CallableKind.hasReceiver]
+     * decision restate itself once per variant. What [kind] answers is *where the arguments are*;
+     * what this answers is *what comes back*.
+     *
+     * [paramTypes] and [returnType] describe the declaration as written -- the continuation
+     * parameter the Kotlin compiler adds is not here, and [returnType] is the value the coroutine
+     * will eventually produce, not the `PendingCall`. That is what lets
+     * `docs/upcall-async-design.md` §5's fast path marshal a body that never suspended exactly as
+     * a synchronous entry would.
+     */
+    val isSuspend: Boolean = false,
     val callable: (Array<Any?>) -> Any?,
 ) {
     init {
@@ -97,7 +115,8 @@ class ExposedCallable(
     /** The size of the `args` array [callable] expects: [arity] plus a receiver slot if any. */
     val expectedArgCount: Int get() = arity + if (kind.hasReceiver) 1 else 0
 
-    override fun toString(): String = "ExposedCallable($kind $name/$arity -> $returnType)"
+    override fun toString(): String =
+        "ExposedCallable(${if (isSuspend) "suspend " else ""}$kind $name/$arity -> $returnType)"
 }
 
 

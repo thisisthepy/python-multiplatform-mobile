@@ -42,6 +42,23 @@ unconditionally and restores the counters around it; `python.multiplatform.ffi.u
 (`tp_traverse`, `tp_clear`, `tp_dealloc`), which are entered with the GIL held and must neither
 take nor release it — see `ProxyTypeFactory`.
 
+### An asynchronous completion is a second entry point, on a thread nobody attached
+
+An exposed `suspend fun` returns an `asyncio.Future` and its value arrives later, on whatever
+thread resumed the coroutine — which is generally not the thread that took the upcall, and may be
+one CPython has never seen. That thread takes its own `withGIL` scope before touching anything
+(`python.multiplatform.ffi.upcall.AsyncUpcall`), and `withGIL` is right here where it is wrong for
+a C entry point: this is *not* reached from C, so the thread's nesting depth is its own honest
+record. A completer thread with depth 0 takes a real `PyGILState_Ensure`; a completion delivered
+from inside a later upcall correctly skips, under the depth that upcall's `attached` set.
+
+The same acquisition is what publishes `PendingCall`'s fields. That class is unsynchronised on the
+stated condition that every mutation happens on a GIL-holding thread — so **a dispatcher that
+resumes an exposed call's continuation must hold the GIL while it does so**, not merely take it
+afterwards to talk to Python. Measured: `AsyncCompletionProbeTest` (a Kotlin-created thread can
+take the GIL while the interpreter is parked in `run_until_complete`) and
+`AsyncUpcallDeliveryTest`.
+
 ## Attaching is not enough — someone has to reach an eval-loop checkpoint
 
 `_Py_HandlePending` is the only place CPython merges the free-threaded build's deferred

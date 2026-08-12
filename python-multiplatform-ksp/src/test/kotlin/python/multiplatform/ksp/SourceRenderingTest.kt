@@ -149,6 +149,57 @@ class SourceRenderingTest {
         assertTrue(!src.contains("enumEntryNames"))
     }
 
+    // ------------------------------------------------------------------------ the suspend flag
+
+    @Test
+    fun aSuspendingEntryCarriesTheFlagTheTrampolineBranchesOn() {
+        // `docs/upcall-async-design.md` §5: the trampoline has to know, before it looks at the
+        // result, whether what came back is the value or a PendingCall. The flag is separate from
+        // `kind` because the two are orthogonal -- a suspending *method* still has its receiver in
+        // args[0], and doubling CallableKind would have made every hasReceiver decision restate it.
+        val model = FragmentModel(
+            moduleName = "my_lib",
+            entries = listOf(
+                CallableEntryModel(
+                    name = "my.lib.fetch",
+                    arity = 1,
+                    paramTags = listOf(Tag.STRING),
+                    returnTag = Tag.STRING,
+                    kind = "FUNCTION",
+                    lambdaBody =
+                        "{ args -> python.multiplatform.ffi.upcall.PendingCall.start { fetch(args[0] as String) } }",
+                    isSuspend = true,
+                ),
+            ),
+            classes = emptyList(),
+        )
+
+        val src = renderFragmentSource(model)
+
+        assertTrue(src.contains("isSuspend = true"))
+        // The declared return type, not the PendingCall: the fast path marshals the real value
+        // with this tag, and the Future's set_result uses the same one.
+        assertTrue(src.contains("returnType = python.multiplatform.reflection.TypeTag.STRING"))
+        assertTrue(src.contains("python.multiplatform.ffi.upcall.PendingCall.start {"))
+    }
+
+    @Test
+    fun anOrdinaryEntryDoesNotMentionTheSuspendFlagAtAll() {
+        // Every entry in every fragment would otherwise carry `isSuspend = false`; the default on
+        // the runtime class keeps generated source the size it was.
+        val src = renderFragmentSource(
+            FragmentModel(
+                moduleName = "my_lib",
+                entries = listOf(
+                    CallableEntryModel("my.lib.greet", 0, emptyList(), Tag.STRING, "FUNCTION", "{ greet() }"),
+                ),
+                classes = emptyList(),
+            ),
+        )
+
+        assertTrue(!src.contains("isSuspend"))
+    }
+
     @Test
     fun duplicateEntryNamesAreDroppedBeforeTheyReachTheTable() {
         // Legal Kotlin: `class Foo { val x = 1; companion object { val x = 2 } }` yields two

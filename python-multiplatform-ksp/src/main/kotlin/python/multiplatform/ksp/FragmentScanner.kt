@@ -17,6 +17,25 @@ class ScanResult(val fragment: FragmentModel, val originatingFiles: List<KSFile>
 private val ENUM_SYNTHETIC_FUNCTIONS = setOf("values", "valueOf")
 private const val ENUM_SYNTHETIC_ENTRIES_PROPERTY = "entries"
 
+/** Where the generated body for a `suspend fun` starts its coroutine. */
+private const val PENDING_CALL = "python.multiplatform.ffi.upcall.PendingCall"
+
+/**
+ * The `callable` lambda for one function entry.
+ *
+ * A `suspend fun` cannot be called from the ordinary `(Array<Any?>) -> Any?` body -- there is no
+ * continuation there to give it -- so its call goes inside `PendingCall.start { }`, which is itself
+ * a `suspend` lambda and needs nothing but `kotlin-stdlib` to build. The entry then evaluates to a
+ * `PendingCall` and carries `isSuspend = true`, which is what tells the trampoline to unwrap it.
+ * See `docs/upcall-async-design.md` §5 and [BindingPolicy.isSuspending].
+ *
+ * [resultExpr] has already been through [wrapReturnExpression], so a `suspend fun` returning `Int`
+ * widens inside the coroutine and the boundary still sees the `Long` its `INT` tag promises.
+ */
+private fun functionBody(function: KSFunctionDeclaration, resultExpr: String): String =
+    if (BindingPolicy.isSuspending(function)) "{ args -> $PENDING_CALL.start { $resultExpr } }"
+    else "{ args -> $resultExpr }"
+
 /**
  * Walks every file KSP knows about in this compilation and turns the exposed surface
  * (`docs/binding-policy.md`) into a [FragmentModel] -- the pure, KSP-independent shape
@@ -38,6 +57,10 @@ private const val ENUM_SYNTHETIC_ENTRIES_PROPERTY = "entries"
  * A `var` gets its setter entry only when the *setter* is public -- `private`/`protected`/
  * `internal set` is a read-only property as far as the table is concerned. See
  * [BindingPolicy.isExposedSetter].
+ *
+ * A `suspend fun` gets the entry its non-suspending counterpart would -- same [CallableEntryModel.kind],
+ * same receiver slot, same [CallableEntryModel.returnTag] -- with its call wrapped in
+ * `PendingCall.start { }` and [CallableEntryModel.isSuspend] set. See [functionBody].
  */
 class FragmentScanner(private val excludePackages: List<String>) {
 
@@ -112,7 +135,8 @@ class FragmentScanner(private val excludePackages: List<String>) {
             paramTags = paramShapes.map(::tagFor),
             returnTag = tagFor(returnShape),
             kind = "FUNCTION",
-            lambdaBody = "{ args -> ${wrapReturnExpression(returnShape, callExpr)} }",
+            lambdaBody = functionBody(function, wrapReturnExpression(returnShape, callExpr)),
+            isSuspend = BindingPolicy.isSuspending(function),
         )
     }
 
@@ -291,7 +315,8 @@ class FragmentScanner(private val excludePackages: List<String>) {
             paramTags = paramShapes.map(::tagFor),
             returnTag = tagFor(returnShape),
             kind = "METHOD",
-            lambdaBody = "{ args -> ${wrapReturnExpression(returnShape, callExpr)} }",
+            lambdaBody = functionBody(function, wrapReturnExpression(returnShape, callExpr)),
+            isSuspend = BindingPolicy.isSuspending(function),
         )
     }
 
@@ -315,7 +340,8 @@ class FragmentScanner(private val excludePackages: List<String>) {
             paramTags = paramShapes.map(::tagFor),
             returnTag = tagFor(returnShape),
             kind = "FUNCTION",
-            lambdaBody = "{ args -> ${wrapReturnExpression(returnShape, callExpr)} }",
+            lambdaBody = functionBody(function, wrapReturnExpression(returnShape, callExpr)),
+            isSuspend = BindingPolicy.isSuspending(function),
         )
     }
 

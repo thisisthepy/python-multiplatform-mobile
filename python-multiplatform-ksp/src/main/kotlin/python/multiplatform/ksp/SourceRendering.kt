@@ -11,13 +11,16 @@ private fun String.quoted(): String = "\"" + replace("\\", "\\\\").replace("\"",
 
 private fun renderEntry(entry: CallableEntryModel): String {
     val paramTags = entry.paramTags.joinToString(", ") { "$TYPE_TAG.$it" }
+    // Omitted rather than rendered as `false`: the runtime default already says so, and every
+    // entry in every fragment would otherwise carry a line that means nothing.
+    val suspendArg = if (entry.isSuspend) "\n|    isSuspend = true," else ""
     return """
         |$EXPOSED_CALLABLE(
         |    name = ${entry.name.quoted()},
         |    arity = ${entry.arity},
         |    paramTypes = listOf($paramTags),
         |    returnType = $TYPE_TAG.${entry.returnTag},
-        |    kind = $CALLABLE_KIND.${entry.kind},
+        |    kind = $CALLABLE_KIND.${entry.kind},$suspendArg
         |    callable = ${entry.lambdaBody},
         |)
     """.trimMargin()

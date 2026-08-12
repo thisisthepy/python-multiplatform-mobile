@@ -24,9 +24,12 @@
 
 ---
 
-## 2. 지금 KSP 는 `suspend` 를 어떻게 다루는가 — 측정
+## 2. KSP 가 `suspend` 를 어떻게 다뤘는가 — 측정 (§8 에서 바뀐다)
 
-`BindingPolicy.isExposedFunctionShape` 한 줄이 전부다.
+> **이 절은 과거형이다.** §8 이 이 동작을 바꿨다. 여기 남겨 두는 이유는 무엇이 바뀌었는지를
+> 대조할 기준이 필요하기 때문이다. `GeneratedSuspendTest` 는 더 이상 이 표를 고정하지 않는다.
+
+`BindingPolicy.isExposedFunctionShape` 한 줄이 전부였다.
 
     if (Modifier.SUSPEND in function.modifiers) return false
 
@@ -237,19 +240,9 @@ Kotlin 이 `Future` 를 만들어 Python 이벤트 루프에 넘기고, 완료 �
   스레드에서 일어난다. 이것은 추가 부담이 아니다 — Python 에 도달하려는 완료는 어차피 GIL 을
   잡아야 하므로, 그 스코프가 이미 이 필드들을 덮는다.
 
-### 구현하지 않음: 전달 절반
+### 전달 절반 — §8 에서 구현됐다
 
-`onCompleted` 는 셋이 붙는 자리이고, **아무것도 붙어 있지 않다.** 다음이 전부 미구현이다:
-
-| 미구현 | 왜 |
-|---|---|
-| KSP 가 `suspend fun` 에 항목을 생성하는 것 | 규약이 정해지기 전에 만들면 잘못된 것을 만든다 |
-| `CallableKind` 의 비동기 변종 | 위와 같다 |
-| `asyncio.Future` 를 만들고 해소하는 런타임 코드 | 경로는 §3(C) 에서 확인했으나 Android·wasm 미확인 |
-| Python 쪽 프록시가 `await` 를 이해하는 것 | 위와 같다 |
-
-§2 의 KSP 동작은 **의도적으로 바꾸지 않았다.** 지금의 침묵이 최선이라서가 아니라, 그것을
-고정해 두어야 규약이 생길 때 변화가 테스트 실패로 드러나기 때문이다.
+이 절이 "아무것도 붙어 있지 않다"고 적었던 `onCompleted` 자리에 이제 (C) 가 붙어 있다. §8 을 보라.
 
 ---
 
@@ -257,12 +250,126 @@ Kotlin 이 `Future` 를 만들어 Python 이벤트 루프에 넘기고, 완료 �
 
 1. **Android 에뮬레이터에서 (B) 의 완료 스레드.** Kotlin 스레드가 `PyGILState_Ensure` 로 들어가
    Python 콜러블을 부를 때 ART attach 가 필요한가. §3(B) 의 추론이 맞는지가 이것 하나에 달려
-   있다. `UpcallThreadAttachTest` 옆에 두면 된다.
+   있다. `UpcallThreadAttachTest` 옆에 두면 된다. **§8 이 이것을 바꾸지 못했다** — 완료 경로는
+   전부 `commonMain` 이라 다섯 타깃이 같은 소스를 컴파일하지만, 실행해 본 것은 desktop 하나다.
 2. **동기 완료 비율.** §5 의 빠른 경로가 실제로 얼마나 자주 타는가. `PendingCall.isDone` 을
    `start` 직후에 세는 것으로 측정 가능하고, 이 값이 높으면 규약의 복잡도 대부분을 드문 경로로
-   미룰 수 있다.
+   미룰 수 있다. §8.4 가 이 질문을 하나 더 늘렸다 — 빠른 경로는 "suspend 하지 않은 호출"보다
+   **넓다.**
 3. **wasm 실행 경로.** §4 가 전부 추론이다. `docs/wasm-design.md` 의 미해결 항목이 풀리기 전에는
-   확인할 수 없다.
-4. **`suspend` 가 걸러졌음을 사용자에게 알리는 것.** §2 의 침묵은 규약이 생겨도 남는다 — 규약이
-   덮지 못하는 형태(확장 수신자를 가진 `suspend fun` 등)는 여전히 조용히 빠진다. KSP 경고가
+   확인할 수 없다. §8.5 를 보라.
+4. **`suspend` 가 걸러졌음을 사용자에게 알리는 것.** §2 의 침묵은 §8 이 덮지 못하는 형태
+   (확장 수신자를 가진 `suspend fun`, 제네릭 `suspend fun`) 에 **그대로 남아 있다.** KSP 경고가
    맞는 자리다.
+5. **취소.** §8 의 범위에서 빠졌다. §8.6 을 보라.
+
+---
+
+## 8. 전달 절반: 구현된 것 — 측정
+
+§5 가 고른 것을 그대로 만들었다. 표면은 (C), 메커니즘은 (B), 빠른 경로가 규약보다 앞에 온다.
+
+    result = await kotlin_async_fn(x)
+
+`AsyncUpcallDeliveryTest`(desktopTest, 7개) 가 이것이 실제로 도는 것을 고정한다.
+
+### 8.1 KSP: 버리는 대신 다른 본문을 만든다
+
+`BindingPolicy` 에서 `Modifier.SUSPEND` 거부 한 줄을 지웠다. 그 자리에 `isSuspending` 이 있고,
+`FragmentScanner.functionBody` 가 그것을 읽어 본문 모양만 바꾼다:
+
+    // 기존
+    { args -> fixture.library.blockingTopLevel(args[0] as Long) }
+    // suspend
+    { args -> python.multiplatform.ffi.upcall.PendingCall.start { fixture.library.suspendingTopLevel(args[0] as Long) } }
+
+`PendingCall.start` 가 받는 것은 `suspend () -> Any?` 이므로 저 중괄호가 suspend 람다이고,
+**`kotlinx.coroutines` 없이 stdlib 만으로 컴파일된다.** 생성된 조각을 직접 읽어 확인했다
+(`Fragment_io_github_thisisthepy_ksp_fixtures_library.kt`, 5개 항목).
+
+바뀌지 않은 것이 바뀐 것만큼 중요하다. `kind` 는 그대로다 — suspending 멤버는 여전히 `METHOD` 이고
+`args[0]` 이 수신자다. `returnType` 도 그대로 **선언된 반환 타입**이다(`PendingCall` 이 아니라).
+그래야 빠른 경로가 동기 항목과 똑같이 마샬링한다.
+
+### 8.2 `CallableKind` 가 아니라 플래그인 이유
+
+`ExposedCallable.isSuspend: Boolean` 을 새로 뒀다. `CallableKind` 에 `SUSPEND_*` 변종을 추가하는
+쪽은 택하지 않았다. 두 축이 직교하기 때문이다 — `kind` 가 답하는 것은 *인자가 어디 있는가*,
+`isSuspend` 가 답하는 것은 *무엇이 돌아오는가* 이고, 하나로 접으면 모든 `hasReceiver` 판단을
+변종마다 한 번씩 다시 써야 한다. suspending 멤버 함수 하나만으로도 그 값이 드러난다.
+
+### 8.3 런타임 경로
+
+`AsyncUpcall.deliver` 가 `UpcallTrampoline.invoke` 의 `entry.isSuspend` 분기에 붙어 있다.
+
+| 경우 | 반환 | 비용 |
+|---|---|---|
+| 이미 완료 · 성공 | 실값 (`marshalResult`) | `asyncio` import 조차 없다 |
+| 이미 완료 · 실패 | `NULL` + 에러 지시자 | 동기 실패와 완전히 같은 경로 |
+| 진짜 suspend | `asyncio.Future` (새 참조) | `get_running_loop` + `create_future` |
+
+완료 시:
+
+    withGIL { loop.call_soon_threadsafe(future.set_result | set_exception, ...) }
+
+- **완료 스레드가 자기 GIL 스코프를 취한다.** `withGIL` 이고 `UpcallTrampoline.attached` 가 아니다 —
+  여기는 C 진입점이 아니므로 그 스레드의 중첩 깊이는 자기 자신의 정직한 기록이다. CPython 이 본 적
+  없는 완료 스레드는 깊이 0 이라 진짜 `PyGILState_Ensure` 를 타고, 나중 업콜 안에서 오는 완료는
+  그 업콜의 `attached` 가 세운 깊이 아래에서 올바르게 건너뛴다.
+- **`Future` 참조는 둘이 나눠 가진다.** Kotlin 래퍼가 `create_future` 가 준 것을 갖고, Python 은
+  증가분 하나를 받는다(트램폴린의 "결과는 새 참조" 규약 그대로). 래퍼가 살아 있는 이유는 완료
+  람다가 그것을 캡처하고, 람다는 `PendingCall` 이, `PendingCall` 은 중단된 continuation 을 쥔
+  쪽이 잡고 있기 때문이다. 완료가 발사되면 `PendingCall` 이 리스너를 놓고 둘 다 회수된다.
+- **새 바인딩이 하나도 없다.** §3(C) 가 예고한 대로다.
+
+### 8.4 빠른 경로는 "suspend 하지 않은 호출"보다 넓다 — 측정
+
+테스트를 처음 쓸 때 관측한 것이고, 예상하지 못했다. 완료 스레드가 업콜 프레임이 아직 돌고 있는
+동안 continuation 을 재개하면 — `CFUNCTYPE` 이 업콜 자체를 위해 GIL 을 놓는 순간이 그 틈이다 —
+`deliver` 가 `isDone` 을 볼 때 이미 참이다. **그러면 `Future` 는 만들어지지 않고 빠른 경로가
+탄다.** 틀린 동작이 아니다(코루틴은 정말로 끝났다). 다만 §7.2 의 "동기 완료 비율" 은 정적인
+성질이 아니라 **경합의 함수**라는 뜻이고, 그 경로를 일부러 밟으려는 테스트는 `Future` 가
+건너간 것을 직접 관측해야 한다. `AsyncUpcallDeliveryTest` 는 `type(r).__name__` 을 Python 쪽에서
+기록해 그것을 단언한다 — 값만 보면 두 경로가 구별되지 않는다.
+
+### 8.5 플랫폼
+
+| 타깃 | 컴파일 | 실행 |
+|---|---|---|
+| desktop | ✔ | ✔ — `await` · 예외 · 빠른 경로 전부 관측 |
+| androidNativeArm64 | ✔ | 미확인 (기기 없음) |
+| iosSimulatorArm64 | ✔ | 미확인 |
+| wasmJs | ✔ | **성립하지 않을 것이다 — 추론.** 아래 |
+| android (JVM) | **미확인** — 이 워크스페이스에 Android SDK 가 없어 태스크가 구성조차 안 된다 |
+
+전달 코드는 전부 `commonMain` 이고 `expect`/`actual` 이 하나도 없다. 즉 컴파일된 다섯 소스가
+같은 소스다. 그것이 보장하는 것은 타입이 맞는다는 것뿐이고, GIL 취득 동작이 각 타깃에서 같다는
+보장은 아니다.
+
+**wasm 은 §4 가 예고한 그 지점에서 막힌다.** wasmJs 에는 스레드가 없으므로 완료는 JS
+마이크로태스크로만 온다. 그런데 Python 이벤트 루프는 같은 스레드에서 `run_until_complete` 안에
+있고, 재래식 selector 루프는 JS 에 제어를 돌려주지 않는다. 그러면 Kotlin 의 재개가 루프 뒤에
+줄을 서고, 루프는 그 재개를 기다린다 — (A) 를 기각한 것과 같은 형태의 교착이다. 이것은
+**추론이다.** 이 워크스페이스에 wasm 실행 경로가 없어(`docs/wasm-design.md` "Still open")
+확인할 수 없었고, 확인하지 않은 것을 확인했다고 적지 않는다.
+
+### 8.6 이번 범위에서 뺀 것
+
+- **취소.** `Future.cancel` 이 도달 가능하다는 것만 §3(C) 에서 확인돼 있고, 그것을 Kotlin
+  코루틴의 취소로 옮기는 경로는 만들지 않았다. `PendingCall` 에는 취소 개념이 없고,
+  `kotlinx.coroutines` 없이 `Job` 트리를 흉내 내는 것은 별도의 설계 문제다. 그러므로 지금
+  Python 쪽에서 `Future` 를 취소해도 **Kotlin 쪽 작업은 계속 돈다.** 그 뒤 완료가 도착했을 때
+  무슨 일이 일어나는지는 **테스트하지 않았고 여기서 단정하지 않는다** — `call_soon_threadsafe` 는
+  예약만 하므로 실패한다면 루프 콜백 안에서일 텐데, 그것을 관측하지 않았다. 취소를 범위에
+  넣을 때 첫 번째로 답해야 할 질문이 이것이다.
+- **Python 쪽 프록시 생성.** `await kotlin_fn(x)` 가 두 경로에서 똑같이 읽히려면 프록시가
+  `async def` 여야 하고, 그 안에서 결과가 awaitable 일 때만 `await` 해야 한다.
+  테스트의 `_await_kotlin` 이 그 모양을 그대로 적어 두었지만, Python 모듈 생성 자체가 아직
+  없으므로 생성되지는 않는다.
+- **실행 중인 루프가 없을 때.** 실패한다(`RuntimeError: no running event loop`), 그리고 그때
+  **코루틴은 이미 시작된 뒤다** — suspend 할지 여부는 시작해 봐야 알기 때문이다. 그 재개는
+  버려진다. 이것은 (C) 가 "애플리케이션이 async 로 짜여 있을 것"을 요구한다는 §3(C) 의 대가를
+  구체적으로 치르는 지점이고, 숨기지 않았다
+  (`aSuspendingEntryThatSuspendsWithNoRunningLoopFailsInsteadOfReturningSomethingUnusable`).
+- **`suspend` 타입 누수.** §2.1 은 그대로다. `val h: suspend (Long) -> Long` 은 여전히 `OBJECT`
+  핸들로 건너가고, 그것을 부를 항목은 테이블에 없다.
