@@ -1335,19 +1335,35 @@ Nothing structural. `wasmJsMain` can be written against §7 as amended. What is 
 
 ### Verification status of the wheel claim
 
-The ABI build is confirmed. Comparing the two `python.wasm` binaries directly: the stock build has
-no tag section and no `__cpp_exception` symbol, the ABI build has two tags and the symbol. The
-unwinding ABI is genuinely in, which is the flag the analysis identified as the one that gates a
-compiled wheel.
+**Demonstrated, reproducibly, as Test G in `native/run.sh`.** The wheel is the real PyPI file --
+`pydantic_core-2.48.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl`, 1,403,190 bytes, sha256
+`4fc45a49334c54541cbc97bf416d9300b4b1d3b2840dfb079b1123dc3f9ef5a6`, matching
+`https://pypi.org/pypi/pydantic-core/json` exactly. It contains a 4,408,639-byte
+`_pydantic_core.cpython-314-wasm32-emscripten.so` (Rust/PyO3, the compiled extension).
 
-**Loading a real compiled wheel is not reproducible from this tree.** The report describes
-`pydantic_core-2.48.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl` -- 4.4 MB with a Rust/PyO3 `.so`
--- importing, validating and raising `ValidationError`. What is on disk under
-`/Volumes/macMini/wasm-build/wheels/` is `packaging` and `typing_extensions`, both pure Python,
-and `native/run.sh` contains no wheel step. Its 43 passing checks cover memory sharing and
-upcalls, not this.
+Against the ABI build's own `python.sh` (no Kotlin involved -- this is a CPython Emscripten
+loader question, not a Kotlin one):
 
-So treat the tag claim as **argued and partly evidenced, not demonstrated**: the binary difference
-is real and is the right difference, but nothing here shows a compiled extension loading. Adding a
-wheel step to `run.sh` -- fetch, install, import, exercise -- is what would settle it, and it
-should be done before the tag compatibility is relied on.
+```
+pydantic_core imported OK, version: 2.48.0
+validate_python("42") -> 42
+raised: ValidationError
+```
+
+Against the stock build, same wheel, same `python.sh` harness, as the negative control:
+
+```
+ImportError: could not load dynamic lib: .../_pydantic_core.cpython-314-wasm32-emscripten.so
+LinkError: WebAssembly.Instance(): Import #204 "env" "__cpp_exception": tag import requires a WebAssembly.Tag
+```
+
+identical to what the original report quoted. Comparing the two `python.wasm` binaries directly:
+the stock build has no tag section and no `__cpp_exception` symbol, the ABI build has two tags and
+the symbol -- and that difference is exactly what separates the pass above from the failure. The
+unwinding ABI (`-fwasm-exceptions -sSUPPORT_LONGJMP=wasm`) is both present only in the ABI build
+and the thing that gates loading a compiled `pyemscripten_2026_0` wheel; PEP 783's premise that
+matching the ABI unlocks compiled extensions holds up on this tree, for this wheel.
+
+Scope of what this settles: one wheel (pydantic-core), one path (import + a validator call +
+exception raise). It does not check every C-API surface a compiled extension might touch, nor
+whether other wheels on this tag rely on something the ABI build's flag set doesn't cover.

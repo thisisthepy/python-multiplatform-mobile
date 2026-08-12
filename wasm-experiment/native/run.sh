@@ -6,6 +6,8 @@
 #   Test D  both mechanisms against real CPython 3.14.2.
 #   Test E  upcalls: Emscripten-side C re-entering Kotlin through a function pointer.
 #   Test F  upcalls against the real interpreter: a Kotlin @WasmExport as a PyCFunction.
+#   Test G  a real compiled (Rust/PyO3) pyemscripten_2026_0 wheel, against the ABI build and,
+#           as a negative control, the stock build.                              (no Kotlin involved)
 #   Test B  Emscripten importing a memory Kotlin exports.        (historical -- see the note below)
 #
 # Test B was the shape forced by Kotlin <= 2.4.10, which DEFINED and exported its linear memory.
@@ -104,6 +106,64 @@ echo; echo "##### Test E: upcalls -- Emscripten-side C re-entering Kotlin/Wasm"
 # Same instantiation graph as Test C (Kotlin's import object already points at Emscripten's memory
 # from the patch above), so the upcall runs with the memory shared, as it would in production.
 "$NODE" "$K/upcall-test.mjs"
+
+echo; echo "##### Test G: a real compiled wheel (pydantic-core, Rust/PyO3) -- does pyemscripten_2026_0 load?"
+# docs/wasm-design.md argues the unwinding ABI (-fwasm-exceptions -sSUPPORT_LONGJMP=wasm, present in
+# build-cpython-abi.sh, absent from the stock build) is what a compiled pyemscripten_2026_0 wheel
+# needs at *load* time, not just at build time. This is the test that settles it: no Kotlin involved,
+# just each CPython Emscripten build's own python.sh importing and calling into the same .so.
+WHEEL_DIR=/Volumes/macMini/wasm-build/wheels
+WHEEL_NAME=pydantic_core-2.48.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl
+WHEEL_PATH="$WHEEL_DIR/$WHEEL_NAME"
+mkdir -p "$WHEEL_DIR"
+if [ ! -f "$WHEEL_PATH" ]; then
+  echo "fetching $WHEEL_NAME from PyPI..."
+  WHEEL_URL=$(python3 -c "
+import json, urllib.request
+d = json.load(urllib.request.urlopen('https://pypi.org/pypi/pydantic-core/json'))
+for f in d['releases']['2.48.0']:
+    if 'pyemscripten' in f['filename']:
+        print(f['url']); break
+")
+  curl -sL "$WHEEL_URL" -o "$WHEEL_PATH"
+fi
+WHEEL_X="$WHEEL_DIR/x"
+if [ ! -d "$WHEEL_X/pydantic_core" ]; then
+  mkdir -p "$WHEEL_X"
+  python3 -m zipfile -e "$WHEEL_PATH" "$WHEEL_X"
+fi
+
+WHEEL_TEST_PY='
+import sys
+sys.path.insert(0, "'"$WHEEL_X"'")
+import pydantic_core
+print("pydantic_core imported OK, version:", pydantic_core.__version__)
+from pydantic_core import SchemaValidator, core_schema
+v = SchemaValidator(core_schema.int_schema())
+print("validate_python(\"42\") ->", v.validate_python("42"))
+try:
+    v.validate_python("not an int")
+    print("FAIL -- no exception raised")
+except Exception as e:
+    print("raised:", type(e).__name__)
+'
+
+echo "--- ABI build ($PMP_PYTHON_DIR) -- expected to import and run ---"
+if [ "$HAVE_CPYTHON" = 1 ]; then
+  ( cd "$PMP_PYTHON_DIR" && chmod +x python.sh && ./python.sh -c "$WHEEL_TEST_PY" )
+else
+  echo "SKIPPED -- no ABI CPython build at $PMP_PYTHON_DIR"
+fi
+
+STOCK_PYTHON_DIR=/Volumes/macMini/wasm-build/cpython314/cross-build/wasm32-emscripten/build/python
+echo; echo "--- stock build (negative control) -- expected to fail with a LinkError on the tag import ---"
+if [ -f "$STOCK_PYTHON_DIR/python.mjs" ]; then
+  ( cd "$STOCK_PYTHON_DIR" && chmod +x python.sh && ./python.sh -c "$WHEEL_TEST_PY" ) \
+    && echo "UNEXPECTED -- stock build loaded the compiled wheel too" \
+    || echo "expected failure reproduced above -- confirms the ABI flags are what gate this"
+else
+  echo "SKIPPED -- no stock CPython build at $STOCK_PYTHON_DIR"
+fi
 
 if [ -n "$RUN_LEGACY_B" ]; then
   echo; echo "##### Test B (historical): Emscripten importing Kotlin's exported memory"
