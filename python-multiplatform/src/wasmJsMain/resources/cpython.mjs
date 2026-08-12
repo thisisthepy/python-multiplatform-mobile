@@ -359,4 +359,85 @@ export const PyModule_GetFilenameObject = bind("PyModule_GetFilenameObject");
 export const malloc = bind("malloc");
 export const free = bind("free");
 
+export const PyType_FromSpec = bind("PyType_FromSpec");
+export const PyObject_GetTypeData = bind("PyObject_GetTypeData");
+export const PyType_GetSlot = bind("PyType_GetSlot");
+export const PyObject_GC_UnTrack = bind("PyObject_GC_UnTrack");
+
+// =================================================================================================
+// Upcalls -- ROADMAP §7 on this target.
+//
+// Everything above is a raw CPython export re-exported under its own name. The three functions
+// below are the opposite: JavaScript, imported *by* Kotlin. They exist for two limitations of
+// Kotlin/Wasm, not because a JS hop was wanted anywhere.
+//
+//   1. **A table index cannot be obtained from inside Kotlin.** A `@WasmExport` is a funcref in the
+//      Kotlin instance's export section; turning it into a C function pointer means putting it in
+//      CPython's `__indirect_function_table`, and `WebAssembly.Table.prototype.set` is reachable
+//      only from the host. So registration is a JS step, run once per slot at startup.
+//
+//   2. **Kotlin/Wasm has no `call_indirect`.** `tp_traverse` is handed a `visitproc` and
+//      `tp_dealloc` has to reach its type's `tp_free`; both are function *pointers*, i.e. table
+//      indices, and calling one means `table.get(i)(...)`.
+//
+// Neither is on a hot path. After registration, CPython calls Kotlin through `call_indirect` with
+// no JS frame at all -- 3.1 ns, measured in `wasm-experiment/` (Tests E and F).
+//
+// A funcref is a funcref whatever instance produced it, which is why (1) works across two
+// independently instantiated modules.
+// =================================================================================================
+
+// The Kotlin instance's raw wasm exports. Set once, from the generated entry module, by the same
+// `doFirst` in build.gradle.kts that points `intrinsics.memory` at `wasmMemory`. It cannot be
+// imported from here: this module is loaded *by* Kotlin's import object, so reaching back would be
+// an ES cycle across a top-level await.
+let kotlinExports = null;
+
+export function pmpSetKotlinExports(exports) {
+    kotlinExports = exports;
+}
+
+const upcallTable = E.__indirect_function_table ?? M.wasmTable;
+
+// Not `M.UTF8ToString`. That is an Emscripten *runtime method*, and this build's
+// -sEXPORTED_RUNTIME_METHODS lists only `wasmExports` and `wasmMemory` -- deliberately, because
+// both are outside PEP 783's ABI-sensitive set and nothing else should be needed. Reaching for a
+// helper that is not exported fails as an ordinary `undefined is not a function` from inside a
+// wasm import, which surfaces in Kotlin as a bare JsException with no clue in it.
+//
+// A fresh view each call: the memory grows underneath us and an ArrayBuffer view detaches when it
+// does. This is a startup path, so the allocation does not matter.
+const decoder = new TextDecoder();
+function readCString(ptr) {
+    const heap = new Uint8Array(M.wasmMemory.buffer);
+    let end = ptr;
+    while (heap[end] !== 0) end++;
+    return decoder.decode(heap.subarray(ptr, end));
+}
+
+export function pmpRegisterUpcall(namePtr) {
+    // Negative results rather than throws: these cross back into Kotlin as an i32, and
+    // `ProxyTypeFactory` turns each code into a message naming the build step that is missing.
+    // A JS stack from inside a wasm import arrives in Kotlin as a bare JsException.
+    if (kotlinExports === null) return -1;
+    if (!upcallTable) return -4;
+    const fn = kotlinExports[readCString(namePtr)];
+    if (typeof fn !== "function") return -2;
+    try {
+        const index = upcallTable.grow(1);
+        upcallTable.set(index, fn);
+        return index;
+    } catch (e) {
+        return -3;
+    }
+}
+
+export function pmpCallVisit(fp, obj, arg) {
+    return upcallTable.get(fp)(obj, arg);
+}
+
+export function pmpCallFree(fp, obj) {
+    upcallTable.get(fp)(obj);
+}
+
 export default E;

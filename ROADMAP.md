@@ -969,10 +969,13 @@ list is needed** for the Stable ABI. Only `wasmExports` and `wasmMemory` have to
 shared object-model suite runs against a live interpreter.
 
 ```
-:python-multiplatform:wasmJsNodeTest    190 tests, 3 failed, 0 skipped
-                    desktopTest, unchanged    204 tests, 0 failed, 1 skipped
+:python-multiplatform:wasmJsNodeTest    214 tests, 3 failed, 0 skipped
+                    desktopTest, unchanged    208 tests, 0 failed, 1 skipped
 Embedded CPython version: 3.14.2 ... [Clang 23.0.0git]   on wasm32-emscripten
 ```
+
+(190 when the target first came up. The three failures are `GCLeakTest`'s, and they are the same
+three; the 24 added since are the marshalling, `Py_ssize_t` boundary and upcall cases below.)
 
 Nothing skipped: `PythonTestFixture.available` was true, so `Python3.initialize()` brought CPython
 up through an ordinary `@WasmImport` call to `Py_Initialize` — the library's own bring-up path,
@@ -992,6 +995,7 @@ Three questions the experiment did not have to answer, and how they came out:
   `intrinsics: { memory: new WebAssembly.Memory({ initial: 0 }), … }` into `*.import-object.mjs`;
   a `doFirst` on the test task rewrites that to Emscripten's `wasmMemory` and stages
   `python.mjs`/`python.wasm` beside the bundle. No binary patching, no `-sIMPORTED_MEMORY`.
+  *(There are two now. Upcalls need a second one, on the generated entry module — see below.)*
 
 ### What §10 still owes
 
@@ -1002,22 +1006,102 @@ and no `Cleaner`. So `registerCleaner` is explicit-`close()`-only, a `PyObject` 
 than weakened** — that is what the platform does today. Reaching JS's `FinalizationRegistry` through
 a `JsReference` is the only candidate route and is unmeasured.
 
-**Upcalls.** `ProxyTypeFactory` throws. The mechanism is no longer the open question this section
-used to call it: `@WasmExport` plus `WebAssembly.Table.set` reaches Kotlin through `call_indirect`
-at **3.1 ns**, against 10.9 ns for the `addFunction`-and-JS-closure route §5 specified, and a Kotlin
-`@WasmExport` has been called from Python as a real `PyMethodDef`. What is missing is plumbing plus
-one constraint — a table index cannot be obtained from inside Kotlin, so registration is a JS-side
-startup step this target does not have yet; and `call_indirect` does not coerce, so trampoline arity
-is a runtime correctness requirement rather than a compile-time one.
-
-**Interning.** Every `actual` taking a `String` allocates and frees a C string per call, which is
-the 259.5 ns row above. `PyObject_GetAttrString` measures **377 ns** here as a result. Caching the
-addresses of repeated names is the Android fix (2238 ns → 148 ns there) and is the largest remaining
-win that costs nothing.
-
 Kotlin/Native once had a `wasm32` target that could have shared CPython's linear memory; it was
 deprecated in 1.8.20 and removed in 1.9.20. That history no longer costs anything — `@WasmImport`
 plus an imported memory reaches the same place.
+
+### Upcalls: closed. CPython calls Kotlin, and cycles are collected
+
+`ProxyTypeFactory` builds a real `PyType_FromSpec` heap type with `tp_traverse`, `tp_clear` and
+`tp_dealloc` filled by Kotlin `@WasmExport`s installed into CPython's own
+`__indirect_function_table`. `wasmJsTest/.../WasmCycleCollectionTest` runs the same two cases
+`desktopTest/CycleCollectionTest` does, and both pass: a Kotlin↔Python cycle is broken by
+`gc.collect()`, and 100 proxies that die *without* a cycle release their `HandleTable` entries and
+leave the heap type's own refcount exactly where it started.
+
+The measurement this section already had — 3.1 ns through `call_indirect`, against 10.9 ns for the
+`addFunction`-and-JS-closure route §5 specified — was the mechanism. What this pass added was the
+wiring, and it turned up three constraints worth carrying forward:
+
+- **`@WasmExport` is honoured only in the compilation that produces the `.wasm`.** Measured, not
+  inferred: the identical annotation on the identical function exports from `wasmJsTest` and does
+  not from `wasmJsMain`, whose klib is linked in — the test binary's export section came out with
+  `startUnitTests` in it and nothing else. **A library cannot export its own trampolines.** The
+  executable module must declare three delegating lines; `wasmJsTest/.../ProxyTypeExports.kt` is
+  that file, kept in the suite precisely so the tests exercise the path an application takes.
+  Generating it from `python-multiplatform-gradle-plugin` is the obvious next step and is not done.
+- **Registration needs the Kotlin instance's raw exports, and only the generated entry module has
+  them.** `cpython.mjs` cannot fetch them: it is imported *by* Kotlin's import object, so importing
+  the entry module back would be an ES cycle across a top-level await. So `build.gradle.kts` appends
+  `pmpSetKotlinExports(exports)` to the entry module. This target now has **two** generated-file
+  substitutions, not the one this section used to advertise.
+- **Kotlin/Wasm has no `call_indirect`,** so calling a C function *pointer* — `visitproc`, `tp_free`
+  — goes through `WebAssembly.Table.get` in JS. Both are cold (a cyclic collection, a deallocation);
+  neither the downcall path nor CPython's path *into* Kotlin touches JavaScript.
+
+Also recorded because it cost time: `Module.UTF8ToString` is not available. This build exports
+`wasmExports` and `wasmMemory` and nothing else from the Emscripten runtime, deliberately, so any
+other helper fails as `undefined is not a function` inside a wasm import and arrives in Kotlin as an
+empty `JsException`.
+
+### Interning: taken, and the answer here is not Android's
+
+All 59 string-argument positions across 49 `actual`s go through `Wasm.internedUtf8` or
+`Wasm.scratchUtf8` now, with the per-argument judgement identical to `desktopMain`'s and
+`androidMain`'s on all 59. Measured at 200 000 iterations:
+
+| ns per argument | 7-char name | 54-char name |
+|---|---|---|
+| `malloc` + `encodeToByteArray` + copy + `free` (what it did) | **82.7** | |
+| `malloc` + `free` alone | 13.0 | |
+| `encodeToByteArray` alone | 59.2 | |
+| `Wasm.scratchUtf8` | **30.6** | **157.0** |
+| `Wasm.internedUtf8` (hit) | **22.2** | **26.4** |
+
+`PyObject_GetAttrString` through the `actual`, both rows back to back in one run so that only the
+marshalling differs: **258.0 → 229.2 ns**.
+
+**The rule transferred; the reasoning did not, and neither did the size of the win.** Three
+findings:
+
+- The expensive part was the **intermediate WasmGC `ByteArray`**, not the encode. Writing UTF-8
+  straight into linear memory is what takes 82.7 ns to 30.6. Shared memory is what makes that
+  possible — the destination is CPython's own heap, so there is no staging buffer — which is the
+  *opposite* of the original design note's claim that shared memory removes a string copy. It
+  removes the allocation.
+- **Interning's whole value is in the string length.** For a 7-character name it beats scratch by
+  8 ns, nothing like Android's 15x (2238 → 148). For a 54-character one it beats it by **6x**
+  (157.0 → 26.4), because a cache hit is flat in the length and an encode is linear. Reporting only
+  the short case — which is what the first measurement here did — would have argued interning is
+  barely worth having.
+- Negative result worth keeping: `BenchmarkTest`'s shared `PyObject_GetAttrString` row **did not
+  move** across this change (376.6 → 384.0 ns). That is two whole suite runs compared against a
+  ~29 ns per-call difference; it is not a usable A/B at this size, in either direction. The in-run
+  rows are the measurement.
+
+### `Py_ssize_t`: two guards, because the two halves fail differently
+
+The declaration half — `bindings.kt` against `python.wasm` — is derived now rather than remembered.
+`./gradlew :python-multiplatform:verifyWasmAbiSignatures` parses the wasm binary's type, import,
+function and export sections and compares all 316 `@WasmImport` declarations against it, plus the 3
+glue functions against `cpython.mjs`. It runs before `wasmJsNodeTest`. Confirmed by deliberately
+mis-declaring one and watching it fail with the function named:
+
+```
+PyList_Size: bindings.kt declares (i32) -> (i64), python.wasm has (i32) -> (i32)
+```
+
+Same shape as `generateDesktopReachabilityMetadata` (§7): read the artefact that decides, every
+build, never a checked-in copy of the answer. The task also asserts that every `external fun` in the
+file was parsed — the first version required an explicit return type and so silently skipped the
+three `Unit`-returning declarations, which is §2's "green test measuring its own scope" again.
+
+The conversion half links cleanly and is silently wrong, so it needed a different guard.
+`EmbedAPI.wasmJs.kt` names the two directions instead of casting inline — `Int.pySsizeToLong()`
+sign-extends, because -1 is the error return and the unsigned widening that is correct for pointers
+here would turn it into 4294967295; `Long.toPySsize()` range-checks rather than truncating, so
+`PyList_New(0x1_0000_0000)` fails instead of quietly becoming `PyList_New(0)`.
+`WasmPySsizeTBoundaryTest` covers both directions and the whole `Int` range.
 
 ## 11. Build wiring
 
