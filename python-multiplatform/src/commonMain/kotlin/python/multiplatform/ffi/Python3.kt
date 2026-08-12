@@ -199,6 +199,24 @@ object Python3 {
      * thread — it stops the world and merges every thread's queue, at a cost proportional to the
      * heap rather than to the queue.
      *
+     * **This is not only a free-threading fix.** `_PY_GC_SCHEDULED_BIT` — the bit `_Py_ScheduleGC`
+     * sets on every allocation that crosses a generation threshold — is cleared by the same
+     * `_Py_HandlePending` this reaches. That scheduling has been how allocation triggers a cyclic
+     * collection since 3.12, on *both* builds. An embedder driving CPython purely through the C
+     * API therefore never runs the cyclic collector at all, GIL or not: reference cycles the
+     * collector would otherwise break simply accumulate. Calling this reclaims them exactly as it
+     * merges the free-threaded queue — one call, one checkpoint, both jobs. See
+     * `docs/gc-scheduling-investigation.md` §1 and §6.
+     *
+     * The trade-off is what runs at the checkpoint, not just what it reclaims: any `__del__`,
+     * weakref callback or pending call attached to something the collector or the queue was
+     * holding can execute here, inside whatever `withGIL` scope happened to trip the checkpoint —
+     * a scope its caller did not ask to yield control from. Measured reentrant-safe (a `__del__`
+     * that calls back into Kotlin mid-collection completes without deadlocking, looping or
+     * crashing — `GCSchedulingMeasurementTest.testReentrancyDuringCheckpoint`), but it is still a
+     * side effect the caller did not request, and is why [autoDrainInterval] defaults to off on
+     * the GIL build rather than always on.
+     *
      * Safe to call at any time, including before initialisation and on a thread that has never
      * touched Python; it returns without doing anything when there is nothing it may legally do.
      */
@@ -222,10 +240,22 @@ object Python3 {
      * released since the previous one, so a workload that never drops a wrapper never pays.
      *
      * Defaults to on for free-threaded builds, where deferred release is the defect described on
-     * [drainPendingReleases], and off otherwise — a build with the global lock frees on the
-     * cleaner's `Py_DecRef` immediately, so there is nothing to reclaim and the checkpoint would
-     * be pure overhead. Set it explicitly to opt in or out; [drainPendingReleases] always works
-     * regardless of this setting.
+     * [drainPendingReleases] — a build with the global lock frees a *plain* reference the
+     * cleaner's `Py_DecRef` immediately, with no queue to drain, so that half of the checkpoint's
+     * job really is pure overhead there.
+     *
+     * **It still defaults to off on the GIL build**, but not because there is nothing left to
+     * reclaim: reference *cycles* are collected only by a scheduled cyclic collection, and that
+     * scheduling is read by the same eval-loop checkpoint on both builds (see
+     * [drainPendingReleases] and `docs/gc-scheduling-investigation.md` §1). An embedder that never
+     * runs Python bytecode accumulates cyclic garbage forever on the GIL build too. The default
+     * stays off there because turning it on is a behavioural change an embedder has to opt into
+     * knowingly, not a free one: a checkpoint can run `__del__`/weakref callbacks/pending calls at
+     * a `withGIL` scope exit the caller never asked to yield from. Measured cost when on: ~5.5 ns
+     * per outermost scope (~2.9% of the ~190 ns floor), amortised over this interval. Turn it on
+     * explicitly, call [drainPendingReleases] to force one checkpoint without changing this, or
+     * call [PyGC_Collect] directly for an immediate, unconditional collection — [drainPendingReleases]
+     * and `PyGC_Collect` both work regardless of this setting.
      */
     var autoDrainInterval: Int = if (BuildConfig.pythonFreeThreaded) DEFAULT_AUTO_DRAIN_INTERVAL else 0
 

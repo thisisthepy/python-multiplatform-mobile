@@ -24,11 +24,14 @@ import python.native.ffi.Py_IncRef
  *
  * `PyGC_Collect`, `PyGC_Enable`, `PyGC_Disable` and `PyGC_IsEnabled` *are*
  * part of the Stable ABI (the last three since 3.10), so this is not an abi3
- * restriction -- it is simply that none of the four is declared in this
- * project's `EmbedAPI` surface, and adding them means touching every
- * platform's `actual` set. Until that happens the `gc` module is the
- * supported route, with identical semantics at the cost of one Python-level
- * call per operation.
+ * restriction. `PyGC_Collect` is now declared in `EmbedAPI` and wired on
+ * every platform's `actual` set (ROADMAP §9) -- callers who want the direct
+ * C entry point instead of `gc.collect()` can reach it as
+ * `python.native.ffi.PyGC_Collect()` from inside [Python3.withPython], or
+ * indirectly through [Python3.drainPendingReleases]. `PyGC_Enable`,
+ * `PyGC_Disable` and `PyGC_IsEnabled` are not, so [enable], [disable] and
+ * [isEnabled] below still go through the `gc` module, with identical
+ * semantics at the cost of one Python-level call per operation.
  *
  * [refCount] is a genuinely different case. Reading a refcount directly needs
  * `Py_REFCNT`, which is a macro over the object header and is therefore not
@@ -62,7 +65,13 @@ object PyGC {
         Python3.withPython { Py_DecRef(result) }
     }
 
-    /** `gc.collect()`; returns the number of unreachable objects found. */
+    /**
+     * `gc.collect()`; returns the number of unreachable objects found.
+     *
+     * Equivalent to `withPython { PyGC_Collect() }` from `python.native.ffi` -- both bottom out in
+     * `gc_collect_internal` -- at the cost of one Python-level call. Use the direct binding instead
+     * if that call is measurable in context.
+     */
     fun collect(): Int {
         val result = callGc("collect")
         return Python3.withPython {
