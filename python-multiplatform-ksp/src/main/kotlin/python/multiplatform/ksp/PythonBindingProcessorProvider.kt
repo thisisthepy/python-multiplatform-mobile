@@ -53,6 +53,36 @@ private fun writeFile(
     }
 }
 
+/**
+ * Emits the `actual` for every `@InstallsUpcallTable expect fun` this compilation carries.
+ *
+ * Called from the app role only, and from round 1: the generated file references `FunctionTable`,
+ * which round 2 has not written yet, and that is fine -- KSP rounds resolve symbols
+ * independently, and the Kotlin compilation that follows sees both files at once. It is the same
+ * forward reference the aggregator makes to fragments it discovers.
+ */
+private fun writeInstallSeams(
+    environment: SymbolProcessorEnvironment,
+    resolver: Resolver,
+) {
+    val seams = findInstallSeams(resolver, environment.logger)
+    if (seams.isEmpty()) return
+    val originating = installSeamOriginatingFiles(resolver)
+    for (seam in seams) {
+        environment.logger.info(
+            "python-multiplatform-ksp: install seam ${seam.packageName}.${seam.simpleName}",
+        )
+        writeFile(
+            environment,
+            seam.packageName,
+            installSeamFileName(seam.simpleName),
+            originating,
+            aggregating = true,
+            content = renderInstallSeamSource(seam),
+        )
+    }
+}
+
 /** `python.multiplatform.role = library`: scan once, emit one fragment. */
 class LibraryProcessor(
     private val environment: SymbolProcessorEnvironment,
@@ -64,6 +94,18 @@ class LibraryProcessor(
     override fun process(resolver: Resolver): List<KSAnnotated> {
         if (invoked) return emptyList()
         invoked = true
+
+        // A library emits a fragment and no aggregator, so there is no `FunctionTable` here for a
+        // generated `actual` to call. Saying so is worth a build failure: the alternative is an
+        // `expect` with no `actual`, reported against the user's commonMain with nothing pointing
+        // at the role that decided it.
+        for (seam in findInstallSeams(resolver, environment.logger)) {
+            environment.logger.error(
+                "@$INSTALL_SEAM_ANNOTATION on ${seam.packageName}.${seam.simpleName}: only an app-role module " +
+                    "aggregates a FunctionTable. Move it to the module that produces the binary, or set " +
+                    "`pythonBindings { role.set(\"app\") }` on this one.",
+            )
+        }
 
         val result = scanner.scan(resolver, moduleName)
         if (result.fragment.entries.isEmpty() && result.fragment.classes.isEmpty()) return emptyList()
@@ -87,6 +129,9 @@ class LibraryProcessor(
  * `docs/upcall-table-design.md` §2/§6 for why this needs two rounds -- round 1's own fragment
  * has to exist as a compiled/generated symbol before [discovery] can see it alongside the
  * others.
+ *
+ * Round 1 also emits the `actual` for every `@InstallsUpcallTable expect fun`
+ * ([writeInstallSeams]), which is how shared code reaches a `FunctionTable` it cannot name.
  */
 class AppProcessor(
     private val environment: SymbolProcessorEnvironment,
@@ -100,6 +145,7 @@ class AppProcessor(
         round++
 
         if (round == 1) {
+            writeInstallSeams(environment, resolver)
             val result = scanner.scan(resolver, moduleName)
             if (result.fragment.entries.isNotEmpty() || result.fragment.classes.isNotEmpty()) {
                 writeFile(

@@ -25,10 +25,19 @@ fun androidNoArgs() {
 fun androidHidden(): String = "must not appear in the generated table"
 
 class AndroidCounter(var count: Long = 0) {
+    /** ROADMAP §13's second defect, on the AGP side of the generator: `isMutable` is true and the
+     * setter is not something generated code may name. `ksp-fixtures/library` pins all three
+     * restricted visibilities; this one only checks the same decision is made over here. */
+    var lastLabel: String = ""
+        private set
+
     fun increment(by: Long): Long {
         count += by
         return count
     }
 
-    fun label(prefix: String): String = "$prefix$count"
+    fun label(prefix: String): String {
+        lastLabel = "$prefix$count"
+        return lastLabel
+    }
 }

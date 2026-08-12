@@ -3,6 +3,7 @@ package org.thisisthepy.python.multiplatform.demo
 import org.thisisthepy.python.multiplatform.demo.bindings.DemoCounter
 import org.thisisthepy.python.multiplatform.demo.bindings.UPCALL_ENTRY_NAME
 import org.thisisthepy.python.multiplatform.demo.bindings.callKotlinFromPython
+import org.thisisthepy.python.multiplatform.demo.bindings.installCtypesBridge
 import org.thisisthepy.python.multiplatform.demo.bindings.installGeneratedUpcallTable
 import org.thisisthepy.python.multiplatform.demo.bindings.upcallTableSummary
 
@@ -10,7 +11,17 @@ import org.thisisthepy.python.multiplatform.demo.bindings.upcallTableSummary
 actual object UpcallDemo {
     actual val available: Boolean = true
     actual val entryName: String = UPCALL_ENTRY_NAME
-    actual fun install() = installGeneratedUpcallTable()
+
+    /**
+     * `installGeneratedUpcallTable` is generated (`@InstallsUpcallTable`); the `ctypes` bridge
+     * beside it is the desktop-only boundary shim and stays hand-written. Separating the two is
+     * what let the install half be generated for every target at once.
+     */
+    actual fun install() {
+        installGeneratedUpcallTable()
+        installCtypesBridge()
+    }
+
     actual fun press() = DemoCounter.press()
     actual fun callFromPython(): String = callKotlinFromPython()
     actual fun tableSummary(): String = upcallTableSummary()

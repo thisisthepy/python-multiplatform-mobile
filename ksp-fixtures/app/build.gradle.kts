@@ -29,6 +29,12 @@ kotlin {
             listOf("-L$targetExtractDir/lib/", "-lpython$libVersion", "-Wl,--allow-shlib-undefined"),
         )
     }
+    // The *second* Native leaf, and it is here for one reason: two of them make the default
+    // hierarchy give this module an `androidNativeMain` intermediate source set. That is the
+    // `iosMain` shape from ROADMAP §13 -- a source set the generating compilations depend on,
+    // which therefore can neither name `FunctionTable` nor host an `actual` for it -- reproduced
+    // without needing Xcode. Compile-only: no test binary is linked for it.
+    androidNativeX64()
 
     sourceSets {
         val commonMain by getting {

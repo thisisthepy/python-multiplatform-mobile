@@ -1,5 +1,6 @@
 package org.thisisthepy.python.multiplatform.demo.bindings
 
+import python.multiplatform.reflection.InstallsUpcallTable
 import python.multiplatform.reflection.UpcallTable
 
 /**
@@ -7,8 +8,15 @@ import python.multiplatform.reflection.UpcallTable
  *
  * `expect`/`actual` for one reason only: KSP emits `python.multiplatform.generated.FunctionTable`
  * into *each target's own compilation*, so `commonMain` -- compiled by every target and seeing
- * none of their generated directories -- cannot name it. Every actual is the same line.
+ * none of their generated directories -- cannot name it.
+ *
+ * There is no hand-written `actual` for this anywhere in the repository. `@InstallsUpcallTable`
+ * makes the processor emit one into every leaf compilation it generates a `FunctionTable` for.
+ * That is what removed the three `InstallTable.ios*.kt` files this sample used to carry -- one
+ * identical line per iOS target, because `iosMain` is an intermediate source set and could host
+ * neither the call nor the `actual`. ROADMAP §13 recorded that as the shape any real app hits.
  */
+@InstallsUpcallTable
 expect fun installGeneratedUpcallTable()
 
 /**

@@ -3,6 +3,7 @@ package fixture.app
 import fixture.library.Color
 import fixture.library.Level
 import fixture.library.Registry
+import fixture.library.RestrictedSetters
 import fixture.library.WithCompanion
 import python.multiplatform.generated.FunctionTable
 import python.multiplatform.reflection.CallableKind
@@ -249,6 +250,72 @@ class GeneratedDeclarationKindsTest {
 
         UpcallTable.invoke(UpcallTable.resolve("fixture.library.mutableCounter="), arrayOf(3L))
         assertEquals(3L, UpcallTable.invoke(UpcallTable.resolve("fixture.library.mutableCounter"), arrayOf()))
+    }
+
+    // --------------------------------------------------- a `var` whose setter is not public API
+
+    @Test
+    fun aVarWithARestrictedSetterIsExposedReadOnly() {
+        // ROADMAP §13: the scanner branched on `isMutable` alone. All three of these are mutable,
+        // and none of their setters may appear in the table -- `private`/`protected` because the
+        // generated assignment does not compile, `internal` because it compiles *only* by the
+        // accident of the fragment sharing this module's compilation.
+        for (name in listOf("privateSet", "protectedSet", "internalSet")) {
+            val getter = "fixture.library.RestrictedSetters.$name"
+            assertTrue(UpcallTable.resolve(getter).isValid, "the read side must stay exposed: $getter")
+            assertEquals(CallableKind.GETTER, kindOf(getter))
+            assertFalse(UpcallTable.resolve("$getter=").isValid, "a restricted setter must not be in the table: $getter=")
+        }
+
+        // The control, in the same class: an ordinary `var` still round-trips.
+        val holder = UpcallTable.invoke(UpcallTable.resolve("fixture.library.RestrictedSetters.<init>"), arrayOf())!!
+        val ref = HandleTable.register(holder)
+        assertEquals(CallableKind.SETTER, kindOf("fixture.library.RestrictedSetters.openSet="))
+        UpcallTable.invoke(
+            UpcallTable.resolve("fixture.library.RestrictedSetters.openSet="),
+            arrayOf(HandleTable.require(ref), 40L),
+        )
+        assertEquals(40L, (holder as RestrictedSetters).openSet)
+
+        // and the read side really reads: a value moved by Kotlin is visible through the getter.
+        val readPrivate = UpcallTable.resolve("fixture.library.RestrictedSetters.privateSet")
+        assertEquals(1L, UpcallTable.invoke(readPrivate, arrayOf(holder)))
+        holder.bumpAll()
+        assertEquals(2L, UpcallTable.invoke(readPrivate, arrayOf(holder)))
+    }
+
+    @Test
+    fun aRestrictedSetterIsAbsentFromTheOwningClassesMemberNamesToo() {
+        // `ReflectedClass.memberNames` is what a Python mirror is built from, so an entry dropped
+        // from the callable table has to be dropped here as well, or attribute access on the
+        // mirror resolves to nothing.
+        val members = ClassLookup.require("fixture.library.RestrictedSetters").memberNames
+        assertFalse(members.contains("fixture.library.RestrictedSetters.privateSet="))
+        assertFalse(members.contains("fixture.library.RestrictedSetters.protectedSet="))
+        assertFalse(members.contains("fixture.library.RestrictedSetters.internalSet="))
+        assertTrue(members.contains("fixture.library.RestrictedSetters.openSet="))
+        for (member in members) {
+            assertTrue(UpcallTable.resolve(member).isValid, "unresolved generated member: $member")
+        }
+    }
+
+    @Test
+    fun theStaticSetterPathHonoursSetterVisibilityAsWell() {
+        // Top-level and `object` properties go through `staticPropertyEntries`, which carried the
+        // same `isMutable`-only branch. "Cannot access 'topLevelPrivateSet': it is private in
+        // file." was one of the three compile errors this fixture produced before the fix.
+        assertTrue(UpcallTable.resolve("fixture.library.topLevelPrivateSet").isValid)
+        assertEquals(CallableKind.STATIC_GETTER, kindOf("fixture.library.topLevelPrivateSet"))
+        assertFalse(UpcallTable.resolve("fixture.library.topLevelPrivateSet=").isValid)
+
+        assertTrue(UpcallTable.resolve("fixture.library.topLevelOpenSet=").isValid, "the control keeps its setter")
+
+        assertTrue(UpcallTable.resolve("fixture.library.RestrictedRegistry.counted").isValid)
+        assertFalse(UpcallTable.resolve("fixture.library.RestrictedRegistry.counted=").isValid)
+        assertFalse(
+            ClassLookup.require("fixture.library.RestrictedRegistry").memberNames
+                .contains("fixture.library.RestrictedRegistry.counted="),
+        )
     }
 
     @Test

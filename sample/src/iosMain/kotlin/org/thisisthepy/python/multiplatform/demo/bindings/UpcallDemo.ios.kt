@@ -3,17 +3,21 @@ package org.thisisthepy.python.multiplatform.demo.bindings
 import python.multiplatform.reflection.UpcallTable
 
 /**
- * `installGeneratedUpcallTable` is **not** here, and cannot be.
+ * `installGeneratedUpcallTable` is **not** here, and still cannot be -- but it is no longer
+ * written by hand anywhere either.
  *
  * KSP writes its output into the *leaf* target's source set --
  * `build/generated/ksp/iosSimulatorArm64/iosSimulatorArm64Main/kotlin` and one sibling per
  * target -- and `iosMain` is an intermediate source set those leaves depend on, not the other way
  * round. So `python.multiplatform.generated.FunctionTable` is unresolvable from here for the same
- * reason it is unresolvable from `commonMain`, and the actual lives in
- * `iosX64Main`/`iosArm64Main`/`iosSimulatorArm64Main` as a one-liner each.
+ * reason it is unresolvable from `commonMain`. That used to cost three identical
+ * `InstallTable.ios*.kt` files, one per leaf.
  *
- * Worth knowing before designing anything that wants to touch the generated table from shared
- * code: it is reachable only from the source set of the target that generated it.
+ * ROADMAP §13 closed it by making the processor emit those `actual`s: `commonMain` declares
+ * `@InstallsUpcallTable expect fun installGeneratedUpcallTable()` and every leaf gets its own
+ * one-liner generated into it. The constraint is unchanged -- the generated table is reachable
+ * only from the source set of the target that generated it -- but nothing shared code writes has
+ * to know that any more. `ksp-fixtures/app`'s `androidNativeMain` pins the same shape.
  */
 
 /**
