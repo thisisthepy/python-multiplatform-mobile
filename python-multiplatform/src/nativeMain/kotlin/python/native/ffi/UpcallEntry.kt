@@ -233,8 +233,8 @@ private fun bindHandle(raw: Long): CPointer<CPyObject>? {
  * So the Python-facing route here is a real `PyMethodDef`: [bind] hands back an ordinary built-in
  * function object whose `ml_meth` is a [staticCFunction] over [pmInvokeMethod] and whose `self`
  * is the callable handle. That is not a workaround so much as the thing `ctypes` was standing in
- * for on desktop -- `UpcallArgumentsTest`'s `_PmBound` exists precisely because a `PyCFunction`
- * slot is what a finished binder installs, and this skips the stand-in.
+ * for on desktop -- desktop's ctypes shim in `UpcallEntryTest` (`commonTest`) exists precisely
+ * because a `PyCFunction` slot is what a finished binder installs, and this skips the stand-in.
  *
  * The `@CName` symbols stay: they are what a C host embeds against, they are what `ctypes`
  * reaches on Android, and [invokeAddress] makes them callable regardless of what the linker did

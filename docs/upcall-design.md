@@ -176,9 +176,9 @@ it is, both directions collapse to one call.
 - **Arguments are borrowed.** `PyTuple_GetItem` lends, so a `PyObject` built over one takes
   `borrowed = true`. `borrowed = false` gives back a reference nobody ever took — one per call —
   and the free lands somewhere unrelated. That is the bug that crashed this repo twice.
-- **The result is a new reference.** Python takes ownership. Measured end to end through ctypes
-  (`UpcallArgumentsTest.theReferenceReturnedToPythonIsTakenOverExactlyOnce`): a hundred calls move
-  the returned object's refcount by zero.
+- **The result is a new reference.** Python takes ownership. Measured end to end through each
+  platform's real entry point (`UpcallEntryTest.theReferenceReturnedToPythonIsTakenOverExactlyOnce`,
+  `commonTest`): a hundred calls move the returned object's refcount by zero.
 
 And one that is not about references: **nothing may be thrown out of a trampoline.** The return
 path is C; a Kotlin exception crossing a Panama upcall stub terminates the VM and on Kotlin/Native
@@ -271,9 +271,9 @@ depending on the link — `UpcallEntryTest.theRawEntryPointsAreCallableCFunction
 calls all three through the C ABI that way.
 
 What replaces it is not a workaround but the destination: a `PyMethodDef` is what the generated
-proxy type installs anyway, and `UpcallArgumentsTest`'s `ctypes` shim on desktop exists precisely
-to stand in for a `PyCFunction` slot. Kotlin/Native fills the struct itself, so the claim that no
-C glue is needed survives — it was the reason for the claim that did not.
+proxy type installs anyway, and desktop's `ctypes` shim (in `UpcallEntryTest`, `commonTest`) exists
+precisely to stand in for a `PyCFunction` slot. Kotlin/Native fills the struct itself, so the claim
+that no C glue is needed survives — it was the reason for the claim that did not.
 
 ## 테이블 생성 — KSP
 
