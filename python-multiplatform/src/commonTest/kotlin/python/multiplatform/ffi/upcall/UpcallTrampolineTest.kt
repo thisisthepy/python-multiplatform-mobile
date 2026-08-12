@@ -133,8 +133,8 @@ object TrampolineFragment : FunctionTableFragment {
 /**
  * ROADMAP §13's gap: the table carries arity and per-argument [TypeTag]s, and until now nothing
  * marshalled them. These drive [UpcallTrampoline] directly with argument tuples built by the
- * interpreter, which is the platform-independent half; `UpcallArgumentsTest` (desktopTest) drives
- * the same code through a real Panama upcall stub from Python.
+ * interpreter, which is the platform-independent half; `UpcallEntryTest` (`commonTest`) drives the
+ * same code through each platform's real published entry point from Python.
  */
 class UpcallTrampolineTest {
 
