@@ -256,12 +256,14 @@ Kotlin 이 `Future` 를 만들어 Python 이벤트 루프에 넘기고, 완료 �
    `start` 직후에 세는 것으로 측정 가능하고, 이 값이 높으면 규약의 복잡도 대부분을 드문 경로로
    미룰 수 있다. §8.4 가 이 질문을 하나 더 늘렸다 — 빠른 경로는 "suspend 하지 않은 호출"보다
    **넓다.**
-3. **wasm 실행 경로.** §4 가 전부 추론이다. `docs/wasm-design.md` 의 미해결 항목이 풀리기 전에는
-   확인할 수 없다. §8.5 를 보라.
+3. ~~**wasm 실행 경로.** §4 가 전부 추론이다.~~ **§9.5 가 측정했다** — wasmJs 에는 실행 경로가
+   있었고(`wasmJsNodeTest`, 273개), (C) 는 `import asyncio` 가 trap 하는 지점에서 끝난다.
+   남은 추론은 "루프가 도는 상태에서의 교착" 하나뿐이다.
 4. **`suspend` 가 걸러졌음을 사용자에게 알리는 것.** §2 의 침묵은 §8 이 덮지 못하는 형태
    (확장 수신자를 가진 `suspend fun`, 제네릭 `suspend fun`) 에 **그대로 남아 있다.** KSP 경고가
    맞는 자리다.
-5. **취소.** §8 의 범위에서 빠졌다. §8.6 을 보라.
+5. ~~**취소.** §8 의 범위에서 빠졌다.~~ **§9.1–9.3 이 답했다.** 남은 것은 이른 통지 하나이고,
+   §9.3 이 그것에 무엇이 필요한지 적어 두었다.
 
 ---
 
@@ -353,19 +355,18 @@ Kotlin 이 `Future` 를 만들어 Python 이벤트 루프에 넘기고, 완료 �
 **추론이다.** 이 워크스페이스에 wasm 실행 경로가 없어(`docs/wasm-design.md` "Still open")
 확인할 수 없었고, 확인하지 않은 것을 확인했다고 적지 않는다.
 
-### 8.6 이번 범위에서 뺀 것
+### 8.6 이번 범위에서 뺀 것 — **§9 가 앞의 둘을 채웠다**
 
-- **취소.** `Future.cancel` 이 도달 가능하다는 것만 §3(C) 에서 확인돼 있고, 그것을 Kotlin
-  코루틴의 취소로 옮기는 경로는 만들지 않았다. `PendingCall` 에는 취소 개념이 없고,
-  `kotlinx.coroutines` 없이 `Job` 트리를 흉내 내는 것은 별도의 설계 문제다. 그러므로 지금
-  Python 쪽에서 `Future` 를 취소해도 **Kotlin 쪽 작업은 계속 돈다.** 그 뒤 완료가 도착했을 때
-  무슨 일이 일어나는지는 **테스트하지 않았고 여기서 단정하지 않는다** — `call_soon_threadsafe` 는
-  예약만 하므로 실패한다면 루프 콜백 안에서일 텐데, 그것을 관측하지 않았다. 취소를 범위에
-  넣을 때 첫 번째로 답해야 할 질문이 이것이다.
-- **Python 쪽 프록시 생성.** `await kotlin_fn(x)` 가 두 경로에서 똑같이 읽히려면 프록시가
-  `async def` 여야 하고, 그 안에서 결과가 awaitable 일 때만 `await` 해야 한다.
-  테스트의 `_await_kotlin` 이 그 모양을 그대로 적어 두었지만, Python 모듈 생성 자체가 아직
-  없으므로 생성되지는 않는다.
+- **취소.** ~~`Future.cancel` 이 도달 가능하다는 것만 §3(C) 에서 확인돼 있고~~ **§9.1–9.3 이 답했다.**
+  아래 원문은 §9 가 무엇을 바꿨는지 대조하기 위해 남긴다.
+
+  > `Future.cancel` 이 도달 가능하다는 것만 §3(C) 에서 확인돼 있고, 그것을 Kotlin
+  > 코루틴의 취소로 옮기는 경로는 만들지 않았다. 그러므로 지금 Python 쪽에서 `Future` 를
+  > 취소해도 **Kotlin 쪽 작업은 계속 돈다.** 그 뒤 완료가 도착했을 때 무슨 일이 일어나는지는
+  > **테스트하지 않았고 여기서 단정하지 않는다.**
+
+- **Python 쪽 프록시 생성.** ~~Python 모듈 생성 자체가 아직 없으므로 생성되지는 않는다.~~
+  **§9.4 가 만들었다.**
 - **실행 중인 루프가 없을 때.** 실패한다(`RuntimeError: no running event loop`), 그리고 그때
   **코루틴은 이미 시작된 뒤다** — suspend 할지 여부는 시작해 봐야 알기 때문이다. 그 재개는
   버려진다. 이것은 (C) 가 "애플리케이션이 async 로 짜여 있을 것"을 요구한다는 §3(C) 의 대가를
@@ -373,3 +374,147 @@ Kotlin 이 `Future` 를 만들어 Python 이벤트 루프에 넘기고, 완료 �
   (`aSuspendingEntryThatSuspendsWithNoRunningLoopFailsInsteadOfReturningSomethingUnusable`).
 - **`suspend` 타입 누수.** §2.1 은 그대로다. `val h: suspend (Long) -> Long` 은 여전히 `OBJECT`
   핸들로 건너가고, 그것을 부를 항목은 테이블에 없다.
+
+---
+
+## 9. 취소와 프록시 생성 — 측정
+
+§8.6 이 미룬 둘을 채웠다. 그리고 그 과정에서 **§4·§8.5 의 wasm 판단이 틀렸다는 것**이 나왔다 —
+틀린 방향이 아니라, 예측한 것보다 훨씬 이른 지점에서 훨씬 나쁘게 깨진다(§9.5).
+
+### 9.1 고치기 전에 무슨 일이 났는가 — 측정
+
+`AsyncUpcallCancellationTest` 를 먼저 쓰고, 고치기 전에 돌렸다. 관측된 것:
+
+| 관측 대상 | 결과 |
+|---|---|
+| `await` 가 받은 것 | `CancelledError` — 정상 |
+| 루프의 `call_exception_handler` | **`InvalidStateError: invalid state` 1건** |
+| 완료 스레드의 에러 지시자 | **깨끗하다** |
+| 그 다음의 무관한 업콜 | **정상 동작** |
+
+즉 **오염은 없었다.** 이 저장소가 두 번 당한 "에러 지시자가 남아 무관한 다음 호출을 죽인다" 는
+일어나지 않았고, 그것을 추측이 아니라 두 가지 방법으로 확인했다 — 완료 뒤 `PyErr_Occurred()` 를
+직접 읽었고, 그 다음 파이썬에서 별개의 항목을 호출해 정상 결과를 받았다.
+
+일어난 것은 하나뿐이다: **루프 콜백 안에서 터진 예외**. `call_soon_threadsafe` 는 예약만 하므로
+`set_result` 는 나중에 루프 스레드에서 실행되고, 취소된 `Future` 에 대해 `InvalidStateError` 를
+던진다. asyncio 는 그것을 `call_exception_handler` 로 보낸다 — 기본 핸들러면 stderr 로그다.
+**애플리케이션이 잘못한 것이 없고 대응할 수도 없는 실패 보고**이며, 값은 일부러 버린 값이다.
+
+### 9.2 안전하게 만든 방법 — 그리고 왜 검사 하나로는 부족한가
+
+둘을 넣었고, **보장인 것은 둘째뿐이다.**
+
+1. 예약 전에 `Future.done()` 을 본다. 싸고 흔한 경우를 걷어낸다. **보장이 아니다** — 이 검사는
+   완료 스레드에서 일어나고 콜백은 나중에 루프 스레드에서 실행되므로, 그 사이에 취소가 끼면
+   검사를 통과한 뒤에 실패한다.
+2. 예약하는 것을 `set_result` 가 아니라 `_pm_settle` 로 바꿨다. 이 함수가 **콜백 안에서 다시**
+   `done()` 을 본다. 순서와 무관하게 성립하는 것은 이쪽이다.
+
+둘 다 필요하다는 것을 단언이 아니라 실험으로 확인했다. `_pm_settle` 의 `done()` 가드만 지우고
+돌리면 **경합 테스트 하나만 빨개진다**(`InvalidStateError: invalid state`) — 나머지 취소 테스트
+둘은 1번 검사가 잡으므로 초록으로 남는다. 즉 1번은 2번을 대체하지 못한다.
+
+그 경합 테스트는 순서를 우연에 맡기지 않는다. 파이썬 코루틴이 `await` 하지 않고 스핀하는 동안
+Kotlin 이 완료·예약하게 만든다 — 루프의 ready 큐는 코루틴이 루프를 쥐고 있어 비워지지 않고,
+CPython 은 스위치 간격마다 GIL 을 놓으므로 완료 스레드는 진행한다. **예약이 이미 큐에 들어간 뒤에**
+취소가 일어나므로, Kotlin 쪽 검사는 이미 "안 끝났다" 라고 답한 상태다.
+
+### 9.3 Kotlin 쪽 취소 — 되는 것과 안 되는 것
+
+**`PendingCall` 은 코루틴을 강제로 취소할 수 없다. 구현이 빠진 것이 아니라 구조적으로 불가능하다.**
+
+`start` 가 `startCoroutine` 에 넘기는 `Continuation` 은 코루틴의 **완료(completion)** 이고, 본문
+전체가 끝났을 때 딱 한 번 재개된다. 본문이 지금 멈춰 있는 **중단 지점의 continuation 은 완전히
+다른 객체**이고, 그것을 쥔 쪽은 중단을 만든 사람 — 사용자의 `suspendCoroutine`, 그들의 디스패처,
+또는 이 라이브러리가 의존하지 않는 `kotlinx.coroutines` 다. `PendingCall` 은 그것을 본 적이 없고,
+stdlib 에는 그것에 닿는 수단이 없다. continuation 을 두 번 재개하는 것은 정의되지 않은 동작이라
+뒷문도 없다. 강제 취소는 `Job` 트리가 하는 일이고, 그것을 만드는 것이 `kotlinx.coroutines` 다.
+
+**되는 것: 협조적 취소.** 코루틴의 `CoroutineContext` 를 `EmptyCoroutineContext` 에서
+`PendingCall` 자신으로 바꿨다(`PendingCall` 이 `CoroutineContext.Element` 다). 그러면 본문이
+`coroutineContext[PendingCall]` 로 자기 호출에 닿고, `ensureActive()` 가 그 한 줄 형태다.
+
+    suspend fun slowSum(n: Long): Long {
+        var total = 0L
+        for (i in 0 until n) { ensureActive(); total += step(i) }
+        return total
+    }
+
+이것은 `kotlinx.coroutines` 와 **같은 계약**이다. 거기서도 취소는 협조적이고, 검사하지 않는 본문은
+거기서도 취소되지 않는다. 다른 점은 거기서는 라이브러리의 suspend 함수들이 대신 검사해 준다는
+것뿐이고, 여기에는 그런 함수가 없다.
+
+디스패처를 추가한 것이 아니라는 점이 중요하다. `ContinuationInterceptor` 가 아닌 element 는 본문이
+어디서 도는지 바꾸지 못하므로, **§5 의 빠른 경로는 그대로다.**
+
+**되지 않는 것: 이른 통지.** `cancel()` 을 파이썬이 취소하는 그 순간에 부를 방법이 없다. Kotlin 이
+Python 의 취소를 알 수 있는 지점은 완료 시점뿐이고, 그때는 이미 늦다. 그러려면 Python→Kotlin 호출이
+하나 더 필요하다 — 구체적으로는 (a) `_pm_release` 와 같은 `(long) -> int` 스텁 하나(모양이 이미
+있으므로 새 스텁 *형태* 는 아니다), (b) `Future` 에 실어 보낼 `PendingCall` 핸들, (c) 다섯 타깃의
+바인딩, (d) 그 핸들의 수명 관리. **이번 범위에서 하지 않았고, 되는 척하지 않는다.**
+
+그래서 지금 협조하지 않는 본문은 끝까지 돌고, 그 결과는 §9.2 가 조용히 버린다. 이 절반이 실제로
+책임지는 보장은 그것이다.
+
+### 9.4 파이썬 프록시 생성 — 런타임 `exec`, 빌드 타임 리소스가 아니라
+
+`PythonProxySource.render` 가 만든다. 두 후보 중 **런타임 렌더 + `exec`** 를 골랐다.
+
+1. **`.py` 를 놓을 자리가 없다.** Kotlin/Native 에는 `getResourceAsStream` 이 없고, iOS·androidNative·
+   wasm 의 `sys.path` 는 `src/nativeInterop/cinterop/lib/...` 의 플랫폼별 CPython 트리를 가리킨다.
+   생성 파일 하나를 거기에 넣고 첫 import 전에 `sys.path` 에 올리는 것은 이 저장소가 무엇에 대해서도
+   풀지 않은 플랫폼별 패키징 문제다. `Python3.exec` 는 다섯 타깃에서 이미 된다.
+2. **KSP 는 무엇이 설치될지 모른다.** fragment 는 Kotlin 모듈 단위이고, 테이블은 런타임에
+   `UpcallTable.install` 이 조립한다. 애플리케이션이 부분집합만 설치할 수 있다(이 저장소의 테스트가
+   전부 그렇게 한다). 빌드 타임 파이썬은 존재하지 않을 수도 있는 테이블을 기술하게 되고, 어차피
+   런타임에 klib 들을 가로질러 재집계해야 한다 — 그것이 바로 이것이고, 정보만 더 적다.
+3. **`ExposedCallable` 이 이미 다 들고 있다.** `isSuspend`·`arity`·`kind` 가 정확히 입력이고, KSP 가
+   이미 싣고 있다. KSP 에서 파이썬까지 뽑으면 그 지식이 **서로 어긋날 수 있는 두 생성기**로 복제된다.
+
+빌드 타임 안(案)에서 실제로 가치 있던 부분은 지켰다: `render` 는 **엔트리 → 소스 텍스트의 순수
+함수**라서 인터프리터 없이 `commonTest`(`PythonProxySourceTest`)가 고정하고, 생성물은 동작이 아니라
+읽을 수 있는 산출물이다. CPython 이 필요한 것은 `install` 뿐이고 그것은 `exec` 밖에 하지 않는다.
+
+생성되는 모양:
+
+    async def _pm_f_0(a0):
+        _pm_r = _pm_invoke(_pm_h_0, (a0,))
+        if hasattr(_pm_r, '__await__'):
+            return await _pm_r
+        return _pm_r
+
+`_await_kotlin` 이 손으로 적어두었던 그 모양이다 — **awaitable 일 때만 await**. 이름은
+`sys.modules` 주입으로 Kotlin 패키지 트리에 실어서 `from demo.calc import doubleLater` 가 되게 했다;
+import 훅이 필요 없는 이유는 CPython 이 finder 를 보기 전에 `sys.modules` 를 먼저 보기 때문이다.
+
+**렌더하지 않는 것:** `CallableKind.FUNCTION` 만 만든다. `METHOD`/`GETTER`/`SETTER` 는 수신자가
+프록시 *인스턴스* 에서 와야 하고, `STATIC_GETTER`/`STATIC_SETTER` 는 호출이 아니라 속성이며,
+`CONSTRUCTOR` 는 프록시 인스턴스를 돌려줘야 한다. 셋 다 §7 의 `PyType_FromSpec` 타입의 몫이다.
+
+빠른 경로가 실제로 공짜인 것도 확인했다. 생성된 프록시는 두 경로를 호출자에게서 감추므로
+`type(r).__name__` 을 볼 수 없다 — 대신 루프의 `create_future` 를 세었고, 이것이 더 강한 진술이다:
+빠른 경로에서 `Future` 는 **반환되지 않은 것이 아니라 만들어지지도 않는다**(`created == 0`).
+
+### 9.5 wasm — §4·§8.5 의 추론을 측정이 뒤집었다
+
+§4 와 §8.5 는 wasmJs 에서 (C) 가 **교착**으로 실패할 것이라고 추론했다. 그게 아니다. 훨씬 이르다.
+
+    import json  OK    import math   OK    import select     OK
+    import socket OK   import contextvars OK
+    import selectors                    RuntimeError: unreachable   <- trap
+    import asyncio{,.events,.base_events}  trap (selectors 를 거쳐서)
+
+**`import asyncio` 가 wasm 인스턴스를 trap 시켜 Node 프로세스를 죽인다.** 파이썬 예외가 아니므로
+Kotlin 에서도 Python 에서도 잡을 수 없다. 그러므로 wasmJs 에서 (C) 는 느리거나 교착하는 것이 아니라
+**첫 걸음에서 없다**. §8.5 가 따진 교착은 거기까지 가지 못해서 도달 불가능하다.
+
+이것이 어떻게 발견됐는지도 적어 둔다: "루프 없이 suspend 하면 명확히 실패하는가" 를 `commonTest` 에
+넣었더니 wasm 스위트 전체가 프로세스째 죽었다. 그래서 그 케이스는 `commonTest` 에 **둘 수 없다**.
+`AsyncUpcallPortabilityTest` 에는 asyncio 를 건드리기 전에 반환하는 두 경로만 남겼고 — 빠른 경로와
+suspend 이전 실패 — 그 둘은 다섯 타깃에서 실제로 돈다. wasm 애플리케이션이 의지할 수 있는 것도
+정확히 그 둘이다.
+
+**뒤집지 않은 것:** 루프가 도는 상태에서 진짜로 suspend 했을 때의 교착은 여전히 추론이다. 그 실험은
+프로세스를 죽이거나 매달리므로 하지 않았고, 하지 않은 것을 했다고 적지 않는다.

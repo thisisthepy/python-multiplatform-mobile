@@ -98,6 +98,16 @@ object UpcallTable {
         installedModules.add(fragment.moduleName)
     }
 
+    /**
+     * Every entry currently installed, in registration order.
+     *
+     * For generators that need to describe the whole table rather than resolve one name --
+     * [python.multiplatform.ffi.upcall.PythonProxySource] is the one that does. A copy, because a
+     * caller iterating the live list while an upcall registers into it would be reading a table
+     * mid-mutation; this path is not hot enough for that to matter.
+     */
+    fun entries(): List<ExposedCallable> = callables.toList()
+
     /** Resolves [name] to a handle, or [CallableHandle.NONE] if nothing claims it. */
     fun resolve(name: String): CallableHandle {
         val index = nameToIndex[name] ?: return CallableHandle.NONE

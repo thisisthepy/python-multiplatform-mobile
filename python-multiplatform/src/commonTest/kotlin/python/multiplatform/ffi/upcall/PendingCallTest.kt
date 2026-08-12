@@ -3,8 +3,11 @@ package python.multiplatform.ffi.upcall
 import python.multiplatform.reflection.HandleTable
 import python.multiplatform.reflection.ObjectReference
 import kotlin.coroutines.Continuation
+import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.startCoroutine
 import kotlin.coroutines.suspendCoroutine
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -146,6 +149,104 @@ class PendingCallTest {
         assertTrue(call.isDone)
         assertEquals(5L, call.value)
         assertEquals("listener blew up", call.deliveryFailure?.message)
+    }
+
+    // ---------------------------------------------------------------------------- cancellation
+
+    @Test
+    fun cancellingALiveCallIsNewsOnceAndDoesNotPretendToHaveStoppedTheCoroutine() {
+        var captured: Continuation<Long>? = null
+        val call = PendingCall.start { suspendCoroutine { c -> captured = c } }
+
+        assertFalse(call.isCancelled)
+        assertTrue(call.cancel(), "the first cancel of a live call is news")
+        assertTrue(call.isCancelled)
+        assertFalse(call.cancel(), "a second cancel has nothing left to report")
+
+        // The honest half: the coroutine is still suspended and still resumable. `cancel` cannot
+        // reach the continuation that represents the suspension point -- that one belongs to
+        // whoever created it -- so nothing stopped.
+        assertFalse(call.isDone, "cancelling must not fake a completion that has not happened")
+        captured!!.resume(9L)
+        assertTrue(call.isDone)
+        assertEquals(9L, call.value, "an uncooperative body runs to the end; its result is dropped downstream")
+    }
+
+    @Test
+    fun cancellingAnAlreadyCompletedCallChangesNothing() {
+        val call = PendingCall.start { 1L }
+        assertFalse(call.cancel(), "there is nothing to cancel about a call that already finished")
+        assertFalse(call.isCancelled)
+    }
+
+    @Test
+    fun aCooperatingBodyStopsAtItsNextEnsureActiveAndReportsCancellationAsTheFailure() {
+        // The other half, and the only kind of cancellation available without a Job tree: the body
+        // reads the flag through its coroutine context and unwinds itself.
+        var captured: Continuation<Unit>? = null
+        var stepsAfterCancel = 0
+
+        val call = PendingCall.start {
+            suspendCoroutine { c -> captured = c }
+            ensureActive()
+            stepsAfterCancel++
+            42L
+        }
+
+        assertTrue(call.cancel())
+        captured!!.resume(Unit)
+
+        assertEquals(0, stepsAfterCancel, "ensureActive did not stop the body")
+        assertTrue(call.isDone)
+        assertNull(call.value)
+        assertTrue(
+            call.failure is CancellationException,
+            "a cooperating body has to unwind with CancellationException, got ${call.failure}",
+        )
+    }
+
+    @Test
+    fun ensureActiveIsANoOpWhenTheCallWasNotCancelled() {
+        var reached = false
+        val call = PendingCall.start {
+            ensureActive()
+            reached = true
+            7L
+        }
+        assertTrue(reached)
+        assertEquals(7L, call.value)
+        assertNull(call.failure)
+    }
+
+    @Test
+    fun theRunningCallIsReachableFromInsideItsOwnBodyAndAbsentOutsideOne() {
+        // What makes `ensureActive` work: `start` puts the PendingCall in the coroutine's context.
+        // Outside a call started that way there is no element, and that has to be tolerated rather
+        // than treated as an error -- an exposed `suspend fun` is an ordinary function that a unit
+        // test or another exposed function may call directly.
+        var seen: PendingCall? = null
+        val call = PendingCall.start { seen = currentPendingCall(); 0L }
+        assertSame(call, seen)
+
+        var outside: PendingCall? = call
+        val plain = PendingCall.start {
+            // Still inside a PendingCall, so this one *does* see itself; the null case is checked
+            // by running a suspend block with no PendingCall around it at all, below.
+            outside = currentPendingCall()
+            0L
+        }
+        assertSame(plain, outside)
+    }
+
+    @Test
+    fun aSuspendBlockNotStartedByTheBoundarySeesNoPendingCall() {
+        var seen: PendingCall? = null
+        var finished = false
+        val block: suspend () -> Unit = { seen = currentPendingCall(); finished = true }
+        block.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+
+        assertTrue(finished, "the block never ran")
+        assertNull(seen, "a coroutine the boundary did not start must not report someone else's call")
     }
 
     // ------------------------------------------------------------- addressing it from Python
