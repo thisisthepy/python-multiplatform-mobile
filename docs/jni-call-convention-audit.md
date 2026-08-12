@@ -47,6 +47,10 @@ This document classifies all 71 registered JNI functions in `jni_onload.def`.
 > **What survives is the classification itself**, which is the useful part: it is the rule for
 > choosing a convention when a *new* call site is written, and that is where the crash ROADMAP §3
 > warns about would actually be introduced.
+>
+> Section 2 was checked against those measurements and **rejected**; see *Resolution* at the end of
+> this document for the judgement, the three classifications in it that are wrong, and the one
+> change that was made instead.
 
 
 ## 1. Mismatches
@@ -177,3 +181,133 @@ Based on CPython's documented semantics, the following rules apply when classify
   - Promoting a re-entrant function to `@CriticalNative` is a fatal crash when upcalls exist.
   - Leaving a leaf as Ordinary wastes ~45ns per call on API 26-31, but only ~2-4ns on modern API 34+. Safe promotions are therefore an optimization mostly relevant for older devices or high-volume loops, and should never override correctness.
 - **Unresolved Entries**: None. All 71 registrations were resolved confidently based on documented CPython semantics (e.g. GC thresholds on container allocation).
+
+---
+
+# Resolution
+
+Written after checking section 2 against this repository's own measurements and against the
+registration table as it stands at 187 entries (the audit read 71).
+
+## The promotion to `@CriticalNative` is rejected
+
+Section 2 argues its eight promotions are worth taking because `@CriticalNative` costs "~45ns on
+API 26-31, only ~2-4ns on API 34+". That is backwards. Measured here, net of the Kotlin floor
+(`docs/downcall-design.md`, `androidMain/README.md`), the *change* a promotion buys is:
+
+| API | ordinary → `@FastNative` | ordinary → `@CriticalNative` |
+|---|---|---|
+| 26 | −6.64 | −43.47 |
+| 30 | −41.33 | −73.33 |
+| 31 | −21.68 | −45.99 |
+| 33 | −5.79 | −7.86 |
+| 34 | −5.84 | **+16.54** |
+| 36 | −14.77 | **+25.73** |
+
+`@CriticalNative` is a **loss** on the two newest levels measured. Taking section 2 as written
+would slow every one of those eight functions down on any device from Android 14 onward.
+
+It could be had behind the existing `preferFastNative` branch — critical below 34, ordinary above.
+That is not being done, for three reasons.
+
+**It is not a relabel.** `@CriticalNative` receives no `JNIEnv` or `jclass`, so it cannot reuse the
+`f_*N` wrappers, which all have them. Each promotion needs a new table entry pointing at the raw
+CPython symbol, a new `@CriticalNative` declaration, and a branch at the call site. Compare with a
+`@FastNative` promotion, which is one annotation: the C signature is already right and the
+registration name does not change.
+
+**Three of the eight cannot be promoted at all.** They are not leaves:
+
+| | audit says | actually |
+|---|---|---|
+| `PyGILState_Release` | "unlocks mutex (non-blocking)" | the release that drops the counter to zero deletes the thread state; clearing a thread state decrefs its dict and exception state, so `__del__` runs |
+| `PyThreadState_GetDict` | "reads struct pointer" | allocates the thread dict with `PyDict_New` on first call per thread — a GC-tracked allocation, so rule 2 applies |
+| `PyEval_InitThreads` | "initializes locking" | a no-op retained for the stable ABI (removed from the C API in 3.13; still exported by the bundled `libpython`, confirmed with `nm -D`). Promoting a no-op buys the convention delta and nothing else |
+
+That leaves `Py_IncRef`, `Py_NewRef`, `Py_XNewRef`, `PyGILState_GetThisThreadState` and
+`PyEval_SaveThread` as genuine leaves — and of those, only the three refcount operations are on a
+path called often enough for tens of nanoseconds to accumulate.
+
+**The audit's own confidence claim does not hold.** "Unresolved entries: none" is not available
+from reading names and documentation, which is exactly how the three above were misread.
+
+## What was changed instead: `PyList_GetItem`
+
+The static sweep found one place where the current configuration contradicts the measurements, and
+it is a demotion rather than a promotion.
+
+`PyList_GetItemRaw` was registered `@CriticalNative` with **no `@FastNative` twin and no
+`preferFastNative` branch** — the only declaration in `bindings.kt` that ignores the device axis.
+It is also the per-element call of bulk list iteration, so the penalty multiplies by N. ROADMAP §5
+measured `list → LongArray`, 1000 elements, at 50065.89 ns on API 36 hardware: 50 ns per element,
+against a `@CriticalNative` net cost of 44.05 ns on that device. That 50 ns also covers the loop and
+the `toNativePointer` conversion, so 44.05 is an upper bound on the convention's share rather than
+an attribution — but it is an upper bound of 88%, which is enough to act on.
+
+So a `@FastNative` twin was added (`f_PyList_GetItemRaw` in `jni_onload.def`,
+`PyList_GetItemRawF` in `bindings.kt`) and the call site now branches on `preferFastNative`, the
+same shape as `PyList_Size` directly above it. Predicted effect on API 36: 44.05 → 3.55 ns per
+element. Nothing else was promoted or demoted.
+
+This is compile-verified only. `JniWiringTest.bothListGetItemConventionsAgree` asserts the two
+registrations return identical pointers at every index of `sys.path`, which catches both a missing
+table entry and a wrapper written without the leading `JNIEnv*, jclass`; it has not been run,
+because the device was in use.
+
+It also narrows §5. If a large share of the 11x bulk-iteration win came from the per-element call
+running under the slowest available convention on that device, then part of the remaining case for
+composition was paying for a configuration mistake rather than for crossings.
+
+## The registrations added since the audit: 116, all ordinary, no defects
+
+The audit read 71 entries. The table has 187 — 74 added at `9abc8edd`, 42 at `aea09585`, none
+removed.
+
+**Every one of the 116 is registered `N`-suffixed and declared plain `@JvmStatic external fun`.**
+Not one has a `@CriticalNative` or `@FastNative` twin registered, so no call site can be reaching a
+GC-blocking variant of them: there is none to reach. The failure mode ROADMAP §3 warns about cannot
+be present in the new surface. Verified by extracting the table names from all three revisions and
+parsing the annotations in `bindings.kt`.
+
+Classifying the 42 anyway, since the point of the exercise is the rule for the *next* one. All 42
+are string-carrying; 31 are re-entrant and correctly ordinary:
+
+| mechanism | functions |
+|---|---|
+| executes module or arbitrary code | `PyImport_ExecCodeModuleN`, `PyImport_ExecCodeModuleExN`, `PyImport_ExecCodeModuleWithPathnamesN`, `PyImport_ImportModuleLevelN`, `PyImport_ImportModuleNoBlockN`, `PyImport_ImportFrozenModuleN`, `Py_CompileStringN` |
+| runs a Python-level hook | `PyObject_HasAttrStringN`, `PyObject_HasAttrStringWithErrorN` (`__getattr__`), `PyMapping_GetItemStringN`, `PyMapping_SetItemStringN`, `PyMapping_HasKeyStringN`, `PyMapping_HasKeyStringWithErrorN` (`__getitem__`/`__contains__`), `PySequence_FastN` (`__iter__`), `PyUnicode_TranslateN` (`__getitem__` on the table), `PySys_AuditTupleN` (audit hooks), `PyErr_WarnExplicitN` (the `warnings` machinery) |
+| Python codec lookup / error handler | `PyUnicode_AsEncodedStringN`, `PyUnicode_FromEncodedObjectN`, `PyUnicode_DecodeLocaleN`, `PyUnicode_EncodeLocaleN`, `PyUnicode_DecodeFSDefaultN` |
+| drops a reference, or allocates GC-tracked | `PyDict_DelItemStringN`, `PySys_SetObjectN`, `PyErr_NewExceptionN`, `PyErr_NewExceptionWithDocN`, `PyErr_SetFromErrnoWithFilenameN`, `PyErr_SyntaxLocationN`, `PyErr_SyntaxLocationExN`, `PyUnicodeTranslateError_SetReasonN` |
+| never returns | `Py_FatalErrorN` |
+
+The remaining 11 are leaves on the success path: `PyBytes_FromStringN`, `PyBytes_AsStringN`,
+`PyByteArray_AsStringN`, `PyUnicode_EqualToUTF8N`, `PyUnicode_CompareWithASCIIStringN`,
+`PyUnicode_InternFromStringN`, `PySys_GetObjectN`, `PyImport_GetMagicTagN`, `PyEval_GetFuncNameN`,
+`PyEval_GetFuncDescN`, `Py_EnterRecursiveCallN`. None of them is promoted, and none should be:
+every one is cold error-reporting or introspection surface, where the whole available win is under
+40 ns on a call that happens once. Step 4 of the decision procedure in `androidMain/README.md`
+covers exactly this case.
+
+## The eight live GC-blocking call sites
+
+Outside the `/** */` block of dead pre-migration code, `EmbedAPI.android.kt` reaches a
+`@CriticalNative` or `@FastNative` binding in eight places. All eight are leaves on the success
+path and all eight can allocate a GC-tracked exception on the failure path:
+
+| call site | success path | failure path |
+|---|---|---|
+| `Py_IsInitialized` | reads a global | — |
+| `Py_GetVersion` | returns a static `const char*` | — |
+| `PyErr_Occurred` | reads the thread state, borrowed | — |
+| `PyLong_FromLongLong` | non-GC allocation | preallocated `MemoryError` |
+| `PyUnicode_FromString` | non-GC allocation | `UnicodeDecodeError` on malformed UTF-8 |
+| `PyUnicode_AsUTF8` | caches the UTF-8 form | `UnicodeEncodeError` on lone surrogates |
+| `PyList_Size` | reads `ob_size` | `PyErr_BadInternalCall` on a non-list |
+| `PyList_GetItem` | indexes the item array | `IndexError` out of range |
+
+That second column is second-order and conditional — the exception instance is GC-tracked, so it
+can cross the collection threshold, so the cyclic collector can run a `__del__`, which with upcalls
+live can be Kotlin. It is not a live defect and it is not a reason to demote these eight, which are
+the measured hot path. It is the reason step 4 of the decision procedure does not pretend "provably
+a leaf" is reachable: the honest promotion test is *leaf on the success path, and measured worth
+it*, not *cannot run Python*.

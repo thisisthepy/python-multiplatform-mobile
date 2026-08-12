@@ -206,19 +206,39 @@ hundred still carry the original wiring.
 
 ## 3. Classify the remaining functions leaf vs re-entrant
 
-**Depends on:** §2.
+**Closed.** The classification is in `docs/jni-call-convention-audit.md`; the decision procedure a
+new call site has to pass is in `androidMain/README.md`.
 
 `@CriticalNative` and `@FastNative` both stop the collector for the call, and `@CriticalNative`
 has no `JNIEnv`, so nothing under it can re-enter the runtime. A function that can execute
 arbitrary Python — a module's top-level code, a `__getattr__`, a `__del__` reached by dropping
 the last reference — must therefore stay on ordinary JNI.
 
-Of the 11 migrated so far, 5 are leaves and 6 are re-entrant. `PyErr_Clear` and
-`PyObject_GetAttrString` both look like leaves and are not.
+**No function was promoted, and that is the finding.** The audit proposed eight promotions to
+`@CriticalNative` on the argument that it is expensive below API 34 and cheap above. Measured here
+it is the reverse: promoting costs **+16.54 ns on API 34 and +25.73 ns on 36**, against savings of
+43-73 ns on 26-31. Three of the eight are not leaves either — `PyGILState_Release` deletes the
+thread state on the last release and runs `__del__` through it, `PyThreadState_GetDict` allocates
+the thread dict lazily, and `PyEval_InitThreads` is a no-op kept for the stable ABI.
 
-The default should be ordinary JNI, with promotion only for functions audited as unable to run
-Python. Guessing wrong toward ordinary costs nanoseconds; guessing wrong the other way is a
-crash once upcalls exist.
+The 116 registrations added since the audit (71 → 187) are **all ordinary, with no `@CriticalNative`
+or `@FastNative` twin registered for any of them**, so the crash this section warns about cannot be
+reached through the new surface.
+
+One change came out of it, in the opposite direction to the audit's: `PyList_GetItem` was pinned to
+`@CriticalNative` with no `preferFastNative` branch — the only binding ignoring the device axis, and
+the per-element call of bulk iteration, where §5 measured 50 ns per element on API 36 against a
+`@CriticalNative` net cost of 44.05 ns there. It now has a `@FastNative` twin and branches like
+every other pair. Compile-verified; the device assertion
+(`JniWiringTest.bothListGetItemConventionsAgree`) is written but has not been run.
+
+The default is ordinary JNI, and the promoted set stays enumerated rather than derived: every C API
+function can fail, and CPython reports failure by allocating a GC-tracked exception, so "provably
+cannot run Python" is not a property any of them has. Guessing wrong toward ordinary costs 6-41 ns;
+guessing wrong the other way is a crash once upcalls exist.
+
+**Was:** depends on §2. Of the 11 migrated at that point, 5 were leaves and 6 re-entrant;
+`PyErr_Clear` and `PyObject_GetAttrString` both look like leaves and are not.
 
 ## 4. Automatic reference release
 

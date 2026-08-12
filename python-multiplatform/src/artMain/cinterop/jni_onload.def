@@ -254,6 +254,16 @@ static jlong f_PyImport_ImportN(JNIEnv *e, jclass c, jlong n) { return PyImport_
 static jlong f_PyObject_GetAttrString(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_GetAttrString(o, (const char*)n); }
 static jlong f_PyErr_Occurred(JNIEnv *e, jclass c) { return PyErr_Occurred(); }
 
+/*
+ * PyList_GetItem had no @FastNative twin, which left it @CriticalNative on every API level -- the
+ * one place in the table that ignores the device axis. That is backwards above API 33: the net
+ * cost of @CriticalNative there is 24.35 ns (34) and 44.05 ns (36 hardware) against @FastNative's
+ * 1.97 and 3.55. It is also the per-element call of bulk list iteration, so the penalty multiplies
+ * by N -- the measured 50065.89 ns for a 1000-element list on API 36 is ~50 ns per element against
+ * a @CriticalNative net cost of 44.05.
+ */
+static jlong f_PyList_GetItemRaw(JNIEnv *e, jclass c, jlong list, jlong i) { return PyList_GetItem(list, i); }
+
 static void f_Py_DecRefN(JNIEnv *e, jclass c, jlong o) { Py_DecRef((jlong)o); }
 static void f_Py_IncRefN(JNIEnv *e, jclass c, jlong o) { Py_IncRef((jlong)o); }
 static jlong f_Py_NewRefN(JNIEnv *e, jclass c, jlong o) { return Py_NewRef((jlong)o); }
@@ -586,6 +596,7 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyObject_GetAttrStringF", "(JJ)J", (void *)&f_PyObject_GetAttrString},
         {"PyErr_OccurredF", "()J", (void *)&f_PyErr_Occurred},
         {"PyList_GetItemRaw", "(JJ)J", (void *)&PyList_GetItem},
+        {"PyList_GetItemRawF", "(JJ)J", (void *)&f_PyList_GetItemRaw},
         {"ffiDirectBufferAddress", "(Ljava/nio/ByteBuffer;)J", (void *)&ffi_direct_addr},
         {"asmExec", "(Ljava/lang/String;)I", (void *)&asm_exec},
         {"asmGetAttr", "(JLjava/lang/String;)J", (void *)&asm_getattr},

@@ -119,7 +119,14 @@ object bindings {
     // asmListToArray replaces PyList_Size + N x PyList_GetItem, filling the caller's array
     // and returning how many elements it wrote.
     // Borrowed reference, leaf: pure index into the list's item array.
+    //
+    // Both conventions, selected by `preferFastNative` like every other pair here. This one was
+    // @CriticalNative-only until the audit follow-up, which made it the single declaration that
+    // ignored the device axis -- and it is the per-element call of bulk list iteration, so on API
+    // 34+ it was paying 24-44 ns per element where @FastNative pays 2-4. See docs/downcall-design.md
+    // and docs/jni-call-convention-audit.md.
     @JvmStatic @dalvik.annotation.optimization.CriticalNative external fun PyList_GetItemRaw(list: Long, i: Long): Long
+    @JvmStatic @dalvik.annotation.optimization.FastNative external fun PyList_GetItemRawF(list: Long, i: Long): Long
     // Python3.exec composed into one crossing -- see jni_onload.def.
     // Address of a DirectByteBuffer's off-heap storage. Called once per buffer, not per
     // string -- see jni_onload.def.

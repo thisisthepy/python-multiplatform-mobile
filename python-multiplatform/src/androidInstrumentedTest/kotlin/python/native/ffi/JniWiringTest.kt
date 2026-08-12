@@ -42,6 +42,41 @@ class JniWiringTest {
         assertEquals("Py_IsInitialized should report 0 before initialisation", 0, state)
     }
 
+    /**
+     * `PyList_GetItemRawF` is the @FastNative twin added so the per-element call of bulk list
+     * iteration follows the device axis instead of being pinned to @CriticalNative (see
+     * `docs/jni-call-convention-audit.md`). It is a second registration of the same CPython
+     * function, so the two must be indistinguishable at every index.
+     *
+     * This is a wiring check, not a benchmark. Two ways to get it wrong are both caught here: a
+     * missing or misspelled table entry leaves the method unregistered and the call throws, and a
+     * wrapper written without the leading `JNIEnv*, jclass` shifts both arguments, which makes the
+     * returned pointers disagree rather than merely being slow.
+     */
+    @Test
+    fun bothListGetItemConventionsAgree() {
+        PythonOnDevice.ensureInitialised()
+
+        val sys = PythonOnDevice.withUtf8("sys") { bindings.PyImport_ImportModuleN(it) }
+        org.junit.Assert.assertTrue("could not import sys", sys != 0L)
+        val path = PythonOnDevice.withUtf8("path") { bindings.PyObject_GetAttrStringN(sys, it) }
+        org.junit.Assert.assertTrue("could not read sys.path", path != 0L)
+
+        val len = bindings.PyList_SizeNormal(path)
+        org.junit.Assert.assertTrue("sys.path should be a non-empty list, got len=$len", len > 0)
+
+        for (i in 0 until len) {
+            val critical = bindings.PyList_GetItemRaw(path, i)
+            val fast = bindings.PyList_GetItemRawF(path, i)
+            org.junit.Assert.assertTrue("PyList_GetItemRaw returned null at index $i", critical != 0L)
+            assertEquals(
+                "PyList_GetItemRawF disagrees with PyList_GetItemRaw at index $i",
+                critical,
+                fast,
+            )
+        }
+    }
+
     @Test
     fun cpythonInitialisesCorrectly() {
         python.multiplatform.ffi.PythonTestFixture.withInterpreter {

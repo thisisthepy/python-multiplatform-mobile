@@ -553,7 +553,11 @@ actual fun PyList_New(len: Long): NativePointer? = python.native.ffi.bindings.Py
 actual inline fun PyList_Size(list: NativePointer): Long =
     if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyList_SizeF(list.toPlatformPointer())
     else python.native.ffi.bindings.PyList_Size(list.toPlatformPointer())
-actual fun PyList_GetItem(list: NativePointer, index: Long): NativePointer? = python.native.ffi.bindings.PyList_GetItemRaw(list.toPlatformPointer(), index).toNativePointer()
+// Leaf on the success path, but the per-element call of bulk iteration, so the convention is the
+// whole cost. Follows the same device axis as PyList_Size above rather than pinning @CriticalNative.
+actual fun PyList_GetItem(list: NativePointer, index: Long): NativePointer? =
+    (if (python.native.ffi.bindings.preferFastNative) python.native.ffi.bindings.PyList_GetItemRawF(list.toPlatformPointer(), index)
+     else python.native.ffi.bindings.PyList_GetItemRaw(list.toPlatformPointer(), index)).toNativePointer()
 actual inline fun PyList_SetItem(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_SetItemN(list.toPlatformPointer(), index, item.toPlatformPointer())
 actual inline fun PyList_Insert(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_InsertN(list.toPlatformPointer(), index, item.toPlatformPointer())
 actual inline fun PyList_Append(list: NativePointer, item: NativePointer): Int = python.native.ffi.bindings.PyList_AppendN(list.toPlatformPointer(), item.toPlatformPointer())
