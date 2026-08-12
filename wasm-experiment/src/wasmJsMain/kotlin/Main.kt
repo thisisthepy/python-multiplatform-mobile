@@ -158,3 +158,125 @@ fun measureTrampoline(iterations: Int): Int {
     }
     return sum
 }
+
+// ---------------------------------------------------------------------------------------------
+// Test C -- the data path, measured.
+//
+// Both string loops run in Kotlin and produce a Kotlin String from the same C address. The only
+// difference is how the bytes get here:
+//
+//   shared : i32.load against the memory Emscripten owns. No boundary at all.
+//   copied : a JS hop out to Emscripten's UTF8ToString, which builds a JS string from the same
+//            bytes, and a second hop back to convert it to a Kotlin String.
+//
+// The second is the design docs/wasm-design.md assumed was forced. Every measurement on Android
+// and desktop found marshalling, not crossing count, to be the dominant cost, so the ratio here
+// is the number that decides whether WASM looks like iOS or like a JS bridge.
+// ---------------------------------------------------------------------------------------------
+
+private fun utf8ViaJs(address: Int): String = js("globalThis.__emModule.UTF8ToString(address)")
+
+@JsExport
+fun readCStringViaJs(address: Int): String = utf8ViaJs(address)
+
+// The naive reader above appends one Char at a time to a StringBuilder. That is the obvious way
+// to write it and it is not what the comparison should be made against, so here is the version a
+// real binding would ship: find the NUL, copy into a ByteArray, decode once.
+@JsExport
+fun readCStringFast(address: Int): String {
+    var len = 0
+    while (Pointer((address + len).toUInt()).loadByte().toInt() != 0) len++
+    val bytes = ByteArray(len)
+    for (i in 0 until len) bytes[i] = Pointer((address + i).toUInt()).loadByte()
+    return bytes.decodeToString()
+}
+
+// Separates the two halves of the cost: reaching the bytes, versus turning them into a String.
+@JsExport
+fun measureSharedStrlen(address: Int, iterations: Int): Int {
+    var total = 0
+    for (i in 0 until iterations) {
+        var len = 0
+        while (Pointer((address + len).toUInt()).loadByte().toInt() != 0) len++
+        total += len
+    }
+    return total
+}
+
+// Scan + copy into a ByteArray, stopping short of decoding. Attributes the cost between reaching
+// the bytes and turning them into a String -- and is itself the operation a PyBytes binding needs,
+// where no decode happens at all.
+@JsExport
+fun measureSharedByteArrayCopy(address: Int, iterations: Int): Int {
+    var total = 0
+    for (i in 0 until iterations) {
+        var len = 0
+        while (Pointer((address + len).toUInt()).loadByte().toInt() != 0) len++
+        val bytes = ByteArray(len)
+        for (j in 0 until len) bytes[j] = Pointer((address + j).toUInt()).loadByte()
+        total += bytes.size
+    }
+    return total
+}
+
+// ASCII fast path -- CharArray + concatToString() instead of ByteArray + decodeToString().
+// Attribute names, module names and most of what a binding marshals are ASCII, so if the UTF-8
+// decoder is what costs, this route avoids it.
+@JsExport
+fun measureSharedStringAscii(address: Int, iterations: Int): Int {
+    var total = 0
+    for (i in 0 until iterations) {
+        var len = 0
+        while (Pointer((address + len).toUInt()).loadByte().toInt() != 0) len++
+        val chars = CharArray(len)
+        for (j in 0 until len) {
+            chars[j] = (Pointer((address + j).toUInt()).loadByte().toInt() and 0xFF).toChar()
+        }
+        total += chars.concatToString().length
+    }
+    return total
+}
+
+@JsExport
+fun measureSharedStringRead(address: Int, iterations: Int): Int {
+    var total = 0
+    for (i in 0 until iterations) total += readCStringFast(address).length
+    return total
+}
+
+@JsExport
+fun measureSharedStringReadNaive(address: Int, iterations: Int): Int {
+    var total = 0
+    for (i in 0 until iterations) total += readCStringAt(address).length
+    return total
+}
+
+@JsExport
+fun measureCopiedStringRead(address: Int, iterations: Int): Int {
+    var total = 0
+    for (i in 0 until iterations) total += utf8ViaJs(address).length
+    return total
+}
+
+// Bulk read: N elements out of a C-owned array. This is the one place composition was argued to
+// still earn its keep, so it needs a number. Shared memory turns it into a plain loop of
+// i32.loads; without shared memory each element costs a boundary crossing.
+@JsExport
+fun measureSharedBulkRead(address: Int, count: Int): Int {
+    var sum = 0
+    var p = Pointer(address.toUInt())
+    for (i in 0 until count) {
+        sum += p.loadInt()
+        p += 4
+    }
+    return sum
+}
+
+private fun loadIntViaJs(address: Int): Int = js("globalThis.__emModule.HEAP32[address >> 2]")
+
+@JsExport
+fun measureCopiedBulkRead(address: Int, count: Int): Int {
+    var sum = 0
+    for (i in 0 until count) sum += loadIntViaJs(address + i * 4)
+    return sum
+}
