@@ -30,6 +30,49 @@ class EvalCheckpointTest {
 
     private companion object {
         const val OUTER = 1000
+
+        /**
+         * Consecutive collector turns with no release at all that count as "the backlog is gone".
+         *
+         * More than one because a host that delivers finalisation in batches has quiet turns in
+         * the middle of a drain; three in a row it does not.
+         */
+        const val QUIET_TURNS_TO_SETTLE = 3
+
+        /** Cap on the turns the drain may spend, so a host that never goes quiet still gets tested. */
+        const val SETTLE_TURN_BUDGET = 40
+    }
+
+    /**
+     * [OUTER] lists, each holding one reference to [target], returned in a list that is the only
+     * thing keeping their wrappers alive.
+     *
+     * A separate function on purpose, and not an inlined `repeat` in the caller. `repeat` is
+     * inline, so `val outer` becomes a local *of the caller's frame*, and Kotlin/Native does not
+     * clear a local's slot when it goes out of scope -- the last wrapper the loop built stays
+     * reachable from that slot for as long as the test body runs, and the collector is right not to
+     * reclaim it. Measured before this was split out: iOS released 999 of 1000 in all 8 runs, with
+     * the target's count resting at exactly one above where it started, and the wait burning its
+     * whole budget every time. Desktop and wasmJs released all 1000 from the same source, so this
+     * is Kotlin/Native's frame scanning rather than the shape of the loop -- the JVM's collector
+     * uses JIT liveness and a wasmJs test body has already returned by the time the host turns run.
+     *
+     * Building them here means the frame holding that last reference has returned before anything
+     * waits on the collector. Measured after: iOS releases all 1000 on the first attempt.
+     */
+    private fun buildOuterLists(listType: PyObject, target: PyObject): MutableList<PyObject> {
+        val built = ArrayList<PyObject>(OUTER)
+        repeat(OUTER) {
+            val outer = listType()
+            val append = outer.getAttr("append")
+            // `append(...)` hands back a wrapper for the `None` it returned. Dropping it made the
+            // setup owe the cleaner exactly OUTER releases that have nothing to do with the outer
+            // lists -- the decoy the KDoc on the test records. Closed, not dropped.
+            append(target).close()
+            append.close()
+            built.add(outer)
+        }
+        return built
     }
 
     private fun refCount(target: PyObject): Long {
@@ -56,6 +99,34 @@ class EvalCheckpointTest {
      * The free-threaded and default builds assert different things because they *are* different:
      * with the global lock there is no deferred-release queue at all and the cleaner's `Py_DecRef`
      * frees on the spot, which is its own invariant worth holding on to.
+     *
+     * ### Why the wait is written the way it is
+     *
+     * [ReleaseCounter] is process-wide, so "the cleaner released $OUTER references" is not by
+     * itself a statement about *this* test's references, and on wasmJs that difference is the
+     * difference between passing and failing. Finalisation there is a host task: nothing is
+     * released until something yields to the engine, this loop is the first thing that does, and
+     * so it is where every wrapper dropped earlier in the process gets paid off. The count reaches
+     * $OUTER in the opening turns on other people's garbage and the loop stops before one outer
+     * wrapper of ours has been collected.
+     *
+     * Measured before the fix: one failure in 20 full-suite wasmJs runs, always
+     * `before: 1002, after: 1002` -- the guard above reporting the cleaner had released $OUTER
+     * while the target's count had not moved by one. Thirty runs of this class alone never failed,
+     * because in isolation there is far less owed. The largest single decoy was this test's own
+     * setup: `append(target)` returns a wrapper for `None` and the loop below used to drop all
+     * $OUTER of them, which is exactly the number the wait was looking for.
+     *
+     * Three things follow, and all three are here:
+     *
+     *  * every wrapper the setup creates is closed, so the setup owes nothing;
+     *  * the loop drains what the *rest of the process* owes before it starts counting, and it
+     *    does that while this test's wrappers are still held so they cannot be part of the drain;
+     *  * where a reading exists that belongs to this test alone, the loop waits on that instead of
+     *    on the counter. With the global lock a released outer wrapper frees its list and hands the
+     *    target back a reference, so the target's own count says how many of *ours* the cleaner has
+     *    reached. The free-threaded build has no such reading -- that it has none is the very thing
+     *    the branch below asserts -- and there the drained counter is the evidence.
      */
     @Test
     fun testDrainPendingReleasesReclaimsWhatTheCleanerGaveBack(): CollectorTestResult {
@@ -78,14 +149,7 @@ class EvalCheckpointTest {
             // count has been sampled so that the build-up is deterministic; see the note on
             // GCLeakTest.testCascadingReleaseOnGC for why letting them die inside the loop races
             // the very mechanism under test.
-            var held: MutableList<PyObject>? = ArrayList(OUTER)
-            repeat(OUTER) {
-                val outer = listType()
-                val append = outer.getAttr("append")
-                append(target)
-                append.close()
-                held!!.add(outer)
-            }
+            var held: MutableList<PyObject>? = buildOuterLists(listType, target)
 
             val refAfterBuild = refCount(target)
             assertTrue(
@@ -100,28 +164,71 @@ class EvalCheckpointTest {
             refCount(target)
             val releasesPerProbe = ReleaseCounter.released - probeMark
 
-            held!!.clear()
-            held = null
+            // Phase 0 of the loop: what the rest of the process still owes the cleaner, flushed
+            // before anything is counted. `held` is deliberately still holding this test's
+            // wrappers throughout, so they cannot be part of what gets flushed here.
+            var settling = true
+            var settleTurns = 0
+            var quietTurns = 0
+            val backlogStart = ReleaseCounter.released
+            var lastReleased = backlogStart
+            var backlogFlushed = 0
 
-            val releasedBefore = ReleaseCounter.released
+            // Phase 1: this test's own wrappers, counted from a standing start.
+            var releasedBefore = 0
             var attempts = 0
             var cleanerReleases = 0
+            var refNow = refAfterBuild
 
             // Driven rather than spun. On wasmJs the cleaner is a host finalisation callback that
             // arrives on a task, so a `while` loop here would ask 200 times inside one job and see
             // nothing; see `commonTest`'s CollectorTestResult.
-            return collectorTest(maxAttempts = 200, attempt = {
-                refCount(target)
-                attempts++
-                cleanerReleases = ReleaseCounter.released - releasedBefore - attempts * releasesPerProbe
-                cleanerReleases >= OUTER
+            return collectorTest(maxAttempts = SETTLE_TURN_BUDGET + 200, attempt = {
+                if (settling) {
+                    val seen = ReleaseCounter.released
+                    if (seen == lastReleased) {
+                        quietTurns++
+                    } else {
+                        quietTurns = 0
+                        lastReleased = seen
+                    }
+                    settleTurns++
+                    if (quietTurns >= QUIET_TURNS_TO_SETTLE || settleTurns >= SETTLE_TURN_BUDGET) {
+                        backlogFlushed = ReleaseCounter.released - backlogStart
+                        settling = false
+                        // Only now does anything of this test's become collectable, and only now
+                        // does the counter start meaning something about it.
+                        held!!.clear()
+                        held = null
+                        releasedBefore = ReleaseCounter.released
+                    }
+                    false
+                } else {
+                    refNow = refCount(target)
+                    attempts++
+                    cleanerReleases = ReleaseCounter.released - releasedBefore - attempts * releasesPerProbe
+                    // With the global lock, `refNow` is the reading that belongs to this test and
+                    // to nothing else, so it is not enough for the counter alone to be satisfied.
+                    cleanerReleases >= OUTER &&
+                        (BuildConfig.pythonFreeThreaded || refNow <= refBefore)
+                }
             }, finish = {
                 try {
+                    val diagnosis =
+                        "released by the cleaner: $cleanerReleases, attempts: $attempts, " +
+                            "backlog flushed before counting started: $backlogFlushed, " +
+                            "target count now: $refNow (was $refBefore before the build, " +
+                            "$refAfterBuild after it)"
+
+                    // Printed on every run, not only on failure: `backlog flushed` is how much the
+                    // rest of the process still owed the cleaner when this test began, and it is
+                    // the quantity that used to be silently counted as this test's own.
+                    println("--- cleaner accounting --- $diagnosis")
+
                     assertTrue(
                         cleanerReleases >= OUTER,
                         "the cleaner has to have released the $OUTER outer wrappers before this test can " +
-                            "say anything about what happened to the memory " +
-                            "(released by the cleaner: $cleanerReleases, attempts: $attempts). " +
+                            "say anything about what happened to the memory ($diagnosis). " +
                             "If this fires, the failure is in GC-driven release, not in checkpointing."
                     )
 
@@ -158,11 +265,17 @@ class EvalCheckpointTest {
                                 "releases (before: $refAfterBuild, after: $refAfterDrain)"
                         )
                     } else {
+                        // `<= refBefore`, not merely `< refAfterBuild`: every one of the $OUTER
+                        // outer lists holds exactly one reference to the target, so a cleaner that
+                        // frees on the spot puts the count back where it started and nowhere in
+                        // between. The weaker form passed on one list out of a thousand, which is
+                        // the shape a wrong-reason pass takes here.
                         assertTrue(
-                            refAfterCleaner < refAfterBuild,
+                            refAfterCleaner <= refBefore,
                             "with the global lock there is no deferred-release queue, so the cleaner's " +
                                 "Py_DecRef should already have freed the outer lists " +
-                                "(before: $refAfterBuild, after: $refAfterCleaner)"
+                                "(before the build: $refBefore, after it: $refAfterBuild, " +
+                                "after the cleaner: $refAfterCleaner; $diagnosis)"
                         )
                     }
 
