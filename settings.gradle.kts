@@ -39,6 +39,10 @@ dependencyResolutionManagement {
 rootProject.name = "PythonMultiplatformMobile"
 
 include(":sample")
+// The half of the sample that can apply the bindings plugin. KSP 2.3.11 requires AGP >= 8.10 and
+// this build is on 8.5.2, so no module carrying an Android plugin may apply it -- see the comment
+// in `sample/build.gradle.kts`.
+include(":sample-bindings")
 include(":python-multiplatform")
 include(":python-multiplatform-ksp")
 include(":ksp-fixtures:library")

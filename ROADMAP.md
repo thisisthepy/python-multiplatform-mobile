@@ -546,16 +546,27 @@ hand-written one.
 **It survives a GraalVM native image**, which is the condition the whole design was chosen for:
 
 ```
-PYTHON: resolved handle = 4294967296
-PYTHON: invoke result = 42
+KOTLIN: table = 8 entries, 1 classes, from io_github_thisisthepy_sample_bindings
+PYTHON: resolved handle = 4294967303
+PYTHON: invoke result = 7
+PYTHON: @PythonInternal entry resolves to -1
 PYTHON: UPCALL_OK
 ```
 
-Python builds a function pointer with `ctypes`, resolves `"demo.answer"` by name through
+Python builds a function pointer with `ctypes`, resolves a Kotlin declaration by name through
 `HandleTable`, and calls back into Kotlin — inside a closed world where runtime reflection is
 forbidden. Every wall hit getting there was metadata or wiring; the lookup and invoke path itself
 needed no reflection registration, because it uses none. `sample` carries the build path
 (`nativeCompile`, `runNativeUpcallDemo`, Liberica NIK).
+
+**The table it resolves against is generated now, not hand-written.** `NativeImageMain.kt` used to
+carry its own `FunctionTableFragment` returning a constant `42`, with a comment saying the
+generator did not exist yet — and a hand-written fragment passes whether or not KSP ever runs, so
+the check measured less than it appeared to. It installs `python.multiplatform.generated.FunctionTable`
+from `:sample-bindings` instead, and the number Python reads back (`7`) is one the process
+produced by calling the Kotlin object seven times, so a stub returning a constant cannot satisfy
+it. The `-1` line is the same check applied to `@PythonInternal`: an opted-out declaration must
+not resolve.
 
 **The metadata is generated, not maintained.** `reachability-metadata.json` was a checked-in file,
 and a checked-in file rots without saying so: a native image links a `FunctionDescriptor` the
@@ -588,7 +599,9 @@ registration is gone.
 - ~~The aggregator uses `Dependencies.ALL_FILES`, correct but reprocessed every build.~~
   **Measured, and the aggregator turned out not to be the cause** — see below.
 - ~~No convenience Gradle plugin; user modules wire KSP per target by hand.~~
-  **Closed:** `python-multiplatform-gradle-plugin/`, applied by id.
+  **Closed:** `python-multiplatform-gradle-plugin/`, applied by id — **except on Android**, where
+  applying it is a configuration-time crash until AGP moves to 8.10. See §13; it is a version pin,
+  not a plugin defect, and it affects every Android consumer rather than only the sample.
 
 **Was:** entirely unimplemented — `ClassLookup.kt`, `ObjectReference.kt` and `ReflectedClass.kt`
 held 1–3 lines each, and this was README's only unchecked box.
@@ -1105,4 +1118,78 @@ is the actual state of the Android object model, and that is the point of doing 
 - **~50 `TODO` markers** remain in `commonMain`, including several questioning whether
   `Py_IncRef` is the right call in `PyObject.init`.
 - **No CI.** The README badges point at a different repository.
-- **Sample app** has not been revisited since the object model landed.
+- ~~**Sample app** has not been revisited since the object model landed.~~ **Done — see §13.**
+
+## 13. The sample, and the AGP version that shapes it
+
+The sample now shows four things, each on the real API: the embedded interpreter (`Python3.version`
+against `currentPlatform`), a Kotlin-built `PyList` of `PyInt` published into `__main__` and
+evaluated by Python, a Python-side `ctypes` call into a Kotlin declaration resolved by name, and
+the contents of the generated table read back off `UpcallTable`. Measured on `:sample:run`:
+
+```
+runtime : 3.14.7  ·  sys.platform=darwin  ·  MacOS 26.5.1 (aarch64) / JVM 21.0.12
+eval    : sum(kotlin_numbers) * 2 -> int: 56
+table   : 8 entries, 1 classes, from io_github_thisisthepy_sample_bindings
+upcall  : Python called Kotlin through handle 4294967303 and got 0
+```
+
+`:sample:run` did not work before this and it was not the sample's fault twice over: the task had
+no `PYTHONHOME`, so `Py_Initialize` could not find `encodings`, and a project dependency resolves
+to class directories rather than to `desktopJar`, so `manager.loadLibPython` found no bundled
+`libpython` either. Both are wired in `sample/build.gradle.kts` now, the second by falling back to
+`$PYTHONHOME/lib` — which is the fallback `manager.kt` already had, it just had nowhere to look.
+
+**What was there before:** the Compose template screen (a button, an image, the platform name),
+and a `desktopMain` `main()` doing raw `PyLong_FromLongLong`/`PyRun_SimpleString` with a pointer
+round-tripped through a `Double`. It compiled. Nothing in it touched the object model, and
+`PyRun_SimpleString` is the call `Python3.exec` exists to avoid (it calls `PyErr_Print`, which
+clears the error indicator before anything can read it).
+
+### The convenience plugin cannot be applied to an Android module at these versions
+
+This is the finding, and it is a property of the repo rather than of the sample.
+
+```
+java.lang.NoSuchMethodError: 'void com.android.build.api.variant
+    .AndroidComponentsExtension.addKspConfigurations(boolean)'
+  at com.google.devtools.ksp.gradle.KspConfigurations$3$1.execute(KspConfigurations.kt:114)
+```
+
+KSP 2.3.11 declares `MINIMUM_SUPPORTED_AGP_VERSION = 8.10.0` (read off its `agpUtils` class), and
+this build pins AGP 8.5.2, whose `AndroidComponentsExtension` has no such method (`javap` on
+`gradle-api-8.5.2.jar`). So `id("io.github.thisisthepy.python.multiplatform.bindings")` — which
+applies `com.google.devtools.ksp` — dies at configuration time in any module carrying an Android
+plugin. `ksp-fixtures` never hit this because neither fixture module applies one.
+
+**Every Android consumer of the plugin is in that position, not just this sample.** The fix is a
+two-version bump: AGP 8.10 requires Gradle 8.11.1 against this build's 8.9. That is worth doing
+deliberately — `python-multiplatform`'s Android wiring hangs a lot of hand-written `Copy` tasks
+and `preBuild` hooks off AGP — and it needs a device run to confirm, so it is recorded here rather
+than done in passing.
+
+Until then the sample is split: `:sample-bindings` (no Android plugin) applies the bindings plugin
+and holds the Python-facing declarations; `:sample` depends on it from `desktopMain`/`iosMain`
+only, and its `androidMain` `UpcallDemo` reports the reason instead of pretending. **The split
+exists only because of the version constraint** — one module is the shape a consumer should copy.
+
+### Two smaller things the sample found
+
+- **The generated table is reachable only from the source set of the target that generated it.**
+  KSP writes `FunctionTable` into `iosSimulatorArm64Main` and its siblings, so `iosMain` — which
+  those leaves depend on — cannot name it, exactly as `commonMain` cannot. `installGeneratedUpcallTable`
+  is therefore one line per leaf target. Anything designed to touch the generated table from
+  shared code has to route through an `expect`/`actual` like this.
+- **A `var` with a `private set` would generate a fragment that does not compile.** `FragmentScanner`
+  decides on `property.isMutable` alone and emits a `STATIC_SETTER`/`SETTER` assigning to it, so
+  the generated file assigns to an inaccessible setter. Read off the scanner, not observed — the
+  sample avoids the shape. Worth a `BindingPolicy` check, since a read-only-to-callers `var` is an
+  ordinary Kotlin idiom.
+
+### What the sample still cannot show
+
+`UpcallStub` is desktop-only, and both its stubs are `(long) -> long`. That is why the entry the
+demo calls takes no arguments and returns a `Long`: the *table* carries arity and per-argument
+`TypeTag`s for anything, but the trampoline that would marshal them does not exist on any
+platform. iOS should be the cheapest place to write one — Python and Kotlin share a binary there —
+and nothing has been written. See §7.
