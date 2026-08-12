@@ -531,6 +531,34 @@ expect fun PyGILState_GetThisThreadState(): NativePointer?
 expect fun PyEval_SaveThread(): NativePointer?
 expect inline fun PyEval_RestoreThread(tstate: NativePointer)
 
+/**
+ * Runs the interpreter's pending-call queue -- and, on the main thread of the main interpreter,
+ * pending signal handlers -- on the calling thread.
+ *
+ * Part of the Stable ABI. Note what it does *not* do. `Py_MakePendingCalls` covers only the
+ * `_PY_CALLS_TO_DO_BIT` and `_PY_SIGNALS_PENDING_BIT` work items, while a full eval-loop
+ * checkpoint (`_Py_HandlePending`) additionally merges the free-threaded build's biased
+ * reference-counting queue, processes QSBR-deferred frees and runs a scheduled cyclic
+ * collection. So this is *not* a way to reclaim memory that another thread released; see
+ * [python.multiplatform.ffi.Python3.drainPendingReleases] for that.
+ *
+ * Returns 0 on success and -1 with the error indicator set otherwise. Called from a thread that
+ * is not the main thread of the main interpreter it returns 0 having done nothing.
+ */
+expect fun Py_MakePendingCalls(): Int
+
+/**
+ * Runs a full cyclic garbage collection: the C equivalent of `gc.collect()`. Part of the Stable ABI.
+ *
+ * On a free-threaded build this stops the world and merges *every* thread's deferred
+ * reference-count queue, so unlike an eval-loop checkpoint it can reclaim references that were
+ * released on behalf of some thread other than the caller. It is correspondingly expensive: the
+ * cost is proportional to the size of the heap, not to the amount of queued work.
+ *
+ * Returns the number of unreachable objects collected.
+ */
+expect fun PyGC_Collect(): Long
+
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Section 2

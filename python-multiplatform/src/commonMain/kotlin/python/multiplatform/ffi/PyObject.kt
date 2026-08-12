@@ -112,10 +112,22 @@ internal object ReleaseCounter {
 private fun topLevelDecRefAction(ptr: NativePointer) {
     ReleaseCounter.ran++
     if (!python.multiplatform.ffi.Python3.isInitialized) return
-    python.multiplatform.ffi.withGIL {
-        if (!python.multiplatform.ffi.Python3.isInitialized) return@withGIL
-        python.native.ffi.Py_DecRef(ptr)
-        ReleaseCounter.released++
+    // No eval-loop checkpoint from here. This runs on the cleaner for every reference the
+    // collector hands back, and on a free-threaded build the queue that needs draining belongs to
+    // the thread that *owns* the object, never to this one -- so a checkpoint taken here would run
+    // Python on a cleaner thread (what ROADMAP §1 turned into a deadlock, and what §9 rules out as
+    // a fix) and would drain an empty queue for its trouble.
+    val tState = getThreadGILState()
+    val wasSuppressed = tState.checkpointsSuppressed
+    tState.checkpointsSuppressed = true
+    try {
+        python.multiplatform.ffi.withGIL {
+            if (!python.multiplatform.ffi.Python3.isInitialized) return@withGIL
+            python.native.ffi.Py_DecRef(ptr)
+            ReleaseCounter.released++
+        }
+    } finally {
+        tState.checkpointsSuppressed = wasSuppressed
     }
 }
 
