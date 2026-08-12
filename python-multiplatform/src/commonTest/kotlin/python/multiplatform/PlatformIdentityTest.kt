@@ -3,6 +3,7 @@ package python.multiplatform
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 
@@ -48,17 +49,66 @@ class PlatformIdentityTest {
         )
     }
 
+    /**
+     * `versionText` is `versionCode` with a label on it, so one is present exactly when the other
+     * is. Both directions matter, and the missing one is what let a defect through: iOS declared
+     * `versionText = "Build $versionCode"` unconditionally, so a null code was *interpolated* rather
+     * than propagated and the field read `"Build null"` -- which `Platform.name` then carried into
+     * every banner as `iOS 26.2 (Build null, arm64) / Native`.
+     *
+     * This test used to only check the `code != null && text != null` corner, which is precisely the
+     * corner that case is not in, so it passed throughout. Asserting the full implication is the
+     * point of the test; weakening it back to the guarded form re-admits the bug.
+     */
     @Test
     fun versionTextAgreesWithVersionCode() {
         val code = currentPlatform.versionCode
         val text = currentPlatform.versionText
-        if (code != null && text != null) {
-            assertTrue(
-                text.contains(code.toString()),
-                "versionText (\"$text\") does not mention versionCode ($code); the two are supposed " +
-                    "to be the same number, one of them labelled."
+
+        if (code == null) {
+            assertNull(
+                text,
+                "versionCode is null but versionText is \"$text\". A platform that cannot name a " +
+                    "version number has nothing to label, so versionText has to be null too -- " +
+                    "which is what Platform.versionText's own default getter does. A non-null " +
+                    "value here means the null was interpolated into a string instead of " +
+                    "propagated."
             )
+            return
         }
+
+        assertNotNull(
+            text,
+            "versionCode is $code but versionText is null; a platform that knows the number has " +
+                "no reason to withhold the labelled form of it."
+        )
+        assertTrue(
+            text.contains(code.toString()),
+            "versionText (\"$text\") does not mention versionCode ($code); the two are supposed " +
+                "to be the same number, one of them labelled."
+        )
+        assertTrue(
+            "null" !in text.lowercase(),
+            "versionText (\"$text\") contains the literal word \"null\", so a null was formatted " +
+                "into it rather than handled."
+        )
+    }
+
+    /**
+     * [Platform.name] is the user-visible rendering of all of the above, and it is where the
+     * `"Build null"` defect was actually observable. Its inputs are each checked above; this checks
+     * that assembling them does not reintroduce a placeholder.
+     */
+    @Test
+    fun nameDoesNotRenderAnyAbsentField() {
+        val name = currentPlatform.name
+        assertTrue(
+            "null" !in name.lowercase(),
+            "Platform.name is \"$name\". Absent fields are nullable so that `name` can leave them " +
+                "out -- it drops versionText when it is null and platformVersion when it is null -- " +
+                "so the word \"null\" appearing in the rendering means some field formatted a null " +
+                "instead of omitting it."
+        )
     }
 
     @Test
