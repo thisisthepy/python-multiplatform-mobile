@@ -90,6 +90,12 @@ export const PyErr_SyntaxLocation = bind("PyErr_SyntaxLocation");
 export const PyErr_BadInternalCall = bind("PyErr_BadInternalCall");
 export const PyErr_WarnExplicit = bind("PyErr_WarnExplicit");
 export const PyErr_Occurred = bind("PyErr_Occurred");
+// Added with the free-threading eval-loop checkpoint. Py_MakePendingCalls does not merge the
+// biased-refcount queue -- measured -- but PyGC_Collect does, by stopping the world; both are
+// stable ABI and bound on every platform, so wasm has to expose them too or the module dies at
+// instantiation rather than at the call.
+export const PyGC_Collect = bind("PyGC_Collect");
+export const Py_MakePendingCalls = bind("Py_MakePendingCalls");
 export const PyErr_ExceptionMatches = bind("PyErr_ExceptionMatches");
 export const PyErr_GivenExceptionMatches = bind("PyErr_GivenExceptionMatches");
 export const PyErr_GetRaisedException = bind("PyErr_GetRaisedException");

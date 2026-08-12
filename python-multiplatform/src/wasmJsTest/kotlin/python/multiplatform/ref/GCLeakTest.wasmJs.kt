@@ -15,3 +15,5 @@ package python.multiplatform.ref
 actual fun forceGC() {
     // Intentionally empty. See above.
 }
+
+actual val cleanerReleasesAutomatically: Boolean = false

@@ -59,6 +59,10 @@ class EvalCheckpointTest {
      */
     @Test
     fun testDrainPendingReleasesReclaimsWhatTheCleanerGaveBack() {
+        // No subject on a platform without a cleaner: nothing releases the wrappers, so the
+        // question this test asks -- what the checkpoint does with what the cleaner gave back --
+        // has nothing to act on. GCLeakTest fails there and names the real cause.
+        if (!cleanerReleasesAutomatically) return
         if (!Python3.isInitialized) Python3.initialize()
 
         val previousInterval = Python3.autoDrainInterval
@@ -221,6 +225,10 @@ class EvalCheckpointTest {
      */
     @Test
     fun testCleanerActivityAloneTakesNoCheckpoint() {
+        // No subject on a platform without a cleaner: nothing releases the wrappers, so the
+        // question this test asks -- what the checkpoint does with what the cleaner gave back --
+        // has nothing to act on. GCLeakTest fails there and names the real cause.
+        if (!cleanerReleasesAutomatically) return
         if (!Python3.isInitialized) Python3.initialize()
 
         val previousInterval = Python3.autoDrainInterval
