@@ -206,16 +206,72 @@ exports. What the build *does* need is `wasmExports,wasmMemory` added to
 `-sEXPORTED_RUNTIME_METHODS`; without them the exports are in the binary but unreachable from JS,
 so there is nothing to hand `@WasmImport`. Neither setting is in PEP 783's ABI-sensitive list.
 
-## There is no automatic reclamation
+## Reclamation is automatic, through JS — and it is the only `js(…)` in this source set
 
-The Kotlin/Wasm stdlib has no finalisation hook — checked directly against
-`kotlin-stdlib-wasm-js-2.4.20-Beta2.klib`, which contains no `FinalizationRegistry`, no `WeakRef`
-and no `Cleaner`. So `registerCleaner` implements explicit `close()` only, `forceGC()` in
-`wasmJsTest` is a genuine no-op, and a `PyObject` dropped without `close()` leaks a reference where
-it would have been collected on every other target.
+The Kotlin/Wasm **stdlib** has no finalisation hook. That much was always true, and was checked
+directly against `kotlin-stdlib-wasm-js-2.4.20-Beta2.klib`: no `FinalizationRegistry`, no `WeakRef`,
+no `Cleaner`. The conclusion drawn from it — that a `PyObject` dropped without `close()` must leak
+here — was wrong. The *host* has all three, and `registerCleaner` now reaches them.
 
-This is the one place where this target is behind rather than merely different. `GCLeakTest`'s
-three cases fail here for that reason, and they are left failing rather than weakened.
+`PyAutoCloseable.wasmJs.kt` hands the cleaner to a JS `FinalizationRegistry` as a `JsReference`,
+with a small `CleanupState` (pointer, decref action, done flag) as the held value. The weakly
+observed target is the cleaner itself, exactly as `Cleaner.register(this, …)` does on `desktopMain`:
+`PyAutoCloseable` holds it and nothing else does, so it dies precisely when the wrapper does.
+
+**Three facts had to be measured first, and the first one is what the design turns on.**
+
+| | measured |
+|---|---|
+| Does `toJsReference()` *pin* the Kotlin object? | **No.** 200 objects, held from JS only by a `WeakRef` and a registry entry: `alive 0 / 200`. Had it pinned them, this design would be impossible. |
+| Does `FinalizationRegistry` fire for a **WasmGC** object? | **Yes.** 200 / 200 callbacks. |
+| Can a collection be observed without yielding to the host? | **No.** See below. |
+
+The third is why this target's tests look different from every other target's. On Node 26 / V8 14.6,
+with the same object dropped and `gc()` called at each step:
+
+```
+same job, after gc()          WeakRef ALIVE     registry callbacks 0
+after one microtask           WeakRef ALIVE     registry callbacks 0
+after two microtasks          WeakRef ALIVE     registry callbacks 0
+after one macrotask           WeakRef CLEARED   registry callbacks 200
+```
+
+A `WeakRef` keeps its target alive for the job that created it, and the registry callback is
+delivered as a *task*. `FinalizationRegistry.prototype.cleanupSome()`, which would have made it
+synchronous, has been removed from V8 — `--harmony-weak-refs-with-cleanup-some` is rejected as an
+unrecognised flag, and `setFlagsFromString` reports the same. **So there is no synchronous drain on
+this platform, at all.** `commonTest`'s `collectorTest` exists for that: on every other target it is
+a blocking loop, and here it is a chain of host turns. `GCLeakTest`'s three cases pass on this
+target now, and they pass for the reason they pass elsewhere rather than because anything about them
+was relaxed.
+
+`forceGC()` is `globalThis.gc()`, which `node --expose-gc` installs; `build.gradle.kts` adds that
+flag to the wasmJs test task's `nodeJsArgs`. Where it is absent, `forceGC()` degrades to a no-op and
+the bounded loop gives up rather than pretending.
+
+**This file is the only `js(…)` in `wasmJsMain`, and it has to be.** Everything else here is
+`@WasmImport`, which is a wasm-to-wasm call with no JavaScript frame — but `@WasmImport` carries
+primitives only, and what has to cross here is a *reference* to the Kotlin object whose reachability
+is the whole question. There is no handle-table trick that avoids it. The cost is confined to
+construction and destruction; nothing on the C API call path goes through it:
+
+| ns / op | |
+|---|---|
+| `registerCleaner` + `close()` — the whole hook | **88.6** |
+| `toJsReference()` alone — the externref crossing | 44.1 |
+
+(50 000 iterations each, after an equal warm-up. Reading the *first* row recorded without a warm-up
+gave 300 ns and made the second look three times cheaper than a superset of itself.)
+
+`WasmCleanerStats` carries the observability half: `registered`, `released`, `finalized`, and
+`outstanding = registered - released`, which is how many wrappers still hold a CPython reference.
+`automatic` is false only on a host with no `FinalizationRegistry`, where `close()` is the sole
+route and `outstanding` is a leak count rather than a live-object count.
+
+One property this target has that the threaded ones do not: **the callback cannot arrive inside a
+Python call.** JS tasks run only once the stack has unwound and every call into CPython here is
+synchronous, so the decref never re-enters the interpreter from within another call — the hazard
+ROADMAP §1 spent a section on.
 
 ## Upcalls work, and cycles are collected
 

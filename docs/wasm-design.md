@@ -1329,8 +1329,14 @@ Nothing structural. `wasmJsMain` can be written against §7 as amended. What is 
   Every trampoline here returns normally or returns `NULL`.
 - Reference-count ownership across the boundary, which is a contract question rather than a
   toolchain one.
-- Whether Kotlin/Wasm offers a GC hook equivalent to `Cleaner`/`createCleaner` — still unchecked,
-  and still the thing that decides whether anything but explicit `close()` is possible.
+- ~~Whether Kotlin/Wasm offers a GC hook equivalent to `Cleaner`/`createCleaner`.~~ **Answered.**
+  The stdlib does not, but the *host* does, and `toJsReference()` reaches it without pinning the
+  object it hands over — measured at `alive 0 / 200` with JS holding only a `WeakRef` and a
+  `FinalizationRegistry` entry. `registerCleaner` is built on that. The second finding cost more:
+  a collection is observable only across a **macrotask** boundary, because a `WeakRef` outlives the
+  job that created it and the registry callback is delivered as a task, and
+  `FinalizationRegistry.prototype.cleanupSome()` — which would have made it synchronous — has been
+  removed from V8. See `src/wasmJsMain/README.md` and ROADMAP §10 for the numbers.
 
 
 ### Verification status of the wheel claim

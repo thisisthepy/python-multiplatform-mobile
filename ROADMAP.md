@@ -1074,13 +1074,14 @@ list is needed** for the Stable ABI. Only `wasmExports` and `wasmMemory` have to
 shared object-model suite runs against a live interpreter.
 
 ```
-:python-multiplatform:wasmJsNodeTest    214 tests, 3 failed, 0 skipped
-                    desktopTest, unchanged    208 tests, 0 failed, 1 skipped
+:python-multiplatform:wasmJsNodeTest    238 tests, 0 failed, 0 skipped
+                    desktopTest, unchanged    233 tests, 0 failed, 1 skipped
 Embedded CPython version: 3.14.2 ... [Clang 23.0.0git]   on wasm32-emscripten
 ```
 
-(190 when the target first came up. The three failures are `GCLeakTest`'s, and they are the same
-three; the 24 added since are the marshalling, `Py_ssize_t` boundary and upcall cases below.)
+(190 when the target first came up, then 214 with 3 failing, then 234 with the same 3. The three
+were always `GCLeakTest`'s; they pass now — see "Lifetimes" below — and the four added with them are
+`WasmFinalizationTest`'s.)
 
 Nothing skipped: `PythonTestFixture.available` was true, so `Python3.initialize()` brought CPython
 up through an ordinary `@WasmImport` call to `Py_Initialize` — the library's own bring-up path,
@@ -1102,14 +1103,69 @@ Three questions the experiment did not have to answer, and how they came out:
   `python.mjs`/`python.wasm` beside the bundle. No binary patching, no `-sIMPORTED_MEMORY`.
   *(There are two now. Upcalls need a second one, on the generated entry module — see below.)*
 
-### What §10 still owes
+### Lifetimes: closed. The candidate route was measured, and it holds
 
-**Lifetimes, and this is the real gap.** Kotlin/Wasm has no finalisation hook — verified against
-`kotlin-stdlib-wasm-js-2.4.20-Beta2.klib`, which contains no `FinalizationRegistry`, no `WeakRef`
-and no `Cleaner`. So `registerCleaner` is explicit-`close()`-only, a `PyObject` dropped without
-`close()` leaks its reference, and `GCLeakTest`'s three cases fail. They are **left failing rather
-than weakened** — that is what the platform does today. Reaching JS's `FinalizationRegistry` through
-a `JsReference` is the only candidate route and is unmeasured.
+The stdlib has no finalisation hook — that part was right, and re-checking
+`kotlin-stdlib-wasm-js-2.4.20-Beta2.klib` still turns up no `FinalizationRegistry`, no `WeakRef` and
+no `Cleaner`. **The conclusion drawn from it was wrong.** The *host* has all three, and a
+`JsReference` reaches them. `registerCleaner` is built on one now, and `GCLeakTest`'s three cases
+pass:
+
+```
+:python-multiplatform:wasmJsNodeTest    238 tests, 0 failed, 0 skipped
+                    desktopTest          233 tests, 0 failed, 1 skipped
+```
+
+(was 234 / 3 failed — the three were `GCLeakTest`'s, and the four added are `WasmFinalizationTest`.)
+
+**The question that decided it: is `JsReference` a strong reference?** If handing a Kotlin object to
+JS pinned it, registering it with a `FinalizationRegistry` would keep it alive forever and there
+would be no route at all. Measured, not reasoned:
+
+| | measured |
+|---|---|
+| 200 Kotlin objects handed over with `toJsReference()`, held from JS only by a `WeakRef` and a registry entry | **`alive 0 / 200`** — not strong |
+| `FinalizationRegistry` callbacks for those WasmGC objects | **200 / 200** |
+| 200 real `PyObject` wrappers dropped without `close()`, judged by CPython's own refcount | **`2 → 202 → 2`** |
+
+**The second finding cost more than the first: nothing on this platform can observe a collection
+without yielding to the host.** Node 26 / V8 14.6, same object, `gc()` at each step:
+
+```
+same job, after gc()      WeakRef ALIVE     registry callbacks 0
+one microtask             WeakRef ALIVE     registry callbacks 0
+two microtasks            WeakRef ALIVE     registry callbacks 0
+one macrotask             WeakRef CLEARED   registry callbacks 200
+```
+
+A `WeakRef` keeps its target alive for the job that created it, and the registry callback is
+delivered as a task. `FinalizationRegistry.prototype.cleanupSome()` would have made it synchronous
+and **has been removed from V8** — `--harmony-weak-refs-with-cleanup-some` is rejected as an
+unrecognised flag, from the command line and from `v8.setFlagsFromString` alike. So the three
+`GCLeakTest` cases could not have passed no matter what the mechanism was: a synchronous test body
+is one job, and a job that has not ended sees nothing. That is why they read as "wasm has no
+finalisation hook" — the hook was the first problem, and the harness was the second.
+
+`commonTest` therefore drives them through `collectorTest`, which is a blocking loop on every target
+whose finalisation runs on a thread and a chain of host turns on `wasmJs`. **No assertion changed.**
+`kotlin-test`'s wasm adapter awaits a returned `Promise` (`TeamcityAdapterWithPromiseSupport`),
+confirmed by a control that returned `Promise.reject` and duly failed; `WasmFinalizationTest` keeps a
+standing `@AfterTest` control so a regression cannot silently turn those assertions into ones nobody
+runs. `forceGC()` is `globalThis.gc()`, with `--expose-gc` added to the test task's `nodeJsArgs`.
+
+Two consequences worth carrying forward:
+
+- **`PyAutoCloseable.wasmJs.kt` is the only `js(…)` in `wasmJsMain`, and it has to be.** Every other
+  declaration this target makes is a `@WasmImport`, which carries primitives only — and what must
+  cross here is a *reference* to the object whose reachability is the question. The cost is confined
+  to construction: `registerCleaner` + `close()` is **88.6 ns**, of which the two `toJsReference()`
+  crossings are **44.1 ns** each; nothing on the C API call path touches it.
+- **The callback cannot arrive inside a Python call.** JS tasks run only after the stack unwinds and
+  every call into CPython here is synchronous, so the decref never re-enters the interpreter from
+  within another call. That is §1's hazard, and this target does not have it.
+
+`WasmCleanerStats` (`registered`, `released`, `finalized`, `outstanding`) is the observability half,
+and stays useful on a host with no `FinalizationRegistry`, where `outstanding` is a leak count.
 
 Kotlin/Native once had a `wasm32` target that could have shared CPython's linear memory; it was
 deprecated in 1.8.20 and removed in 1.9.20. That history no longer costs anything — `@WasmImport`
