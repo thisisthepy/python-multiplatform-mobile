@@ -95,6 +95,24 @@ Gradle 출력을 `| tail`, `| grep`, `| head` 로 넘긴 뒤 종료 코드를 �
 2번 계정(`irack000@gmail.com`)은 `~/.claude-alt` 에 로그인되어 있고, 1번(`brew.airesearch@gmail.com`)을
 덮어쓰지 않는다 — 양쪽 `-p` 호출이 동시에 성공하는 것으로 확인했다. 한쪽이 한도에 걸려도 다른 쪽으로 계속 진행한다.
 
+**2번 계정은 세션 환경변수를 지우고 띄워야 한다.** 조율 세션이 물려주는 변수를 그대로 상속하면
+`Not logged in · Please run /login` 이 나온다. 로그아웃된 것이 아니라, 자식이 **부모 세션(1번)의 인증
+채널로 붙으려 하는데** `CLAUDE_CONFIG_DIR` 은 2번을 가리켜 어긋나는 것이다.
+
+    unset CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN
+    unset CLAUDE_CODE_EXECPATH CLAUDE_CODE_SSE_PORT CLAUDECODE
+    export CLAUDE_CONFIG_DIR=/Users/ibrew/.claude-alt
+    claude -p "..."
+
+같은 호출이 환경변수를 지우기 전에는 `exit=1`, 지운 뒤에는 `exit=0` 이었다.
+
+**이 증상을 로그아웃으로 오진하지 마라.** 실제로 한 번 그렇게 판단해 사용자에게 재로그인을 요청했는데,
+확인해보니 전부 정상이었다 — 키체인 항목이 `sha256("/Users/ibrew/.claude-alt")` 접미사로 존재했고,
+자격증명은 만료 전이었으며 `.claude.json` 의 계정 기록도 온전했다. **모든 저장 상태가 정상인데
+"로그인 안 됨"이 나오면 저장된 것이 아니라 호출하는 쪽을 의심해라.** 진단 순서는
+(1) `~/.claude-alt/.claude.json` 의 `oauthAccount`, (2) 키체인 항목과 만료 시각,
+(3) 환경변수 — 앞의 둘이 멀쩡하면 원인은 셋째다.
+
 ### 서브 에이전트는 반드시 별도 프로세스로 띄운다
 
 조율 세션의 턴 안에서 실행되는 서브 에이전트는 **그 턴이 끊기면 함께 죽는다.** 사용자가 답변 도중
