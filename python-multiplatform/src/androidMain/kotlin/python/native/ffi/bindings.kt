@@ -141,6 +141,17 @@ object bindings {
     @JvmStatic external fun testThreadCreateFloor(x: Long): Long
 
     /**
+     * Attaches a bare pthread as a daemon, reads back the `java.lang.Thread` id it was given, and
+     * lets the pthread exit **without** detaching. Returns that id, or -1.
+     *
+     * The evidence `pmp_attach` rests on when it keeps an attachment rather than dropping it per
+     * call: whether ART aborts for this is the fact the whole choice turns on, and it is observed
+     * here rather than read off `Thread::ThreadExitCallback`. See
+     * `UpcallThreadAttachTest.aThreadThatExitsWithoutDetachingLeaksItsPeerRatherThanAbortingArt`.
+     */
+    @JvmStatic external fun testAttachWithoutDetach(x: Long): Long
+
+    /**
      * Which JNI calling convention this device fast-paths.
      *
      * Measured, not guessed: @CriticalNative is at or below the timing floor from API 26

@@ -29,8 +29,21 @@ import kotlin.test.assertTrue
  * The second is the one that decides whether anything needs changing, and it cannot be settled by
  * reading `jni_onload.def`'s `pmp_attach` alone: that function only says *an* attach happens when
  * `GetEnv` fails. Whether the attachment survives to the next call is a property of the caller
- * (`pmp_upcall_invoke_meth` detaches on every exit) *and* of ART, so it is observed here rather
- * than argued.
+ * *and* of ART, so it is observed here rather than argued.
+ *
+ * ### What it cost when it was per call, and what changed
+ *
+ * The first run of this test found the attach was paid on **every** call, and priced it:
+ *
+ * | | API 26 | API 36 |
+ * |---|---|---|
+ * | upcall, instrumentation thread | 1695 ns | 6693 ns |
+ * | upcall, Python worker | 63293 ns | 31219 ns |
+ * | attach, i.e. the difference | **61598 ns** | **24526 ns** |
+ *
+ * `pmp_attach` now keeps the attachment for the life of the thread and releases it from a
+ * `pthread_key_create` destructor, so the worker figure should collapse onto the instrumentation
+ * one. `UpcallThreadAttachTest` holds the correctness half of that change; this holds the price.
  *
  * ### How the attach is counted rather than inferred from a stopwatch
  *
@@ -209,17 +222,17 @@ class UpcallOverheadTest {
                     "reporting $threadsMain distinct ids would mean this probe measures something else",
             )
             assertEquals(
-                PROBE_CALLS, threadsWorker,
-                "each upcall from a Python worker thread is expected to arrive on a freshly " +
-                    "attached ART thread, so $PROBE_CALLS calls should report $PROBE_CALLS distinct " +
-                    "ids. Getting 1 would mean the attach is now amortised per thread -- a genuine " +
-                    "improvement, but it invalidates the cost recorded in docs/upcall-design.md, " +
-                    "so update the numbers there rather than deleting this assertion",
+                1, threadsWorker,
+                "every upcall from one Python worker thread should arrive on the same ART thread: " +
+                    "the attach is paid once when the worker first crosses into ART and released " +
+                    "by pmp_thread_exit_detach when the pthread dies. $threadsWorker distinct ids " +
+                    "over $PROBE_CALLS calls means it is back to one attach per call",
             )
             assertTrue(
-                upcallWorker > upcallMain,
-                "an upcall from a thread ART has never seen cannot be cheaper than one from a " +
-                    "thread it already knows: worker ${upcallWorker.ns()} vs main ${upcallMain.ns()}",
+                upcallWorker < upcallWorkerFirst,
+                "the steady-state upcall from a Python worker is not cheaper than that thread's " +
+                    "first one, so nothing is being amortised: steady ${upcallWorker.ns()} vs " +
+                    "first ${upcallWorkerFirst.ns()}",
             )
         }
 
@@ -280,11 +293,15 @@ class UpcallOverheadTest {
         return results
     }
 
-    private fun Double.ns(): String {
-        val whole = toLong()
-        val hundredths = ((this - whole) * 100).toLong()
-        return "$whole.${hundredths.toString().padStart(2, '0')} ns"
-    }
+    /**
+     * The sign is handled separately because the difference this reports can now be negative: with
+     * the attach amortised, a Python worker's steady-state upcall is no longer reliably more
+     * expensive than the instrumentation thread's, and formatting the two halves independently
+     * printed that as "-1999.-50 ns".
+     */
+    private fun Double.ns(): String = "${sign(this)}${fmt(kotlin.math.abs(this))} ns"
+
+    private fun sign(v: Double): String = if (v < 0) "-" else ""
 
     private fun report(
         loopMain: Double, pyMain: Double, upcallMain: Double, threadsMain: Int,

@@ -160,6 +160,7 @@ These functions are registered as ordinary JNI (with the `N` suffix or implicitl
 | `testUpcallString` | Ordinary | Ordinary | Yes (JNI upcall). Explicitly calls into Java runtime. |
 | `testUpcallUnattached` | Ordinary | Ordinary | Yes (JNI upcall in new thread). |
 | `testThreadCreateFloor` | Ordinary | Ordinary | No (thread floor probe), but uses ordinary. |
+| `testAttachWithoutDetach` | Ordinary | Ordinary | Yes (attaches a pthread and calls back into Java). |
 
 ## 4. Rules of Thumb
 
