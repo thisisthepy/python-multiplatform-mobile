@@ -36,7 +36,11 @@ kotlin {
     }
 
     sourceSets {
-        val androidMain by getting {
+        // On `commonMain` rather than `androidMain`: the `@InstallsUpcallTable expect fun` lives
+        // in `src/commonMain` and needs the annotation on its own compile classpath. An `expect`
+        // has to sit in a source set the target's source set depends on, which is the whole
+        // reason the seam exists.
+        val commonMain by getting {
             dependencies {
                 implementation(projects.pythonMultiplatform)
             }

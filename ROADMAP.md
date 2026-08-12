@@ -1651,7 +1651,9 @@ Two things the fold-back exposed that the split had hidden:
   target's source set, compiled together with each variant's KSP output, so its `actual` names
   `FunctionTable` directly. `iosMain` is an intermediate source set the generating leaves depend
   on, so it still needs one `actual` per leaf. Same processor, opposite answer, and the difference
-  is which side of the compilation the source set sits on.
+  is which side of the compilation the source set sits on. (Both `actual`s are generated now —
+  see "Two smaller things the sample found" below — but the asymmetry that made them necessary is
+  unchanged.)
 - **Exposure is a blacklist, so applying the plugin offers the whole module to Python — including
   Compose.** A `@Composable` may only be called from another composable and a generated entry is an
   ordinary lambda, so a scanned `@Composable` is a compile failure of *generated* code. `:sample`
@@ -1696,20 +1698,77 @@ keeps its processor. `WiringTest` pins the full observed Android configuration l
 
 **Nothing without an Android plugin could have found this**, which is the point of the fixture.
 
-### Two smaller things the sample found
+### ~~Two smaller things the sample found~~ — both closed
 
-- **The generated table is reachable only from the source set of the target that generated it.**
-  KSP writes `FunctionTable` into `iosSimulatorArm64Main` and its siblings, so `iosMain` — which
-  those leaves depend on — cannot name it, exactly as `commonMain` cannot. `installGeneratedUpcallTable`
-  is therefore one line per leaf target. Anything designed to touch the generated table from
-  shared code has to route through an `expect`/`actual` like this. The rule is about *intermediate*
-  source sets, not about "not being `commonMain`": `androidMain` is the Android target's own source
-  set and names `FunctionTable` directly, which the fold-back above made visible.
-- **A `var` with a `private set` would generate a fragment that does not compile.** `FragmentScanner`
-  decides on `property.isMutable` alone and emits a `STATIC_SETTER`/`SETTER` assigning to it, so
-  the generated file assigns to an inaccessible setter. Read off the scanner, not observed — the
-  sample avoids the shape. Worth a `BindingPolicy` check, since a read-only-to-callers `var` is an
-  ordinary Kotlin idiom.
+Neither existing fixture had the *shape* to catch either one, which is the part worth keeping.
+`ksp-fixtures` grew that shape first, and both defects reproduced there before anything was fixed.
+
+#### The generated table is reachable only from the source set of the target that generated it
+
+KSP writes `FunctionTable` into `iosSimulatorArm64Main` and its siblings, so `iosMain` — which
+those leaves depend on — cannot name it, exactly as `commonMain` cannot. The rule is about
+*intermediate* source sets, not about "not being `commonMain`": `androidMain` is the Android
+target's own source set and names `FunctionTable` directly, which the fold-back above made visible.
+
+**The constraint has not moved and cannot.** A fragment scan has to see the target's own
+declarations — Android's table is three entries larger than desktop's because that compilation also
+scans `MainActivity` — so generating into `commonMain` through `kspCommonMainMetadata`, the usual
+KMP answer, would shrink the exposed surface to whatever happens to be common. What moved is *who
+writes the `actual`*:
+
+```kotlin
+// commonMain, and nowhere else in the repository
+@InstallsUpcallTable
+expect fun installGeneratedUpcallTable()
+```
+
+`python-multiplatform-ksp` finds the annotated `expect` — a leaf compilation sees its whole source
+set closure, the same fact that lets the fragment scanner pick up common declarations — and emits
+one `actual` per leaf, carrying `@PythonInternal` so the generated function does not itself end up
+in the table. `sample` lost its three identical `InstallTable.ios*.kt` files and gained nothing in
+their place. Android's hand-written `actual` is gone too, not because Android needed one but
+because a per-platform special case is precisely what shared code cannot be written against.
+
+`expect`/`actual` rather than a common interface plus a runtime registry because the reference
+chain has to stay static: §7 keeps every fragment reachable to the Kotlin/Native linker by naming
+it explicitly, with no `ServiceLoader` and no `@EagerInitialization`, and a generated object that
+nothing names is dead code the linker may drop. The generated `actual` is that name.
+
+`ksp-fixtures/app` gained a second Native leaf (`androidNativeX64`) purely so the default hierarchy
+would give it an intermediate `androidNativeMain` — `iosMain`'s shape, without Xcode — plus a
+`commonMain` that installs the table. Written the obvious way first, it failed exactly as the
+sample did:
+
+```
+e: ksp-fixtures/app/src/commonMain/kotlin/fixture/app/TableInstall.kt:4:39
+    Unresolved reference 'FunctionTable'.
+```
+
+Neither existing fixture could have produced that: both reached the table from `desktopTest`, a
+*leaf* compilation, where it resolves fine. `ksp-fixtures/android` carries the same seam, because
+KSP runs once per AGP *variant* there and that is where a generated `actual` could go missing or
+land twice.
+
+#### A `var` with a `private set` generated a fragment that did not compile
+
+`FragmentScanner` decided on `property.isMutable` alone and emitted a `STATIC_SETTER`/`SETTER`
+assigning to it. The ROADMAP recorded this read off the scanner rather than observed; putting the
+shape into `ksp-fixtures/library` produced it on the first run:
+
+```
+e: Fragment_..._library.kt:58  Cannot access 'topLevelPrivateSet': it is private in file.
+e: Fragment_..._library.kt:442 Cannot access 'privateSet': it is private in 'RestrictedSetters'.
+e: Fragment_..._library.kt:458 Cannot access 'protectedSet': it is protected in 'RestrictedSetters'.
+```
+
+Three errors from four properties, and **the fourth is the one that matters.** `internal set`
+compiled: the fragment is generated into the same compilation as the sources it scans and
+`internal` is enforced per Kotlin *module*, so the assignment is legal there — and only there.
+Fixing what the build complained about would have left a table entry describing a write no
+consuming module could perform. `BindingPolicy.isExposedSetter` therefore reads the *setter's*
+modifiers and treats `private`, `protected` and `internal` alike. The read side is untouched: a
+`var` with a restricted setter is a read-only property to Python, which is what it already is to
+every Kotlin caller outside its module.
 
 ### ~~What the sample still cannot show~~ — the trampoline exists now
 

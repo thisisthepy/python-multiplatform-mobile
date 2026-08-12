@@ -34,6 +34,10 @@ private const val ENUM_SYNTHETIC_ENTRIES_PROPERTY = "entries"
  * | `interface` | `METHOD`, `GETTER` / `SETTER`; no constructor -- receivers arrive as handles |
  * | `enum class` | one `STATIC_GETTER` per entry, plus `name`, `ordinal`, `valueOf`, and its own members |
  * | `annotation class` | nothing -- see [BindingPolicy.isExposedClass] |
+ *
+ * A `var` gets its setter entry only when the *setter* is public -- `private`/`protected`/
+ * `internal set` is a read-only property as far as the table is concerned. See
+ * [BindingPolicy.isExposedSetter].
  */
 class FragmentScanner(private val excludePackages: List<String>) {
 
@@ -331,7 +335,7 @@ class FragmentScanner(private val excludePackages: List<String>) {
             kind = "GETTER",
             lambdaBody = "{ args -> ${wrapReturnExpression(propShape, "$receiver.$propName")} }",
         )
-        if (!property.isMutable) return listOf(getter)
+        if (!BindingPolicy.isExposedSetter(property)) return listOf(getter)
         val setter = CallableEntryModel(
             name = "$classQualifiedName.$propName=",
             arity = 1,
@@ -361,7 +365,7 @@ class FragmentScanner(private val excludePackages: List<String>) {
             kind = "STATIC_GETTER",
             lambdaBody = "{ ${wrapReturnExpression(propShape, "$callPrefix.$propName")} }",
         )
-        if (!property.isMutable) return listOf(getter)
+        if (!BindingPolicy.isExposedSetter(property)) return listOf(getter)
         val setter = CallableEntryModel(
             name = "$nameOwner.$propName=",
             arity = 1,

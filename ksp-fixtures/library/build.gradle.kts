@@ -20,6 +20,11 @@ kotlin {
     // (docs/upcall-table-design.md §8's open question). Compile-only here: androidNativeArm64
     // targets a device/emulator this workspace does not run tests against.
     androidNativeArm64()
+    // `:ksp-fixtures:app` grew a second Native leaf so that it would have an intermediate
+    // `androidNativeMain` -- ROADMAP §13's `iosMain` shape, without Xcode. A consumer's targets
+    // have to be a subset of its dependency's, so this one follows or the app module fails
+    // dependency resolution ("Unresolved platforms: [androidNativeX64]") before compiling.
+    androidNativeX64()
 
     sourceSets {
         val commonMain by getting {

@@ -103,4 +103,40 @@ class GeneratedAndroidTableTest {
             assertTrue(UpcallTable.resolve(member).isValid, "unresolved generated member: $member")
         }
     }
+
+    @Test
+    fun aVarWithAPrivateSetterIsExposedReadOnlyHereToo() {
+        val counter = UpcallTable.invoke(UpcallTable.resolve("fixture.android.AndroidCounter.<init>"), arrayOf(3L))!!
+        UpcallTable.invoke(UpcallTable.resolve("fixture.android.AndroidCounter.label"), arrayOf(counter, "n="))
+
+        assertEquals(
+            "n=3",
+            UpcallTable.invoke(UpcallTable.resolve("fixture.android.AndroidCounter.lastLabel"), arrayOf(counter)),
+        )
+        assertFalse(UpcallTable.resolve("fixture.android.AndroidCounter.lastLabel=").isValid)
+        assertFalse(
+            ClassLookup.require("fixture.android.AndroidCounter").memberNames
+                .contains("fixture.android.AndroidCounter.lastLabel="),
+        )
+    }
+
+    @Test
+    fun commonCodeInstallsTheGeneratedTableThroughTheSeam() {
+        // ROADMAP §13's first defect, checked on the side where the ROADMAP recorded the
+        // *exception*: `androidMain` can name `FunctionTable` directly. `installAndCountEntries`
+        // is in `commonMain`, which cannot -- and KSP runs once per variant here, so this is the
+        // path where a generated `actual` could go missing or land twice.
+        UpcallTable.clear()
+        assertEquals(0, UpcallTable.callableCount)
+
+        val count = installAndCountEntries()
+
+        assertTrue(count > 0)
+        assertEquals(setOf("io_github_thisisthepy_ksp_fixtures_android"), UpcallTable.moduleNames)
+        assertTrue(UpcallTable.resolve("fixture.android.androidDouble").isValid)
+        assertFalse(
+            UpcallTable.resolve("fixture.android.installGeneratedUpcallTable").isValid,
+            "the generated actual carries @PythonInternal and must not be offered to Python",
+        )
+    }
 }

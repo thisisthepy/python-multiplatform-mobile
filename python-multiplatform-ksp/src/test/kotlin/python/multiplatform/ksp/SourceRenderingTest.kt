@@ -164,4 +164,48 @@ class SourceRenderingTest {
         assertEquals(listOf("p.Foo.x", "p.Foo.y"), deduped.map { it.name })
         assertEquals("GETTER", deduped[0].kind)
     }
+
+    // ------------------------------------------------------------------- the install-table seam
+
+    @Test
+    fun theInstallSeamActualLandsInTheDeclarationsOwnPackageAndCallsTheAggregator() {
+        // ROADMAP §13: `FunctionTable` is nameable only from the compilation that generated it,
+        // so this file is the one place the call can be written -- and it has to land in the
+        // `expect`'s own package or it does not match it.
+        val src = renderInstallSeamSource(
+            InstallSeamModel(packageName = "com.example.app", simpleName = "installTable", isInternal = false),
+        )
+
+        assertTrue(src.contains("package com.example.app"))
+        assertTrue(src.contains("actual fun installTable() {"))
+        assertTrue(src.contains("python.multiplatform.generated.FunctionTable.installInto()"))
+        assertTrue(!src.contains("internal actual"))
+    }
+
+    @Test
+    fun theInstallSeamActualIsMarkedPythonInternal() {
+        // It is a public top-level function in the user's own package. Without the annotation, an
+        // incremental round that hands the scanner its own previous output would expose a
+        // Python-callable that reinstalls the table underneath its caller.
+        val src = renderInstallSeamSource(
+            InstallSeamModel(packageName = "com.example.app", simpleName = "installTable", isInternal = false),
+        )
+
+        assertTrue(src.contains("@python.multiplatform.reflection.PythonInternal"))
+    }
+
+    @Test
+    fun anInternalSeamGetsAnInternalActualBecauseExpectAndActualMustAgree() {
+        val src = renderInstallSeamSource(
+            InstallSeamModel(packageName = "com.example.app", simpleName = "installTable", isInternal = true),
+        )
+
+        assertTrue(src.contains("internal actual fun installTable() {"))
+    }
+
+    @Test
+    fun seamFileNamesAreDerivedFromTheDeclarationSoTwoSeamsDoNotCollide() {
+        assertEquals("InstallUpcallTable_installTable", installSeamFileName("installTable"))
+        assertTrue(installSeamFileName("a") != installSeamFileName("b"))
+    }
 }

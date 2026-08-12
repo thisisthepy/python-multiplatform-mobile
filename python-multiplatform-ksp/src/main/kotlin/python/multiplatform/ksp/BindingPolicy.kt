@@ -122,6 +122,39 @@ object BindingPolicy {
         return true
     }
 
+    /**
+     * Whether an already-[isExposedProperty] property gets a `SETTER`/`STATIC_SETTER` entry too.
+     *
+     * `isMutable` alone is not the question, which is ROADMAP §13's second defect: a `var` with a
+     * `private set` is mutable and its setter is not something generated code may name. The
+     * generated fragment then failed to compile --
+     *
+     *     Cannot access 'privateSet': it is private in 'fixture.library.RestrictedSetters'.
+     *     Cannot access 'topLevelPrivateSet': it is private in file.
+     *
+     * -- observed on `ksp-fixtures/library`'s `RestrictedSetters` before this check existed.
+     *
+     * `internal set` is excluded for a different reason, and the difference is worth stating
+     * because it does *not* announce itself: `internal` is enforced per Kotlin module and the
+     * fragment is generated into the same compilation as the sources it scans, so the assignment
+     * compiles. It is still not exposable. What the table describes is a module's public API --
+     * the aggregator that reads this fragment lives in another module, and a Python caller has no
+     * notion of which Kotlin module it is "inside". Checking only for the shape that broke the
+     * build would have left the quiet one behind.
+     *
+     * A `var` KSP reports with no setter node at all is an ordinary public one: there is no
+     * accessor there to carry a visibility modifier.
+     */
+    fun isExposedSetter(property: KSPropertyDeclaration): Boolean {
+        if (!property.isMutable) return false
+        val setter = property.setter ?: return true
+        val declared = setter.modifiers.intersect(VISIBILITY_MODIFIERS)
+        return declared.isEmpty() || declared == setOf(Modifier.PUBLIC)
+    }
+
+    private val VISIBILITY_MODIFIERS =
+        setOf(Modifier.PUBLIC, Modifier.PRIVATE, Modifier.PROTECTED, Modifier.INTERNAL)
+
     private fun isExposedFunctionShape(function: KSFunctionDeclaration): Boolean {
         if (!isPublic(function)) return false
         if (hasPythonInternal(function)) return false

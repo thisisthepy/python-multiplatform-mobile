@@ -255,6 +255,48 @@ this. A Gradle plugin wrapping the KSP configuration could set the role
 automatically based on `plugins.hasPlugin("application")` or
 `plugins.hasPlugin("com.android.application")`.
 
+### Reaching `FunctionTable` from shared code: `@InstallsUpcallTable`
+
+`FunctionTable` is emitted into the compilation that generated it, so only that target's own
+source set can name it. An **intermediate** source set — `commonMain`, `iosMain`,
+`androidNativeMain` — is one the generating leaves *depend on*, and it gets `Unresolved reference
+'FunctionTable'`. `androidMain` is the exception, being the Android target's own source set; a
+per-platform exception is exactly what shared code cannot be written against.
+
+Moving generation to `kspCommonMainMetadata` would fix the visibility and break the scan: a
+fragment has to see the target's own declarations, and a common-only scan exposes only what is
+common. So generation stays in the leaves and the *seam* is generated instead:
+
+```kotlin
+// commonMain
+@InstallsUpcallTable
+expect fun installGeneratedUpcallTable()
+```
+
+The processor (app role, round 1) finds the annotated `expect` — a leaf compilation resolves its
+whole source set closure, which is the same reason the fragment scanner sees `commonMain`
+declarations — and writes one `actual` per leaf compilation, into the `expect`'s own package:
+
+```kotlin
+@python.multiplatform.reflection.PythonInternal
+actual fun installGeneratedUpcallTable() {
+    python.multiplatform.generated.FunctionTable.installInto()
+}
+```
+
+`@PythonInternal` because the `actual` is an ordinary public top-level function in the user's
+package, and an incremental round that fed the scanner its own previous output would otherwise
+offer Python a callable that reinstalls the table underneath its caller.
+
+A `library`-role module carrying the annotation is an error rather than a silent skip: it
+aggregates nothing, so there is no `FunctionTable` for the `actual` to call, and the alternative
+diagnostic is an unimplemented `expect` reported against the user's `commonMain` with nothing
+naming the cause.
+
+`expect`/`actual` rather than a common interface plus a runtime registry, for the reason §4 and §9
+give: the fragment reference chain has to stay static or the Kotlin/Native linker is free to drop
+what nothing names. The generated `actual` is that name.
+
 ### Discovery key: well-known package, not annotation
 
 The aggregator does **not** scan for annotations. It calls

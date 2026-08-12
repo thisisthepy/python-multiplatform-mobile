@@ -115,3 +115,67 @@ class Box<T>(val value: T)
 
 /** Observation fixture for what KSP reports for a `data class`'s compiler-generated members. */
 data class Point(val x: Long, val y: Long)
+
+// -------------------------------------------------------- a `var` whose setter is not public API
+
+/**
+ * ROADMAP §13's second defect: `FragmentScanner` decided whether to emit a setter entry from
+ * `property.isMutable` alone, and `isMutable` is `true` for all four properties below. Only
+ * [openSet] has a setter the generated fragment may use.
+ *
+ * The three restricted ones fail differently, which is why one of them would not have been
+ * enough:
+ *
+ * - `private set` -- the generated assignment does not compile at all
+ *   ("Cannot assign to 'privateSet': the setter is private in ...").
+ * - `protected set` -- the same, from outside the class.
+ * - `internal set` -- **compiles**, because the fragment is generated into this module's own
+ *   compilation and `internal` is enforced per Kotlin module. It is still wrong: what the table
+ *   describes is the public API, and the same shape in a module that only *consumed* this one
+ *   would not compile. Fixing only the loud failure would have left this one in the table.
+ *
+ * `open` rather than `class` so that `protected` has a meaning here.
+ */
+open class RestrictedSetters {
+    var privateSet: Long = 1
+        private set
+
+    var protectedSet: Long = 2
+        protected set
+
+    var internalSet: Long = 3
+        internal set
+
+    /** The control: an ordinary `var`, whose setter entry must survive. */
+    var openSet: Long = 4
+
+    /** Lets a test move the read-only values without there being a setter entry. */
+    fun bumpAll() {
+        privateSet += 1
+        protectedSet += 1
+        internalSet += 1
+    }
+}
+
+/** [RestrictedSetters] for the `STATIC_SETTER` path: a top-level `var` goes through
+ * `FragmentScanner.staticPropertyEntries`, which carried the same `isMutable`-only branch. */
+var topLevelPrivateSet: Long = 7
+    private set
+
+/** The control for [topLevelPrivateSet]. */
+var topLevelOpenSet: Long = 8
+
+/** Moves [topLevelPrivateSet] without exposing a setter. */
+fun bumpTopLevelPrivateSet() {
+    topLevelPrivateSet += 1
+}
+
+/** The `object` form of the same shape; `Registry.size` above is the mutable control. */
+object RestrictedRegistry {
+    var counted: Long = 0
+        internal set
+
+    fun count() {
+        counted += 1
+    }
+}
