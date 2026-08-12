@@ -125,6 +125,20 @@ kotlin {
     }
 }
 
+val prepareIosFrameworks by tasks.registering(Sync::class) {
+    dependsOn(":python-multiplatform:downloadPython_ios")
+    
+    val samplePythonVersion = project.findProperty("pythonVersion")?.toString() ?: rootProject.version.toString()
+    val extractedIosDir = project(":python-multiplatform").layout.buildDirectory.dir("python-standalone/extracted/$samplePythonVersion/ios")
+    
+    from(extractedIosDir)
+    into(layout.buildDirectory.dir("xcode-frameworks"))
+}
+
+tasks.matching { it.name.startsWith("link") && it.name.contains("Ios") }.configureEach {
+    dependsOn(prepareIosFrameworks)
+}
+
 android {
     namespace = "org.thisisthepy.python.multiplatform.demo"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
