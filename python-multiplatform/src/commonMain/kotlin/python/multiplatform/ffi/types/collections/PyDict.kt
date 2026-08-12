@@ -2,6 +2,7 @@ package python.multiplatform.ffi.types.collections
 
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyType
+import python.multiplatform.ffi.adoptingNewReference
 import python.multiplatform.ffi.conversion.PyProxy
 import python.multiplatform.ffi.exceptions.PyException
 import python.native.ffi.NativePointer
@@ -47,13 +48,19 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
         /** Builds a new Python `dict` from [map], preserving key/value object identity. */
         fun fromMap(map: Map<PyObject, PyObject>): PyDict {
             val dictPtr = python.multiplatform.ffi.Python3.withPython { PyDict_New() } ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate dict")
-            for ((k, v) in map) {
-                // PyDict_SetItem does not steal references to either key or value.
-                if (python.multiplatform.ffi.Python3.withPython { PyDict_SetItem(dictPtr, k.pointer, v.pointer) } != 0) {
-                    throw PyException.fromCurrentError() ?: PyException("Failed to populate dict")
+            // The dict is a bare pointer until the wrapper below adopts it, and populating it is
+            // fallible -- an unhashable key is enough. Dropping it there would leak the dict and,
+            // with it, every key and value it had already taken a reference to, with no wrapper
+            // for a cleaner to hang off. See ROADMAP §4.
+            return dictPtr.adoptingNewReference {
+                for ((k, v) in map) {
+                    // PyDict_SetItem does not steal references to either key or value.
+                    if (python.multiplatform.ffi.Python3.withPython { PyDict_SetItem(it, k.pointer, v.pointer) } != 0) {
+                        throw PyException.fromCurrentError() ?: PyException("Failed to populate dict")
+                    }
                 }
+                PyDict(it, false)
             }
-            return PyDict(dictPtr, false)
         }
     }
 
@@ -89,16 +96,21 @@ open class PyDict(pointer: NativePointer, borrowed: Boolean) :
         val itemsTuplePtr = python.multiplatform.ffi.Python3.withPython { PyList_AsTuple(itemsPtr) }
         python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(itemsPtr) } // list of (k, v) 2-tuples, new reference, no longer needed once copied
         if (itemsTuplePtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to snapshot dict items")
-        val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(itemsTuplePtr) }
-        val result = ArrayList<DictEntry>(count.toInt())
-        for (i in 0 until count) {
-            val pairPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(itemsTuplePtr, i) }!! // borrowed, valid while itemsTuplePtr is alive
-            val keyPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pairPtr, 0) }!! // borrowed
-            val valPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pairPtr, 1) }!! // borrowed
-            result.add(DictEntry(PyObject(keyPtr, true), PyObject(valPtr, true), this))
+        // Nothing adopts the snapshot tuple, so its release belongs in a finally: the loop below
+        // dereferences three nullable results and would otherwise strand it on any of them.
+        try {
+            val count = python.multiplatform.ffi.Python3.withPython { PyTuple_Size(itemsTuplePtr) }
+            val result = ArrayList<DictEntry>(count.toInt())
+            for (i in 0 until count) {
+                val pairPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(itemsTuplePtr, i) }!! // borrowed, valid while itemsTuplePtr is alive
+                val keyPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pairPtr, 0) }!! // borrowed
+                val valPtr = python.multiplatform.ffi.Python3.withPython { PyTuple_GetItem(pairPtr, 1) }!! // borrowed
+                result.add(DictEntry(PyObject(keyPtr, true), PyObject(valPtr, true), this))
+            }
+            return result
+        } finally {
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(itemsTuplePtr) }
         }
-        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(itemsTuplePtr) }
-        return result
     }
 
     /** Snapshot conversion to a plain Kotlin map, recursively converting keys/values ([python.multiplatform.ffi.conversion.ConversionStrategy.NATIVE]). */

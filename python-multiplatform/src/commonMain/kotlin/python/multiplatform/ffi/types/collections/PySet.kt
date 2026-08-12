@@ -52,12 +52,17 @@ open class PySet(pointer: NativePointer, borrowed: Boolean) :
             // case is allowed at the C level -- build a scratch tuple to feed it either way.
             val tuplePtr = python.multiplatform.ffi.Python3.withPython { PyTuple_New(elements.size.toLong()) }
                 ?: throw PyException.fromCurrentError() ?: PyException("Failed to allocate tuple() scratch buffer")
-            elements.forEachIndexed { i, el ->
-                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(el.pointer) } // PyTuple_SetItem steals; keep `el`'s own reference valid
-                python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
+            // See PyList.fromList: the scratch tuple's release covers the fill loop too, since
+            // nothing wraps it and an escape from the loop would strand it.
+            val setPtr = try {
+                elements.forEachIndexed { i, el ->
+                    python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_IncRef(el.pointer) } // PyTuple_SetItem steals; keep `el`'s own reference valid
+                    python.multiplatform.ffi.Python3.withPython { PyTuple_SetItem(tuplePtr, i.toLong(), el.pointer) }
+                }
+                python.multiplatform.ffi.Python3.withPython { PySet_New(tuplePtr) }
+            } finally {
+                python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(tuplePtr) } // scratch tuple, no longer needed once copied into the set
             }
-            val setPtr = python.multiplatform.ffi.Python3.withPython { PySet_New(tuplePtr) }
-            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(tuplePtr) } // scratch tuple, no longer needed once copied into the set
             if (setPtr == null) throw PyException.fromCurrentError() ?: PyException("Failed to build set()")
             return PySet(setPtr, false)
         }

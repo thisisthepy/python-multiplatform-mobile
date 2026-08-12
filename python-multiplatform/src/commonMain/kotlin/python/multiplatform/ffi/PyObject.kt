@@ -51,6 +51,46 @@ internal fun pyErrorOrGeneric(fallback: String): PyException =
 
 
 /**
+ * Releases one reference that no Kotlin object owns.
+ *
+ * Unlike [PyObject.decRef] this takes a bare pointer, because the whole point is the window in
+ * which there is no wrapper yet. Guarded by the initialisation check for the same reason every
+ * other refcount path is: after `Py_Finalize()` the pointer no longer addresses anything.
+ */
+internal fun releaseUnownedReference(pointer: NativePointer) {
+    if (python.multiplatform.ffi.Python3.isInitialized) withGIL { Py_DecRef(pointer) }
+}
+
+/**
+ * Runs [block] on a pointer the caller has just been handed as a **new reference**, releasing
+ * that reference if -- and only if -- [block] throws.
+ *
+ * This closes the one leak in this architecture that no collector can reach. Between a C API
+ * call returning a new reference and a wrapper adopting it, the reference belongs to nobody:
+ * there is no Kotlin object for a cleaner to be attached to, so an exception thrown in that
+ * window loses the reference for the life of the interpreter. See ROADMAP §4.
+ *
+ * ### The one thing this must not be wrapped around
+ *
+ * [block] may adopt the pointer only as its **last** act. [python.multiplatform.ref.PyAutoCloseable]
+ * registers the cleaner in its own constructor, before any subclass initialiser runs, so a
+ * wrapper that throws from `init` has *already* queued a release for that pointer -- releasing
+ * it here too would decrement it twice, which corrupts CPython's free lists and surfaces
+ * somewhere unrelated (ROADMAP §1 is the account of exactly that). [PyType.getInstance] is the
+ * constructor in this codebase that can throw, and it validates before it constructs for this
+ * reason.
+ */
+internal inline fun <R> NativePointer.adoptingNewReference(block: (NativePointer) -> R): R {
+    try {
+        return block(this)
+    } catch (t: Throwable) {
+        releaseUnownedReference(this)
+        throw t
+    }
+}
+
+
+/**
  * Releases one reference, from wherever the cleaner happens to run.
  *
  * A top-level function on purpose: registered as the cleanup action it must close over the
@@ -105,7 +145,9 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         // it takes ownership of exactly that reference (no extra incRef).
         val typePointer: NativePointer = python.multiplatform.ffi.Python3.withPython { PyObject_Type(pointer) }
             ?: throw pyErrorOrGeneric("Failed to get the type of this object")
-        PyType.getInstance(typePointer)
+        // getInstance either adopts this reference (cache miss) or releases it (cache hit); it
+        // throws for an object that is not a type, which is what adoptingNewReference covers.
+        typePointer.adoptingNewReference { PyType.getInstance(it) }
     }
 
     /**
@@ -307,8 +349,13 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
     open fun repr(): String {
         // PyObject_Repr: new reference on success, null + exception set on failure.
         val reprPointer = python.multiplatform.ffi.Python3.withPython { PyObject_Repr(pointer) } ?: throw pyErrorOrGeneric("Failed to compute repr()")
-        val result = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(reprPointer) }
-        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(reprPointer) }
+        // The decode below is the only thing between the new reference and its release, so the
+        // release goes in a finally: a throw from there would otherwise strand the repr string.
+        val result = try {
+            python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(reprPointer) }
+        } finally {
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(reprPointer) }
+        }
         return result ?: throw pyErrorOrGeneric("Failed to decode repr() result")
     }
 
@@ -318,8 +365,13 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         // success, null + exception set on failure.
         val resultPointer = python.multiplatform.ffi.Python3.withPython { PyObject_RichCompare(pointer, other.pointer, op.opId) }
             ?: throw pyErrorOrGeneric("Comparison failed")
-        val truthy = python.multiplatform.ffi.Python3.withPython { PyObject_IsTrue(resultPointer) }
-        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(resultPointer) }
+        // PyObject_IsTrue runs __bool__/__len__, i.e. arbitrary Python -- so the release of the
+        // comparison result belongs in a finally rather than after it.
+        val truthy = try {
+            python.multiplatform.ffi.Python3.withPython { PyObject_IsTrue(resultPointer) }
+        } finally {
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(resultPointer) }
+        }
         if (truthy < 0) throw pyErrorOrGeneric("Failed to evaluate comparison result")
         return truthy != 0
     }
@@ -348,8 +400,11 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
             val message = PyException.fromCurrentError()?.errMsg
             return "<error converting to str${message?.let { ": $it" } ?: ""}>"
         }
-        val result = python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(strPointer) }
-        python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(strPointer) }
+        val result = try {
+            python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(strPointer) }
+        } finally {
+            python.multiplatform.ffi.Python3.withPython { python.native.ffi.Py_DecRef(strPointer) }
+        }
         return result ?: "<error decoding str>"
     }
 
