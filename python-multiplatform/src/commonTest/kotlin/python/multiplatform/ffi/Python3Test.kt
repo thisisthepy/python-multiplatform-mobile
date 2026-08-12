@@ -7,15 +7,14 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * Red-phase functional tests for [Python3]: lifecycle, script execution,
- * evaluation, module import and interpreter metadata.
+ * Functional tests for [Python3]: lifecycle (`initialize`/`isInitialized`),
+ * script execution, evaluation, module import, and the interpreter metadata
+ * properties (`version`/`platform`/`copyright`/`compiler`/`buildInfo`).
  *
- * `initialize`/`exec`/`eval`/`import`/the metadata properties are already
- * implemented (unlike most of the rest of the object model, which is still
- * `TODO`), so several of these are expected to pass immediately -- that is
- * fine and expected for this slice of the surface; the point of the red
- * phase is that the *typed* wrapper layer (PyInt, PyList, ...) is not
- * implemented yet, which the other test files in this package cover.
+ * This header used to call these a red phase, on the grounds that the typed
+ * wrapper layer (PyInt, PyList, ...) covered by the other files in this
+ * package was still `TODO`. It is implemented now, so every test here is a
+ * regression test and any failure is a real one.
  */
 class Python3Test {
 

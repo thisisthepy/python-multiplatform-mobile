@@ -6,8 +6,10 @@ import python.native.ffi.PyObject_GetAttrString
 /**
  * Shared entry point for functional tests that need a live interpreter.
  *
- * A real CPython 3.13 interpreter *does* initialise inside this test binary
- * on the platforms this suite currently runs on (see
+ * A real CPython interpreter *does* initialise inside this test binary on the
+ * platforms this suite currently runs on -- the version is whatever
+ * `pythonVersion` is set to in `gradle.properties` (3.14.7 as this is written),
+ * not a literal, which is why nothing here names one (see
  * `python.multiplatform.env.InterpreterAvailabilityTest`, and the
  * `extractIosSimulatorStdlib` task in `build.gradle.kts` that gives the iOS
  * simulator run a `PYTHONHOME` with an actual standard library to find). So

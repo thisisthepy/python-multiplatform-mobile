@@ -5,8 +5,11 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 /**
- * Red-phase functional tests for [PyTuple]: construction, indexing, size,
- * sub-listing and conversion to a Kotlin `List`. All members are `TODO`.
+ * Functional tests for [PyTuple]: construction from a Kotlin list, indexing,
+ * size, `subList`, iteration order and conversion to a Kotlin `List`.
+ *
+ * This header used to say all members were `TODO` stubs. They are implemented
+ * now, so every test here is a regression test and any failure is a real one.
  */
 class PyTupleTest {
 

@@ -6,13 +6,15 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * Red-phase functional tests for the basic-type wrappers: construction from
- * Kotlin values (`from`), reading back to Kotlin (`toKotlin`/`asNative`),
- * and wrapping an existing Python object obtained via `eval`.
+ * Functional tests for the basic-type wrappers: construction from Kotlin
+ * values (`from`), reading back to Kotlin (`toKotlin`), and wrapping an
+ * existing Python object obtained via `eval` -- for `PyInt`, `PyFloat`,
+ * `PyBool` and `PyString`, plus `PyNone`'s singleton identity and `isNone`.
  *
- * Every one of these bodies is `TODO("Not yet implemented")` (see
- * `PyInt`/`PyFloat`/`PyBool`/`PyString`/`PyNone`), so all of these are
- * expected to fail with [NotImplementedError] until the next phase.
+ * This header used to say every one of these bodies was a
+ * `TODO("Not yet implemented")` stub expected to fail with
+ * [NotImplementedError]. They are all implemented now, so every test here is
+ * a regression test and any failure is a real one.
  */
 class PyBasicTypesTest {
 

@@ -10,18 +10,21 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 
 /**
- * Red-phase functional tests establishing that a Python-level error surfaces
- * as a Kotlin throwable with type/message information attached, per the
- * mermaid sketch's `PyException { type, value, traceback, message, cause,
- * context }`.
+ * Functional tests establishing that a Python-level error surfaces as a Kotlin
+ * throwable with type/message information attached, per the mermaid sketch's
+ * `PyException { type, value, traceback, message, cause, context }`.
  *
- * A division by zero at the Python level already throws a [PyException]
- * today (see `Python3.exec`), but with `type`/`value`/`traceback` left
- * unpopulated -- the exec/eval call sites only build a bare message, they
- * do not yet call [PyException.fromCurrentError] to pull the real
- * `ZeroDivisionError` off CPython's error indicator. The `type`-asserting
- * tests below are expected to fail for that reason until that wiring is
- * done; they document the intended end state.
+ * This header used to call these a red phase, on the grounds that the exec/eval
+ * call sites built a bare message and never called [PyException.fromCurrentError],
+ * so `type`/`value`/`traceback` came back unpopulated and the `type`-asserting
+ * cases were expected to fail. That wiring is done: `Python3.exec`, `eval` and
+ * `import` all raise through `pyErrorOrGeneric`, which is
+ * `fromCurrentError() ?: PyException(fallback)`. `exec` is deliberately built on
+ * `PyRun_String` rather than `PyRun_SimpleString` for exactly this reason -- the
+ * latter calls `PyErr_Print()`, which prints and *clears* the error indicator
+ * before anything can read the real `ZeroDivisionError` off it.
+ *
+ * So every test here is a regression test and any failure is a real one.
  */
 class PyExceptionTest {
 
