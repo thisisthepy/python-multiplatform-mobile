@@ -78,3 +78,5 @@ actual fun forceGC() {
     // that is a queue poll on a daemon thread, which needs longer than a Cleanable dispatch.
     Thread.sleep(100)
 }
+
+actual val cleanerReleasesAutomatically: Boolean = true

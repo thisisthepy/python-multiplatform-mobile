@@ -5,6 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import python.multiplatform.Versions
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.PythonTestFixture
 
@@ -49,7 +50,12 @@ class EmbedApiLowLevelTest {
         ready()
         val v = Python3.withPython { Py_GetVersion() }
         assertNotNull(v, "Py_GetVersion returned null")
-        assertTrue(v.startsWith("3.14"), "expected 3.14.x, got $v")
+        // Against the *configured* version rather than a literal. What this proves is that the
+        // library loaded the interpreter the build downloaded; a hardcoded release line turns
+        // every version bump into an unrelated failure, which is exactly what
+        // `-PpythonVersion=3.15.0rc1` produced here and in three sibling tests.
+        val expected = Versions.currentVersion.compactVersionString
+        assertTrue(v.startsWith(expected), "expected $expected.x, got $v")
     }
 
     @Test

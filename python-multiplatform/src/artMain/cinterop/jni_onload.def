@@ -18,6 +18,8 @@ extern void PyGILState_Release(jint);
 extern jlong PyGILState_GetThisThreadState(void);
 extern jlong PyEval_SaveThread(void);
 extern void PyEval_RestoreThread(jlong);
+extern jint Py_MakePendingCalls(void);
+extern jlong PyGC_Collect(void);
 extern void PyEval_InitThreads(void);
 extern jlong PyThreadState_GetDict(void);
 extern jlong PyTuple_New(jlong);
@@ -452,6 +454,8 @@ static void f_PyGILState_ReleaseN(JNIEnv *e, jclass c, jint s) { PyGILState_Rele
 static jlong f_PyGILState_GetThisThreadStateN(JNIEnv *e, jclass c) { return PyGILState_GetThisThreadState(); }
 static jlong f_PyEval_SaveThreadN(JNIEnv *e, jclass c) { return PyEval_SaveThread(); }
 static void f_PyEval_RestoreThreadN(JNIEnv *e, jclass c, jlong t) { PyEval_RestoreThread(t); }
+static jint f_Py_MakePendingCallsN(JNIEnv *e, jclass c) { return Py_MakePendingCalls(); }
+static jlong f_PyGC_CollectN(JNIEnv *e, jclass c) { return PyGC_Collect(); }
 static void f_PyEval_InitThreadsN(JNIEnv *e, jclass c) { PyEval_InitThreads(); }
 static jlong f_PyThreadState_GetDictN(JNIEnv *e, jclass c) { return PyThreadState_GetDict(); }
 static jlong f_PyTuple_NewN(JNIEnv *e, jclass c, jlong len) { return PyTuple_New(len); }
@@ -1009,17 +1013,23 @@ static jmethodID g_proxyClear = NULL;
 /*
  * A JNIEnv for a thread CPython may or may not have entered from the JVM.
  *
- * On every path this project currently exercises, the collector runs on the thread that called
- * into Python, and that thread came *from* ART -- so GetEnv succeeds and nothing is attached.
- * The exception is a thread CPython created itself (threading.Thread is a bare pthread), where
- * an allocation can trip the generational threshold and run a collection on a thread ART has
- * never seen. That is the case AttachCurrentThreadAsDaemon covers.
+ * On most paths the collector runs on the thread that called into Python, and that thread came
+ * *from* ART -- so GetEnv succeeds and nothing is attached. The exception is a thread CPython
+ * created itself (threading.Thread is a bare pthread), where a collection, or a refcount reaching
+ * zero, runs on a thread ART has never seen. That is the case AttachCurrentThreadAsDaemon covers.
+ *
+ * That branch is exercised rather than assumed. CycleCollectionTest's
+ * testCycleCollectedOnAThreadCPythonCreated and testDeallocOnAThreadCPythonCreated do their work
+ * inside a threading.Thread, and they assert that the thread the callback arrived on is not the
+ * instrumentation thread -- so a pass cannot come from GetEnv having succeeded after all. Green
+ * on pmp_api26 and pmp_api36.
  *
  * The caller must detach again if *attached is set on return. Leaving an attachment behind is
  * not an option: ART aborts the process when a thread it knows about exits without detaching
  * ("Native thread exiting without having called DetachCurrentThread"), and a CPython worker
  * thread is exactly a thread that will exit outside our control. The cost is an attach and a
- * detach per callback on such threads, which is only paid there.
+ * detach per callback on such threads, which is only paid there. Neither device printed that
+ * line during the runs above, which is the balance being checked rather than argued.
  */
 static JNIEnv *pmp_attach(int *attached) {
     JNIEnv *env = NULL;
@@ -1235,6 +1245,26 @@ static void proxy_set_handle(JNIEnv *e, jclass c, jlong obj, jlong handle) {
     if (slot != NULL) *slot = handle;
 }
 
+/*
+ * ob_refcnt of the object at `obj`, read straight out of the header.
+ *
+ * Py_REFCNT is a macro over a struct this file does not include, and sys.getrefcount counts its
+ * own argument's temporary reference -- neither can answer whether tp_dealloc released the
+ * instance's reference to its heap type exactly once, which is what the cycle-collection tests
+ * check. ob_refcnt is the first field of PyObject and the stable ABI fixes that; it is 64-bit on
+ * both ABIs this project ships (arm64-v8a, x86_64), so jlong is the right width.
+ *
+ * A test probe. Composed here for the same reason proxy_set_handle is: reading 8 bytes at a raw
+ * address from Kotlin/JVM needs sun.misc.Unsafe, a restricted non-SDK interface on Android.
+ *
+ * Ordinary JNI. A load of one word cannot run Python, but it is only ever called from a test, so
+ * there is nothing to gain from a GC-blocking convention here.
+ */
+static jlong ob_refcnt(JNIEnv *e, jclass c, jlong obj) {
+    if (obj == 0) return 0;
+    return *(jlong *)(intptr_t)obj;
+}
+
 int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -1330,6 +1360,8 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyGILState_GetThisThreadStateN", "()J", (void *)&f_PyGILState_GetThisThreadStateN},
         {"PyEval_SaveThreadN", "()J", (void *)&f_PyEval_SaveThreadN},
         {"PyEval_RestoreThreadN", "(J)V", (void *)&f_PyEval_RestoreThreadN},
+        {"Py_MakePendingCallsN", "()I", (void *)&f_Py_MakePendingCallsN},
+        {"PyGC_CollectN", "()J", (void *)&f_PyGC_CollectN},
         {"PyEval_InitThreadsN", "()V", (void *)&f_PyEval_InitThreadsN},
         {"PyThreadState_GetDictN", "()J", (void *)&f_PyThreadState_GetDictN},
         {"PyTuple_NewN", "(J)J", (void *)&f_PyTuple_NewN},
@@ -1656,6 +1688,7 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"proxyCreateType", "()J", (void *)&proxy_create_type},
         {"proxyGetHandle", "(J)J", (void *)&proxy_get_handle},
         {"proxySetHandle", "(JJ)V", (void *)&proxy_set_handle},
+        {"obRefCnt", "(J)J", (void *)&ob_refcnt},
 
         {"testUpcallPrimitive", "(J)J", (void *)&test_upcall_primitive},
         {"testUpcallString", "(Ljava/lang/String;)J", (void *)&test_upcall_string},

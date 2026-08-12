@@ -1150,6 +1150,10 @@ actual fun PyEval_SaveThread(): NativePointer? = python.native.ffi.bindings.PyEv
 @CName("${namePrefix}PyEval_1RestoreThread")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PyEval_RestoreThread(tstate: NativePointer) = python.native.ffi.bindings.PyEval_RestoreThread(tstate.toPlatformPointer())
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+actual fun Py_MakePendingCalls(): Int = python.native.ffi.bindings.Py_MakePendingCalls()
+@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
+actual fun PyGC_Collect(): Long = python.native.ffi.bindings.PyGC_Collect()
 
 
 //**************************************************

@@ -47,6 +47,27 @@ class Versions private constructor(val versionString: String) {
     val compactVersionString: String
         get() = versionString.split(".").take(2).joinToString(".")
 
+    /**
+     * CPython's ABI flags suffix: `t` on a free-threaded build (PEP 703), empty otherwise.
+     *
+     * This is a property of the *build*, not of the version -- 3.14 ships in both flavours out of
+     * the same source tree -- so it comes from [BuildConfig.pythonFreeThreaded] rather than from
+     * [versionString].
+     */
+    val abiFlags: String
+        get() = if (BuildConfig.pythonFreeThreaded) "t" else ""
+
+    /**
+     * `major.minor` plus [abiFlags]: `3.14` on a default build, `3.14t` free-threaded.
+     *
+     * Everything CPython names after itself carries this rather than [compactVersionString]: the
+     * shared library (`libpython3.14t.dylib`), the stdlib directory (`lib/python3.14t/`), the
+     * interpreter (`bin/python3.14t`). Use it wherever a library name or a path is being built;
+     * use [compactVersionString] only where the release line itself is what is meant.
+     */
+    val taggedVersionString: String
+        get() = compactVersionString + abiFlags
+
     val majorVersion: Int
         get() = versionString.split(".")[0].toInt()
 

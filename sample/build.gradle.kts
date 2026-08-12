@@ -1,3 +1,5 @@
+import java.io.ByteArrayOutputStream
+import org.apache.tools.ant.util.TeeOutputStream
 import org.gradle.internal.classpath.Instrumented
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
@@ -17,6 +19,25 @@ plugins {
     alias(libs.plugins.jetpack.compose)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.graalvm.native)
+
+    // NOT applied here, and it should be:
+    //
+    //   id("io.github.thisisthepy.python.multiplatform.bindings")
+    //
+    // The bindings plugin applies `com.google.devtools.ksp`, and KSP 2.3.11 declares a minimum
+    // AGP of 8.10.0 (`MINIMUM_SUPPORTED_AGP_VERSION` in its `agpUtils`). This repo is on AGP
+    // 8.5.2, whose `AndroidComponentsExtension` has no `addKspConfigurations`, so applying it to
+    // any module carrying an Android plugin dies at configuration time:
+    //
+    //   java.lang.NoSuchMethodError: 'void com.android.build.api.variant
+    //       .AndroidComponentsExtension.addKspConfigurations(boolean)'
+    //     at com.google.devtools.ksp.gradle.KspConfigurations$3$1.execute(KspConfigurations.kt:114)
+    //
+    // That is not a property of this sample -- it is true of every Android consumer of the
+    // plugin at these versions, and AGP 8.10 needs Gradle 8.11.1 against this build's 8.9, so it
+    // is a two-version bump rather than a one-line change. `:sample-bindings` therefore carries
+    // the Python-facing declarations and the generated table, and this module reaches them from
+    // `desktopMain`/`iosMain` only. See ROADMAP §7 and §12.
 }
 
 kotlin {
@@ -101,6 +122,15 @@ kotlin {
         desktopMain.dependencies {
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutines.swing)
+
+            // Declared per source set rather than in commonMain: `:sample-bindings` has no
+            // Android target (it could not have one and still apply KSP), so an androidMain that
+            // depended on it would fail variant resolution. The upcall half of the demo is
+            // therefore `expect`/`actual` in this module, with androidMain reporting why.
+            implementation(projects.sampleBindings)
+        }
+        iosMain.dependencies {
+            implementation(projects.sampleBindings)
         }
     }
 }
@@ -187,8 +217,15 @@ val hostPlatform = when {
     System.getProperty("os.name").contains("Windows") -> "windows-x86_64"
     else -> "linux-x86_64"
 }
+// The extraction tree is keyed by CPython version and desktop flavour (see python-multiplatform's
+// `extractedDir` / `desktopFlavourSuffix` for why the guard needs that), so this has to be derived
+// the same way rather than hardcoding a flat path -- otherwise the sample points PYTHONHOME at a
+// directory that only exists for the default configuration.
+val samplePythonVersion = project.findProperty("pythonVersion")?.toString() ?: rootProject.version.toString()
+val sampleFlavourSuffix =
+    if (project.findProperty("pythonFreeThreaded")?.toString()?.toBoolean() == true) "-freethreaded" else ""
 val pythonHomeForHost = project(":python-multiplatform").layout.buildDirectory
-    .dir("python-standalone/extracted/$hostPlatform/python")
+    .dir("python-standalone/extracted/$samplePythonVersion/$hostPlatform$sampleFlavourSuffix/python")
 
 tasks.register<JavaExec>("runNativeImageUpcallDemo") {
     group = "verification"
@@ -208,6 +245,18 @@ tasks.register<JavaExec>("runNativeImageUpcallDemo") {
     // at a prefix with a `lib/python3.14` stdlib -- the standalone build embeds the path from the
     // machine that built it, not this one. Mirrors python-multiplatform's own desktopTest task.
     environment("PYTHONHOME", pythonHomeForHost.get().asFile.absolutePath)
+}
+
+// `:sample:run` (Compose Desktop's own task) needs the same two things the task above needs, and
+// used to get neither: `Py_Initialize()` aborts with "Failed to import encodings module" without
+// a PYTHONHOME holding a real stdlib, and `manager.loadLibPython` finds no `libpython` on the
+// classpath because a project dependency resolves to class directories rather than to
+// `desktopJar` -- it falls back to `$PYTHONHOME/lib`, which only exists once the archive has been
+// extracted. Both fixed here rather than in `runNativeImageUpcallDemo`'s style (an explicit
+// classpath), because `run`'s classpath is Compose's to build.
+tasks.matching { it.name == "run" }.configureEach {
+    dependsOn(":python-multiplatform:downloadAllPythonBuilds")
+    (this as? JavaExec)?.environment("PYTHONHOME", pythonHomeForHost.get().asFile.absolutePath)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -270,4 +319,29 @@ tasks.register<Exec>("runNativeUpcallDemo") {
     dependsOn(nativeCompile)
     executable = nativeImageOutputDir.get().asFile.resolve("upcall-native-demo").absolutePath
     environment("PYTHONHOME", pythonHomeForHost.get().asFile.absolutePath)
+
+    // A zero exit status is not the same as a working upcall path. `PyRun_SimpleString` reports
+    // failure for an exception raised inside the script, but a Python interpreter that never got
+    // as far as running the script -- or a `print` lost to a missing flush -- exits 0 with the
+    // marker absent. Since this task is the only thing standing between a missing reachability
+    // registration and a shipped binary that dies on first call, it has to assert on the marker
+    // itself rather than on the exit code.
+    val captured = ByteArrayOutputStream()
+    standardOutput = TeeOutputStream(System.out, captured)
+    errorOutput = TeeOutputStream(System.err, captured)
+
+    doLast {
+        val text = captured.toString(Charsets.UTF_8)
+        if (!text.contains("PYTHON: UPCALL_OK")) {
+            throw GradleException(
+                "upcall-native-demo exited successfully but never printed `PYTHON: UPCALL_OK`. " +
+                    "The Python -> Kotlin upcall path did not complete inside the native image. " +
+                    "A `MissingForeignRegistrationError` here means the shipped " +
+                    "reachability-metadata.json is missing a descriptor -- regenerate it with " +
+                    "`:python-multiplatform:generateDesktopReachabilityMetadata` and check that " +
+                    "the new signature's shape is derivable by GenerateReachabilityMetadata.\n" +
+                    "--- output ---\n$text"
+            )
+        }
+    }
 }

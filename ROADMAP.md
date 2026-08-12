@@ -118,7 +118,25 @@ removes contention, not the rule that a thread must be attached before touching 
 
 ## 2. Finish the Android JNI surface
 
-**Reopened. Marking this closed was wrong.**
+**Closed, on the measure the section itself set.** Both emulators run 213 tests with zero
+failures, and the registration surface is complete: 363 of 367 `external fun` are bound through
+`RegisterNatives`, with the four exceptions deliberate — `ffiAllocUtf8`/`ffiFreeUtf8`/`ffiReadUtf8`
+are hand-written with the correct `JNIEnv*`/`jclass` prologue and cannot move into C because the
+buffers belong to Kotlin/Native, and `echoCriticalNamed` exists in order to be name-linked, so
+registering it would delete the measurement.
+
+Descriptor consistency is checked against the compiled bytecode rather than the Kotlin source —
+`javap` on `bindings.class` joined to the table by name, zero mismatches — and there are no
+duplicate wrappers or table names, which is a failure that broke cinterop once during this work.
+
+**The history below is why this took three passes**, and it is worth keeping. The section was
+closed once on `AssembledApiTest` passing, which measured its own scope: those 19 tests only
+exercised the 71 functions that had been registered. Wiring `commonTest` into Android (§11b) took
+discovery from 19 tests to 168 and the suite died on its 2nd, then its 12th. Two defects behind
+that had been invisible because nothing on Android had ever run those tests — an unpackaged stdlib
+and a `RegisterNatives` count hardcoded to 138 against a table of 145.
+
+**Reopened once. Marking it closed the first time was wrong.**
 
 It was closed on the strength of `AssembledApiTest` passing — 19 tests on `pmp_api26` and
 `pmp_api36`, 0 failed. That was true and it did not mean what it was taken to mean. Those 19 tests
@@ -528,16 +546,48 @@ hand-written one.
 **It survives a GraalVM native image**, which is the condition the whole design was chosen for:
 
 ```
-PYTHON: resolved handle = 4294967296
-PYTHON: invoke result = 42
+KOTLIN: table = 8 entries, 1 classes, from io_github_thisisthepy_sample_bindings
+PYTHON: resolved handle = 4294967303
+PYTHON: invoke result = 7
+PYTHON: @PythonInternal entry resolves to -1
 PYTHON: UPCALL_OK
 ```
 
-Python builds a function pointer with `ctypes`, resolves `"demo.answer"` by name through
+Python builds a function pointer with `ctypes`, resolves a Kotlin declaration by name through
 `HandleTable`, and calls back into Kotlin — inside a closed world where runtime reflection is
 forbidden. Every wall hit getting there was metadata or wiring; the lookup and invoke path itself
 needed no reflection registration, because it uses none. `sample` carries the build path
 (`nativeCompile`, `runNativeUpcallDemo`, Liberica NIK).
+
+**The table it resolves against is generated now, not hand-written.** `NativeImageMain.kt` used to
+carry its own `FunctionTableFragment` returning a constant `42`, with a comment saying the
+generator did not exist yet — and a hand-written fragment passes whether or not KSP ever runs, so
+the check measured less than it appeared to. It installs `python.multiplatform.generated.FunctionTable`
+from `:sample-bindings` instead, and the number Python reads back (`7`) is one the process
+produced by calling the Kotlin object seven times, so a stub returning a constant cannot satisfy
+it. The `-1` line is the same check applied to `@PythonInternal`: an opted-out declaration must
+not resolve.
+
+**The metadata is generated, not maintained.** `reachability-metadata.json` was a checked-in file,
+and a checked-in file rots without saying so: a native image links a `FunctionDescriptor` the
+metadata does not declare, builds clean, and dies on the first call with
+`MissingForeignRegistrationError`. It had already rotted — it declared one upcall descriptor while
+`Panama` builds three, so `ProxyTypeFactory` (the `tp_traverse` wiring below) would have failed in
+any image that reached it. `generateDesktopReachabilityMetadata` now derives the `foreign` section
+from `bindings.kt`, `ShapeDowncalls.desktop.kt` and `Panama.kt`, and fails the build on a
+declaration form it cannot read rather than dropping the descriptor. `ReachabilityMetadataTest`
+re-checks the result against the `MethodHandle.type()`s the loaded classes actually produce, and
+`runNativeUpcallDemo` now asserts on the `UPCALL_OK` marker instead of on the exit status. The
+failure mode was confirmed by deliberately mis-declaring one descriptor and watching the binary
+die at runtime, not argued from the documentation.
+
+**The binary is 16.7 MB, down from 35.4 MB.** The largest single item in the image was CPython
+itself: a registered resource is baked into the image heap as a `byte[]`, so the binary carried
+19.4 MB of `libpython` only so that `manager.kt` could write it back out to a temporary file at
+startup. It has to be on disk anyway — `PYTHONHOME` must point at a prefix with a matching stdlib
+for `Py_Initialize` to get past `encodings` — so `manager.kt` loads it from that prefix when the
+classpath copy is absent (`PYTHON_MULTIPLATFORM_LIBPYTHON` overrides), and the resource
+registration is gone.
 
 **What is not done**, and should not be read as done:
 
@@ -549,7 +599,9 @@ needed no reflection registration, because it uses none. `sample` carries the bu
 - ~~The aggregator uses `Dependencies.ALL_FILES`, correct but reprocessed every build.~~
   **Measured, and the aggregator turned out not to be the cause** — see below.
 - ~~No convenience Gradle plugin; user modules wire KSP per target by hand.~~
-  **Closed:** `python-multiplatform-gradle-plugin/`, applied by id.
+  **Closed:** `python-multiplatform-gradle-plugin/`, applied by id — **except on Android**, where
+  applying it is a configuration-time crash until AGP moves to 8.10. See §13; it is a version pin,
+  not a plugin defect, and it affects every Android consumer rather than only the sample.
 
 **Was:** entirely unimplemented — `ClassLookup.kt`, `ObjectReference.kt` and `ReflectedClass.kt`
 held 1–3 lines each, and this was README's only unchecked box.
@@ -563,7 +615,7 @@ Python proxy's instance data, KSP running in user modules too.
 generate fragments into a well-known package; the app module's KSP finds them with
 `getDeclarationsFromPackage` and emits an aggregator holding explicit references. No
 `ServiceLoader`, no reflection, no `@EagerInitialization`. A three-module experiment under
-`ksp-experiment/` compiles and runs, discovering fragments across a module boundary. Two caveats
+`ksp-fixtures/` compiles and runs, discovering fragments across a module boundary. Two caveats
 carried over: `.klib` discovery on a Native target is inferred rather than tested, and
 `getDeclarationsFromPackage` is `@KspExperimental`, so keep that step swappable. See
 `docs/upcall-table-design.md`.
@@ -675,17 +727,280 @@ a compiler warning saying inlining gains nothing there), delete the two platform
 one in `jvmMain`. Keeping `inline` on an intermediate-source-set `expect` crashes Kotlin 2.0.20
 with `Internal error in file lowering`.
 
-## 9. Free-threading (3.15t)
+## 9. Free-threading
 
-**Waiting on upstream.** `abi3t` is Final for 3.15 (PEP 803); 3.14 free-threaded has no Limited
-API at all, so choosing it there would mean recompiling per Python version.
+**Nothing is being waited on. It builds, it runs, and what it breaks is now known.**
+`./gradlew :python-multiplatform:desktopTest -PpythonFreeThreaded=true` runs the whole desktop
+suite against `cpython-3.14.7+20260807-<target>-freethreaded-install_only`:
 
-Also missing: free-threaded prebuilts for Android (python.org ships GIL-only) and iOS (BeeWare
-likewise). Desktop free-threaded builds do exist in `python-build-standalone`.
+| build | tests | failing | skipped |
+|---|---|---|---|
+| default (GIL) 3.14.7 | 211 | 0 | 1 |
+| free-threaded 3.14.7 | 211 | **1** | 1 |
 
-`pythonFreeThreaded` is already a `gradle.properties` switch; nothing else is prepared.
-Verified as compatible: nothing in this codebase dereferences `PyObject`, so `abi3t` making it
-an incomplete type does not break us.
+This section used to say "3.15t" and "waiting on upstream"; neither was true. 3.14 free-threaded
+is what was measured here, and those artefacts have been on the python-build-standalone release
+all along.
+
+It used to report two failures. One of them — deferred deallocation — turned out to be fixable
+after all, and is fixed; see below. What is left is `CycleCollectionTest`, whose *premise* the
+free-threaded runtime does not honour, and which no change to this library can repair.
+
+### The flag did nothing at all until three silent defects were fixed
+
+None of these produced an error message; all three made the build quietly do something other
+than what was asked.
+
+- **Extraction was not keyed by what it extracted.** Every unpack is guarded by "is the
+  destination directory empty?", and the destination was a flat `extracted/<platform>`. Passing
+  `-PpythonFreeThreaded=true` therefore downloaded the free-threaded archive, verified its
+  checksum, and then *discarded* it, because the GIL build had already filled the directory. The
+  build then ran the GIL interpreter while every log line named the free-threaded tarball. The
+  identical hazard applied to `-PpythonVersion`. Extraction is now
+  `extracted/<version>/<platform>[-freethreaded]` (`extractedDir`, `desktopFlavourSuffix`).
+- **A free-threaded install renames everything looked up by name.** It ships
+  `libpython3.14t.dylib`, `lib/python3.14t/` and `bin/python3.14t`, and does *not* ship the
+  un-suffixed names. `manager.loadLibPython` asked for `libpython3.14.dylib`, which such an
+  install does not contain. `Versions.abiFlags` / `taggedVersionString` now carry the `t`, fed by
+  a new `BuildConfig.pythonFreeThreaded`.
+- **`updatePythonChecksums` would have destroyed the lockfile.** It wrote `"\\n"` — a literal
+  backslash and an `n`, not a newline — so the whole file came out as one physical line beginning
+  with `#`, which `Properties` reads as a single comment. One run would have deleted every
+  checksum and left the next build failing "Missing checksum" for all of them. The committed file
+  was intact only because nobody had run the task since it was written.
+
+### Free-threading defers deallocation to the owning thread, and a pure embedder never gets there
+
+`GCLeakTest.testCascadingReleaseOnGC` used to fail. This is the important finding in this section,
+and it is the free-threading counterpart of §1: turning the feature on exposed an assumption, not a
+typo. **It now passes, unmodified**, because the library reaches the checkpoint the runtime is
+waiting for. The diagnosis below stands; the last subsection records the fix.
+
+The test builds 1000 Python lists each holding one target object, drops the Kotlin wrappers, and
+waits for the cleaner to release them. Measured on the free-threaded build (the cleaner is
+confirmed to have run — `ReleaseCounter.released` rose by 2003):
+
+| after | `sys.getrefcount(target)` |
+|---|---|
+| 1000 lists built, each holding `target` | 1002 |
+| 50 forced JVM GCs; cleaner called `Py_DecRef` 2003 times | 1002 |
+| 500 further C API round trips on the owning thread | 1002 |
+| 2 s of wall clock | 1002 |
+| `Python3.exec("pass")` — one trivial bytecode frame | **2** |
+
+So the decrements happened, and the objects were not freed. Not time, and not C API traffic:
+entering the eval loop *once*, for a body that does nothing, released all thousand at once. That
+is the signature of the free-threaded build's biased reference counting — a decref from a thread
+that does not own the object cannot run `tp_dealloc` there, so the object is queued to its owner,
+and the owner drains that queue at an eval-loop checkpoint.
+
+Under the GIL there is no such queue and the cleaner's decref frees immediately. The consequence
+for this library is specific and unpleasant: **an embedder that drives CPython entirely through
+the C API never reaches a checkpoint, so memory released by the cleaner is never actually
+reclaimed.** It is not a leak in the sense of a lost pointer — the refcount is correct and one
+line of Python flushes it — but a Kotlin process that only ever calls `PyObject_Call` will grow
+without bound.
+
+### The checkpoint is the fix, and the Stable ABI does not offer a way to reach one without bytecode
+
+The open question above was *what to call to force a drain, and from where*. Both halves have
+answers now, and the first one is a "no" that had to be established before the second made sense.
+
+**CPython exposes no non-bytecode way to merge the queue on the current thread.** The merge lives
+behind `_PY_EVAL_EXPLICIT_MERGE_BIT`, and `Python/ceval_gil.c` clears that bit in exactly one
+function:
+
+```c
+int _Py_HandlePending(PyThreadState *tstate) {
+    ...
+#ifdef Py_GIL_DISABLED
+    if ((breaker & _PY_EVAL_EXPLICIT_MERGE_BIT) != 0) {
+        _Py_unset_eval_breaker_bit(tstate, _PY_EVAL_EXPLICIT_MERGE_BIT);
+        _Py_brc_merge_refcounts(tstate);
+    }
+    if (_Py_qsbr_should_process(((_PyThreadStateImpl *)tstate)->qsbr)) {
+        _PyMem_ProcessDelayed(tstate);
+    }
+#endif
+    if ((breaker & _PY_GC_SCHEDULED_BIT) != 0) { ... _Py_RunGC(tstate); }
+    ...
+}
+```
+
+`_Py_HandlePending` has one caller family: the `_CHECK_PERIODIC` / `_CHECK_PERIODIC_IF_NOT_YIELD_FROM`
+uops in `Python/bytecodes.c`, which open every Python-level frame (`RESUME`) and close every call
+instruction. There is no public entry point.
+
+`Py_MakePendingCalls` is the obvious Stable ABI candidate and it **does not work**. Read the
+source and it cannot: it forwards to `_PyEval_MakePendingCalls`, which handles `handle_signals`
+and `make_pending_calls` and returns — the merge bit is not among them. Measured, on the
+free-threaded build with 1000 releases queued, it returns 0 and leaves `sys.getrefcount` at
+1002. `EvalCheckpointTest` asserts exactly that, so the day CPython changes its mind, the test
+says so.
+
+`PyGC_Collect` **does** work, and is the only Stable ABI function that does, because
+`gc_collect_internal` stops the world and walks every thread state:
+
+```c
+_Py_FOR_EACH_TSTATE_BEGIN(interp, p) {
+    _PyObject_MergePerThreadRefcounts((_PyThreadStateImpl *)p);
+    merge_queued_objects((_PyThreadStateImpl *)p, state);   //  <-- the drain
+}
+```
+
+That is the one option that reclaims on behalf of a thread *other* than the caller. It is also
+the most expensive thing here by three orders of magnitude, because it costs a heap walk rather
+than a queue pop. Both functions are now bound (`Py_MakePendingCalls`, `PyGC_Collect`); both are
+in `Misc/stable_abi.toml`.
+
+So the drain has to be an eval-loop entry, and the only question left is how cheap one can be
+made. `exec("pass")` recompiles a module every time. A *cached* zero-argument Python function
+whose body is `pass`, called through `PyObject_CallNoArgs`, does not — and it still reaches the
+checkpoint after specialisation, because `RESUME_CHECK` deopts back to `RESUME` whenever
+`eval_breaker != version`, and the merge bit makes them differ. Measured on the free-threaded
+build (`EvalCheckpointTest.testCheckpointCostAgainstTheAlternatives`, macOS arm64):
+
+| | ns/op | |
+|---|---:|---|
+| `withGIL { }` — attach and detach, nothing else | 154.6 | the floor |
+| `Python3.drainPendingReleases()` | 283.0 | **the checkpoint, ~128 ns over the floor** |
+| `withGIL { Py_MakePendingCalls() }` | 183.1 | cheap, and does not merge |
+| `Python3.exec("pass")` | 6 458.9 | 23× — it recompiles |
+| `withGIL { PyGC_Collect() }` | 256 447.1 | 906× — heap walk, but drains every thread |
+
+**Where it is called from.** Not the cleaner — that was ruled out before the mechanism was known
+and the measurement confirms the instinct was right for a second reason: the queue belongs to the
+thread that *owns* the object, and the cleaner owns nothing, so a checkpoint taken there would run
+Python on a cleaner thread (§1's deadlock) and drain an empty queue for it.
+`EvalCheckpointTest.testCleanerActivityAloneTakesNoCheckpoint` pins that suppression.
+
+It rides on the next ordinary call instead. `withGIL` takes a checkpoint at its outermost entry,
+behind two gates: at most one per `Python3.autoDrainInterval` outermost scopes (32), and skipped
+entirely unless `ReleaseCounter.released` has moved since the last one, so a workload that drops
+no wrappers pays a field compare. Amortised that is ~4 ns on a 155 ns scope. `drainPendingReleases()`
+is public for anyone who wants to force one, and `autoDrainInterval = 0` turns the automatic path
+off.
+
+The automatic path defaults **on for free-threaded builds and off otherwise**, which is why the
+default suite's numbers are unchanged. One guard is worth naming: the checkpoint declines to run
+when `PyErr_Occurred()` is non-null. Several call sites read the error indicator *after* their
+`withPython { }` scope closes — `PyObject.getAttr` is one — and entering the eval loop can replace
+it, since a pending signal handler or a finaliser raising is enough.
+
+**This is not only a free-threading problem.** `_PY_GC_SCHEDULED_BIT` is cleared in the same
+function, and `_Py_ScheduleGC` is how allocation triggers a collection on *both* builds since 3.12.
+An embedder that never reaches a checkpoint therefore never runs the cyclic collector either, on
+either build. That is not what §9 is about and nothing here depends on it, but it is the same root
+cause, and `drainPendingReleases()` covers it for anyone who turns the automatic path on.
+
+### Heap types are not reference counted at all, which voids a test's premise
+
+This is the one remaining free-threaded failure.
+`CycleCollectionTest.testHandleReleasedWhenProxyDiesWithoutCycle` fails, and its own guard
+assertion is what caught it — the one documented as "not decoration: it is what proves the probe
+reads a real refcount". It refused to proceed, exactly as designed.
+
+Two separate things are wrong with it free-threaded, and only the second matters:
+
+- The probe reads eight bytes at offset 0 of `PyObject`. Measured on 3.14.7: on the default build
+  that word is `ob_refcnt` and steps 1 → 2 with the count; on the free-threaded build it is
+  `ob_tid` and never moves, while the count lives in a `uint32` at offset 12 (`ob_ref_local`)
+  plus `ob_ref_shared >> 2` at offset 16. The failure reported `6173044960` for both "before" and
+  "alive" — a thread id, read as a refcount.
+- Fixing the offset would not save the test. Its premise is that "each live instance of a heap
+  type holds one reference to that type", and free-threaded CPython gives heap types **deferred
+  reference counting**: measured, a heap type's count reads `1152921504606846980` and does not
+  move when 100 instances are created or destroyed. The invariant simply does not exist there, so
+  `tp_dealloc`'s obligation to release the type reference cannot be checked this way at all.
+
+This also corrects what this section previously claimed: *"nothing in this codebase dereferences
+`PyObject`, so `abi3t` making it an incomplete type does not break us."* Something does — that
+test — and it is the one place that would have to change for `abi3t`. The library proper is still
+clean: `ProxyTypeFactory` writes only into memory it obtained from `PyObject_GetTypeData`, and
+nothing reads inside a `PyObject`.
+
+### What each platform can actually get
+
+Checked against the live release listings, 2026-08-12:
+
+| target | free-threaded prebuilt | source |
+|---|---|---|
+| desktop (macOS/Linux/Windows) | **yes** | `python-build-standalone` `20260807`, `…-freethreaded-install_only`, for 3.14.7 and 3.15.0rc1 alike |
+| Android | no | python.org's `python-<ver>-<arch>-linux-android.tar.gz` contains `libpython3.14.so` / `libpython3.15.so` only — checked in both 3.14.7 and 3.15.0rc1 |
+| iOS | no | neither BeeWare's Python-Apple-support nor python.org's XCframework defines `Py_GIL_DISABLED` |
+
+So free-threading is a desktop-only capability for as long as that holds, and the flag should stay
+off by default.
+
+### `abi3t` is not a blocker, because nothing here asks for the Limited API
+
+`abi3t` is Final for 3.15 (PEP 803), and 3.14 free-threaded has no Limited API at all. That was
+recorded as the reason to wait. It is not one: `Py_LIMITED_API` is never defined anywhere in this
+build — desktop binds symbols by name at runtime through Panama, and the native targets cinterop
+against the full headers. "abi3" in this codebase means a self-imposed rule about *which*
+functions to call, not a compilation mode. The rule is what keeps one binding working across
+versions, and it is unaffected.
+
+### 3.15.0rc1: desktop is already there; the native targets need three functions migrated
+
+`-PpythonVersion=3.15.0rc1` gives **208 tests, 0 failures, 1 skipped** on desktop — the same as
+the default. The first attempt failed 4, all of them assertions hardcoding `"3.14"` against the
+reported interpreter version (`EmbedApiLowLevelTest`, `InterpreterAvailabilityTest`,
+`Python3Test`, `DesktopPythonTest`). They now compare against
+`Versions.currentVersion.compactVersionString`, which is strictly stronger: it checks that the
+interpreter loaded is the one the build configured, instead of pinning a release line that has to
+be hand-edited on every bump. (Two other `"3.14"` literals nearby are `math.pi`, left alone.)
+
+`compileKotlinAndroidNativeArm64` and `compileKotlinIosSimulatorArm64` both fail on 3.15, with the
+*same* four errors, from three functions 3.15 removed:
+
+| removed in 3.15 | replacement |
+|---|---|
+| `PySys_ResetWarnOptions` | none — the `PyConfig` API covers it |
+| `PyImport_ImportModuleNoBlock` | `PyImport_ImportModule` (an alias since 3.3) |
+| `PyWeakref_GetObject` | `PyWeakref_GetRef` — **present in 3.14 too**, so the migration can be made without dropping 3.14 |
+
+Why desktop does not notice: the symbols are **still exported from the shared library** — checked
+with `nm` on `libpython3.15.dylib`, all three are there — and were removed only from the headers.
+Panama resolves by symbol name at run time, so nothing breaks; cinterop and the hand-written C in
+`jni_onload.def` compile against headers, so they do.
+
+That makes the porting cost concrete rather than open-ended: three functions, each appearing in
+the `commonMain` `expect`, four platform `actual`s, `jni_onload.def` (declaration, thunk and table
+entry) and the wasmJs `@WasmImport` block. Roughly 20 sites, no behavioural change on 3.14.
+
+**The default stays 3.14.7.** A release candidate is not a default. What is established is what
+raising it costs.
+
+### iOS: the source has to change with the version, and 3.15 is the switchover
+
+python.org began publishing an official iOS `Python.xcframework` with 3.15 —
+`ftp/python/3.15.0/python-3.15.0rc1-iOS-XCframework.tar.gz`, first appearing at 3.15.0b1.
+BeeWare's Python-Apple-support, the only previous source, stops at `3.14-b10` and has no 3.15
+release. The two do not overlap, so this is a hard switch on the version rather than a
+preference: **3.14 and earlier can only come from BeeWare, 3.15 and later only from python.org.**
+`iosFromPythonOrg` in the build now picks between them at ≥ 3.15, and both archives are pinned in
+`python-checksums.properties`.
+
+Swapping is otherwise free, because the trees are layout-compatible everywhere this build reaches
+into them — `Python.xcframework/<abi>/Python.framework/Headers`, `-F …/<abi>`,
+`Python.xcframework/lib/pythonX.Y` and `…/<abi>/lib-arm64/pythonX.Y` all exist in both. The
+differences are in parts nothing reads: BeeWare adds `platform-config/` (cross-compilation
+sysconfig data for building wheels) and a `VERSIONS` file. The header-set differences
+(`module.modulemap`, `lock.h`, `monitoring.h`, `typeslots.h` on one side; `pyabi.h`, `slots.h`,
+`slots_generated.h` on the other) are 3.14-vs-3.15, not packaging.
+
+Neither source publishes checksums this build can use — BeeWare publishes none at all, python.org
+publishes sigstore material that is not reasonable to verify in Gradle — so both stay pinned by
+the local lockfile.
+
+The swap is verified as far as it can be while 3.15 is not the default:
+`cinteropPythonIosSimulatorArm64` **succeeds** against the python.org framework, so its headers and
+`Python.framework` are consumed exactly like BeeWare's. The build then fails in
+`compileKotlinIosSimulatorArm64` — on the three removed functions above, with byte-identical errors
+to `androidNativeArm64`, i.e. in shared `nativeMain` source and not in anything iOS-specific.
+`compileKotlinIosSimulatorArm64` on the default 3.14 (BeeWare) still passes, so no regression was
+introduced for the version actually in use.
 
 ## 10. WASM
 
@@ -751,13 +1066,146 @@ so a stock build cannot advertise the tag even where the flags line up. Also set
 list is needed** for the Stable ABI. Only `wasmExports` and `wasmMemory` have to be added to
 `-sEXPORTED_RUNTIME_METHODS`, and neither is ABI-sensitive.
 
-**What still defers §10** is upcalls: `addFunction` re-entering WasmGC still goes through JS and is
-unmeasured, so §7's shape has to settle before `wasmJsMain`'s `actual`s are written. The `wasmJs`
-target in `python-multiplatform/build.gradle.kts` is still commented out.
+### The target is on, and `commonTest` runs on it
+
+`wasmJs` is a real target now — a leaf directly under `commonMain`, beside `jvmMain` and
+`nativeMain`. It is not a partial bring-up: **all 310 C symbols have `actual`s**, and the whole
+shared object-model suite runs against a live interpreter.
+
+```
+:python-multiplatform:wasmJsNodeTest    214 tests, 3 failed, 0 skipped
+                    desktopTest, unchanged    208 tests, 0 failed, 1 skipped
+Embedded CPython version: 3.14.2 ... [Clang 23.0.0git]   on wasm32-emscripten
+```
+
+(190 when the target first came up. The three failures are `GCLeakTest`'s, and they are the same
+three; the 24 added since are the marshalling, `Py_ssize_t` boundary and upcall cases below.)
+
+Nothing skipped: `PythonTestFixture.available` was true, so `Python3.initialize()` brought CPython
+up through an ordinary `@WasmImport` call to `Py_Initialize` — the library's own bring-up path,
+rather than a JS-side `Py_InitializeEx` as in `wasm-experiment/`.
+
+Three questions the experiment did not have to answer, and how they came out:
+
+* **`Py_ssize_t` is 32-bit on wasm32**, and `EmbedAPI.kt` types it as `Long`. Fourteen functions are
+  affected (`PyList_*`, `PyTuple_*`, `PyDict_Size`, `PySet_Size`, `PyObject_Size/Length`) and
+  `EmbedAPI.wasmJs.kt` converts at the boundary. This is the **only** ABI divergence across the
+  whole surface — and it is not a compile error, it is a `LinkError` at instantiation, so
+  `bindings.kt`'s types are read off `python.wasm`'s own type section rather than transliterated
+  from the `expect`s.
+* **All 310 symbols really are exported**, checked against the ABI build's 8287 — which confirms the
+  `-sMAIN_MODULE`/`LINKABLE` reading above on the surface this library actually needs.
+* **The Gradle integration is the one substitution** the design predicted. The compiler emits
+  `intrinsics: { memory: new WebAssembly.Memory({ initial: 0 }), … }` into `*.import-object.mjs`;
+  a `doFirst` on the test task rewrites that to Emscripten's `wasmMemory` and stages
+  `python.mjs`/`python.wasm` beside the bundle. No binary patching, no `-sIMPORTED_MEMORY`.
+  *(There are two now. Upcalls need a second one, on the generated entry module — see below.)*
+
+### What §10 still owes
+
+**Lifetimes, and this is the real gap.** Kotlin/Wasm has no finalisation hook — verified against
+`kotlin-stdlib-wasm-js-2.4.20-Beta2.klib`, which contains no `FinalizationRegistry`, no `WeakRef`
+and no `Cleaner`. So `registerCleaner` is explicit-`close()`-only, a `PyObject` dropped without
+`close()` leaks its reference, and `GCLeakTest`'s three cases fail. They are **left failing rather
+than weakened** — that is what the platform does today. Reaching JS's `FinalizationRegistry` through
+a `JsReference` is the only candidate route and is unmeasured.
 
 Kotlin/Native once had a `wasm32` target that could have shared CPython's linear memory; it was
 deprecated in 1.8.20 and removed in 1.9.20. That history no longer costs anything — `@WasmImport`
 plus an imported memory reaches the same place.
+
+### Upcalls: closed. CPython calls Kotlin, and cycles are collected
+
+`ProxyTypeFactory` builds a real `PyType_FromSpec` heap type with `tp_traverse`, `tp_clear` and
+`tp_dealloc` filled by Kotlin `@WasmExport`s installed into CPython's own
+`__indirect_function_table`. `wasmJsTest/.../WasmCycleCollectionTest` runs the same two cases
+`desktopTest/CycleCollectionTest` does, and both pass: a Kotlin↔Python cycle is broken by
+`gc.collect()`, and 100 proxies that die *without* a cycle release their `HandleTable` entries and
+leave the heap type's own refcount exactly where it started.
+
+The measurement this section already had — 3.1 ns through `call_indirect`, against 10.9 ns for the
+`addFunction`-and-JS-closure route §5 specified — was the mechanism. What this pass added was the
+wiring, and it turned up three constraints worth carrying forward:
+
+- **`@WasmExport` is honoured only in the compilation that produces the `.wasm`.** Measured, not
+  inferred: the identical annotation on the identical function exports from `wasmJsTest` and does
+  not from `wasmJsMain`, whose klib is linked in — the test binary's export section came out with
+  `startUnitTests` in it and nothing else. **A library cannot export its own trampolines.** The
+  executable module must declare three delegating lines; `wasmJsTest/.../ProxyTypeExports.kt` is
+  that file, kept in the suite precisely so the tests exercise the path an application takes.
+  Generating it from `python-multiplatform-gradle-plugin` is the obvious next step and is not done.
+- **Registration needs the Kotlin instance's raw exports, and only the generated entry module has
+  them.** `cpython.mjs` cannot fetch them: it is imported *by* Kotlin's import object, so importing
+  the entry module back would be an ES cycle across a top-level await. So `build.gradle.kts` appends
+  `pmpSetKotlinExports(exports)` to the entry module. This target now has **two** generated-file
+  substitutions, not the one this section used to advertise.
+- **Kotlin/Wasm has no `call_indirect`,** so calling a C function *pointer* — `visitproc`, `tp_free`
+  — goes through `WebAssembly.Table.get` in JS. Both are cold (a cyclic collection, a deallocation);
+  neither the downcall path nor CPython's path *into* Kotlin touches JavaScript.
+
+Also recorded because it cost time: `Module.UTF8ToString` is not available. This build exports
+`wasmExports` and `wasmMemory` and nothing else from the Emscripten runtime, deliberately, so any
+other helper fails as `undefined is not a function` inside a wasm import and arrives in Kotlin as an
+empty `JsException`.
+
+### Interning: taken, and the answer here is not Android's
+
+All 59 string-argument positions across 49 `actual`s go through `Wasm.internedUtf8` or
+`Wasm.scratchUtf8` now, with the per-argument judgement identical to `desktopMain`'s and
+`androidMain`'s on all 59. Measured at 200 000 iterations:
+
+| ns per argument | 7-char name | 54-char name |
+|---|---|---|
+| `malloc` + `encodeToByteArray` + copy + `free` (what it did) | **82.7** | |
+| `malloc` + `free` alone | 13.0 | |
+| `encodeToByteArray` alone | 59.2 | |
+| `Wasm.scratchUtf8` | **30.6** | **157.0** |
+| `Wasm.internedUtf8` (hit) | **22.2** | **26.4** |
+
+`PyObject_GetAttrString` through the `actual`, both rows back to back in one run so that only the
+marshalling differs: **258.0 → 229.2 ns**.
+
+**The rule transferred; the reasoning did not, and neither did the size of the win.** Three
+findings:
+
+- The expensive part was the **intermediate WasmGC `ByteArray`**, not the encode. Writing UTF-8
+  straight into linear memory is what takes 82.7 ns to 30.6. Shared memory is what makes that
+  possible — the destination is CPython's own heap, so there is no staging buffer — which is the
+  *opposite* of the original design note's claim that shared memory removes a string copy. It
+  removes the allocation.
+- **Interning's whole value is in the string length.** For a 7-character name it beats scratch by
+  8 ns, nothing like Android's 15x (2238 → 148). For a 54-character one it beats it by **6x**
+  (157.0 → 26.4), because a cache hit is flat in the length and an encode is linear. Reporting only
+  the short case — which is what the first measurement here did — would have argued interning is
+  barely worth having.
+- Negative result worth keeping: `BenchmarkTest`'s shared `PyObject_GetAttrString` row **did not
+  move** across this change (376.6 → 384.0 ns). That is two whole suite runs compared against a
+  ~29 ns per-call difference; it is not a usable A/B at this size, in either direction. The in-run
+  rows are the measurement.
+
+### `Py_ssize_t`: two guards, because the two halves fail differently
+
+The declaration half — `bindings.kt` against `python.wasm` — is derived now rather than remembered.
+`./gradlew :python-multiplatform:verifyWasmAbiSignatures` parses the wasm binary's type, import,
+function and export sections and compares all 316 `@WasmImport` declarations against it, plus the 3
+glue functions against `cpython.mjs`. It runs before `wasmJsNodeTest`. Confirmed by deliberately
+mis-declaring one and watching it fail with the function named:
+
+```
+PyList_Size: bindings.kt declares (i32) -> (i64), python.wasm has (i32) -> (i32)
+```
+
+Same shape as `generateDesktopReachabilityMetadata` (§7): read the artefact that decides, every
+build, never a checked-in copy of the answer. The task also asserts that every `external fun` in the
+file was parsed — the first version required an explicit return type and so silently skipped the
+three `Unit`-returning declarations, which is §2's "green test measuring its own scope" again.
+
+The conversion half links cleanly and is silently wrong, so it needed a different guard.
+`EmbedAPI.wasmJs.kt` names the two directions instead of casting inline — `Int.pySsizeToLong()`
+sign-extends, because -1 is the error return and the unsigned widening that is correct for pointers
+here would turn it into 4294967295; `Long.toPySsize()` range-checks rather than truncating, so
+`PyList_New(0x1_0000_0000)` fails instead of quietly becoming `PyList_New(0)`.
+`WasmPySsizeTBoundaryTest` covers both directions and the whole `Int` range.
 
 ## 11. Build wiring
 
@@ -836,11 +1284,132 @@ is the actual state of the Android object model, and that is the point of doing 
 
 - **Download integrity**: desktop, Android and iOS archives are pinned in
   `python-checksums.properties` and verified. python.org publishes Sigstore bundles for the
-  Android archives that are not checked; what verifying them would require is noted in
-  `docs/python-version-acquisition.md`.
-- **`PyList.subList`** returns a copy, not a live view. **`pyObjectToNative`**'s fallback branch
-  is not fully native. Both are marked `TODO` and neither is exercised by current tests.
-- **~50 `TODO` markers** remain in `commonMain`, including several questioning whether
-  `Py_IncRef` is the right call in `PyObject.init`.
+  Android archives — and, from 3.15, for the iOS XCframework (§9) — that are not checked; what
+  verifying them would require is noted in `docs/python-version-acquisition.md`. The lockfile is
+  keyed by version *and* flavour, so a `-freethreaded` or a 3.15 archive is a separate entry and
+  cannot be silently accepted under an existing key.
+- ~~**`PyList.subList`** returns a copy, not a live view.~~ **Stale — it returns `PySubList`,
+  which delegates `get`/`set`/`add`/`removeAt` to the backing list, i.e. it is a live view.**
+  **`pyObjectToNative`**'s fallback branch is still not fully native; the open question is now
+  written out at the branch itself (three candidate answers, and what to measure first).
+- ~~**~50 `TODO` markers** remain in `commonMain`~~ **— triaged. 18 remained, not ~50; 15 are
+  closed, 2 are sharpened open questions, and the work items are the four bullets below.** The
+  `Py_IncRef`-in-`PyObject.init` question named here is answered in place: `borrowed = true` is a
+  statement that the wrapper must obtain its own reference, and both directions of getting it
+  wrong have now been paid for (§1's double free, §4's dropped reference, and the fixture leak
+  below). Two bugs came out of the pass:
+  - **`PyType.dict` handed a `mappingproxy` to `PyDict`.** `type.__dict__` is not a `dict`, and
+    `PyDict_Size`/`PyDict_Items` reject a non-dict with `PyErr_BadInternalCall()` — returning
+    `-1`/`NULL` *and leaving the error indicator set*. Measured: `int.__dict__` reported
+    `size == -1`, and the next unrelated `Python3.eval` in the same suite died with
+    `Objects/dictobject.c:4248: bad argument to internal function`. It now copies through
+    `PyDict_New` + `PyDict_Update` into a real dict. `PyType_GetDict()`, which the code comment
+    proposed instead, is **not** an option: it is declared in `cpython/object.h`, outside the
+    Limited API, so it is not in the Stable ABI subset this binding restricts itself to.
+  - **`PythonTestFixture.mainGlobals()` leaked one reference per call**, wrapping
+    `PyObject_GetAttrString`'s new reference with `borrowed = true`. Measured at exactly +50 over
+    50 calls — the inverse of §1's defect, in the fixture every functional test is built on.
+    `OwnershipLeakTest.theTestFixtureDoesNotLeakMainGlobals` is the guard.
+- **`Python3.runMain` is not usable as written**, and "add error handling" (the TODO it carried)
+  understated it. `sys.argv[1] = ...` assigns to an existing index, but `Py_Initialize()` does not
+  set `sys.argv`, so it raises `IndexError` — invisibly, because `PyRun_SimpleString` prints and
+  clears the indicator and its return value is discarded. Worse, `Py_RunMain()` **always finalizes
+  the interpreter**, so on return the runtime is gone while `Python3.isInitialized` is still
+  `true`. Its `Int` exit status is also discarded. No caller in `src/` or `sample/`, so it is a
+  landmine, not a live failure. Fixing it is a design decision: what should "run a module" mean
+  for an embedded interpreter that has to survive the call?
+- **`Python3.runApp` does nothing at all** — its only statement is commented out, as is the
+  `Py_BytesMain` `expect` it would call. It returns `Unit` either way, so a caller cannot tell.
+  Declaring `Py_BytesMain` is not a one-liner: it takes `(int argc, char **argv)`, so it needs an
+  array-of-C-strings marshalling path, which each of the four platforms does differently.
+- **`Python3.finalize` reports no error detail**, and cannot: `Py_Finalize()` returns void and
+  there is no interpreter left to hold an error indicator afterwards. The one improvement
+  available is `Py_FinalizeEx()`'s `int` (0, or -1 when flushing buffered data failed). Left
+  undone because finalization is untested — its only caller is `artMain/JniExport.kt`, and a test
+  that exercises it destroys the interpreter the rest of the suite shares.
+- **`EmbedAPI.kt`'s section numbers are append order, not the C API docs' chapter order.**
+  Sections 1–26 follow the docs; 27 (Type Objects), 28 (Tuple Objects) and 29 (Module Objects)
+  were appended as needed. Documented target order: Type before Integer Objects (§16), Tuple
+  before List Objects (§22), Module before Iterator Objects (§25). It is a ~370-line pure-comment
+  move with no behavioural effect, so it should be done alone, on a quiet tree, or not at all.
+- **Several `commonTest` file headers still describe their subjects as `TODO` stubs "expected to
+  fail with `NotImplementedError`"** — `PyObjectTest`, `Python3Test`, `PyBasicTypesTest`,
+  `PyModuleTest`, `PyDictTest`, `PyIteratorTest`, `PySetTest`, `PyTupleTest`, `PyListTest`,
+  `ConversionTest`. Every one of those is implemented, so the headers invite the next reader to
+  dismiss a real failure as expected. `PyTypeTest`'s was corrected; the rest were left.
 - **No CI.** The README badges point at a different repository.
-- **Sample app** has not been revisited since the object model landed.
+- ~~**Sample app** has not been revisited since the object model landed.~~ **Done — see §13.**
+
+## 13. The sample, and the AGP version that shapes it
+
+The sample now shows four things, each on the real API: the embedded interpreter (`Python3.version`
+against `currentPlatform`), a Kotlin-built `PyList` of `PyInt` published into `__main__` and
+evaluated by Python, a Python-side `ctypes` call into a Kotlin declaration resolved by name, and
+the contents of the generated table read back off `UpcallTable`. Measured on `:sample:run`:
+
+```
+runtime : 3.14.7  ·  sys.platform=darwin  ·  MacOS 26.5.1 (aarch64) / JVM 21.0.12
+eval    : sum(kotlin_numbers) * 2 -> int: 56
+table   : 8 entries, 1 classes, from io_github_thisisthepy_sample_bindings
+upcall  : Python called Kotlin through handle 4294967303 and got 0
+```
+
+`:sample:run` did not work before this and it was not the sample's fault twice over: the task had
+no `PYTHONHOME`, so `Py_Initialize` could not find `encodings`, and a project dependency resolves
+to class directories rather than to `desktopJar`, so `manager.loadLibPython` found no bundled
+`libpython` either. Both are wired in `sample/build.gradle.kts` now, the second by falling back to
+`$PYTHONHOME/lib` — which is the fallback `manager.kt` already had, it just had nowhere to look.
+
+**What was there before:** the Compose template screen (a button, an image, the platform name),
+and a `desktopMain` `main()` doing raw `PyLong_FromLongLong`/`PyRun_SimpleString` with a pointer
+round-tripped through a `Double`. It compiled. Nothing in it touched the object model, and
+`PyRun_SimpleString` is the call `Python3.exec` exists to avoid (it calls `PyErr_Print`, which
+clears the error indicator before anything can read it).
+
+### The convenience plugin cannot be applied to an Android module at these versions
+
+This is the finding, and it is a property of the repo rather than of the sample.
+
+```
+java.lang.NoSuchMethodError: 'void com.android.build.api.variant
+    .AndroidComponentsExtension.addKspConfigurations(boolean)'
+  at com.google.devtools.ksp.gradle.KspConfigurations$3$1.execute(KspConfigurations.kt:114)
+```
+
+KSP 2.3.11 declares `MINIMUM_SUPPORTED_AGP_VERSION = 8.10.0` (read off its `agpUtils` class), and
+this build pins AGP 8.5.2, whose `AndroidComponentsExtension` has no such method (`javap` on
+`gradle-api-8.5.2.jar`). So `id("io.github.thisisthepy.python.multiplatform.bindings")` — which
+applies `com.google.devtools.ksp` — dies at configuration time in any module carrying an Android
+plugin. `ksp-fixtures` never hit this because neither fixture module applies one.
+
+**Every Android consumer of the plugin is in that position, not just this sample.** The fix is a
+two-version bump: AGP 8.10 requires Gradle 8.11.1 against this build's 8.9. That is worth doing
+deliberately — `python-multiplatform`'s Android wiring hangs a lot of hand-written `Copy` tasks
+and `preBuild` hooks off AGP — and it needs a device run to confirm, so it is recorded here rather
+than done in passing.
+
+Until then the sample is split: `:sample-bindings` (no Android plugin) applies the bindings plugin
+and holds the Python-facing declarations; `:sample` depends on it from `desktopMain`/`iosMain`
+only, and its `androidMain` `UpcallDemo` reports the reason instead of pretending. **The split
+exists only because of the version constraint** — one module is the shape a consumer should copy.
+
+### Two smaller things the sample found
+
+- **The generated table is reachable only from the source set of the target that generated it.**
+  KSP writes `FunctionTable` into `iosSimulatorArm64Main` and its siblings, so `iosMain` — which
+  those leaves depend on — cannot name it, exactly as `commonMain` cannot. `installGeneratedUpcallTable`
+  is therefore one line per leaf target. Anything designed to touch the generated table from
+  shared code has to route through an `expect`/`actual` like this.
+- **A `var` with a `private set` would generate a fragment that does not compile.** `FragmentScanner`
+  decides on `property.isMutable` alone and emits a `STATIC_SETTER`/`SETTER` assigning to it, so
+  the generated file assigns to an inaccessible setter. Read off the scanner, not observed — the
+  sample avoids the shape. Worth a `BindingPolicy` check, since a read-only-to-callers `var` is an
+  ordinary Kotlin idiom.
+
+### What the sample still cannot show
+
+`UpcallStub` is desktop-only, and both its stubs are `(long) -> long`. That is why the entry the
+demo calls takes no arguments and returns a `Long`: the *table* carries arity and per-argument
+`TypeTag`s for anything, but the trampoline that would marshal them does not exist on any
+platform. iOS should be the cheapest place to write one — Python and Kotlin share a binary there —
+and nothing has been written. See §7.

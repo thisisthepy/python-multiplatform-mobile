@@ -7,15 +7,13 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * Red-phase functional tests for [PyType]: name/base-type introspection,
- * MRO, `isInstance`/`isSubtypeOf`, and construction via `invoke`/`__new__`.
+ * Functional tests for [PyType]: name/base-type introspection, MRO,
+ * `isInstance`/`isSubtypeOf`, construction via `invoke`, and the `__dict__`
+ * namespace.
  *
- * `name` and `baseType` are already implemented; `mro`, `isInstance`,
- * `isSubtypeOf`, `getIterator`, `invoke`, `__new__` and `__init__` are new
- * `TODO` stubs added as part of this pass and are expected to fail with
- * [NotImplementedError]. `baseTypes` has a pre-existing implementation with
- * a known bug (see `PyType.kt`); it is exercised here too so a fix shows up
- * as this test flipping from failing-with-a-crash to passing.
+ * This header used to say the members were `TODO` stubs expected to fail with
+ * [NotImplementedError]. They are all implemented now, so every test here is a
+ * regression test and any failure is a real one.
  */
 class PyTypeTest {
 
@@ -78,5 +76,56 @@ class PyTypeTest {
         assertFailsWith<PyTypeError> {
             intType.cast(notAnInt)
         }
+    }
+
+    /**
+     * `type.__dict__` is a **`mappingproxy`**, not a `dict`. Handing that pointer to a [PyDict]
+     * is not merely inelegant, it is actively corrupting: `PyDict_Size`/`PyDict_Items` reject a
+     * non-dict with `PyErr_BadInternalCall()`, so every read returns a sentinel (`-1`/`NULL`)
+     * *and leaves the error indicator set* for whatever Python call runs next -- the same class
+     * of silent poisoning the `*OrNull` helpers on [PyObject] exist to avoid.
+     *
+     * The names asserted here are the ones the probe class declares, so this fails both if the
+     * mapping comes back empty (the sentinel path) and if it is somebody else's namespace.
+     */
+    @Test
+    fun dictExposesTheTypesOwnNamespace() = PythonTestFixture.withInterpreter {
+        Python3.exec(
+            """
+            class PyTypeDictProbe:
+                probe_marker = 7
+                def probe_method(self):
+                    return 1
+            py_type_dict_probe_instance = PyTypeDictProbe()
+            """.trimIndent()
+        )
+        val probeType = PythonTestFixture.eval("py_type_dict_probe_instance").Type
+        assertEquals("PyTypeDictProbe", probeType.name)
+
+        val namespace = probeType.dict
+        val keyNames = namespace.keys.map { it.toString() }
+        assertTrue(
+            keyNames.containsAll(listOf("probe_marker", "probe_method")),
+            "expected PyTypeDictProbe.__dict__ to carry the names the class declares, got $keyNames"
+        )
+        assertEquals(
+            keyNames.size, namespace.size,
+            "size must agree with the entries actually readable; a mismatch means PyDict_Size " +
+                "returned its -1 error sentinel"
+        )
+    }
+
+    /**
+     * A read of `__dict__` must not leave the error indicator set. If it does, the *next*
+     * unrelated Python call is the one that fails, which is why this asserts on a call made
+     * afterwards rather than on the read itself.
+     */
+    @Test
+    fun readingDictLeavesNoPendingError() = PythonTestFixture.withInterpreter {
+        val intType = PythonTestFixture.eval("42").Type
+        val namespace = intType.dict
+        assertTrue(namespace.size > 0, "int.__dict__ is not empty")
+        // Would surface the leftover SystemError from PyErr_BadInternalCall if one were pending.
+        assertEquals("3", PythonTestFixture.eval("1 + 2").toString())
     }
 }

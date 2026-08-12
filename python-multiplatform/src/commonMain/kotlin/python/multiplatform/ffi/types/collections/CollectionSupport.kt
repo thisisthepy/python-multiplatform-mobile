@@ -24,9 +24,16 @@ import python.native.ffi.Py_DecRef
 
 /**
  * `a == b`, via the raw `PyObject_RichCompareBool` FFI call directly (opid
- * `Py_EQ` == 2, see [PyCompareOp.EQ]) rather than [PyObject.richCompare],
- * which is still `TODO` elsewhere -- this lets element-equality-dependent
- * operations here (`indexOf`, `retainAll`, ...) work independently of that.
+ * `Py_EQ` == 2, see [PyCompareOp.EQ]) rather than [PyObject.richCompare].
+ *
+ * The original reason for going direct was that `richCompare` was a `TODO`; it is implemented
+ * now, and the direct call is kept for a different and better reason. This takes raw
+ * `NativePointer`s, so the element-equality-dependent operations here (`indexOf`, `retainAll`,
+ * `contains`, ...) can compare a candidate against every element without constructing a
+ * [PyObject] wrapper per element -- and each wrapper is a refcount round trip plus a registered
+ * cleaner. It also avoids the second crossing `richCompare` needs: `PyObject_RichCompare` returns
+ * a new `PyObject*` that then has to go through `PyObject_IsTrue` and `Py_DecRef`, where
+ * `PyObject_RichCompareBool` answers in one call.
  */
 internal fun pyEquals(a: NativePointer, b: NativePointer): Boolean {
     val result = python.multiplatform.ffi.Python3.withPython { PyObject_RichCompareBool(a, b, PyCompareOp.EQ.opId) }
@@ -100,10 +107,10 @@ internal fun snapshotElements(pointer: NativePointer): List<PyObject> {
  * the `else` branch below, exactly as the old name-based dispatch did (its
  * exact `PyType.name` would have been the subclass's own name, not `"list"`).
  * Falls back to `str(obj)` (via [PyObject.toString]) for any type not
- * explicitly handled -- not a fully native representation for arbitrary
- * user-defined objects, but always available without depending on
- * [python.multiplatform.ffi.conversion.PyContext] (whose `autoConvert`/
- * `proxyConvert` machinery is still `TODO` elsewhere).
+ * explicitly handled -- see the note on that branch below for why it is
+ * still the fallback now that
+ * [python.multiplatform.ffi.conversion.PyContext]'s `autoConvert`/
+ * `proxyConvert` exist (ROADMAP §7b closed the eager path).
  */
 internal fun pyObjectToNative(obj: PyObject): Any? {
     if (PyNone.isNone(obj)) return null
@@ -122,8 +129,26 @@ internal fun pyObjectToNative(obj: PyObject): Any? {
             PyTypeChecks.dictType -> PyDict(obj.pointer, true).toNativeMap()
             PyTypeChecks.setType -> PySet(obj.pointer, true).toNativeSet()
             PyTypeChecks.frozensetType -> PyFrozenSet(obj.pointer, true).toNativeSet()
-            // TODO: no generic fallback beyond str() for arbitrary user-defined objects --
-            // a full implementation would hook into PyContext's (still-TODO) conversion machinery.
+            // TODO(open design question): what should NATIVE conversion of a user-defined object
+            // produce? `str(obj)` is lossy and one-way -- `toNativeMap()`/`toNativeList()` on a
+            // container holding one silently turns it into its repr, which no caller can convert
+            // back. Deferring to PyContext is *not* the answer that was once assumed here: it is
+            // implemented now (ROADMAP §7b), and `proxyConvert` returns a `PyValue` wrapping a
+            // live PyObject, i.e. exactly what NATIVE exists to avoid. Calling it here would also
+            // invert the layering -- CollectionSupport is below `conversion/`, which calls *into*
+            // this function for ConversionStrategy.NATIVE.
+            //
+            // The question to answer first is which of these the boundary should carry, because
+            // each has a different lifetime rule (see docs/object-lifetime.md):
+            //   (a) a `Map<String, Any?>` built from the object's `__dict__`, recursively -- a
+            //       real native projection, but it drops behaviour, cannot represent cycles, and
+            //       needs a visited-set;
+            //   (b) an upcall-table handle (§7), which is native in the sense that matters for
+            //       Kotlin but is a reference, not a value;
+            //   (c) keep `str(obj)` and document NATIVE as builtins-only, making the lossiness
+            //       part of the contract rather than a gap.
+            // Measure before choosing: (a)'s cost is one `PyObject_GetAttrString` plus a full
+            // dict walk per object, against `str()`'s single call, on a container of N objects.
             else -> obj.toString()
         }
     } finally {

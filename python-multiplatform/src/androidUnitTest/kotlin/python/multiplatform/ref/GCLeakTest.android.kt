@@ -17,3 +17,5 @@ actual fun forceGC() {
     }
     Thread.sleep(50)
 }
+
+actual val cleanerReleasesAutomatically: Boolean = true

@@ -531,6 +531,34 @@ expect fun PyGILState_GetThisThreadState(): NativePointer?
 expect fun PyEval_SaveThread(): NativePointer?
 expect inline fun PyEval_RestoreThread(tstate: NativePointer)
 
+/**
+ * Runs the interpreter's pending-call queue -- and, on the main thread of the main interpreter,
+ * pending signal handlers -- on the calling thread.
+ *
+ * Part of the Stable ABI. Note what it does *not* do. `Py_MakePendingCalls` covers only the
+ * `_PY_CALLS_TO_DO_BIT` and `_PY_SIGNALS_PENDING_BIT` work items, while a full eval-loop
+ * checkpoint (`_Py_HandlePending`) additionally merges the free-threaded build's biased
+ * reference-counting queue, processes QSBR-deferred frees and runs a scheduled cyclic
+ * collection. So this is *not* a way to reclaim memory that another thread released; see
+ * [python.multiplatform.ffi.Python3.drainPendingReleases] for that.
+ *
+ * Returns 0 on success and -1 with the error indicator set otherwise. Called from a thread that
+ * is not the main thread of the main interpreter it returns 0 having done nothing.
+ */
+expect fun Py_MakePendingCalls(): Int
+
+/**
+ * Runs a full cyclic garbage collection: the C equivalent of `gc.collect()`. Part of the Stable ABI.
+ *
+ * On a free-threaded build this stops the world and merges *every* thread's deferred
+ * reference-count queue, so unlike an eval-loop checkpoint it can reclaim references that were
+ * released on behalf of some thread other than the caller. It is correspondingly expensive: the
+ * cost is proportional to the size of the heap, not to the amount of queued work.
+ *
+ * Returns the number of unreachable objects collected.
+ */
+expect fun PyGC_Collect(): Long
+
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Section 2
@@ -4194,7 +4222,13 @@ expect fun PyType_GetModule(type: NativePointer): NativePointer?
 // Section 28
 // Tuple Objects
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// TODO: Section 27, 28은 필요에 의해 추가된 Section이므로 순서 재정렬 하기
+// NOTE: section numbers are append order, not the C API documentation's chapter order.
+// Sections 1-26 follow the docs; 27 (Type Objects), 28 (Tuple Objects) and 29 (Module Objects)
+// were added when they were first needed and so sit after Weak Reference Objects instead of at
+// their documented positions (Type before Integer Objects, Tuple before List Objects, Module
+// before Iterator Objects). Renumbering is a ~370-line pure-comment move with no behavioural
+// effect, and it conflicts with anything else editing this file; the target order is recorded in
+// ROADMAP §12 instead. Navigate this file by function name, not by section number.
 expect fun PyTuple_New(len: Long): NativePointer?
 expect inline fun PyTuple_Size(p: NativePointer): Long
 expect fun PyTuple_GetItem(p: NativePointer, pos: Long): NativePointer?
@@ -4206,7 +4240,7 @@ expect inline fun PyTuple_SetItem(p: NativePointer, pos: Long, o: NativePointer)
 // Section 29
 // Module Objects
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// TODO: Section 29 was previously entirely absent (see Section 27/28's note above on ad-hoc ordering).
+// NOTE: this section was added after 27/28; see the ordering note above. Nothing is outstanding.
 /**
  *  *Part of the Stable ABI.*
  *
