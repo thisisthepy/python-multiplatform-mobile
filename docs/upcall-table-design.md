@@ -659,11 +659,16 @@ Two things the original sketch below did not anticipate:
   object name into it. `:ksp-fixtures:app` with group `io.github.thisisthepy` derives
   `io_github_thisisthepy_ksp_fixtures_app`.
 - **The plugin does not compile against KSP's Gradle plugin.** `kotlin-dsl` builds against
-  Gradle's embedded Kotlin (1.9 on Gradle 8.9) and KSP 2.3.11 is compiled with Kotlin 2.3:
+  Gradle's embedded Kotlin (2.0.20 on Gradle 8.11.1) and KSP 2.3.11 is compiled with Kotlin 2.3:
   "Class 'com.google.devtools.ksp.gradle.KspExtension' was compiled with an incompatible version
   of Kotlin". The dependency is `runtimeOnly` — a plugin id resolves from a classpath resource,
   not from a compiled type — and the two `ksp { arg(...) }` calls go through one reflective
   lookup of `arg(String, String)`.
+- **Which KSP configurations count is decided by name, and Android names them differently.** AGP's
+  source-set names put the build type last (`kspAndroidTestDebug`), so an `endsWith("Test")` check
+  put the processor on the unit-test compilation, which emitted a duplicate fragment that shadowed
+  `main`'s inside that compilation. `Test` is matched as a camel-case word now; see ROADMAP §13 and
+  `ksp-fixtures/android`, the fixture that carries an Android plugin.
 
 The original sketch, for the record:
 

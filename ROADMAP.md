@@ -540,14 +540,15 @@ The runtime is in `reflection/` — `HandleTable` (slot plus generation, so a re
 cannot alias onto whatever takes its slot), `UpcallTable`, `ExposedCallable`, `ObjectReference`.
 The generator is `python-multiplatform-ksp/`, wired into a user module by
 `python-multiplatform-gradle-plugin/` (one `id(...)`, no per-target `add("ksp<Target>", ...)`).
-Fixture modules under `ksp-fixtures/` run 29 tests against a table KSP actually generated, not a
-hand-written one.
+Fixture modules under `ksp-fixtures/` run 35 tests against a table KSP actually generated, not a
+hand-written one — 29 on desktop, and 6 more from `ksp-fixtures/android`, the fixture that carries
+an Android plugin (§13).
 
 **It survives a GraalVM native image**, which is the condition the whole design was chosen for:
 
 ```
-KOTLIN: table = 8 entries, 1 classes, from io_github_thisisthepy_sample_bindings
-PYTHON: resolved handle = 4294967303
+KOTLIN: table = 19 entries, 3 classes, from io_github_thisisthepy_sample
+PYTHON: resolved handle = 4294967314
 PYTHON: invoke result = 7
 PYTHON: @PythonInternal entry resolves to -1
 PYTHON: UPCALL_OK
@@ -563,7 +564,7 @@ needed no reflection registration, because it uses none. `sample` carries the bu
 carry its own `FunctionTableFragment` returning a constant `42`, with a comment saying the
 generator did not exist yet — and a hand-written fragment passes whether or not KSP ever runs, so
 the check measured less than it appeared to. It installs `python.multiplatform.generated.FunctionTable`
-from `:sample-bindings` instead, and the number Python reads back (`7`) is one the process
+— generated from `:sample`'s own sources — instead, and the number Python reads back (`7`) is one the process
 produced by calling the Kotlin object seven times, so a stub returning a constant cannot satisfy
 it. The `-1` line is the same check applied to `@PythonInternal`: an opted-out declaration must
 not resolve.
@@ -1350,9 +1351,22 @@ the contents of the generated table read back off `UpcallTable`. Measured on `:s
 ```
 runtime : 3.14.7  ·  sys.platform=darwin  ·  MacOS 26.5.1 (aarch64) / JVM 21.0.12
 eval    : sum(kotlin_numbers) * 2 -> int: 56
-table   : 8 entries, 1 classes, from io_github_thisisthepy_sample_bindings
-upcall  : Python called Kotlin through handle 4294967303 and got 0
+table   : 19 entries, 3 classes, from io_github_thisisthepy_sample
+upcall  : Python called Kotlin through handle 4294967314 and got 0
 ```
+
+and, since the AGP bump below, the same four sections on Android — observed on `pmp_api36` and on
+`pmp_api26`, which is `minSdk`:
+
+```
+1  3.14.7  ·  sys.platform=android  ·  Android 16 (SDK 36, aarch64) / ART VM 0.9
+3  table hit: handle 4294967317 -> 3   (Kotlin-side call; the boundary shim is desktop-only today)
+4  22 entries, 4 classes, from io_github_thisisthepy_sample
+   @PythonInternal held: the annotated member is absent from the table
+```
+
+Twenty-two rather than desktop's nineteen because the Android compilation also scans
+`MainActivity`; the module name is the same one, since it is one module now.
 
 `:sample:run` did not work before this and it was not the sample's fault twice over: the task had
 no `PYTHONHOME`, so `Py_Initialize` could not find `encodings`, and a project dependency resolves
@@ -1366,9 +1380,9 @@ round-tripped through a `Double`. It compiled. Nothing in it touched the object 
 `PyRun_SimpleString` is the call `Python3.exec` exists to avoid (it calls `PyErr_Print`, which
 clears the error indicator before anything can read it).
 
-### The convenience plugin cannot be applied to an Android module at these versions
+### The convenience plugin could not be applied to an Android module — closed
 
-This is the finding, and it is a property of the repo rather than of the sample.
+This was the finding, and it was a property of the repo rather than of the sample.
 
 ```
 java.lang.NoSuchMethodError: 'void com.android.build.api.variant
@@ -1377,21 +1391,81 @@ java.lang.NoSuchMethodError: 'void com.android.build.api.variant
 ```
 
 KSP 2.3.11 declares `MINIMUM_SUPPORTED_AGP_VERSION = 8.10.0` (read off its `agpUtils` class), and
-this build pins AGP 8.5.2, whose `AndroidComponentsExtension` has no such method (`javap` on
+this build pinned AGP 8.5.2, whose `AndroidComponentsExtension` has no such method (`javap` on
 `gradle-api-8.5.2.jar`). So `id("io.github.thisisthepy.python.multiplatform.bindings")` — which
-applies `com.google.devtools.ksp` — dies at configuration time in any module carrying an Android
-plugin. `ksp-fixtures` never hit this because neither fixture module applies one.
+applies `com.google.devtools.ksp` — died at configuration time in any module carrying an Android
+plugin, which is **every Android consumer of the plugin, not just this sample.** `ksp-fixtures`
+never hit it because neither fixture module applied an Android plugin: the fixtures were verifying
+their own shape rather than the plugin's advertised one, the same failure mode §2's
+`AssembledApiTest` had.
 
-**Every Android consumer of the plugin is in that position, not just this sample.** The fix is a
-two-version bump: AGP 8.10 requires Gradle 8.11.1 against this build's 8.9. That is worth doing
-deliberately — `python-multiplatform`'s Android wiring hangs a lot of hand-written `Copy` tasks
-and `preBuild` hooks off AGP — and it needs a device run to confirm, so it is recorded here rather
-than done in passing.
+**Two versions moved, and nothing else had to.**
 
-Until then the sample is split: `:sample-bindings` (no Android plugin) applies the bindings plugin
-and holds the Python-facing declarations; `:sample` depends on it from `desktopMain`/`iosMain`
-only, and its `androidMain` `UpcallDemo` reports the reason instead of pretending. **The split
-exists only because of the version constraint** — one module is the shape a consumer should copy.
+| | was | now | why |
+|---|---|---|---|
+| AGP | 8.5.2 | **8.10.1** | KSP's declared minimum is 8.10.0 |
+| Gradle | 8.9 | **8.11.1** | AGP 8.10's own minimum |
+
+Kotlin (2.4.20-Beta2), KSP (2.3.11) and the Compose Multiplatform plugin (1.6.11) are untouched —
+the bump needed no chain beyond those two. `python-multiplatform`'s Android wiring is the part
+that was expected to complain, since it hangs hand-written `Copy` tasks, a `tasks.configureEach`
+name match on `merge*JniLibFolders`/`*NativeLibs`, and a `preBuild.dependsOn(linkTaskProvider)`
+off AGP internals — none of it needed changing. `compileSdk` stays at 34.
+
+`:sample` applies the bindings plugin directly now and `:sample-bindings` is gone; its sources moved
+back under `sample/src/*/kotlin/.../demo/bindings/`. The Android `UpcallDemo` actual, which used to
+answer "unavailable on Android" to every member, is an ordinary one-line delegation like the others.
+
+Two things the fold-back exposed that the split had hidden:
+
+- **`androidMain` can name the generated table; `iosMain` cannot.** `androidMain` *is* the Android
+  target's source set, compiled together with each variant's KSP output, so its `actual` names
+  `FunctionTable` directly. `iosMain` is an intermediate source set the generating leaves depend
+  on, so it still needs one `actual` per leaf. Same processor, opposite answer, and the difference
+  is which side of the compilation the source set sits on.
+- **Exposure is a blacklist, so applying the plugin offers the whole module to Python — including
+  Compose.** A `@Composable` may only be called from another composable and a generated entry is an
+  ordinary lambda, so a scanned `@Composable` is a compile failure of *generated* code. `:sample`
+  therefore sets `excludePackages` to keep `...demo.ui` out. A separate module made this invisible;
+  any real app has UI in the same module as its bindings.
+
+### `ksp-fixtures/android`, and the second defect it found immediately
+
+`ksp-fixtures/android` is the fixture that carries `com.android.library` — the one thing neither
+existing fixture does. It applies the bindings plugin, exposes the same declaration shapes the
+desktop fixture uses, and runs 6 tests against the generated `FunctionTable` as a plain JVM unit
+test (`testDebugUnitTest`, no device). If the AGP/KSP pair ever drifts apart again it stops
+configuring, which is the failure worth having.
+
+It earned itself on the first run, by failing for an unrelated reason:
+
+```
+6 tests completed, 5 failed
+```
+
+The plugin decided which KSP configurations to put the processor on with `name.endsWith("Test")`.
+That holds for Kotlin target names (`kspDesktopTest`), but **AGP names its source sets with the
+build type last**:
+
+```
+main          kspAndroid              kspAndroidDebug              kspAndroidRelease
+unit test     kspAndroidTest          kspAndroidTestDebug          kspAndroidTestRelease
+instrumented  kspAndroidAndroidTest   kspAndroidAndroidTestDebug   kspAndroidAndroidTestRelease
+testFixtures  kspAndroidTestFixtures  kspAndroidTestFixturesDebug  kspAndroidTestFixturesRelease
+```
+
+so the suffix check caught three of those nine. The processor ran over the *test* sources on
+`kspAndroidTestDebug` and emitted a second `Fragment_<module>` and a second `FunctionTable` into
+the test compilation, where they shadowed the real ones from `main` — a compilation's own
+generated sources win over its classpath. The table the test read held the test class's own
+members and nothing the module exposes.
+
+This is exactly the duplicate-fragment hazard the plugin's own doc comment describes, arriving
+through a name shape that comment did not anticipate. `Test` is now matched as a camel-case *word*
+(`(?:^|[a-z0-9])Test(?:[A-Z]|$)`), not as a suffix, so a flavour or target named `testing` still
+keeps its processor. `WiringTest` pins the full observed Android configuration list.
+
+**Nothing without an Android plugin could have found this**, which is the point of the fixture.
 
 ### Two smaller things the sample found
 
@@ -1399,7 +1473,9 @@ exists only because of the version constraint** — one module is the shape a co
   KSP writes `FunctionTable` into `iosSimulatorArm64Main` and its siblings, so `iosMain` — which
   those leaves depend on — cannot name it, exactly as `commonMain` cannot. `installGeneratedUpcallTable`
   is therefore one line per leaf target. Anything designed to touch the generated table from
-  shared code has to route through an `expect`/`actual` like this.
+  shared code has to route through an `expect`/`actual` like this. The rule is about *intermediate*
+  source sets, not about "not being `commonMain`": `androidMain` is the Android target's own source
+  set and names `FunctionTable` directly, which the fold-back above made visible.
 - **A `var` with a `private set` would generate a fragment that does not compile.** `FragmentScanner`
   decides on `property.isMutable` alone and emits a `STATIC_SETTER`/`SETTER` assigning to it, so
   the generated file assigns to an inaccessible setter. Read off the scanner, not observed — the

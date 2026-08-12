@@ -9,7 +9,7 @@ import org.thisisthepy.python.multiplatform.demo.bindings.upcallTableSummary
 /**
  * The table is generated and installed here exactly as on desktop -- same processor, discovered
  * through a `.klib`. The call itself is made from Kotlin, because the Python-side boundary shim
- * is desktop-only; `UpcallDemo.ios.kt` in `:sample-bindings` says what is missing.
+ * is desktop-only; `bindings/UpcallDemo.ios.kt` next door says what is missing.
  */
 actual object UpcallDemo {
     actual val available: Boolean = true

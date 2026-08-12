@@ -10,9 +10,10 @@ import python.multiplatform.ffi.types.collections.PyList
  * Everything the demo screen calls, with no Compose in sight.
  *
  * Sections 1 and 2 are pure `commonMain` against the library's object model -- that is the point
- * of them. Section 3 (upcalls) goes through [UpcallDemo], which is `expect`/`actual` because the
- * generated function table lives in `:sample-bindings`, a module the Android target cannot depend
- * on. See `sample/build.gradle.kts` for why.
+ * of them. Section 3 (upcalls) goes through [UpcallDemo], which is `expect`/`actual` because KSP
+ * writes `python.multiplatform.generated.FunctionTable` into each *target's* own compilation, so
+ * `commonMain` -- compiled by every target and seeing none of their generated directories --
+ * cannot name it.
  */
 object PythonDemo {
 
@@ -73,10 +74,12 @@ object PythonDemo {
 }
 
 /**
- * The upcall half, which only exists where `:sample-bindings` can be depended on.
+ * The upcall half, one `actual` per target because the generated table is per-target.
  *
- * Every member is a one-line delegation on desktop and iOS; the Android actual explains why it is
- * not, rather than quietly doing nothing.
+ * Every member is a one-line delegation on every platform. It was not always: Android's actual
+ * used to answer "unavailable" to all of them, because the bindings plugin could not be applied to
+ * a module carrying an Android plugin below AGP 8.10 (ROADMAP §13). What still differs by platform
+ * is *who makes the call* -- only desktop reaches Kotlin from inside the interpreter.
  */
 expect object UpcallDemo {
 

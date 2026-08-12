@@ -39,11 +39,11 @@ dependencyResolutionManagement {
 rootProject.name = "PythonMultiplatformMobile"
 
 include(":sample")
-// The half of the sample that can apply the bindings plugin. KSP 2.3.11 requires AGP >= 8.10 and
-// this build is on 8.5.2, so no module carrying an Android plugin may apply it -- see the comment
-// in `sample/build.gradle.kts`.
-include(":sample-bindings")
 include(":python-multiplatform")
 include(":python-multiplatform-ksp")
 include(":ksp-fixtures:library")
 include(":ksp-fixtures:app")
+// The fixture that carries an Android plugin. `:library` and `:app` apply none, which is why the
+// KSP/AGP minimum-version wall of ROADMAP §13 stayed invisible to them while it broke every
+// Android consumer of the bindings plugin.
+include(":ksp-fixtures:android")
