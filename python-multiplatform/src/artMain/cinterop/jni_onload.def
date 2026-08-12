@@ -1235,6 +1235,26 @@ static void proxy_set_handle(JNIEnv *e, jclass c, jlong obj, jlong handle) {
     if (slot != NULL) *slot = handle;
 }
 
+/*
+ * ob_refcnt of the object at `obj`, read straight out of the header.
+ *
+ * Py_REFCNT is a macro over a struct this file does not include, and sys.getrefcount counts its
+ * own argument's temporary reference -- neither can answer whether tp_dealloc released the
+ * instance's reference to its heap type exactly once, which is what the cycle-collection tests
+ * check. ob_refcnt is the first field of PyObject and the stable ABI fixes that; it is 64-bit on
+ * both ABIs this project ships (arm64-v8a, x86_64), so jlong is the right width.
+ *
+ * A test probe. Composed here for the same reason proxy_set_handle is: reading 8 bytes at a raw
+ * address from Kotlin/JVM needs sun.misc.Unsafe, a restricted non-SDK interface on Android.
+ *
+ * Ordinary JNI. A load of one word cannot run Python, but it is only ever called from a test, so
+ * there is nothing to gain from a GC-blocking convention here.
+ */
+static jlong ob_refcnt(JNIEnv *e, jclass c, jlong obj) {
+    if (obj == 0) return 0;
+    return *(jlong *)(intptr_t)obj;
+}
+
 int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -1656,6 +1676,7 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"proxyCreateType", "()J", (void *)&proxy_create_type},
         {"proxyGetHandle", "(J)J", (void *)&proxy_get_handle},
         {"proxySetHandle", "(JJ)V", (void *)&proxy_set_handle},
+        {"obRefCnt", "(J)J", (void *)&ob_refcnt},
 
         {"testUpcallPrimitive", "(J)J", (void *)&test_upcall_primitive},
         {"testUpcallString", "(Ljava/lang/String;)J", (void *)&test_upcall_string},

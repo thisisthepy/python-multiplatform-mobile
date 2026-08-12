@@ -36,6 +36,36 @@ class UnregisteredAndroidCycleNode {
 }
 
 /**
+ * Which thread the last `tp_traverse` upcall arrived on.
+ *
+ * Test-owned, and that is the point: the lambda [CycleCollectionTest.setUp] registers with
+ * [ClassLookup] runs *inside* `ProxyCallbacks.traverse`, which itself runs on whichever thread C
+ * called the slot from. Recording the thread there therefore needs no hook in production code.
+ *
+ * Without it, "the handle was released after a `threading.Thread` ran `gc.collect()`" would only
+ * show that the release happened, not that it happened on a thread ART had never seen -- which is
+ * the whole claim `pmp_attach`'s `AttachCurrentThreadAsDaemon` branch exists to support.
+ */
+object TraverseThreadProbe {
+    @Volatile
+    var lastThreadId: Long = -1L
+
+    @Volatile
+    var lastThreadName: String? = null
+
+    fun record() {
+        val t = Thread.currentThread()
+        lastThreadId = t.id
+        lastThreadName = t.name
+    }
+
+    fun reset() {
+        lastThreadId = -1L
+        lastThreadName = null
+    }
+}
+
+/**
  * Android's counterpart of `desktopTest`'s and `iosSimulatorArm64Test`'s `CycleCollectionTest`:
  * a Kotlin object holds a Python object, the Python object holds that Kotlin object through its
  * handle, and the loop is breakable only by CPython's cycle collector reaching across the
@@ -70,6 +100,7 @@ class CycleCollectionTest {
                 name = AndroidCycleNode::class.qualifiedName!!,
                 memberNames = emptyList(),
                 traverse = { obj, visit ->
+                    TraverseThreadProbe.record()
                     val node = obj as AndroidCycleNode
                     if (node.rawPtr != 0L) visit(node.rawPtr)
                 },
@@ -219,5 +250,255 @@ class CycleCollectionTest {
             0, python.multiplatform.ffi.ProxyCallbacks.traverse(0L).size,
             "the null handle must report nothing",
         )
+    }
+
+    /**
+     * The leak `tp_clear` cannot reach: a proxy that dies **without** being in a cycle.
+     *
+     * Ported from `desktopTest`, and it is the case that matters most in practice. `tp_clear` only
+     * runs when the cyclic collector decides to break a loop, which is the exceptional path. The
+     * ordinary one is a refcount reaching zero, and that goes straight to `tp_dealloc` -- so with
+     * no `tp_dealloc` slot the [HandleTable] entry stays rooted for the life of the interpreter,
+     * holding its Kotlin object with it. Almost every proxy dies this way.
+     *
+     * The [AndroidCycleNode]s here deliberately reference nothing: `rawPtr` stays 0 and `ref`
+     * stays null, so there is no cycle for the collector to find and `gc.collect()` is never
+     * called. The only thing that can release these handles is `tp_dealloc`.
+     *
+     * ### The type refcount assertions
+     *
+     * `tp_dealloc` on a heap type has a second obligation beyond freeing the object: since 3.8
+     * every instance holds a strong reference to its type, and the default `subtype_dealloc`
+     * releases it. `pmp_proxy_dealloc` in `jni_onload.def` hand-writes that (`PyObject_Type` for
+     * the temporary, then two `Py_DecRef`s), so it can leak one type reference per instance by
+     * forgetting, or free the type out from under the process by doing it twice. Both are checked
+     * by reading `ob_refcnt` through [bindings.obRefCnt] -- the first field of `PyObject`, fixed
+     * there by the stable ABI. `sys.getrefcount` cannot answer this: it counts its own argument's
+     * temporary reference.
+     *
+     * The "rises while alive" assertion is not decoration: it is what proves the probe reads a
+     * real refcount, so the "returns afterwards" assertion cannot pass vacuously on an address
+     * that happens to hold a stable number.
+     */
+    @Test
+    fun testHandleReleasedWhenProxyDiesWithoutCycle() {
+        withGIL {
+            val proxyTypeAddr = ProxyTypeFactory.createProxyType()
+            assertTrue(proxyTypeAddr != 0L, "Proxy type creation failed")
+
+            val liveBefore = HandleTable.liveCount
+            val typeRefBefore = bindings.obRefCnt(proxyTypeAddr)
+
+            val rounds = 100
+            val proxies = LongArray(rounds)
+            val handles = LongArray(rounds)
+
+            repeat(rounds) { i ->
+                val pyObjPtr = bindings.PyObject_CallObjectN(proxyTypeAddr, 0L)
+                assertTrue(pyObjPtr != 0L, "Failed to instantiate proxy type at round $i")
+                proxies[i] = pyObjPtr
+
+                // rawPtr stays 0 and ref stays null: nothing to make a cycle out of.
+                val handle = HandleTable.register(AndroidCycleNode()).raw
+                handles[i] = handle
+                ProxyTypeFactory.setHandle(pyObjPtr, handle)
+            }
+
+            assertEquals(
+                liveBefore + rounds, HandleTable.liveCount,
+                "setup failed: $rounds handles should be rooted while the proxies are alive",
+            )
+            val typeRefAlive = bindings.obRefCnt(proxyTypeAddr)
+            assertEquals(
+                typeRefBefore + rounds, typeRefAlive,
+                "each live instance of a heap type holds one reference to that type, so the count " +
+                    "should have risen by exactly $rounds (before: $typeRefBefore, alive: " +
+                    "$typeRefAlive). If this fails the ob_refcnt probe is not reading a refcount " +
+                    "and the balance assertion after it would be meaningless",
+            )
+
+            // Drop the only reference to each proxy. This takes the refcount to zero, which is
+            // tp_dealloc's path and *not* tp_clear's -- the cyclic collector never runs here.
+            repeat(rounds) { i -> bindings.Py_DecRefN(proxies[i]) }
+
+            val stillRooted = handles.count { HandleTable.resolveRaw(it) != null }
+            assertEquals(
+                0, stillRooted,
+                "$stillRooted of $rounds handles are still rooted after their proxies were " +
+                    "deallocated. A proxy that dies without a cycle never runs tp_clear, so " +
+                    "without a tp_dealloc slot its HandleTable entry -- and the Kotlin object it " +
+                    "holds -- leaks for the life of the interpreter",
+            )
+            assertEquals(
+                liveBefore, HandleTable.liveCount,
+                "the table should be back to its starting size once every proxy is gone",
+            )
+            assertEquals(
+                typeRefBefore, bindings.obRefCnt(proxyTypeAddr),
+                "tp_dealloc must release the instance's reference to its heap type exactly once: " +
+                    "a count above $typeRefBefore means it was never released and the type leaks " +
+                    "per instance, below means it was released twice and the type will be freed " +
+                    "while still in use",
+            )
+        }
+    }
+
+    /**
+     * `tp_dealloc` reached from a thread CPython created, which ART has never seen.
+     *
+     * Every other test here runs the slots on the instrumentation thread, so `pmp_attach`'s
+     * `GetEnv` succeeds and the `AttachCurrentThreadAsDaemon` branch beside it is never taken.
+     * `ProxyTypeFactory`'s own documentation records that gap. A `threading.Thread` is a bare
+     * pthread, so handing the proxy's last reference to one and letting that thread drop it runs
+     * `pmp_proxy_dealloc` -> `pmp_release_handle` -> `pmp_attach` on a thread with no JNIEnv.
+     *
+     * Two things can go wrong and this test tells them apart from a pass:
+     *  - the attach fails, `pmp_release_handle` returns early, and the handle stays rooted;
+     *  - the attach succeeds but the detach is missed, in which case ART aborts the process with
+     *    "Native thread exiting without having called DetachCurrentThread" when the worker exits
+     *    -- which shows up as the whole instrumentation run dying, not as this assertion failing.
+     *
+     * The proxy is parked in `__main__` so that Python owns the only reference and Kotlin keeps
+     * none. Rebinding the name on the worker takes the refcount to zero there.
+     */
+    @Test
+    fun testDeallocOnAThreadCPythonCreated() {
+        withGIL {
+            val proxyTypeAddr = ProxyTypeFactory.createProxyType()
+            assertTrue(proxyTypeAddr != 0L, "Proxy type creation failed")
+
+            val liveBefore = HandleTable.liveCount
+            val typeRefBefore = bindings.obRefCnt(proxyTypeAddr)
+
+            val pyObjPtr = bindings.PyObject_CallObjectN(proxyTypeAddr, 0L)
+            assertTrue(pyObjPtr != 0L, "Failed to instantiate proxy type")
+
+            val handle = HandleTable.register(AndroidCycleNode()).raw
+            ProxyTypeFactory.setHandle(pyObjPtr, handle)
+
+            // Hand the reference to __main__, then drop ours: Python now owns the only one.
+            val main = PythonOnDevice.withUtf8("__main__") { bindings.PyImport_ImportModuleN(it) }
+            assertTrue(main != 0L, "could not import __main__")
+            val globals = PythonOnDevice.withUtf8("__dict__") {
+                bindings.PyObject_GetAttrStringN(main, it)
+            }
+            assertTrue(globals != 0L, "could not read __main__.__dict__")
+            val setRc = PythonOnDevice.withUtf8("_pmp_thread_proxy") {
+                bindings.PyDict_SetItemStringN(globals, it, pyObjPtr)
+            }
+            assertEquals(0, setRc, "could not park the proxy in __main__")
+            bindings.Py_DecRefN(pyObjPtr)
+            bindings.Py_DecRefN(globals)
+            bindings.Py_DecRefN(main)
+
+            assertNotNull(HandleTable.resolveRaw(handle), "handle did not resolve before the drop")
+
+            // The gc.collect() in the worker is not what drops the proxy -- __main__ still holds
+            // it at that point, so it is reachable. It is there to make the worker thread
+            // *identify itself*: collecting calls tp_traverse on every tracked object in the
+            // generation, this proxy included, and the traverse lambda records its thread. Without
+            // it the release below would be observable but the thread it happened on would not.
+            //
+            // t.join() releases the GIL, so the worker really does run both statements.
+            TraverseThreadProbe.reset()
+            val here = Thread.currentThread().id
+            val script = """
+                import gc, threading
+                def _pmp_drop():
+                    global _pmp_thread_proxy
+                    gc.collect()
+                    _pmp_thread_proxy = None
+                _t = threading.Thread(target=_pmp_drop)
+                _t.start()
+                _t.join()
+            """.trimIndent()
+            val rc = PythonOnDevice.withUtf8(script) { bindings.PyRun_SimpleStringN(it) }
+            assertEquals(0, rc, "the worker thread script did not run")
+
+            val seen = TraverseThreadProbe.lastThreadId
+            assertTrue(
+                seen != -1L,
+                "no slot callback reached Kotlin at all while the worker ran, so nothing here " +
+                    "says which thread the dealloc below happened on",
+            )
+            assertTrue(
+                seen != here,
+                "the slots ran on the instrumentation thread (id $here, " +
+                    "${TraverseThreadProbe.lastThreadName}), so CPython's worker did not carry " +
+                    "the callback and AttachCurrentThreadAsDaemon was still not exercised",
+            )
+
+            assertNull(
+                HandleTable.resolveRaw(handle),
+                "the proxy's last reference was dropped on a thread CPython created, and the " +
+                    "handle is still rooted -- pmp_attach could not give tp_dealloc's callback a " +
+                    "JNIEnv on a thread ART had never seen",
+            )
+            assertEquals(liveBefore, HandleTable.liveCount, "the table did not return to its starting size")
+            assertEquals(
+                typeRefBefore, bindings.obRefCnt(proxyTypeAddr),
+                "tp_dealloc ran on a CPython-created thread but did not balance the instance's " +
+                    "reference to its heap type",
+            )
+        }
+    }
+
+    /**
+     * The collector itself running on a thread CPython created -- `tp_traverse` and `tp_clear`,
+     * where [testDeallocOnAThreadCPythonCreated] covers `tp_dealloc`.
+     *
+     * `tp_traverse` is the harder of the two over JNI: it calls back into Kotlin for a `jlong[]`
+     * and reads it with `GetLongArrayElements`, all on a thread that may have been attached a
+     * microsecond earlier.
+     */
+    @Test
+    fun testCycleCollectedOnAThreadCPythonCreated() {
+        withGIL {
+            val proxyTypeAddr = ProxyTypeFactory.createProxyType()
+            assertTrue(proxyTypeAddr != 0L, "Proxy type creation failed")
+
+            val pyObjPtr = bindings.PyObject_CallObjectN(proxyTypeAddr, 0L)
+            assertTrue(pyObjPtr != 0L, "Failed to instantiate proxy type")
+
+            val node = AndroidCycleNode()
+            val handle = HandleTable.register(node).raw
+            ProxyTypeFactory.setHandle(pyObjPtr, handle)
+
+            node.ref = PyObject(assertNotNull(pyObjPtr.toNativePointer()), borrowed = false)
+            node.rawPtr = pyObjPtr
+
+            assertNotNull(HandleTable.resolveRaw(handle), "handle did not resolve before collection")
+
+            TraverseThreadProbe.reset()
+            val here = Thread.currentThread().id
+            val script = """
+                import gc, threading
+                _t = threading.Thread(target=gc.collect)
+                _t.start()
+                _t.join()
+            """.trimIndent()
+            val rc = PythonOnDevice.withUtf8(script) { bindings.PyRun_SimpleStringN(it) }
+            assertEquals(0, rc, "the worker thread script did not run")
+
+            val seen = TraverseThreadProbe.lastThreadId
+            assertTrue(
+                seen != -1L,
+                "tp_traverse never reached Kotlin during the worker's collection, so the cycle " +
+                    "was invisible to it -- pmp_attach could not produce a JNIEnv there",
+            )
+            assertTrue(
+                seen != here,
+                "tp_traverse ran on the instrumentation thread (id $here, " +
+                    "${TraverseThreadProbe.lastThreadName}) rather than on CPython's worker, so " +
+                    "AttachCurrentThreadAsDaemon was still not exercised",
+            )
+
+            assertNull(
+                HandleTable.resolveRaw(handle),
+                "the cycle was not collected when gc.collect() ran on a CPython-created thread, " +
+                    "though it is on the instrumentation thread -- tp_traverse or tp_clear did " +
+                    "not reach Kotlin through pmp_attach's AttachCurrentThreadAsDaemon branch",
+            )
+        }
     }
 }
