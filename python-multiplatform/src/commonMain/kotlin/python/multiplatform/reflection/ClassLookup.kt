@@ -28,4 +28,14 @@ object ClassLookup {
     /** [find], but throws where the caller has no better response than to give up. */
     fun require(name: String): ReflectedClass =
         find(name) ?: throw IllegalArgumentException("no such exposed class: $name")
+
+    /**
+     * Every class currently registered, in registration order.
+     *
+     * For generators that need to describe the whole set rather than resolve one name --
+     * [python.multiplatform.ffi.upcall.PythonProxySource] is the one that does, to render a
+     * Python class per [ReflectedClass] alongside the module functions it already renders. A
+     * copy, for the same reason [UpcallTable.entries] returns one.
+     */
+    fun all(): List<ReflectedClass> = classes.values.toList()
 }

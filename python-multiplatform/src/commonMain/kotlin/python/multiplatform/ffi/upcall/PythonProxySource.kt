@@ -3,7 +3,10 @@ package python.multiplatform.ffi.upcall
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.Python3
 import python.multiplatform.reflection.CallableKind
+import python.multiplatform.reflection.ClassLookup
 import python.multiplatform.reflection.ExposedCallable
+import python.multiplatform.reflection.ReflectedClass
+import python.multiplatform.reflection.ReflectedClassKind
 import python.multiplatform.reflection.UpcallTable
 
 /**
@@ -52,16 +55,30 @@ import python.multiplatform.reflection.UpcallTable
  * reflection, no class loading and no dynamic Kotlin code -- the closed world stays closed.
  * (Unverified here: no native image was built for this change.)
  *
- * ### What is deliberately not rendered
+ * ### Instance surfaces: [CallableKind.METHOD], [CallableKind.GETTER], [CallableKind.SETTER]
  *
- * Only [CallableKind.FUNCTION] entries become proxies. Everything else needs a Python object this
- * layer cannot make:
+ * These need a receiver, which a bare module function has nowhere to put. [render] takes the
+ * matching [ReflectedClass] descriptors and, for each one, emits a plain Python `class` whose
+ * `__init__` (if a `CONSTRUCTOR` entry exists) calls through to Kotlin and stashes the resulting
+ * handle in `self._pm_handle`, and whose methods and properties pass that handle as `args[0]` --
+ * exactly the shape `pm_invoke` already expects for a receiver-carrying entry.
+ *
+ * This deliberately does **not** go through [python.multiplatform.ffi.ProxyTypeFactory]'s
+ * `PyType_FromSpec` type. That type exists for one thing: giving a Kotlin-held Python reference a
+ * `tp_traverse`/`tp_clear`/`tp_dealloc` slot so CPython's cyclic collector can see through it
+ * (`CycleCollectionTest`). It carries no `tp_call`, `tp_methods` or `tp_getset` -- nothing that
+ * would let Python *call into* Kotlin -- and nothing in this codebase wires a `TypeTag.OBJECT`
+ * return into an instance of it; [UpcallTrampoline.marshalResult] hands back a bare
+ * [python.multiplatform.reflection.HandleTable] integer today. A receiver in this design is
+ * therefore just that integer, and a plain Python class holding one in an attribute is sufficient
+ * -- no C type, no new slot, no new platform code.
+ *
+ * ### What is still not rendered
  *
  * | kind | why not |
  * |---|---|
- * | `METHOD`, `GETTER`, `SETTER` | `args[0]` is a receiver, which comes from a proxy *instance* -- §7's `PyType_FromSpec` type, not a module function |
- * | `STATIC_GETTER`, `STATIC_SETTER` | a property, not a callable. Rendering it as `libraryVersion()` would make the Python surface disagree with the Kotlin declaration, and rendering it as a value would freeze a `var` at install time |
- * | `CONSTRUCTOR` | returns an object handle; what Python should get back is a proxy instance, which is the same §7 type |
+ * | `STATIC_GETTER`, `STATIC_SETTER` | a property, not a callable. Rendering it as `libraryVersion()` would make the Python surface disagree with the Kotlin declaration, and rendering it as a value would freeze a `var` at install time. Doing this right needs a module-level `__getattr__`/`__setattr__` (PEP 562), which nothing here emits yet |
+ * | a `TypeTag.OBJECT` value returned from an arbitrary [CallableKind.FUNCTION] or [CallableKind.METHOD] | still crosses as the bare handle integer, not wrapped in the class rendered for it. Only a value that came from *this* proxy's own `__init__` -- i.e. something Python itself constructed -- gets the class. A factory function that should hand back a `Counter` today hands back an `int` |
  *
  * These are skipped silently *here* because the skip is a property of this stage, not a policy
  * decision -- `docs/binding-policy.md` already decided they are exposed, and they remain reachable
@@ -128,37 +145,61 @@ object PythonProxySource {
     """.trimIndent()
 
     /**
-     * Renders the proxy module for [entries].
+     * Renders the proxy module for [entries] and [classes].
      *
      * @param entries what the table holds; [UpcallTable.entries] is the usual source.
-     * @param rootModule where an entry whose name has no dot in it goes. Kotlin's default package
-     *   produces such names, and they have nowhere else to live.
+     * @param classes the class descriptors whose [CallableKind.METHOD]/[CallableKind.GETTER]/
+     *   [CallableKind.SETTER]/[CallableKind.CONSTRUCTOR] entries in [entries] should get a Python
+     *   class rather than being left unreachable; [ClassLookup.all] is the usual source. Only
+     *   [ReflectedClassKind.CLASS] and [ReflectedClassKind.INTERFACE] are rendered -- an `object`'s
+     *   members are already [CallableKind.FUNCTION]/[CallableKind.STATIC_GETTER] under the
+     *   object's name (`FragmentScanner`'s `staticFunctionEntry`), so they go through the ordinary
+     *   function path above with no receiver, and an `ENUM`'s instances come from
+     *   [CallableKind.STATIC_GETTER] entries this stage does not render either.
+     * @param rootModule where a name with no dot in it goes. Kotlin's default package produces
+     *   such names, and they have nowhere else to live.
      * @return Python source. Deterministic, and safe to `exec` more than once -- every statement is
-     *   an assignment or a `def`.
+     *   an assignment, a `def`, or a `class`.
      */
-    fun render(entries: List<ExposedCallable>, rootModule: String = DEFAULT_ROOT_MODULE): String {
-        val rendered = entries.filter { it.kind == CallableKind.FUNCTION }
+    fun render(
+        entries: List<ExposedCallable>,
+        classes: List<ReflectedClass> = emptyList(),
+        rootModule: String = DEFAULT_ROOT_MODULE,
+    ): String {
+        val byName = entries.associateBy { it.name }
+        val functions = entries.filter { it.kind == CallableKind.FUNCTION }
+        val renderableClasses = classes.filter {
+            it.kind == ReflectedClassKind.CLASS || it.kind == ReflectedClassKind.INTERFACE
+        }
 
         return buildString {
             appendLine(support)
             appendLine()
-            if (rendered.isEmpty()) {
+            if (functions.isEmpty() && renderableClasses.isEmpty()) {
                 // Not an error: a table can legitimately hold nothing this stage can render (only
-                // methods, say). Saying so in the generated source beats emitting an empty file that
-                // reads like a generator failure.
-                appendLine("# no CallableKind.FUNCTION entries to proxy")
+                // static members, say). Saying so in the generated source beats emitting an empty
+                // file that reads like a generator failure.
+                appendLine("# no CallableKind.FUNCTION entries or proxy classes to render")
                 return@buildString
             }
             appendLine(ENTRY_POINT_GUARD)
             appendLine()
-            rendered.forEachIndexed { index, entry ->
+            var index = 0
+            functions.forEach { entry ->
                 appendLine(renderOne(index, entry, rootModule))
+                index++
+            }
+            renderableClasses.forEach { cls ->
+                val (source, nextIndex) = renderClass(index, cls, byName, rootModule)
+                appendLine(source)
+                index = nextIndex
             }
         }
     }
 
     /**
-     * Renders the proxies for whatever [UpcallTable] currently holds and `exec`s them.
+     * Renders the proxies for whatever [UpcallTable] and [ClassLookup] currently hold and `exec`s
+     * them.
      *
      * The caller has to have bound the two raw entry points (`_pm_resolve` and `_pm_invoke`) into
      * `__main__` first; how that is done is per-platform and is the one part of this path that is
@@ -169,7 +210,7 @@ object PythonProxySource {
      * @return the source that was executed, so a caller can log or inspect exactly what ran.
      */
     fun install(rootModule: String = DEFAULT_ROOT_MODULE): String {
-        val source = render(UpcallTable.entries(), rootModule)
+        val source = render(UpcallTable.entries(), ClassLookup.all(), rootModule)
         Python3.exec(source)
         return source
     }
@@ -200,24 +241,32 @@ object PythonProxySource {
             )
     """.trimIndent()
 
+    /**
+     * A parenthesised Python tuple literal for [elements], with the one-element trailing comma
+     * that turns `(a0)` (just `a0`) into an actual tuple -- the trampoline calls `PyTuple_Size` on
+     * whatever it is handed, and a bare non-tuple argument fails that call rather than being
+     * politely rejected.
+     */
+    private fun tupleOf(elements: List<String>): String = when (elements.size) {
+        0 -> "()"
+        1 -> "(${elements[0]},)"
+        else -> "(${elements.joinToString(", ")})"
+    }
+
+    private fun params(arity: Int): List<String> = (0 until arity).map { "a$it" }
+
     private fun renderOne(index: Int, entry: ExposedCallable, rootModule: String): String {
         val handle = "_pm_h_$index"
         val function = "_pm_f_$index"
-        val params = (0 until entry.arity).joinToString(", ") { "a$it" }
-        // A one-element tuple needs the trailing comma or it is not a tuple at all, and the
-        // trampoline would be handed the bare argument and read its size instead of its items.
-        val argsTuple = when (entry.arity) {
-            0 -> "()"
-            1 -> "(a0,)"
-            else -> "($params)"
-        }
+        val paramList = params(entry.arity).joinToString(", ")
+        val argsTuple = tupleOf(params(entry.arity))
         val dot = entry.name.lastIndexOf('.')
         val module = if (dot < 0) rootModule else entry.name.substring(0, dot)
         val leaf = if (dot < 0) entry.name else entry.name.substring(dot + 1)
 
         val body = if (entry.isSuspend) {
             """
-            |async def $function($params):
+            |async def $function($paramList):
             |    _pm_r = _pm_invoke($handle, $argsTuple)
             |    # Two return types for one declaration: the real value when the Kotlin body never
             |    # reached a suspension point, an asyncio.Future when it did. Only the second costs
@@ -228,7 +277,7 @@ object PythonProxySource {
             """.trimMargin()
         } else {
             """
-            |def $function($params):
+            |def $function($paramList):
             |    return _pm_invoke($handle, $argsTuple)
             """.trimMargin()
         }
@@ -244,6 +293,124 @@ object PythonProxySource {
             |$function.__qualname__ = ${entry.name.quoted()}
             |setattr(_pm_module(${module.quoted()}), ${leaf.quoted()}, $function)
         """.trimMargin()
+    }
+
+    /**
+     * Renders one Python class for [cls], plus the `_pm_bind` calls its members need.
+     *
+     * @param startIndex the first unused `_pm_h_N` / `_pm_f_N` suffix; shared with [render]'s
+     *   function loop so a class's handles never collide with a module function's.
+     * @return the source, and the next unused index -- the same threading [render] does across
+     *   its function loop, extended across classes too.
+     */
+    private fun renderClass(
+        startIndex: Int,
+        cls: ReflectedClass,
+        byName: Map<String, ExposedCallable>,
+        rootModule: String,
+    ): Pair<String, Int> {
+        var index = startIndex
+        fun bindHandle(): String {
+            val handle = "_pm_h_$index"
+            index++
+            return handle
+        }
+
+        val binds = StringBuilder()
+        val body = StringBuilder()
+
+        val ctor = byName["${cls.name}.<init>"]
+        if (ctor != null) {
+            val handle = bindHandle()
+            binds.appendLine("$handle = _pm_bind(${ctor.name.quoted()})")
+            val paramList = params(ctor.arity).joinToString(", ")
+            val callParams = if (paramList.isEmpty()) "self" else "self, $paramList"
+            val argsTuple = tupleOf(params(ctor.arity))
+            body.appendLine("    def __init__($callParams):")
+            body.appendLine("        self._pm_handle = _pm_invoke($handle, $argsTuple)")
+            body.appendLine()
+        }
+
+        // Preserves [ReflectedClass.memberNames] order (declaration order) for methods, but
+        // collects property names into a set first: a GETTER and its SETTER are two entries with
+        // one Python name between them, and rendering the getter as soon as its name is seen would
+        // split `@property`/`@x.setter` across wherever each entry happened to fall in the member
+        // list instead of keeping them adjacent, which is what a reader expects of one property.
+        val propertyNames = LinkedHashSet<String>()
+        for (memberName in cls.memberNames) {
+            val entry = byName[memberName] ?: continue
+            when (entry.kind) {
+                CallableKind.METHOD -> {
+                    val handle = bindHandle()
+                    binds.appendLine("$handle = _pm_bind(${entry.name.quoted()})")
+                    body.append(renderMethodBody(entry.name.substringAfterLast('.'), handle, entry))
+                    body.appendLine()
+                }
+                CallableKind.GETTER -> propertyNames += entry.name.substringAfterLast('.')
+                // SETTER is picked up alongside its GETTER below; CONSTRUCTOR was handled above;
+                // FUNCTION/STATIC_GETTER/STATIC_SETTER members of this class (an object's or a
+                // companion's) already went through the ordinary function path in `render`.
+                else -> {}
+            }
+        }
+
+        for (propName in propertyNames) {
+            val getter = byName["${cls.name}.$propName"] ?: continue
+            val getterHandle = bindHandle()
+            binds.appendLine("$getterHandle = _pm_bind(${getter.name.quoted()})")
+            body.appendLine("    @property")
+            body.appendLine("    def $propName(self):")
+            body.appendLine("        return _pm_invoke($getterHandle, (self._pm_handle,))")
+            body.appendLine()
+
+            val setter = byName["${cls.name}.$propName="]
+            if (setter != null) {
+                val setterHandle = bindHandle()
+                binds.appendLine("$setterHandle = _pm_bind(${setter.name.quoted()})")
+                body.appendLine("    @$propName.setter")
+                body.appendLine("    def $propName(self, a0):")
+                body.appendLine("        _pm_invoke($setterHandle, (self._pm_handle, a0))")
+                body.appendLine()
+            }
+        }
+
+        val dot = cls.name.lastIndexOf('.')
+        val module = if (dot < 0) rootModule else cls.name.substring(0, dot)
+        val className = if (dot < 0) cls.name else cls.name.substring(dot + 1)
+
+        val source = buildString {
+            append(binds)
+            appendLine()
+            appendLine("class $className:")
+            if (body.isEmpty()) appendLine("    pass") else append(body)
+            appendLine()
+            appendLine("$className.__qualname__ = ${cls.name.quoted()}")
+            appendLine("setattr(_pm_module(${module.quoted()}), ${className.quoted()}, $className)")
+        }
+        return source to index
+    }
+
+    /** The method half of [renderClass]: like [renderOne]'s body, but `self._pm_handle` is
+     * always the first element of the args tuple. */
+    private fun renderMethodBody(name: String, handle: String, entry: ExposedCallable): String {
+        val paramList = params(entry.arity).joinToString(", ")
+        val callParams = if (paramList.isEmpty()) "self" else "self, $paramList"
+        val argsTuple = tupleOf(listOf("self._pm_handle") + params(entry.arity))
+
+        return if (entry.isSuspend) {
+            """
+            |    async def $name($callParams):
+            |        _pm_r = _pm_invoke($handle, $argsTuple)
+            |        if hasattr(_pm_r, '__await__'):
+            |            return await _pm_r
+            |        return _pm_r
+            """.trimMargin()
+        } else {
+            """
+            |    def $name($callParams):
+            |        return _pm_invoke($handle, $argsTuple)
+            """.trimMargin()
+        }
     }
 
     private fun String.quoted(): String =

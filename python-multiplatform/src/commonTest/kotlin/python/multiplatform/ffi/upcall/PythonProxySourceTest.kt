@@ -2,6 +2,7 @@ package python.multiplatform.ffi.upcall
 
 import python.multiplatform.reflection.CallableKind
 import python.multiplatform.reflection.ExposedCallable
+import python.multiplatform.reflection.ReflectedClass
 import python.multiplatform.reflection.TypeTag
 import kotlin.test.Test
 import kotlin.test.assertContains
@@ -93,10 +94,12 @@ class PythonProxySourceTest {
     }
 
     @Test
-    fun kindsThatNeedAReceiverOrAnAttributeAreLeftToTheProxyTypeAndNotRenderedHere() {
+    fun kindsThatNeedAReceiverOrAnAttributeAreLeftUnrenderedWithNoClassDescriptor() {
         // Rendering a METHOD as a module function would put the receiver handle in the caller's
         // hands as a bare int, and rendering a STATIC_GETTER as `libraryVersion()` would make the
-        // Python surface disagree with the Kotlin declaration. Both belong to §7's proxy type.
+        // Python surface disagree with the Kotlin declaration. A METHOD/GETTER/SETTER only gets a
+        // Python-visible surface when its owning ReflectedClass is passed too (see the `classes`
+        // tests below); STATIC_GETTER/STATIC_SETTER have no rendering path at all yet.
         val source = PythonProxySource.render(
             listOf(
                 entry("p.Thing.method", arity = 1, kind = CallableKind.METHOD),
@@ -112,13 +115,99 @@ class PythonProxySourceTest {
         assertContains(source, "_pm_bind('p.plain')")
         assertFalse(source.contains("p.Thing.method"), "a method must not be rendered as a module function")
         assertFalse(source.contains("p.version"), "a property must not be rendered as a callable")
+        assertFalse(source.contains("class "), "no ReflectedClass was passed, so no class can be rendered")
+    }
+
+    // ------------------------------------------------------------------------------- classes
+
+    @Test
+    fun aConstructorAndAnInstanceMethodBecomeAPythonClassThatDispatchesThroughTheHandle() {
+        val ctor = entry("fixture.library.Counter.<init>", arity = 1, kind = CallableKind.CONSTRUCTOR)
+        val increment = entry("fixture.library.Counter.increment", arity = 1, kind = CallableKind.METHOD)
+        val cls = ReflectedClass(
+            name = "fixture.library.Counter",
+            memberNames = listOf(ctor.name, increment.name),
+        )
+
+        val source = PythonProxySource.render(listOf(ctor, increment), listOf(cls))
+
+        assertContains(source, "class Counter:")
+        assertContains(source, "def __init__(self, a0):")
+        assertContains(source, "self._pm_handle = _pm_invoke(")
+        assertContains(source, "def increment(self, a0):")
+        assertContains(source, "return _pm_invoke(")
+        assertContains(source, "(self._pm_handle, a0)")
+        assertContains(source, "setattr(_pm_module('fixture.library'), 'Counter', Counter)")
+    }
+
+    @Test
+    fun aPropertyBecomesAPythonPropertyRatherThanAMethod() {
+        val getter = entry("fixture.library.Counter.value", kind = CallableKind.GETTER)
+        val setter = entry("fixture.library.Counter.value=", arity = 1, kind = CallableKind.SETTER)
+        val cls = ReflectedClass(name = "fixture.library.Counter", memberNames = listOf(getter.name, setter.name))
+
+        val source = PythonProxySource.render(listOf(getter, setter), listOf(cls))
+
+        assertContains(source, "@property")
+        assertContains(source, "def value(self):")
+        assertContains(source, "(self._pm_handle,)")
+        assertContains(source, "@value.setter")
+        assertContains(source, "def value(self, a0):")
+        assertFalse(source.contains("value()"), "a property must not be called like a method")
+    }
+
+    @Test
+    fun aReadOnlyPropertyGetsNoSetter() {
+        val getter = entry("fixture.library.Counter.value", kind = CallableKind.GETTER)
+        val cls = ReflectedClass(name = "fixture.library.Counter", memberNames = listOf(getter.name))
+
+        val source = PythonProxySource.render(listOf(getter), listOf(cls))
+
+        assertContains(source, "@property")
+        assertFalse(source.contains(".setter"), "no SETTER entry means no setter to render")
+    }
+
+    @Test
+    fun aSuspendingInstanceMethodBecomesAnAwaitableTheSameWayASuspendingFunctionDoes() {
+        val method = entry("fixture.library.Worker.fetch", arity = 1, kind = CallableKind.METHOD, isSuspend = true)
+        val cls = ReflectedClass(name = "fixture.library.Worker", memberNames = listOf(method.name))
+
+        val source = PythonProxySource.render(listOf(method), listOf(cls))
+
+        assertContains(source, "async def fetch(self, a0):")
+        assertContains(source, "if hasattr(_pm_r, '__await__'):")
+        assertContains(source, "return await _pm_r")
+        assertFalse(source.contains("def fetch(self, a0):\n        return _pm_invoke"), "a suspending method must not be a plain def")
+    }
+
+    @Test
+    fun aClassWithNoPackageOfItsOwnLandsInTheRootModule() {
+        val ctor = entry("Standalone.<init>", kind = CallableKind.CONSTRUCTOR)
+        val cls = ReflectedClass(name = "Standalone", memberNames = listOf(ctor.name))
+
+        val source = PythonProxySource.render(listOf(ctor), listOf(cls))
+        assertContains(source, "setattr(_pm_module('kotlin'), 'Standalone', Standalone)")
+    }
+
+    @Test
+    fun functionsAndClassesRenderTogetherWithoutHandleNameCollisions() {
+        val fn = entry("fixture.library.greet", arity = 1)
+        val ctor = entry("fixture.library.Counter.<init>", arity = 1, kind = CallableKind.CONSTRUCTOR)
+        val cls = ReflectedClass(name = "fixture.library.Counter", memberNames = listOf(ctor.name))
+
+        val source = PythonProxySource.render(listOf(fn, ctor), listOf(cls))
+
+        val handleNames = Regex("^(_pm_h_\\d+) = _pm_bind", RegexOption.MULTILINE)
+            .findAll(source).map { it.groupValues[1] }.toList()
+        assertEquals(handleNames.distinct(), handleNames, "every bound handle name must be unique")
+        assertEquals(2, handleNames.size)
     }
 
     @Test
     fun anEmptyTableRendersSomethingRunnableRatherThanNothing() {
         val source = PythonProxySource.render(emptyList())
         assertContains(source, "def _pm_settle(")
-        assertContains(source, "# no CallableKind.FUNCTION entries to proxy")
+        assertContains(source, "# no CallableKind.FUNCTION entries or proxy classes to render")
         assertFalse(source.contains("_pm_bind('"), "there is nothing to bind")
     }
 
