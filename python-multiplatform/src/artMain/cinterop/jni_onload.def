@@ -1272,6 +1272,265 @@ static jlong ob_refcnt(JNIEnv *e, jclass c, jlong obj) {
     return *(jlong *)(intptr_t)obj;
 }
 
+/*
+ * ===========================================================================
+ * Upcalls: Python -> Kotlin/JVM.
+ * ===========================================================================
+ *
+ * The last of the three JVM/native inversions in this file, and the same one as the proxy type's:
+ * desktop hands Python a Panama upcall stub, Kotlin/Native hands it a `staticCFunction`, and
+ * Android can produce neither -- `androidMain` is Kotlin/JVM on ART. A `PyMethodDef`'s `ml_meth`
+ * has to be a C function pointer, so the entry points are here and *they* call Kotlin, through
+ * `python/native/ffi/UpcallCallbacks` registered in JNI_OnLoad.
+ *
+ * Only the address-publishing step lives here. Every argument and every result is marshalled by
+ * `commonMain`'s UpcallTrampoline, which is shared with the other two platforms; what crosses this
+ * boundary is `(jlong callableHandle, jlong argsTuple) -> jlong`, i.e. primitives only, which is
+ * what androidMain/README.md requires of anything on this path.
+ *
+ * ### Conventions this side must not break
+ *
+ *  - `args` is **borrowed** and is passed straight through. Nothing here touches its refcount;
+ *    the trampoline wraps its items with `borrowed = true`.
+ *  - The result is a **new** reference, produced by the trampoline and returned unchanged.
+ *  - `self` on a bound `pm_invoke` is the callable handle as a PyLong, borrowed like any
+ *    PyCFunction's self. A bad one becomes -1 (CallableHandle.NONE), which the trampoline rejects
+ *    with the error indicator set -- not a crash, and not a call to whatever entry 0 happens to be.
+ *  - Failure leaves as 0 with Python's error indicator set. A pending *JVM* exception is cleared
+ *    before returning, because ART aborts if one is left set across a return into native code.
+ *
+ * ### The GIL
+ *
+ * CPython holds the GIL when it calls a PyCFunction, so nothing here takes it. The trampoline on
+ * the Kotlin side still takes its own PyGILState_Ensure/Release pair unconditionally -- that is
+ * commonMain/README.md's rule for any entry point reached from C, and PyGILState_Ensure is
+ * reentrant, so the second one costs a counter bump.
+ *
+ * ### Cost
+ *
+ * One JNI upcall per call, plus an attach/detach pair when Python calls from a thread ART has
+ * never seen -- every `threading.Thread` is a bare pthread, so that is not a corner case. The
+ * detach is not optional: ART aborts the process when a thread it knows about exits without
+ * calling DetachCurrentThread, and a CPython worker thread exits outside our control. That is the
+ * same balance pmp_attach already strikes for tp_traverse, and it is why this reuses it.
+ */
+
+/* From methodobject.h. Flag values are ABI, not header-version-dependent. */
+#define PMP_METH_VARARGS 0x0001
+#define PMP_METH_O       0x0008
+
+/*
+ * PyCFunction, with the same jlong-for-PyObject* convention the rest of this file uses. Both ABIs
+ * this project ships (arm64-v8a, x86_64) pass a pointer and an int64_t identically.
+ */
+typedef jlong (*pmp_pycfunction)(jlong, jlong);
+
+/* Mirrors CPython's PyMethodDef; stable ABI, so its layout is fixed. */
+typedef struct {
+    const char *ml_name;
+    pmp_pycfunction ml_meth;
+    int ml_flags;
+    const char *ml_doc;
+} pmp_method_def;
+
+extern jlong PyCMethod_New(void *ml, jlong self, jlong module, jlong cls);
+extern void *PyExc_RuntimeError;
+
+static jclass g_upcallBridge = NULL;
+static jmethodID g_upcallInvokeM = NULL;
+static jmethodID g_upcallResolveM = NULL;
+static jmethodID g_upcallReleaseM = NULL;
+
+static jlong pmp_upcall_invoke_meth(jlong self, jlong args);
+static jlong pmp_upcall_resolve_meth(jlong self, jlong name);
+static jlong pmp_upcall_bind_meth(jlong self, jlong handle);
+static jlong pmp_upcall_release_meth(jlong self, jlong handle);
+
+/*
+ * Static rather than heap-allocated: a PyCFunction object stores the PyMethodDef * it was built
+ * from instead of copying it, so anything freed here would leave every callable built from it
+ * pointing at released memory. Four structs for the life of the process.
+ */
+static pmp_method_def g_pmInvokeDef =
+    {"pm_invoke", &pmp_upcall_invoke_meth, PMP_METH_VARARGS, NULL};
+static pmp_method_def g_pmResolveDef =
+    {"_pm_resolve", &pmp_upcall_resolve_meth, PMP_METH_O, NULL};
+static pmp_method_def g_pmBindDef =
+    {"_pm_bind", &pmp_upcall_bind_meth, PMP_METH_O, NULL};
+static pmp_method_def g_pmReleaseDef =
+    {"_pm_release", &pmp_upcall_release_meth, PMP_METH_O, NULL};
+
+/*
+ * Returns 0 -- the only failure signal this boundary has -- with an error indicator set.
+ *
+ * An error Python already has is left exactly as it is. Overwriting it would replace whatever the
+ * exposed Kotlin function raised with a generic message from the plumbing, and the trampoline sets
+ * one on every failure it handles itself.
+ */
+static jlong pmp_upcall_fail(const char *msg) {
+    if (PyErr_Occurred() == 0) {
+        PyErr_SetString((jlong)(intptr_t)PyExc_RuntimeError, msg);
+    }
+    return 0;
+}
+
+/* The callable handle inside a bound pm_invoke's `self`, or -1 (CallableHandle.NONE). */
+static jlong pmp_upcall_handle_of(jlong self) {
+    jlong handle;
+    if (self == 0) return -1;
+    handle = PyLong_AsLongLong(self);
+    if (PyErr_Occurred() != 0) {
+        PyErr_Clear();
+        return -1;
+    }
+    return handle;
+}
+
+/*
+ * PyObject *pm_invoke(PyObject *self, PyObject *args) -- the one C shape argument passing needs.
+ *
+ * `self` carries the callable handle; when the generated proxy type lands it carries the receiver
+ * instead and this signature does not change, which is the whole reason the shape was chosen.
+ */
+static jlong pmp_upcall_invoke_meth(jlong self, jlong args) {
+    JNIEnv *env;
+    int attached = 0;
+    jlong result;
+
+    if (g_upcallBridge == NULL || g_upcallInvokeM == NULL) {
+        return pmp_upcall_fail("the Kotlin upcall bridge was not registered at load time");
+    }
+    env = pmp_attach(&attached);
+    if (env == NULL) return pmp_upcall_fail("no JNIEnv is available on this thread");
+
+    result = (*env)->CallStaticLongMethod(
+        env, g_upcallBridge, g_upcallInvokeM, pmp_upcall_handle_of(self), args);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        result = 0;
+    }
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+
+    if (result == 0) return pmp_upcall_fail("the Kotlin upcall failed");
+    return result;
+}
+
+/* METH_O: str -> handle, or -1. Called once per name; every call after that carries the integer. */
+static jlong pmp_upcall_resolve_meth(jlong self, jlong name) {
+    JNIEnv *env;
+    int attached = 0;
+    const char *text;
+    jstring jname;
+    jlong handle = -1;
+
+    if (g_upcallBridge == NULL || g_upcallResolveM == NULL) {
+        return pmp_upcall_fail("the Kotlin upcall bridge was not registered at load time");
+    }
+    /* A non-str argument leaves a TypeError pending, which is a better answer than -1. */
+    text = (name == 0) ? NULL : PyUnicode_AsUTF8(name);
+    if (text == NULL) return pmp_upcall_fail("_pm_resolve expects a str");
+
+    env = pmp_attach(&attached);
+    if (env == NULL) return pmp_upcall_fail("no JNIEnv is available on this thread");
+
+    jname = (*env)->NewStringUTF(env, text);
+    if (jname != NULL) {
+        handle = (*env)->CallStaticLongMethod(env, g_upcallBridge, g_upcallResolveM, jname);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            handle = -1;
+        }
+        (*env)->DeleteLocalRef(env, jname);
+    } else if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+    }
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+
+    return PyLong_FromLongLong(handle);
+}
+
+/*
+ * METH_O: handle -> a callable that invokes it.
+ *
+ * The handle is deliberately not validated. A stale one is rejected by the trampoline at call time
+ * with a proper Python exception, and checking twice would only move the same failure earlier while
+ * adding a second place that has to agree with the table's epoch rule.
+ *
+ * PyCMethod_New takes its own reference to `self`, so the PyLong built here is given back
+ * immediately -- keeping it would leak one integer per bound method.
+ */
+static jlong pmp_upcall_bind_meth(jlong self, jlong handle) {
+    jlong raw;
+    jlong boundSelf;
+    jlong fn;
+
+    raw = (handle == 0) ? -1 : PyLong_AsLongLong(handle);
+    if (PyErr_Occurred() != 0) return 0;
+
+    boundSelf = PyLong_FromLongLong(raw);
+    if (boundSelf == 0) return 0;
+    fn = PyCMethod_New(&g_pmInvokeDef, boundSelf, 0, 0);
+    Py_DecRef(boundSelf);
+    return fn;
+}
+
+/* METH_O: object handle -> 1 if it released a live entry. What a proxy's tp_dealloc calls. */
+static jlong pmp_upcall_release_meth(jlong self, jlong handle) {
+    JNIEnv *env;
+    int attached = 0;
+    jlong raw;
+    jint released = 0;
+
+    if (g_upcallBridge == NULL || g_upcallReleaseM == NULL) {
+        return pmp_upcall_fail("the Kotlin upcall bridge was not registered at load time");
+    }
+    raw = (handle == 0) ? 0 : PyLong_AsLongLong(handle);
+    if (PyErr_Occurred() != 0) return 0;
+
+    env = pmp_attach(&attached);
+    if (env == NULL) return pmp_upcall_fail("no JNIEnv is available on this thread");
+
+    released = (*env)->CallStaticIntMethod(env, g_upcallBridge, g_upcallReleaseM, raw);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        released = 0;
+    }
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+
+    return PyLong_FromLongLong((jlong)released);
+}
+
+/* PyDict_SetItemString takes a reference of its own, so the one built here is given back. */
+static int pmp_install_method(jlong ns, pmp_method_def *def) {
+    int ok;
+    jlong fn = PyCMethod_New(def, 0, 0, 0);
+    if (fn == 0) return 0;
+    ok = (PyDict_SetItemString(ns, def->ml_name, fn) == 0);
+    Py_DecRef(fn);
+    return ok;
+}
+
+/*
+ * Installs `_pm_resolve`, `_pm_bind` and `_pm_release` into the Python dict at `ns`. 1 on success.
+ *
+ * That trio is the whole bootstrap: everything after it is Python calling Python objects.
+ * `pm_invoke` is deliberately not published on its own -- it is only ever reached through the
+ * callable `_pm_bind` returns, which is what keeps the handle out of Python's hands as a separate
+ * argument.
+ *
+ * Ordinary JNI. It builds function objects and stores them in a dict, so it allocates GC-tracked
+ * containers and can reach a Python-level hook (androidMain/README.md, step 2) -- and it runs once
+ * per interpreter, so there is nothing to gain from a promotion anyway. The caller holds the GIL.
+ */
+static jint upcall_publish(JNIEnv *e, jclass c, jlong ns) {
+    if (ns == 0) return 0;
+    if (g_upcallBridge == NULL) return 0;
+    if (!pmp_install_method(ns, &g_pmResolveDef)) return 0;
+    if (!pmp_install_method(ns, &g_pmBindDef)) return 0;
+    if (!pmp_install_method(ns, &g_pmReleaseDef)) return 0;
+    return 1;
+}
+
 int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -1304,6 +1563,24 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         g_proxyTraverse = (*env)->GetStaticMethodID(env, g_proxyCallbacks, "traverse", "(J)[J");
         g_proxyClear = (*env)->GetStaticMethodID(env, g_proxyCallbacks, "clear", "(J)V");
         (*env)->DeleteLocalRef(env, proxyClazz);
+    }
+
+    /*
+     * The Kotlin half of the upcall entry points. A global ref for the same reason: they are
+     * called from whichever thread Python happens to be running on, long after this frame is gone.
+     *
+     * Failures are cleared rather than propagated, as above. A missing class leaves upcall_publish
+     * returning 0 -- "the bootstrap could not be installed" -- rather than aborting the load and
+     * taking the rest of the bindings with it.
+     */
+    jclass upcallBridgeClazz = (*env)->FindClass(env, "python/native/ffi/UpcallCallbacks");
+    if (upcallBridgeClazz != NULL) {
+        g_upcallBridge = (jclass)(*env)->NewGlobalRef(env, upcallBridgeClazz);
+        g_upcallInvokeM = (*env)->GetStaticMethodID(env, g_upcallBridge, "invoke", "(JJ)J");
+        g_upcallResolveM =
+            (*env)->GetStaticMethodID(env, g_upcallBridge, "resolve", "(Ljava/lang/String;)J");
+        g_upcallReleaseM = (*env)->GetStaticMethodID(env, g_upcallBridge, "release", "(J)I");
+        (*env)->DeleteLocalRef(env, upcallBridgeClazz);
     }
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 
@@ -1694,6 +1971,9 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"proxyGetHandle", "(J)J", (void *)&proxy_get_handle},
         {"proxySetHandle", "(JJ)V", (void *)&proxy_set_handle},
         {"obRefCnt", "(J)J", (void *)&ob_refcnt},
+
+        /* Upcalls: Python -> Kotlin/JVM. See the block above pmp_upcall_invoke_meth. */
+        {"upcallPublish", "(J)I", (void *)&upcall_publish},
 
         {"testUpcallPrimitive", "(J)J", (void *)&test_upcall_primitive},
         {"testUpcallString", "(Ljava/lang/String;)J", (void *)&test_upcall_string},

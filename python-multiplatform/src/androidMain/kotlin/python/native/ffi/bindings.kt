@@ -690,4 +690,19 @@ object bindings {
      */
     @JvmStatic external fun obRefCnt(obj: Long): Long
 
+    //**************************************************
+    // Upcalls: Python -> Kotlin/JVM.
+    //
+    // Composed on the native side for the same reason the proxy type is: a `PyMethodDef`'s
+    // `ml_meth` has to be a C function pointer and Kotlin/JVM cannot make one. So C owns the
+    // entry points and androidMain only asks for them to be installed; the traffic in the other
+    // direction (C calling Kotlin on every upcall) goes to [UpcallCallbacks].
+    //
+    // Ordinary JNI. It builds function objects and stores them in a dict, so it allocates
+    // GC-tracked containers and can reach a Python-level hook -- step 2 of the promotion
+    // checklist in this source set's README rules it out on its own -- and it runs once per
+    // interpreter, so a promotion would buy nothing even if it were safe. The caller holds the
+    // GIL; see [UpcallEntry.publish].
+    @JvmStatic external fun upcallPublish(namespace: Long): Int
+
 }

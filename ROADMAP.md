@@ -1827,7 +1827,19 @@ of what the linker did with the name.
 was there and nothing pointed at it, so its one file was dead source and had been copied
 byte-for-byte into all five native target test source sets. Those copies are gone.
 
-**What is still open.** Android (JVM/ART) — a `RegisterNatives` method behind a `PyCFunction`
-shim — and wasm, a `@WasmExport` plus `Table.set` (3.1 ns, measured in §11). Per-platform detail
-is in `docs/upcall-design.md`'s "What each platform still owes". The generated proxy type that
-would let Python write `obj.method(x)` instead of going through `_pm_bind` is §7's remaining half.
+**Android landed next, and not the way this section predicted.** The prediction was "a
+`RegisterNatives` method behind a `PyCFunction` shim". `RegisterNatives` binds a JVM `external fun`
+to a C function — the *downcall* direction — and no arrangement of it lets C call Kotlin, which is
+what a `PyMethodDef` slot needs. The boundary is inverted instead, exactly as the proxy type's
+`tp_traverse`/`tp_clear` already are: the entry points are C functions in
+`artMain/cinterop/jni_onload.def` and *they* call `python/native/ffi/UpcallCallbacks` through
+`CallStaticLongMethod`, reusing `pmp_attach` so an upcall arriving on a `threading.Thread` — a bare
+pthread ART has never seen — attaches and detaches rather than silently returning `NULL`.
+`RegisterNatives` survives only for the one cold `upcallPublish(long)` that installs the bootstrap.
+`UpcallEntryTest` (`androidInstrumentedTest`) is green on `pmp_api26` and `pmp_api36`, 251 tests
+each, 0 failed; `docs/upcall-design.md`'s "Android's boundary runs the other way round" has the rest.
+
+**What is still open.** wasm — a `@WasmExport` plus `Table.set` (3.1 ns, measured in §11).
+Per-platform detail is in `docs/upcall-design.md`'s "What each platform still owes". The generated
+proxy type that would let Python write `obj.method(x)` instead of going through `_pm_bind` is §7's
+remaining half.
