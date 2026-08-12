@@ -118,7 +118,13 @@ object UpcallTrampoline {
     fun invoke(callableHandle: Long, argsTuple: Long): Long = attached {
         try {
             val entry = UpcallTable.callable(CallableHandle(callableHandle))
-            marshalResult(entry.returnType, entry.callable(unmarshalArguments(entry, argsTuple)))
+            val result = entry.callable(unmarshalArguments(entry, argsTuple))
+            // A suspending entry's body hands back a PendingCall rather than the value, because
+            // this frame has to return before the coroutine can finish. `AsyncUpcall` either
+            // unwraps an already-complete one -- the common case, and free -- or builds the
+            // `asyncio.Future` that will carry the answer. See docs/upcall-async-design.md §5.
+            if (entry.isSuspend) AsyncUpcall.deliver(entry, result)
+            else marshalResult(entry.returnType, result)
         } catch (t: Throwable) {
             raiseInPython(t)
             NULL
@@ -256,7 +262,10 @@ object UpcallTrampoline {
     // Result: Kotlin value -> new PyObject reference
     // ---------------------------------------------------------------------------------------
 
-    private fun marshalResult(tag: TypeTag, value: Any?): Long {
+    /** Internal so [AsyncUpcall] can marshal a completion with the same rules a return uses --
+     * a value delivered late must reach Python as the same type it would have reached it as
+     * synchronously, and the tag is the only thing that decides that. */
+    internal fun marshalResult(tag: TypeTag, value: Any?): Long {
         if (tag == TypeTag.UNIT || value == null || value == Unit) return newNone()
         return when (tag) {
             TypeTag.INT -> newReference(PyLong_FromLongLong(value as Long), "int")
@@ -359,4 +368,16 @@ object UpcallTrampoline {
         val builtins = PyEval_GetBuiltins() ?: error("builtins is unreachable")
         PyDict_GetItemString(builtins, "RuntimeError") ?: error("builtins.RuntimeError is unreachable")
     }
+
+    /**
+     * The same `RuntimeError` class [raiseInPython] uses, as a callable wrapper.
+     *
+     * [AsyncUpcall] needs to *construct* an instance rather than set the indicator, because
+     * `Future.set_exception` takes an exception object. Sharing the lookup keeps a Kotlin failure
+     * mapping to one Python type whether it is raised at the call or delivered to an `await`.
+     *
+     * The cached pointer is borrowed from the builtins dict, so the wrapper takes a reference of
+     * its own.
+     */
+    internal fun runtimeErrorClass(): PyObject = PyObject(runtimeErrorType, borrowed = true)
 }

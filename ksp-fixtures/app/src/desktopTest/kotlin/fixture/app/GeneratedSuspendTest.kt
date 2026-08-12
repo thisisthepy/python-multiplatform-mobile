@@ -1,9 +1,11 @@
 package fixture.app
 
 import fixture.library.SuspendingService
+import python.multiplatform.ffi.upcall.PendingCall
 import python.multiplatform.generated.FunctionTable
 import python.multiplatform.reflection.CallableKind
 import python.multiplatform.reflection.ClassLookup
+import python.multiplatform.reflection.ExposedCallable
 import python.multiplatform.reflection.HandleTable
 import python.multiplatform.reflection.TypeTag
 import python.multiplatform.reflection.UpcallTable
@@ -13,24 +15,34 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * What the generator does with `suspend` today, pinned against the table KSP actually produced
- * from `ksp-fixtures/library/.../Suspending.kt`.
+ * What the generator does with `suspend`, pinned against the table KSP actually produced from
+ * `ksp-fixtures/library/.../Suspending.kt`.
  *
- * The answer is **silently skipped**, and "silently" is the part worth a test:
- * `BindingPolicy.isExposedFunctionShape` drops any declaration carrying `Modifier.SUSPEND`
- * before it reaches the scanner, so nothing is emitted, nothing is logged, and the enclosing
- * class keeps every other member. A user exposing a `suspend fun` gets an `AttributeError` from
- * Python with no indication that the function was seen and rejected.
+ * The answer used to be **silently skipped** -- `BindingPolicy.isExposedFunctionShape` dropped any
+ * declaration carrying `Modifier.SUSPEND`, so nothing was emitted and nothing was logged, and a
+ * user exposing a `suspend fun` got an `AttributeError` from Python with no indication that the
+ * function had been seen and rejected. `docs/upcall-async-design.md` §6 recorded that as
+ * deliberate: the silence was held in place so that the day a convention landed, the change would
+ * show up as these tests failing rather than as one silence quietly becoming another.
  *
- * Every assertion of an absence here is paired with a control in the same scope, so the test
- * cannot pass by the whole declaration having been dropped for some unrelated reason.
+ * It has landed. A `suspend fun` now gets an ordinary entry whose body is
+ * `PendingCall.start { ... }` and which carries [ExposedCallable.isSuspend]; the trampoline reads
+ * that flag and either hands back the real value (the body never suspended) or an `asyncio.Future`
+ * (it did). So what every assertion below checks is the *presence* of a shape rather than the
+ * absence of one -- and the controls that used to guard against "the whole scope was dropped" are
+ * still here, now guarding the opposite mistake: that suspending and non-suspending declarations
+ * are not being given the same treatment.
  *
- * `docs/upcall-async-design.md` is why the skip is the right behaviour for now and what would
- * replace it. When an async convention lands, these tests are what has to change -- deliberately,
- * with the new names asserted here, rather than the silence changing shape unnoticed.
+ * Two things this deliberately does **not** claim:
+ *
+ * - Nothing here touches CPython. The entry's shape and its `PendingCall` are checkable in plain
+ *   Kotlin; whether `await` works is `AsyncUpcallDeliveryTest` in `python-multiplatform`.
+ * - A `suspend` *type* (`val h: suspend (Long) -> Long`) is still a different question with the
+ *   same old answer, and the last three tests are unchanged.
  */
 class GeneratedSuspendTest {
 
@@ -45,23 +57,51 @@ class GeneratedSuspendTest {
         HandleTable.releaseAll()
     }
 
-    // ------------------------------------------------------------------ the skip, shape by shape
+    private fun entry(name: String): ExposedCallable {
+        val handle = UpcallTable.resolve(name)
+        assertTrue(handle.isValid, "$name is not in the table")
+        return UpcallTable.callable(handle)
+    }
+
+    /** Calls through the table the way the trampoline does, and asserts the shape it gets back. */
+    private fun startCall(name: String, vararg args: Any?): PendingCall {
+        val result = UpcallTable.invoke(UpcallTable.resolve(name), arrayOf(*args))
+        assertNotNull(result, "$name returned nothing")
+        assertTrue(result is PendingCall, "a suspending entry must hand back a PendingCall, got $result")
+        return result
+    }
+
+    // ------------------------------------------------------------ the entry, shape by shape
 
     @Test
-    fun aSuspendingTopLevelFunctionIsNotInTheTableAndItsControlIs() {
-        assertFalse(
-            UpcallTable.resolve("fixture.library.suspendingTopLevel").isValid,
-            "a suspend fun has no synchronous return value to hand back to the C frame that called it",
-        )
+    fun aSuspendingTopLevelFunctionIsInTheTableAlongsideItsControl() {
+        val suspending = entry("fixture.library.suspendingTopLevel")
+        assertTrue(suspending.isSuspend, "the trampoline branches on this and nothing else")
+        assertEquals(CallableKind.FUNCTION, suspending.kind)
+        assertEquals(1, suspending.arity)
+        assertEquals(listOf(TypeTag.INT), suspending.paramTypes)
+        // The *declared* return type, not the PendingCall that actually comes back: the fast path
+        // marshals the real value with this tag, and so does the Future's set_result.
+        assertEquals(TypeTag.INT, suspending.returnType)
+
+        val control = entry("fixture.library.blockingTopLevel")
+        assertFalse(control.isSuspend, "a non-suspending function must not be given the async path")
         assertEquals(4L, UpcallTable.invoke(UpcallTable.resolve("fixture.library.blockingTopLevel"), arrayOf(2L)))
     }
 
     @Test
-    fun aSuspendingMemberIsDroppedButItsClassStaysExposedAndConstructible() {
+    fun aSuspendingMemberKeepsItsReceiverSlotAndItsClassStaysConstructible() {
         val service = UpcallTable.invoke(UpcallTable.resolve("fixture.library.SuspendingService.<init>"), arrayOf(7L))
         assertEquals(7L, (service as SuspendingService).id)
 
-        assertFalse(UpcallTable.resolve("fixture.library.SuspendingService.fetch").isValid)
+        val fetch = entry("fixture.library.SuspendingService.fetch")
+        assertTrue(fetch.isSuspend)
+        // `suspend` and "has a receiver" are orthogonal, which is why the flag is not a
+        // CallableKind: this is still a METHOD, and args[0] is still the instance.
+        assertEquals(CallableKind.METHOD, fetch.kind)
+        assertEquals(2, fetch.expectedArgCount)
+        assertEquals(TypeTag.STRING, fetch.returnType)
+
         assertEquals(
             "sync:k",
             UpcallTable.invoke(
@@ -72,55 +112,105 @@ class GeneratedSuspendTest {
     }
 
     @Test
-    fun aSuspendingCompanionMemberIsDroppedFromTheOwnersStaticSurface() {
-        assertFalse(UpcallTable.resolve("fixture.library.SuspendingService.create").isValid)
+    fun aSuspendingCompanionMemberJoinsTheOwnersStaticSurface() {
+        val create = entry("fixture.library.SuspendingService.create")
+        assertTrue(create.isSuspend)
+        assertEquals(CallableKind.FUNCTION, create.kind)
+        assertEquals(TypeTag.OBJECT, create.returnType)
+
         val made = UpcallTable.invoke(UpcallTable.resolve("fixture.library.SuspendingService.createBlocking"), arrayOf(3L))
         assertEquals(3L, (made as SuspendingService).id)
     }
 
     @Test
-    fun aSuspendingInterfaceMemberIsDroppedAndTheInterfaceKeepsTheRest() {
+    fun aSuspendingInterfaceMemberIsExposedLikeAnyOtherMethod() {
         assertNotNull(ClassLookup.find("fixture.library.SuspendingSource"))
-        assertFalse(UpcallTable.resolve("fixture.library.SuspendingSource.load").isValid)
-        assertEquals(CallableKind.METHOD, UpcallTable.callable(UpcallTable.resolve("fixture.library.SuspendingSource.describe")).kind)
+        val load = entry("fixture.library.SuspendingSource.load")
+        assertTrue(load.isSuspend)
+        assertEquals(CallableKind.METHOD, load.kind)
+        assertEquals(1, load.expectedArgCount, "no declared parameters, but the receiver is still a slot")
+
+        assertEquals(CallableKind.METHOD, entry("fixture.library.SuspendingSource.describe").kind)
+        assertFalse(entry("fixture.library.SuspendingSource.describe").isSuspend)
     }
 
     @Test
-    fun aSuspendingObjectMemberIsDroppedFromTheSingletonsSurface() {
-        assertFalse(UpcallTable.resolve("fixture.library.SuspendingRegistry.ping").isValid)
+    fun aSuspendingObjectMemberJoinsTheSingletonsSurface() {
+        val ping = entry("fixture.library.SuspendingRegistry.ping")
+        assertTrue(ping.isSuspend)
+        assertEquals(CallableKind.FUNCTION, ping.kind)
+        assertEquals(0, ping.expectedArgCount)
+
         assertEquals("pong", UpcallTable.invoke(UpcallTable.resolve("fixture.library.SuspendingRegistry.pingBlocking"), arrayOf()))
     }
 
     @Test
-    fun aDroppedSuspendingMemberIsAbsentFromTheClassesMemberNamesToo() {
-        // `ReflectedClass.memberNames` is what a Python mirror is built from. A name advertised
-        // there but missing from the callable table resolves to nothing at attribute access.
-        for ((className, dropped, kept) in listOf(
+    fun everySuspendingMemberIsAdvertisedOnItsClassAndResolves() {
+        // `ReflectedClass.memberNames` is what a Python mirror is built from. A member missing
+        // from it is invisible to Python however well the table entry is formed -- which is the
+        // shape the old skip took, and the thing that had to change with it.
+        for ((className, suspending, control) in listOf(
             Triple("fixture.library.SuspendingService", "fetch", "fetchBlocking"),
             Triple("fixture.library.SuspendingSource", "load", "describe"),
             Triple("fixture.library.SuspendingRegistry", "ping", "pingBlocking"),
         )) {
             val members = ClassLookup.require(className).memberNames
-            assertFalse(members.contains("$className.$dropped"), "$className.$dropped must not be advertised")
-            assertTrue(members.contains("$className.$kept"), "$className.$kept must stay advertised")
+            assertTrue(members.contains("$className.$suspending"), "$className.$suspending must be advertised")
+            assertTrue(members.contains("$className.$control"), "$className.$control must stay advertised")
             for (member in members) {
                 assertTrue(UpcallTable.resolve(member).isValid, "unresolved generated member: $member")
             }
         }
     }
 
+    // ------------------------------------------------- the generated body, run without an interpreter
+
+    @Test
+    fun theGeneratedBodyStartsTheCoroutineAndParksItsOutcomeInAPendingCall() {
+        // `PendingCall.start { suspendingTopLevel(args[0] as Long) }` is what the generator emits.
+        // Nothing in that fixture reaches a suspension point, so `docs/upcall-async-design.md` §5's
+        // fast path applies: the call is already complete before `start` returned, and the boundary
+        // can hand Python a real `int` with no Future and no event loop.
+        val call = startCall("fixture.library.suspendingTopLevel", 21L)
+
+        assertTrue(call.isDone, "a body with no suspension point completes on the calling thread")
+        assertEquals(42L, call.value)
+        assertNull(call.failure)
+    }
+
+    @Test
+    fun aSuspendingMethodsGeneratedBodyReadsItsReceiverFromArgsZero() {
+        val service = UpcallTable.invoke(
+            UpcallTable.resolve("fixture.library.SuspendingService.<init>"),
+            arrayOf(1L),
+        ) as SuspendingService
+
+        val call = startCall("fixture.library.SuspendingService.fetch", service, "k")
+
+        assertTrue(call.isDone)
+        assertEquals("async:k", call.value)
+    }
+
+    @Test
+    fun aSuspendingCompanionMemberReturnsARealKotlinObjectThroughThePendingCall() {
+        val call = startCall("fixture.library.SuspendingService.create", 9L)
+
+        assertTrue(call.isDone)
+        assertEquals(9L, (call.value as SuspendingService).id)
+    }
+
     // -------------------------------------------------- a suspending *type* is a different answer
 
     @Test
-    fun aSuspendingFunctionTypeIsNotSkippedAtAllBecauseTheModifierIsOnTheTypeNotTheDeclaration() {
-        // The policy reads `Modifier.SUSPEND` on a *declaration*. `val h: suspend (Long) -> Long`
-        // carries no such modifier, so it is exposed like any other non-primitive: as an OBJECT
-        // handle. Observed, not assumed -- and it is the one async-adjacent thing that crosses
-        // today.
+    fun aSuspendingFunctionTypeIsStillJustAnObjectBecauseTheModifierIsOnTheTypeNotTheDeclaration() {
+        // Unchanged by the async convention, and deliberately so: the policy reads
+        // `Modifier.SUSPEND` on a *declaration*, and `val h: suspend (Long) -> Long` carries no
+        // such modifier. There is no `PendingCall` here to start -- what crosses is a handle.
         val getter = UpcallTable.resolve("fixture.library.suspendingHandler")
         assertTrue(getter.isValid)
         assertEquals(TypeTag.OBJECT, UpcallTable.callable(getter).returnType)
         assertEquals(CallableKind.STATIC_GETTER, UpcallTable.callable(getter).kind)
+        assertFalse(UpcallTable.callable(getter).isSuspend, "the getter itself does not suspend")
 
         val made = UpcallTable.resolve("fixture.library.makeHandler")
         assertEquals(TypeTag.OBJECT, UpcallTable.callable(made).returnType)
@@ -150,11 +240,10 @@ class GeneratedSuspendTest {
     }
 
     @Test
-    fun butWhatCrossesIsAnOpaqueHandleThatPythonCanHoldAndNotCall() {
-        // The consequence of the previous test, and the reason it is not a workaround for the
-        // skip: the handle has no entry of its own. `invoke` on a suspending function type is not
-        // in the table under any name, so Python can pass the thing back to Kotlin and nothing
-        // else. See docs/upcall-async-design.md.
+    fun butWhatCrossesIsStillAnOpaqueHandleThatPythonCanHoldAndNotCall() {
+        // Unchanged, and still the reason a suspending *type* is not a way around anything: the
+        // handle has no entry of its own. Exposing `suspend fun` did not expose
+        // `SuspendFunction1.invoke`, and `docs/upcall-async-design.md` §2.1 keeps that open.
         assertFalse(UpcallTable.resolve("kotlin.coroutines.SuspendFunction1.invoke").isValid)
         assertFalse(UpcallTable.resolve("fixture.library.suspendingHandler.invoke").isValid)
     }

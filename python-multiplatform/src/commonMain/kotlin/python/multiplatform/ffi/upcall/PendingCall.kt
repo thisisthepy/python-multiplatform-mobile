@@ -18,10 +18,11 @@ import kotlin.coroutines.startCoroutine
  *
  * ### What this deliberately does not do
  *
- * It does not deliver anything to Python. Whether the value reaches Python by polling, by calling
- * a Python callable, or by resolving an `asyncio.Future` is the part the design doc leaves open,
- * and building one of them before that is settled would be building the wrong one. [onCompleted]
- * is the single seam all three attach to.
+ * It does not deliver anything to Python. [onCompleted] is the single seam a delivery convention
+ * attaches to, and [AsyncUpcall] is the one that does -- it resolves an `asyncio.Future` from the
+ * completing thread. Keeping that out of here is not indecision: this half is pure Kotlin, so it
+ * is identical on all five targets and testable with no interpreter at all (`PendingCallTest` is
+ * in `commonTest` for that reason), while the delivery half is entirely C API calls.
  *
  * ### No `kotlinx.coroutines`
  *

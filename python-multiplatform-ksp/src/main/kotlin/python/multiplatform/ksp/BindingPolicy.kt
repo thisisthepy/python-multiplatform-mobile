@@ -155,10 +155,26 @@ object BindingPolicy {
     private val VISIBILITY_MODIFIERS =
         setOf(Modifier.PUBLIC, Modifier.PRIVATE, Modifier.PROTECTED, Modifier.INTERNAL)
 
+    /**
+     * Whether this declaration needs the asynchronous calling convention
+     * (`docs/upcall-async-design.md`).
+     *
+     * `suspend` used to be a rejection here, and silently: a C callback slot has to hand back a
+     * `PyObject *` before it returns and a suspension has nothing to hand back, so until there was
+     * somewhere to put the answer there was nothing correct to generate. There is now --
+     * `python.multiplatform.ffi.upcall.PendingCall` starts the coroutine inside the frame and the
+     * boundary returns either the value (it never suspended) or an `asyncio.Future` (it did) -- so
+     * the modifier selects a *body shape* rather than excluding the declaration.
+     *
+     * This reads the modifier on the **declaration**. A `suspend` function *type*
+     * (`val h: suspend (Long) -> Long`) carries no such modifier and is not this question; it is
+     * still exposed as an opaque `OBJECT` handle, which `GeneratedSuspendTest` pins.
+     */
+    fun isSuspending(function: KSFunctionDeclaration): Boolean = Modifier.SUSPEND in function.modifiers
+
     private fun isExposedFunctionShape(function: KSFunctionDeclaration): Boolean {
         if (!isPublic(function)) return false
         if (hasPythonInternal(function)) return false
-        if (Modifier.SUSPEND in function.modifiers) return false
         if (Modifier.EXPECT in function.modifiers) return false
         if (function.extensionReceiver != null) return false
         if (!hasRenderableSignature(function)) return false

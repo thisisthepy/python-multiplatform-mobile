@@ -14,6 +14,13 @@ data class CallableEntryModel(
     val kind: String,
     /** The full lambda expression text, e.g. `{ args -> greet(args[0] as String) }`. */
     val lambdaBody: String,
+    /**
+     * Mirrors `python.multiplatform.reflection.ExposedCallable.isSuspend`: the declaration was a
+     * `suspend fun`, so [lambdaBody] starts a coroutine and evaluates to a `PendingCall` rather
+     * than to the value. [returnTag] still describes the *declared* return type, which is what the
+     * boundary marshals once the coroutine finishes.
+     */
+    val isSuspend: Boolean = false,
 )
 
 data class ClassModel(
