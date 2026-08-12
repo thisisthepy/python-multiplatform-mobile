@@ -1009,17 +1009,23 @@ static jmethodID g_proxyClear = NULL;
 /*
  * A JNIEnv for a thread CPython may or may not have entered from the JVM.
  *
- * On every path this project currently exercises, the collector runs on the thread that called
- * into Python, and that thread came *from* ART -- so GetEnv succeeds and nothing is attached.
- * The exception is a thread CPython created itself (threading.Thread is a bare pthread), where
- * an allocation can trip the generational threshold and run a collection on a thread ART has
- * never seen. That is the case AttachCurrentThreadAsDaemon covers.
+ * On most paths the collector runs on the thread that called into Python, and that thread came
+ * *from* ART -- so GetEnv succeeds and nothing is attached. The exception is a thread CPython
+ * created itself (threading.Thread is a bare pthread), where a collection, or a refcount reaching
+ * zero, runs on a thread ART has never seen. That is the case AttachCurrentThreadAsDaemon covers.
+ *
+ * That branch is exercised rather than assumed. CycleCollectionTest's
+ * testCycleCollectedOnAThreadCPythonCreated and testDeallocOnAThreadCPythonCreated do their work
+ * inside a threading.Thread, and they assert that the thread the callback arrived on is not the
+ * instrumentation thread -- so a pass cannot come from GetEnv having succeeded after all. Green
+ * on pmp_api26 and pmp_api36.
  *
  * The caller must detach again if *attached is set on return. Leaving an attachment behind is
  * not an option: ART aborts the process when a thread it knows about exits without detaching
  * ("Native thread exiting without having called DetachCurrentThread"), and a CPython worker
  * thread is exactly a thread that will exit outside our control. The cost is an attach and a
- * detach per callback on such threads, which is only paid there.
+ * detach per callback on such threads, which is only paid there. Neither device printed that
+ * line during the runs above, which is the balance being checked rather than argued.
  */
 static JNIEnv *pmp_attach(int *attached) {
     JNIEnv *env = NULL;

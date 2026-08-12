@@ -223,12 +223,28 @@ private fun proxyDealloc(self: CPointer<CPyObject>?) {
  * cinterop as real structs, so the spec is filled in by field name instead of by hand-computed
  * offsets through `sun.misc.Unsafe`.
  *
- * ### What is not established yet
+ * ### Threads CPython created
  *
- * Both slots are only exercised from a thread that already runs Kotlin code -- the one that called
- * `gc.collect()`. CPython will call them from whichever thread holds the GIL when a collection
- * fires, and a Kotlin/Native callback entered from a thread with no attached runtime is a
- * different situation from the one the test covers. Nothing here handles that case explicitly.
+ * The slots used to be reached only from a thread that already runs Kotlin -- the one that called
+ * `gc.collect()` -- and a [staticCFunction] entered from a thread the Kotlin/Native runtime has
+ * never seen is a different situation. Nothing here handles it explicitly, and it turns out
+ * nothing has to: `CycleCollectionTest.testCycleCollectedOnAThreadCPythonCreated` and
+ * `testDeallocOnAThreadCPythonCreated` run the collection, and the last-reference drop, on a
+ * `threading.Thread` -- a bare pthread the runtime never created -- and all three slots work
+ * there. The tests do not infer the thread from the effect: the `traverse` lambda they register
+ * records `pthread_self()` and they assert it differs from the test thread's.
+ *
+ * Verified on `iosSimulatorArm64Test`, 195 tests, 0 failed. The androidNative build shares this
+ * file but has no test run of its own, so read the result as "the new memory model attaches a
+ * runtime to a foreign thread on entry", not as a per-target measurement.
+ *
+ * ### `tp_dealloc`, measured
+ *
+ * `CycleCollectionTest.testHandleReleasedWhenProxyDiesWithoutCycle` drops 100 cycle-free proxies
+ * and checks both that their handles are released and that [proxyDealloc]'s two `Py_DecRef`s
+ * balance -- it reads the type's `ob_refcnt` directly, so a forgotten release (type leaks per
+ * instance) and a doubled one (type freed while in use) are told apart rather than lumped
+ * together.
  */
 actual object ProxyTypeFactory {
 

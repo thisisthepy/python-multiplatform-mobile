@@ -101,6 +101,7 @@ class CycleCollectionTest {
                 name = CycleNode::class.qualifiedName!!,
                 memberNames = emptyList(),
                 traverse = { obj, visit ->
+                    TraverseThreadProbe.record()
                     val node = obj as CycleNode
                     if (node.rawPtr != 0L) visit(node.rawPtr)
                 },
@@ -361,12 +362,22 @@ class CycleCollectionTest {
 
             assertNotNull(HandleTable.resolveRaw(handle), "handle did not resolve before the drop")
 
-            // t.join() releases the GIL, so the worker really does run the drop.
+            // The gc.collect() in the worker is not what drops the proxy -- __main__ still holds
+            // it at that point, so it is reachable. It is there to make the worker thread
+            // *identify itself*: collecting calls tp_traverse on every tracked object in the
+            // generation, this proxy included, and the traverse lambda records its pthread_t.
+            // Without it the release below would be observable but the thread it happened on
+            // would not.
+            //
+            // t.join() releases the GIL, so the worker really does run both statements.
+            TraverseThreadProbe.reset()
+            val here = platform.posix.pthread_self()?.rawValue?.toLong() ?: 0L
             val rc = PyRun_SimpleString(
                 """
-                import threading
+                import gc, threading
                 def _pmp_drop():
                     global _pmp_thread_proxy
+                    gc.collect()
                     _pmp_thread_proxy = None
                 _t = threading.Thread(target=_pmp_drop)
                 _t.start()
@@ -374,6 +385,19 @@ class CycleCollectionTest {
                 """.trimIndent()
             )
             assertEquals(0, rc, "the worker thread script did not run")
+
+            val seen = TraverseThreadProbe.lastThread
+            assertTrue(
+                seen != -1L,
+                "no slot callback reached Kotlin at all while the worker ran, so nothing here " +
+                    "says which thread the dealloc below happened on",
+            )
+            assertTrue(
+                seen != here,
+                "the slots ran on the thread that has been running Kotlin all along " +
+                    "(pthread $here), so CPython's worker did not carry the callback and the " +
+                    "unattached-thread case is still untested",
+            )
 
             assertNull(
                 HandleTable.resolveRaw(handle),
@@ -418,6 +442,8 @@ class CycleCollectionTest {
 
             assertNotNull(HandleTable.resolveRaw(handle), "handle did not resolve before collection")
 
+            TraverseThreadProbe.reset()
+            val here = platform.posix.pthread_self()?.rawValue?.toLong() ?: 0L
             val rc = PyRun_SimpleString(
                 """
                 import gc, threading
@@ -427,6 +453,19 @@ class CycleCollectionTest {
                 """.trimIndent()
             )
             assertEquals(0, rc, "the worker thread script did not run")
+
+            val seen = TraverseThreadProbe.lastThread
+            assertTrue(
+                seen != -1L,
+                "tp_traverse never reached Kotlin during the worker's collection, so the cycle " +
+                    "was invisible to it",
+            )
+            assertTrue(
+                seen != here,
+                "tp_traverse ran on the thread that has been running Kotlin all along " +
+                    "(pthread $here) rather than on CPython's worker, so the unattached-thread " +
+                    "case is still untested",
+            )
 
             assertNull(
                 HandleTable.resolveRaw(handle),

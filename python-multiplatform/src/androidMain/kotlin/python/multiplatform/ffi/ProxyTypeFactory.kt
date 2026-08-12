@@ -104,18 +104,30 @@ object ProxyCallbacks {
  * have to be C function pointers. This is the Kotlin entry point to that, plus the accessors a
  * caller needs to put a handle into a proxy instance.
  *
- * ### Not yet established
+ * ### The foreign-thread path is exercised now
  *
- * The slots are only exercised from a thread that already runs Kotlin -- the one that called
- * `gc.collect()`. CPython calls them from whichever thread holds the GIL when a collection
- * fires, and a thread CPython created itself (a `threading.Thread` is a bare pthread) has never
- * been seen by ART. The C side handles that with `AttachCurrentThreadAsDaemon` and detaches
- * again before returning, but nothing tests it; Kotlin/Native leaves the same case open.
+ * The slots used to be reached only from a thread that already runs Kotlin -- the one that called
+ * `gc.collect()` -- so `pmp_attach`'s `GetEnv` always succeeded and the
+ * `AttachCurrentThreadAsDaemon` branch beside it was, as far as any test went, dead code.
+ *
+ * `CycleCollectionTest.testCycleCollectedOnAThreadCPythonCreated` and
+ * `testDeallocOnAThreadCPythonCreated` close that. A `threading.Thread` is a bare pthread ART has
+ * never seen, and those two run the collection, and the last-reference drop, on one. Neither
+ * infers the thread from the effect: the `traverse` lambda they register records
+ * `Thread.currentThread().id`, and they assert it differs from the instrumentation thread's -- so
+ * a callback that had quietly been re-dispatched onto a thread ART already knew would fail rather
+ * than pass. Green on `pmp_api26` and `pmp_api36`, 216 tests each, 0 failed, with no
+ * `Native thread exiting without having called DetachCurrentThread` in either logcat. That line
+ * is what ART prints immediately before aborting if the detach on the way out is ever missed, so
+ * its absence is the attach/detach balance being checked rather than assumed.
  *
  * `tp_dealloc` (`pmp_proxy_dealloc` in `jni_onload.def`) closes what used to be the larger hole:
  * a proxy that dies without a cycle never runs `tp_clear`, so its [HandleTable] entry leaked --
  * and since cycles are the exception, almost every proxy died that way. All three platforms
- * carry the slot now; desktop is where it is measured, in `CycleCollectionTest`.
+ * carry the slot, and all three now measure it:
+ * `CycleCollectionTest.testHandleReleasedWhenProxyDiesWithoutCycle` drops 100 cycle-free proxies
+ * and checks both the handles and the type's own `ob_refcnt` (through [bindings.obRefCnt] here,
+ * `sun.misc.Unsafe` on desktop, a `LongVar` load on Kotlin/Native).
  */
 actual object ProxyTypeFactory {
 
