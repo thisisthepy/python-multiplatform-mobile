@@ -73,12 +73,58 @@ import python.multiplatform.reflection.UpcallTable
  * therefore just that integer, and a plain Python class holding one in an attribute is sufficient
  * -- no C type, no new slot, no new platform code.
  *
+ * ### Static surfaces: [CallableKind.STATIC_GETTER], [CallableKind.STATIC_SETTER]
+ *
+ * A static property is an **attribute**, not a callable: rendering it as `libraryVersion()` would
+ * make the Python surface disagree with the Kotlin declaration, and rendering it as a plain
+ * assignment at install time would freeze a `var` at whatever it held then. So it has to be a
+ * descriptor, and the only question is what object carries it. There are two answers because there
+ * are two owners:
+ *
+ * - **A static member of a class that gets a Python `class`** (a `companion object` member, which
+ *   `FragmentScanner` folds into the owner's name) goes on a **metaclass** rendered beside the
+ *   class. A `property` in the class body would answer `instance.x`, not `Foo.x`; a descriptor
+ *   answers for the object whose *type* carries it, so for the class object itself to read and
+ *   write, the descriptor must live on the class's type. This also reproduces Kotlin's own rule
+ *   for free -- a companion member is reached through the class and **not** through an instance,
+ *   and a metaclass attribute is invisible to instances for exactly the same reason.
+ * - **Everything else static** -- a top-level property, and the members of a `ReflectedClassKind`
+ *   this stage does not render as a class ([ReflectedClassKind.OBJECT], [ReflectedClassKind.ENUM])
+ *   -- becomes a live attribute of the module its name points at. That is not a second design so
+ *   much as the same one applied to the module: the module object is reclassed to `_PmModule`, a
+ *   `ModuleType` subclass whose `__getattr__`/`__setattr__` route registered names through the
+ *   table. It has to be a subclass rather than PEP 562's module-level `__getattr__` because PEP 562
+ *   covers the read half only and there is no `__setattr__` counterpart.
+ *
+ * Putting an `object`'s properties on the module rather than on a class of its own is what keeps
+ * `Registry.ping()` and `Registry.size` resolving against the same Python object: `ping` is a
+ * [CallableKind.FUNCTION] entry named `..Registry.ping` and has always gone through the module
+ * path, so its sibling property has to follow it there.
+ *
+ * #### What this cost, and the alternatives it was chosen over
+ *
+ * The price is one extra type object per class that has static members, and one more shape in the
+ * generated source for a reader to account for. It is paid only where there is something to put on
+ * it -- a class with no statics still renders as a bare `class Foo:`. The alternatives:
+ *
+ * | alternative | why not |
+ * |---|---|
+ * | accessor pair (`Foo.get_count()` / `Foo.set_count(v)`) | no metaclass, but it is the same disagreement between the Python surface and the Kotlin declaration that ruled out rendering the property as a callable in the first place. Rejecting it for a `val` and accepting it for a companion `val` would be arbitrary |
+ * | module-level accessors (`fixture.library.WithCompanion_count`) | mangles the name, and `WithCompanion` is already taken as a module by the companion's *functions*, so the two halves of one companion would live in different places |
+ * | a C type with `tp_getset` via [python.multiplatform.ffi.ProxyTypeFactory] | new platform C on five targets, for something a pure-Python descriptor already does. The same argument the instance section above makes against that type |
+ *
+ * The setter half follows `docs/binding-policy.md` rather than restating it: a `val`, or a `var`
+ * whose setter is `private`/`protected`/`internal`, simply has no `STATIC_SETTER` entry, so this
+ * renders a `property` with no `fset` (and, on a module, a `__setattr__` branch that raises). The
+ * assignment fails with `AttributeError` instead of silently binding a plain attribute that would
+ * shadow the Kotlin declaration for every later read.
+ *
  * ### What is still not rendered
  *
  * | kind | why not |
  * |---|---|
- * | `STATIC_GETTER`, `STATIC_SETTER` | a property, not a callable. Rendering it as `libraryVersion()` would make the Python surface disagree with the Kotlin declaration, and rendering it as a value would freeze a `var` at install time. Doing this right needs a module-level `__getattr__`/`__setattr__` (PEP 562), which nothing here emits yet |
  * | a `TypeTag.OBJECT` value returned from an arbitrary [CallableKind.FUNCTION] or [CallableKind.METHOD] | still crosses as the bare handle integer, not wrapped in the class rendered for it. Only a value that came from *this* proxy's own `__init__` -- i.e. something Python itself constructed -- gets the class. A factory function that should hand back a `Counter` today hands back an `int` |
+ * | a `companion object` **function** on a class that is also rendered as a Python class | it is a [CallableKind.FUNCTION] whose name is `pkg.Owner.fn`, so the function path publishes it into a *module* named `pkg.Owner`, and the class rendering then overwrites `pkg.Owner` with the class. Its static *properties* are reachable (they are on the metaclass); its static functions are not. Unverified by a test here -- read off the two `setattr` sites, not observed |
  *
  * These are skipped silently *here* because the skip is a property of this stage, not a policy
  * decision -- `docs/binding-policy.md` already decided they are exposed, and they remain reachable
@@ -179,6 +225,55 @@ object PythonProxySource {
             if _h == -1:
                 raise AttributeError('no exposed Kotlin declaration named ' + _name)
             return _h
+
+
+        class _PmModule(_pm_types.ModuleType):
+            # A Kotlin top-level `val`/`var` is a module *attribute* in Python, and it has to stay
+            # live in both directions: a read has to call Kotlin's getter (a plain assignment at
+            # install time would freeze a `var` at whatever it held then), and an assignment has to
+            # reach Kotlin's setter rather than rebinding the name in the module dict. PEP 562's
+            # module-level `__getattr__` covers the read half only -- there is no `__setattr__`
+            # counterpart -- so the module object itself is an instance of this subclass.
+            #
+            # Only names registered through `_pm_static_property` are intercepted; everything else
+            # on the module (the rendered functions and classes) stays an ordinary attribute, which
+            # is why `__getattr__` (consulted only after normal lookup fails) is enough on the read
+            # side and `__setattr__` has to fall through to `object.__setattr__` on the write side.
+
+            def __getattr__(self, _n):
+                _p = self.__dict__.get('_pm_props')
+                if _p is not None and _n in _p:
+                    return _pm_invoke(_p[_n][0], ())
+                raise AttributeError(_n)
+
+            def __setattr__(self, _n, _v):
+                _p = self.__dict__.get('_pm_props')
+                if _p is not None and _n in _p:
+                    _s = _p[_n][1]
+                    if _s is None:
+                        # `docs/binding-policy.md`: a `val`, or a `var` whose setter is not public
+                        # API, has no setter entry. Letting the assignment through would bind a
+                        # plain module attribute that shadows the Kotlin declaration for every
+                        # later read -- silently, and only in Python.
+                        raise AttributeError(
+                            'the Kotlin declaration behind ' + self.__name__ + '.' + _n +
+                            ' has no exposed setter'
+                        )
+                    _pm_invoke(_s, (_v,))
+                    return
+                object.__setattr__(self, _n, _v)
+
+
+        def _pm_static_property(_mod, _name, _get, _set):
+            # `__getattr__`/`__setattr__` are looked up on the type, never on the instance, so the
+            # module object has to be reclassed rather than decorated. Assigning `__class__` is the
+            # documented way to do that to a module and is what PEP 562's own rationale describes.
+            _mod.__class__ = _PmModule
+            _p = _mod.__dict__.get('_pm_props')
+            if _p is None:
+                _p = {}
+                object.__setattr__(_mod, '_pm_props', _p)
+            _p[_name] = (_get, _set)
     """.trimIndent()
 
     /**
@@ -191,8 +286,10 @@ object PythonProxySource {
      *   [ReflectedClassKind.CLASS] and [ReflectedClassKind.INTERFACE] are rendered -- an `object`'s
      *   members are already [CallableKind.FUNCTION]/[CallableKind.STATIC_GETTER] under the
      *   object's name (`FragmentScanner`'s `staticFunctionEntry`), so they go through the ordinary
-     *   function path above with no receiver, and an `ENUM`'s instances come from
-     *   [CallableKind.STATIC_GETTER] entries this stage does not render either.
+     *   function and module-attribute paths with no receiver, and an `ENUM`'s instances come from
+     *   [CallableKind.STATIC_GETTER] entries that land as module attributes for the same reason.
+     *   Passing a class here also *claims* its [ReflectedClass.memberNames]: a static member of a
+     *   rendered class goes on that class's metaclass instead of onto a module.
      * @param rootModule where a name with no dot in it goes. Kotlin's default package produces
      *   such names, and they have nowhere else to live.
      * @return Python source. Deterministic, and safe to `exec` more than once -- every statement is
@@ -208,14 +305,23 @@ object PythonProxySource {
         val renderableClasses = classes.filter {
             it.kind == ReflectedClassKind.CLASS || it.kind == ReflectedClassKind.INTERFACE
         }
+        // A static member of a class that gets a Python `class` of its own belongs on that class's
+        // metaclass, not on a module named after the class -- the two would collide, since
+        // `renderClass` publishes the class under exactly that name. Everything else static (a
+        // top-level property, and an `object`'s or an `enum`'s, neither of which is rendered as a
+        // Python class) is a module attribute, which is where its sibling functions already went.
+        val claimedByClasses = renderableClasses.flatMapTo(HashSet()) { it.memberNames }
+        val moduleStatics = entries.filter {
+            it.kind == CallableKind.STATIC_GETTER && it.name !in claimedByClasses
+        }
 
         return buildString {
             appendLine(support)
             appendLine()
-            if (functions.isEmpty() && renderableClasses.isEmpty()) {
+            if (functions.isEmpty() && renderableClasses.isEmpty() && moduleStatics.isEmpty()) {
                 // Not an error: a table can legitimately hold nothing this stage can render (only
-                // static members, say). Saying so in the generated source beats emitting an empty
-                // file that reads like a generator failure.
+                // instance members with no class descriptor, say). Saying so in the generated
+                // source beats emitting an empty file that reads like a generator failure.
                 appendLine("# no CallableKind.FUNCTION entries or proxy classes to render")
                 return@buildString
             }
@@ -225,6 +331,11 @@ object PythonProxySource {
             functions.forEach { entry ->
                 appendLine(renderOne(index, entry, rootModule))
                 index++
+            }
+            moduleStatics.forEach { getter ->
+                val (source, nextIndex) = renderModuleStatic(index, getter, byName, rootModule)
+                appendLine(source)
+                index = nextIndex
             }
             renderableClasses.forEach { cls ->
                 val (source, nextIndex) = renderClass(index, cls, byName, rootModule)
@@ -359,6 +470,52 @@ object PythonProxySource {
     }
 
     /**
+     * The setter entry paired with [getter], if the table has one.
+     *
+     * `null` is the answer for a Kotlin `val` **and** for a `var` whose setter is not public API
+     * (`private`/`protected`/`internal set`) -- `FragmentScanner` emits no setter entry for either,
+     * and this stage must not invent one. What it renders instead is a read-only attribute that
+     * *raises* on assignment; see `_PmModule.__setattr__` and, for the class case, the
+     * setter-less `property` on the metaclass.
+     */
+    private fun setterFor(
+        getter: ExposedCallable,
+        byName: Map<String, ExposedCallable>,
+        kind: CallableKind,
+    ): ExposedCallable? = byName["${getter.name}="]?.takeIf { it.kind == kind }
+
+    /**
+     * Renders one static property as a live attribute of the module its name points at.
+     *
+     * @return the source, and the next unused index -- one handle for the getter, and one more
+     *   for the setter when there is one.
+     */
+    private fun renderModuleStatic(
+        startIndex: Int,
+        getter: ExposedCallable,
+        byName: Map<String, ExposedCallable>,
+        rootModule: String,
+    ): Pair<String, Int> {
+        var index = startIndex
+        val getterHandle = "_pm_h_${index++}"
+        val dot = getter.name.lastIndexOf('.')
+        val module = if (dot < 0) rootModule else getter.name.substring(0, dot)
+        val leaf = if (dot < 0) getter.name else getter.name.substring(dot + 1)
+
+        val source = buildString {
+            appendLine("$getterHandle = _pm_bind(${getter.name.quoted()})")
+            val setter = setterFor(getter, byName, CallableKind.STATIC_SETTER)
+            val setterHandle = if (setter == null) "None" else "_pm_h_${index++}"
+            if (setter != null) appendLine("$setterHandle = _pm_bind(${setter.name.quoted()})")
+            append(
+                "_pm_static_property(_pm_module(${module.quoted()}), ${leaf.quoted()}, " +
+                    "$getterHandle, $setterHandle)",
+            )
+        }
+        return source to index
+    }
+
+    /**
      * Renders one Python class for [cls], plus the `_pm_bind` calls its members need.
      *
      * @param startIndex the first unused `_pm_h_N` / `_pm_f_N` suffix; shared with [render]'s
@@ -400,6 +557,7 @@ object PythonProxySource {
         // split `@property`/`@x.setter` across wherever each entry happened to fall in the member
         // list instead of keeping them adjacent, which is what a reader expects of one property.
         val propertyNames = LinkedHashSet<String>()
+        val staticNames = LinkedHashSet<String>()
         for (memberName in cls.memberNames) {
             val entry = byName[memberName] ?: continue
             when (entry.kind) {
@@ -410,9 +568,10 @@ object PythonProxySource {
                     body.appendLine()
                 }
                 CallableKind.GETTER -> propertyNames += entry.name.substringAfterLast('.')
-                // SETTER is picked up alongside its GETTER below; CONSTRUCTOR was handled above;
-                // FUNCTION/STATIC_GETTER/STATIC_SETTER members of this class (an object's or a
-                // companion's) already went through the ordinary function path in `render`.
+                CallableKind.STATIC_GETTER -> staticNames += entry.name.substringAfterLast('.')
+                // SETTER and STATIC_SETTER are picked up alongside their getters below;
+                // CONSTRUCTOR was handled above; a FUNCTION member of this class (a companion's)
+                // already went through the ordinary function path in `render`.
                 else -> {}
             }
         }
@@ -426,7 +585,7 @@ object PythonProxySource {
             body.appendLine("        return _pm_invoke($getterHandle, (self._pm_handle,))")
             body.appendLine()
 
-            val setter = byName["${cls.name}.$propName="]
+            val setter = setterFor(getter, byName, CallableKind.SETTER)
             if (setter != null) {
                 val setterHandle = bindHandle()
                 binds.appendLine("$setterHandle = _pm_bind(${setter.name.quoted()})")
@@ -437,6 +596,38 @@ object PythonProxySource {
             }
         }
 
+        // The metaclass body. A `property` in the class body answers `instance.x`; a static member
+        // has no instance, and Kotlin reaches a companion member through the *class* and never
+        // through an instance. A descriptor answers for the object whose *type* carries it, so for
+        // the class object itself to be the reader and writer, the descriptor has to live on the
+        // class's type -- which is what a metaclass is. See the KDoc's "Static surfaces" section
+        // for the alternatives this was chosen over.
+        val metaBody = StringBuilder()
+        for (staticName in staticNames) {
+            val getter = byName["${cls.name}.$staticName"] ?: continue
+            val getterHandle = bindHandle()
+            binds.appendLine("$getterHandle = _pm_bind(${getter.name.quoted()})")
+            metaBody.appendLine("    @property")
+            metaBody.appendLine("    def $staticName(cls):")
+            // No receiver: a STATIC_GETTER's args are empty and a STATIC_SETTER's args[0] is the
+            // new value, so `cls` is a Python-side formality and never crosses the boundary.
+            metaBody.appendLine("        return _pm_invoke($getterHandle, ())")
+            metaBody.appendLine()
+
+            val setter = setterFor(getter, byName, CallableKind.STATIC_SETTER)
+            if (setter != null) {
+                val setterHandle = bindHandle()
+                binds.appendLine("$setterHandle = _pm_bind(${setter.name.quoted()})")
+                metaBody.appendLine("    @$staticName.setter")
+                metaBody.appendLine("    def $staticName(cls, a0):")
+                metaBody.appendLine("        _pm_invoke($setterHandle, (a0,))")
+                metaBody.appendLine()
+            }
+        }
+        // A class with nothing static pays nothing: no extra type object, and no shape a reader of
+        // the generated source has to account for.
+        val metaclassName = if (metaBody.isEmpty()) null else "_pm_t_${index++}"
+
         val dot = cls.name.lastIndexOf('.')
         val module = if (dot < 0) rootModule else cls.name.substring(0, dot)
         val className = if (dot < 0) cls.name else cls.name.substring(dot + 1)
@@ -444,7 +635,13 @@ object PythonProxySource {
         val source = buildString {
             append(binds)
             appendLine()
-            appendLine("class $className:")
+            if (metaclassName != null) {
+                appendLine("class $metaclassName(type):")
+                appendLine()
+                append(metaBody)
+                appendLine()
+            }
+            appendLine(if (metaclassName == null) "class $className:" else "class $className(metaclass=$metaclassName):")
             if (body.isEmpty()) appendLine("    pass") else append(body)
             appendLine()
             appendLine("$className.__qualname__ = ${cls.name.quoted()}")
