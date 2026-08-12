@@ -58,6 +58,35 @@ builds and off otherwise. **Never take a checkpoint from a cleaner**: the queue 
 thread that *owns* the object, so it would drain nothing while running Python exactly where §1
 proved that deadlocks. See ROADMAP §9.
 
+### The GIL build needs the same checkpoint, for cyclic garbage specifically
+
+`_PY_GC_SCHEDULED_BIT` — set by `_Py_ScheduleGC` on an allocation that crosses a generation
+threshold, and how allocation has triggered a cyclic collection since 3.12 — is read by the same
+`_Py_HandlePending` as the free-threaded merge above, and nowhere else. That part of the problem
+is **not free-threading-specific**: an embedder that only calls `PyObject_Call` and friends never
+runs the cyclic collector on either build, because neither build ever executes a bytecode frame on
+its own. A plain (non-cyclic) reference still frees immediately on the GIL build — there is no
+queue there — but a reference cycle accumulates exactly as it would on the free-threaded build's
+deferred-release queue. Measured: 10,000 cyclic groups built purely through the C API leave
+20,000+ objects uncollected indefinitely with `autoDrainInterval = 0`; the same workload with
+`autoDrainInterval` on leaves only what has accumulated since the last checkpoint. See
+`docs/gc-scheduling-investigation.md` §1, §6 and §7.
+
+`Python3.autoDrainInterval` therefore defaults to **off** on the GIL build too, and that default
+is deliberate rather than an oversight: turning it on is a real behavioural change, not a free
+one. A checkpoint tripped inside an ordinary `withGIL` scope can run whatever the collector or the
+release queue was holding onto — `__del__`, weakref callbacks, pending calls — at a point the
+caller never asked to yield from. Measured reentrant-safe (a `__del__` that calls back into
+Kotlin mid-collection completes without deadlocking, looping or crashing —
+`GCSchedulingMeasurementTest.testReentrancyDuringCheckpoint`), and cheap (~5.5 ns per outermost
+`withGIL` scope, ~2.9% of the floor, amortised over the interval) — but still a side effect an
+embedder has to opt into with eyes open, by setting `autoDrainInterval` explicitly or calling
+`Python3.drainPendingReleases()`. An embedder that would rather force an immediate, unconditional
+collection without touching either can call `PyGC_Collect()` directly (`python.native.ffi`, or
+`python.multiplatform.ffi.utils.PyGC.collect()` for the `gc.collect()`-equivalent route) — the
+same function `drainPendingReleases()` documents as the way to reclaim on behalf of *another*
+thread.
+
 ## Reference conventions, stated at every call site
 
 CPython's C API is inconsistent about ownership and getting it wrong is silent. Write which one
