@@ -46,11 +46,86 @@ class WiringTest {
         assertTrue(isBindingKspConfiguration("ksp", isMultiplatform = false))
     }
 
+    // Observed on `:ksp-fixtures:android` (`gradlew :ksp-fixtures:android:dependencies`), the
+    // fixture that carries `com.android.library`. AGP names its source sets with the build type
+    // *last*, so the test configurations here do not end in `Test` the way the Kotlin-target ones
+    // above do. Every one of the nine `...Test...` names below was receiving the processor before
+    // ROADMAP §13.
+    private val observedAndroidConfigurations = listOf(
+        "ksp",
+        "kspAndroid",
+        "kspAndroidAndroidTest",
+        "kspAndroidAndroidTestDebug",
+        "kspAndroidAndroidTestRelease",
+        "kspAndroidDebug",
+        "kspAndroidRelease",
+        "kspAndroidTest",
+        "kspAndroidTestDebug",
+        "kspAndroidTestFixtures",
+        "kspAndroidTestFixturesDebug",
+        "kspAndroidTestFixturesRelease",
+        "kspAndroidTestRelease",
+        "kspCommonMainMetadata",
+        "kspDebug",
+        "kspDebugAndroidTestKotlinAndroidProcessorClasspath",
+        "kspDebugKotlinAndroidProcessorClasspath",
+        "kspDebugUnitTestKotlinAndroidProcessorClasspath",
+        "kspPluginClasspath",
+        "kspPluginClasspathNonEmbeddable",
+        "kspRelease",
+        "kspReleaseKotlinAndroidProcessorClasspath",
+        "kspReleaseUnitTestKotlinAndroidProcessorClasspath",
+        "kspTest",
+        "kspTestDebug",
+        "kspTestFixtures",
+        "kspTestFixturesDebug",
+        "kspTestFixturesRelease",
+        "kspTestRelease",
+    )
+
     @Test
     fun testCompilationsAreExcludedOrTheModuleWouldEmitASecondFragmentUnderTheSameName() {
         assertFalse(isBindingKspConfiguration("kspDesktopTest", isMultiplatform = true))
         assertFalse(isBindingKspConfiguration("kspAndroidNativeArm64Test", isMultiplatform = true))
         assertFalse(isBindingKspConfiguration("kspTest", isMultiplatform = false))
+    }
+
+    @Test
+    fun anAndroidModulesTestConfigurationsCarryTheBuildTypeAfterTheWordTest() {
+        // The ROADMAP §13 defect: `kspAndroidTestDebug` does not end in `Test`, so the processor
+        // ran over the unit-test sources and emitted a `Fragment_<module>`/`FunctionTable` pair
+        // that shadowed `main`'s inside the test compilation. Observed on
+        // `:ksp-fixtures:android` before this filter was widened.
+        for (name in listOf(
+            "kspAndroidTestDebug",
+            "kspAndroidTestRelease",
+            "kspAndroidAndroidTestDebug",
+            "kspAndroidAndroidTestRelease",
+            "kspTestDebug",
+            "kspTestRelease",
+            "kspAndroidTestFixtures",
+            "kspAndroidTestFixturesDebug",
+            "kspTestFixturesRelease",
+        )) {
+            assertFalse(isBindingKspConfiguration(name, isMultiplatform = true), name)
+        }
+    }
+
+    @Test
+    fun onlyTheAndroidMainSourceSetsConfigurationsKeepTheProcessor() {
+        assertEquals(
+            listOf("kspAndroid", "kspAndroidDebug", "kspAndroidRelease", "kspDebug", "kspRelease"),
+            observedAndroidConfigurations.filter { isBindingKspConfiguration(it, isMultiplatform = true) },
+        )
+    }
+
+    @Test
+    fun aFlavourOrTargetMerelyContainingTheLettersTestKeepsTheProcessor() {
+        // `Test` is matched as a camel-case word, not as a substring: `testing` is an ordinary
+        // name a product flavour or a Kotlin target may carry, and excluding it would silently
+        // leave that variant without a fragment.
+        assertTrue(isBindingKspConfiguration("kspAndroidTestingDebug", isMultiplatform = true))
+        assertTrue(isBindingKspConfiguration("kspLatestDebug", isMultiplatform = true))
     }
 
     @Test

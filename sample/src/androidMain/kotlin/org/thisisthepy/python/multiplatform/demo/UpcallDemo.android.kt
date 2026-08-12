@@ -1,26 +1,28 @@
 package org.thisisthepy.python.multiplatform.demo
 
+import org.thisisthepy.python.multiplatform.demo.bindings.DemoCounter
+import org.thisisthepy.python.multiplatform.demo.bindings.UPCALL_ENTRY_NAME
+import org.thisisthepy.python.multiplatform.demo.bindings.callKotlinFromPython
+import org.thisisthepy.python.multiplatform.demo.bindings.installGeneratedUpcallTable
+import org.thisisthepy.python.multiplatform.demo.bindings.upcallTableSummary
+
 /**
- * Not wired, and the reason is a build constraint rather than anything about Android at run time.
+ * The table is generated and installed here exactly as on desktop and iOS -- same processor, same
+ * fragments, discovered through this module's own Android compilation.
  *
- * The generated table lives in `:sample-bindings`, which has no Android target because a module
- * carrying an Android plugin cannot apply the bindings plugin at these versions: KSP 2.3.11
- * requires AGP >= 8.10 and this build is on AGP 8.5.2 (`NoSuchMethodError:
- * AndroidComponentsExtension.addKspConfigurations`). See `sample/build.gradle.kts`.
- *
- * The runtime half is not the problem -- `python.multiplatform.reflection.UpcallTable` is
- * `commonMain` and works here. What Android cannot get today is the *generated* fragment, and a
- * hand-written one would hide exactly the thing this demo exists to show.
+ * This used to be a stub whose every member returned "unavailable on Android", because the
+ * bindings plugin could not be applied to a module carrying an Android plugin at the AGP this
+ * build pinned. ROADMAP §13 moved AGP past KSP's minimum and the stub is gone. The call itself is
+ * still made from Kotlin rather than from Python, because the boundary shim is desktop-only.
  */
 actual object UpcallDemo {
-    actual val available: Boolean = false
-    actual val entryName: String = "(none)"
-    actual fun install() = Unit
-    actual fun press() = Unit
-    actual fun callFromPython(): String = UNAVAILABLE
-    actual fun tableSummary(): String = UNAVAILABLE
-    actual fun optOutHeld(): Boolean = false
-
-    private const val UNAVAILABLE =
-        "unavailable on Android: the bindings plugin needs AGP >= 8.10 (this build is on 8.5.2)"
+    actual val available: Boolean = true
+    actual val entryName: String = UPCALL_ENTRY_NAME
+    actual fun install() = installGeneratedUpcallTable()
+    actual fun press() = DemoCounter.press()
+    actual fun callFromPython(): String = callKotlinFromPython()
+    actual fun tableSummary(): String = upcallTableSummary()
+    // Fully qualified: the member would otherwise shadow the imported top-level function and
+    // recurse into itself.
+    actual fun optOutHeld(): Boolean = org.thisisthepy.python.multiplatform.demo.bindings.optOutHeld()
 }

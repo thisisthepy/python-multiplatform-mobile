@@ -10,11 +10,13 @@ dependencies {
     // The plugin applies KSP itself, so the KSP Gradle plugin has to be on its runtime classpath
     // -- but deliberately *not* on its compile classpath.
     //
-    // `kotlin-dsl` compiles against Gradle's embedded Kotlin (1.9 on Gradle 8.9), and KSP 2.3.11
-    // is compiled with Kotlin 2.3: "Class 'com.google.devtools.ksp.gradle.KspExtension' was
-    // compiled with an incompatible version of Kotlin ... the compiler version 1.9.0 can read
-    // versions up to 2.0.0". `runtimeOnly` keeps the id resolvable (plugin ids are resolved from
-    // a classpath resource, not from compiled types) while the two `ksp { arg(...) }` calls go
+    // `kotlin-dsl` compiles against Gradle's embedded Kotlin (2.0.20 on Gradle 8.11.1; it was 1.9
+    // on the 8.9 this build used before ROADMAP §13), and KSP 2.3.11 is compiled with Kotlin 2.3:
+    // "Class 'com.google.devtools.ksp.gradle.KspExtension' was compiled with an incompatible
+    // version of Kotlin ... the compiler version 1.9.0 can read versions up to 2.0.0". The
+    // Gradle bump narrowed that gap but did not close it -- 2.0.20 reads up to 2.1 -- so
+    // `runtimeOnly` still applies. It keeps the id resolvable (plugin ids are resolved from a
+    // classpath resource, not from compiled types) while the two `ksp { arg(...) }` calls go
     // through `PythonBindingsPlugin.setKspArg`.
     runtimeOnly("com.google.devtools.ksp:symbol-processing-gradle-plugin:${libs.versions.ksp.get()}")
     testImplementation(kotlin("test"))

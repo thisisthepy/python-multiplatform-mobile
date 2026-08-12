@@ -20,24 +20,23 @@ plugins {
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.graalvm.native)
 
-    // NOT applied here, and it should be:
-    //
-    //   id("io.github.thisisthepy.python.multiplatform.bindings")
-    //
-    // The bindings plugin applies `com.google.devtools.ksp`, and KSP 2.3.11 declares a minimum
-    // AGP of 8.10.0 (`MINIMUM_SUPPORTED_AGP_VERSION` in its `agpUtils`). This repo is on AGP
-    // 8.5.2, whose `AndroidComponentsExtension` has no `addKspConfigurations`, so applying it to
-    // any module carrying an Android plugin dies at configuration time:
+    // The one id the plugin advertises, applied to a module that also carries an Android plugin
+    // -- which is the whole of ROADMAP §13. It applies `com.google.devtools.ksp`, and KSP 2.3.11
+    // declares `MINIMUM_SUPPORTED_AGP_VERSION = 8.10.0`; against this build's former AGP 8.5.2 it
+    // died at configuration time with
     //
     //   java.lang.NoSuchMethodError: 'void com.android.build.api.variant
     //       .AndroidComponentsExtension.addKspConfigurations(boolean)'
     //     at com.google.devtools.ksp.gradle.KspConfigurations$3$1.execute(KspConfigurations.kt:114)
     //
-    // That is not a property of this sample -- it is true of every Android consumer of the
-    // plugin at these versions, and AGP 8.10 needs Gradle 8.11.1 against this build's 8.9, so it
-    // is a two-version bump rather than a one-line change. `:sample-bindings` therefore carries
-    // the Python-facing declarations and the generated table, and this module reaches them from
-    // `desktopMain`/`iosMain` only. See ROADMAP §7 and §12.
+    // in *any* module carrying an Android plugin, so the demo was split into `:sample` and an
+    // Android-free `:sample-bindings` to get a generated table at all. AGP is 8.10.1 now (and
+    // Gradle 8.11.1, which AGP 8.10 requires), so the split is gone and this module holds its own
+    // Python-facing declarations again -- `src/*/kotlin/.../demo/bindings/`.
+    //
+    // `ksp-fixtures/android` is the regression test. It is the first fixture to apply an Android
+    // plugin, which is exactly why nothing caught this.
+    id("io.github.thisisthepy.python.multiplatform.bindings")
 }
 
 kotlin {
@@ -122,15 +121,6 @@ kotlin {
         desktopMain.dependencies {
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutines.swing)
-
-            // Declared per source set rather than in commonMain: `:sample-bindings` has no
-            // Android target (it could not have one and still apply KSP), so an androidMain that
-            // depended on it would fail variant resolution. The upcall half of the demo is
-            // therefore `expect`/`actual` in this module, with androidMain reporting why.
-            implementation(projects.sampleBindings)
-        }
-        iosMain.dependencies {
-            implementation(projects.sampleBindings)
         }
     }
 }
@@ -167,6 +157,22 @@ android {
 
 dependencies {
     debugImplementation(compose.uiTooling)
+}
+
+pythonBindings {
+    // `role` is not stated: `com.android.application` is applied, so the plugin infers `app` and
+    // this module aggregates. That inference is half the reason the plugin exists.
+
+    // In-repo consumer: the processor is a project here rather than published coordinates.
+    processor.set(projects.pythonMultiplatformKsp)
+
+    // Exposure is a blacklist, so applying the plugin offers *every* public declaration in this
+    // module to Python -- including the Compose UI. A `@Composable` function may only be called
+    // from another composable, and the generated fragment's entry is an ordinary lambda, so a
+    // scanned `@Composable` is a compile failure of generated code rather than a useless entry.
+    // The demo's Python-facing surface lives in `...demo.bindings`; the UI package is the one
+    // that has to be kept out.
+    excludePackages.set(listOf("org.thisisthepy.python.multiplatform.demo.ui"))
 }
 
 compose.desktop {
