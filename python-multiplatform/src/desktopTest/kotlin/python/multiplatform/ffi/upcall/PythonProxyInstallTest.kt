@@ -3,9 +3,11 @@ package python.multiplatform.ffi.upcall
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.PythonTestFixture
 import python.multiplatform.ffi.withGIL
+import python.multiplatform.reflection.CallableKind
 import python.multiplatform.reflection.ExposedCallable
 import python.multiplatform.reflection.FunctionTableFragment
 import python.multiplatform.reflection.HandleTable
+import python.multiplatform.reflection.ReflectedClass
 import python.multiplatform.reflection.TypeTag
 import python.multiplatform.reflection.UpcallTable
 import python.native.ffi.bindUpcallOrNull
@@ -72,6 +74,62 @@ class PythonProxyInstallTest {
             assertEquals("hi world", PythonTestFixture.eval("_p_sync['shout']").toString())
             assertEquals("7", PythonTestFixture.eval("_p_sync['ping']").toString())
             assertEquals("shout", PythonTestFixture.eval("_p_sync['name']").toString())
+        }
+
+    @Test
+    fun creatingAKotlinObjectFromPythonAndCallingAnInstanceMethodDispatchesThroughTheReceiverHandle() =
+        PythonTestFixture.withInterpreter {
+            PythonProxySource.install()
+
+            Python3.exec(
+                """
+                from proxycls import Counter
+                c = Counter(10)
+                _p_method = {'after': c.increment(5), 'again': c.increment(1)}
+                """.trimIndent(),
+            )
+
+            assertEquals("15", PythonTestFixture.eval("_p_method['after']").toString())
+            assertEquals("16", PythonTestFixture.eval("_p_method['again']").toString())
+        }
+
+    @Test
+    fun readingAndWritingAPropertyGoesThroughTheGetterAndSetterEntries() =
+        PythonTestFixture.withInterpreter {
+            PythonProxySource.install()
+
+            Python3.exec(
+                """
+                from proxycls import Counter
+                c = Counter(1)
+                _p_prop = {'before': c.value, 'label_before': c.label}
+                c.label = 'renamed'
+                _p_prop['label_after'] = c.label
+                """.trimIndent(),
+            )
+
+            assertEquals("1", PythonTestFixture.eval("_p_prop['before']").toString())
+            assertEquals("counter", PythonTestFixture.eval("_p_prop['label_before']").toString())
+            assertEquals("renamed", PythonTestFixture.eval("_p_prop['label_after']").toString())
+        }
+
+    @Test
+    fun awaitingASuspendingInstanceMethodDeliversTheValueFromAKotlinThread() =
+        PythonTestFixture.withInterpreter {
+            PythonProxySource.install()
+            installLoopHarness()
+            Python3.exec("from proxycls import Counter\nc = Counter(3)")
+
+            val outcome = runOnLoopThread("c.fetchLater(4)")
+
+            assertNull(outcome.completerFailure, "the Kotlin completer thread failed: ${outcome.completerFailure}")
+            assertEquals("None", outcome.error, "the generated proxy raised instead of resolving")
+            assertEquals("7", outcome.value)
+            assertEquals(
+                1,
+                outcome.futuresCreated,
+                "no Future was built, so this run took the fast path and proves nothing about delivery",
+            )
         }
 
     @Test
@@ -268,5 +326,87 @@ object ProxyFragment : FunctionTableFragment {
             paramTypes = emptyList(),
             returnType = TypeTag.INT,
         ) { 7L },
+    ) + counterEntries()
+
+    override fun classes(): List<ReflectedClass> = listOf(
+        ReflectedClass(
+            name = COUNTER,
+            memberNames = listOf(
+                "$COUNTER.<init>",
+                "$COUNTER.increment",
+                "$COUNTER.value",
+                "$COUNTER.label",
+                "$COUNTER.label=",
+                "$COUNTER.fetchLater",
+            ),
+        ),
     )
+
+    private const val COUNTER = "proxycls.Counter"
+
+    private fun counterEntries(): List<ExposedCallable> = listOf(
+        ExposedCallable(
+            name = "$COUNTER.<init>",
+            arity = 1,
+            paramTypes = listOf(TypeTag.INT),
+            returnType = TypeTag.OBJECT,
+            kind = CallableKind.CONSTRUCTOR,
+        ) { args -> ProxyCounter(args[0] as Long) },
+        ExposedCallable(
+            name = "$COUNTER.increment",
+            arity = 1,
+            paramTypes = listOf(TypeTag.INT),
+            returnType = TypeTag.INT,
+            kind = CallableKind.METHOD,
+        ) { args -> (args[0] as ProxyCounter).increment(args[1] as Long) },
+        ExposedCallable(
+            name = "$COUNTER.value",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.INT,
+            kind = CallableKind.GETTER,
+        ) { args -> (args[0] as ProxyCounter).value },
+        ExposedCallable(
+            name = "$COUNTER.label",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.STRING,
+            kind = CallableKind.GETTER,
+        ) { args -> (args[0] as ProxyCounter).label },
+        ExposedCallable(
+            name = "$COUNTER.label=",
+            arity = 1,
+            paramTypes = listOf(TypeTag.STRING),
+            returnType = TypeTag.UNIT,
+            kind = CallableKind.SETTER,
+        ) { args -> (args[0] as ProxyCounter).label = args[1] as String },
+        ExposedCallable(
+            name = "$COUNTER.fetchLater",
+            arity = 1,
+            paramTypes = listOf(TypeTag.INT),
+            returnType = TypeTag.INT,
+            kind = CallableKind.METHOD,
+            isSuspend = true,
+        ) { args -> PendingCall.start { (args[0] as ProxyCounter).fetchLater(args[1] as Long) } },
+    )
+}
+
+/**
+ * The instance fixture for [PythonProxyInstallTest]'s class-rendering tests: a receiver that
+ * arrives in `args[0]` the way `CallableKind.METHOD`/`GETTER`/`SETTER` require, resolved from the
+ * `self._pm_handle` integer the generated `Counter.__init__` stashes. Named differently from
+ * [ProxyFragment]'s Python-visible `Counter` so a grep for the Kotlin declaration is unambiguous.
+ */
+class ProxyCounter(private var total: Long) {
+    fun increment(by: Long): Long {
+        total += by
+        return total
+    }
+
+    val value: Long get() = total
+
+    var label: String = "counter"
+
+    suspend fun fetchLater(x: Long): Long =
+        suspendCoroutine { c -> ProxyFragment.parked.put { c.resume(total + x) } }
 }
