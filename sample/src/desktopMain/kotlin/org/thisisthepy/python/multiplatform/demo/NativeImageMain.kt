@@ -1,6 +1,7 @@
 package org.thisisthepy.python.multiplatform.demo
 
 import org.thisisthepy.python.multiplatform.demo.bindings.DemoCounter
+import org.thisisthepy.python.multiplatform.demo.bindings.UPCALL_ARGS_ENTRY_NAME
 import org.thisisthepy.python.multiplatform.demo.bindings.UPCALL_ENTRY_NAME
 import org.thisisthepy.python.multiplatform.demo.bindings.UPCALL_EXCLUDED_NAME
 import org.thisisthepy.python.multiplatform.demo.bindings.installGeneratedUpcallTable
@@ -42,8 +43,10 @@ fun main() {
 
     val resolveAddr = UpcallStub.resolveHandleStubAddr
     val invokeAddr = UpcallStub.invokeHandleStubAddr
+    val invokeWithArgsAddr = UpcallStub.invokeWithArgsStubAddr
     println("KOTLIN: resolve stub @ 0x${resolveAddr.toString(16)}")
     println("KOTLIN: invoke  stub @ 0x${invokeAddr.toString(16)}")
+    println("KOTLIN: args    stub @ 0x${invokeWithArgsAddr.toString(16)}")
 
     // Python resolves the entry to a handle by name exactly once, then calls back through that
     // handle -- the ObjC-selector-cache shape docs/upcall-design.md argues for, reached here via
@@ -58,6 +61,9 @@ fun main() {
         try:
             resolve = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_char_p)($resolveAddr)
             invoke = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_long)($invokeAddr)
+            invoke_args = ctypes.CFUNCTYPE(
+                ctypes.py_object, ctypes.c_long, ctypes.py_object
+            )($invokeWithArgsAddr)
 
             handle = resolve(b"$UPCALL_ENTRY_NAME")
             print("PYTHON: resolved handle =", handle)
@@ -66,6 +72,18 @@ fun main() {
             result = invoke(handle)
             print("PYTHON: invoke result =", result)
             assert result == $PRESSES, f"expected $PRESSES, got {result}"
+
+            # The argument-carrying trampoline, in the same closed world: a str and an int in,
+            # a str back. This is the descriptor that has to be in reachability-metadata.json --
+            # under native-image an undeclared one dies here with MissingForeignRegistrationError,
+            # not at build time.
+            args_handle = resolve(b"$UPCALL_ARGS_ENTRY_NAME")
+            print("PYTHON: resolved args handle =", args_handle)
+            assert args_handle != -1, "argument-taking name lookup failed"
+
+            described = invoke_args(args_handle, ("presses x3 = ", 3))
+            print("PYTHON: invoke_args result =", repr(described))
+            assert described == "presses x3 = ${PRESSES * 3}", f"got {described!r}"
 
             excluded = resolve(b"$UPCALL_EXCLUDED_NAME")
             print("PYTHON: @PythonInternal entry resolves to", excluded)

@@ -28,6 +28,20 @@ made without one is undefined behaviour, and the resulting segfault lands far fr
 This is true on free-threaded builds too. Dropping the global lock removes contention, not the
 requirement that a thread be attached before touching any object.
 
+## An entry point reached from C must not trust the nesting depth
+
+`withGIL` skips `PyGILState_Ensure` when this thread's depth is already non-zero. That counter
+records scopes *Kotlin* opened, and C is free to have dropped the GIL inside one of them:
+`ctypes.CFUNCTYPE` releases it around every foreign call (`PYFUNCTYPE` does not). So a callback
+entered from C can run with a non-zero depth and no thread state at all, and the first C API call
+segfaults inside `_PyThreadState_GET` — observed here as `PyErr_Occurred+0x1c`.
+
+Anything Python calls into therefore takes its own `PyGILState_Ensure`/`Release` pair
+unconditionally and restores the counters around it; `python.multiplatform.ffi.upcall
+.UpcallTrampoline.attached` is that. It does **not** apply to CPython's own type slots
+(`tp_traverse`, `tp_clear`, `tp_dealloc`), which are entered with the GIL held and must neither
+take nor release it — see `ProxyTypeFactory`.
+
 ## Attaching is not enough — someone has to reach an eval-loop checkpoint
 
 `_Py_HandlePending` is the only place CPython merges the free-threaded build's deferred

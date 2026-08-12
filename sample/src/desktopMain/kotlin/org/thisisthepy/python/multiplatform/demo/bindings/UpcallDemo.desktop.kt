@@ -18,25 +18,34 @@ actual fun installGeneratedUpcallTable() {
 }
 
 /**
- * Resolve once, invoke many. `_pm_handle` is computed here and lives on in `__main__`, so every
+ * Resolve once, invoke many. Both handles are computed here and live on in `__main__`, so every
  * call afterwards passes an integer and never a string again -- which is the whole argument of
  * `docs/upcall-design.md` (a selector is fast because it is interned, not because a table
  * exists).
  *
- * `ctypes` stands in for the generated proxy type a finished binder would install. Both stub
- * addresses are Panama upcall stubs of shape `(long) -> long`, which is why the entry this demo
- * calls takes no arguments and returns a `Long`.
+ * `ctypes` stands in for the generated proxy type a finished binder would install. Two stub
+ * shapes are in play and the difference is the point:
+ *
+ * - `(long) -> long` reaches zero-argument entries and carries nothing but the handle. That is
+ *   all this demo could do before ROADMAP §13.
+ * - `(long, PyObject *) -> PyObject *` is the argument-carrying trampoline. It is the shape a
+ *   `PyCFunction` slot takes, so the same stub serves the proxy type when that lands.
  */
 private fun installCtypesBridge() {
     val resolveAddr = UpcallStub.resolveHandleStubAddr
     val invokeAddr = UpcallStub.invokeHandleStubAddr
+    val invokeWithArgsAddr = UpcallStub.invokeWithArgsStubAddr
     Python3.exec(
         """
         import ctypes
 
         _pm_resolve = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_char_p)($resolveAddr)
         _pm_invoke = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_long)($invokeAddr)
+        _pm_invoke_args = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.c_long, ctypes.py_object)(
+            $invokeWithArgsAddr
+        )
         _pm_handle = _pm_resolve(b"$UPCALL_ENTRY_NAME")
+        _pm_args_handle = _pm_resolve(b"$UPCALL_ARGS_ENTRY_NAME")
         """.trimIndent(),
     )
 }
@@ -48,7 +57,13 @@ actual fun callKotlinFromPython(): String = try {
         "the name was not in the table (handle -1)"
     } else {
         val value = Python3.eval("_pm_invoke(_pm_handle)", PY_EVAL_INPUT, globals, globals)
-        "Python called Kotlin through handle $handle and got $value"
+        // The argument-carrying call: Python builds a real tuple, Kotlin reads a String and a
+        // Long out of it and hands a String back.
+        val described = Python3.eval(
+            "_pm_invoke_args(_pm_args_handle, ('presses x3 = ', 3))",
+            PY_EVAL_INPUT, globals, globals,
+        )
+        "handle $handle -> $value  ·  with args -> $described"
     }
 } catch (t: Throwable) {
     "${t::class.simpleName}: ${t.message}"

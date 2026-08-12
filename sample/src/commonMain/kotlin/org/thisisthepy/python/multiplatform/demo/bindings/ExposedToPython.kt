@@ -26,13 +26,20 @@ object DemoCounter {
     }
 
     /**
-     * What Python calls back into. Zero arguments and a `Long` return is not an accident: the
-     * desktop boundary shim (`python.native.ffi.UpcallStub`) is a pair of `(long) -> long` Panama
-     * upcall stubs, so that is the only shape a real `ctypes` call can take today. The table
-     * itself carries arity and per-argument `TypeTag`s for richer entries -- what is missing is
-     * the trampoline, not the table.
+     * The zero-argument entry, kept because `NativeImageMain`'s closed-world check resolves and
+     * calls exactly this one through the older `(long) -> long` stub pair.
      */
     fun presses(): Long = count
+
+    /**
+     * The entry that takes arguments -- the half that did not exist until
+     * `python.multiplatform.ffi.upcall.UpcallTrampoline` did (ROADMAP §13).
+     *
+     * A `String` and a `Long` in, a `String` out: three marshalling decisions the boundary makes
+     * from the `TypeTag`s the generated table has carried all along. Nothing about this
+     * declaration is special -- it is exposed for being `public`, like everything else here.
+     */
+    fun describe(prefix: String, multiplier: Long): String = "$prefix${count * multiplier}"
 
     /**
      * Exposed to nobody. `@PythonInternal` is the opt-out, and this entry must be absent from the
@@ -46,6 +53,10 @@ object DemoCounter {
 /** The name [DemoCounter.presses] is registered under. */
 const val UPCALL_ENTRY_NAME: String =
     "org.thisisthepy.python.multiplatform.demo.bindings.DemoCounter.presses"
+
+/** The name [DemoCounter.describe] is registered under. */
+const val UPCALL_ARGS_ENTRY_NAME: String =
+    "org.thisisthepy.python.multiplatform.demo.bindings.DemoCounter.describe"
 
 /** The name [DemoCounter.internalDetail] *would* carry if `@PythonInternal` did nothing. */
 const val UPCALL_EXCLUDED_NAME: String =
