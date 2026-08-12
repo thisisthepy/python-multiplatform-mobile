@@ -736,16 +736,18 @@ suite against `cpython-3.14.7+20260807-<target>-freethreaded-install_only`:
 
 | build | tests | failing | skipped |
 |---|---|---|---|
-| default (GIL) 3.14.7 | 211 | 0 | 1 |
-| free-threaded 3.14.7 | 211 | **1** | 1 |
+| default (GIL) 3.14.7 | 236 | 0 | 1 |
+| free-threaded 3.14.7 | 236 | 0 | 1 |
 
 This section used to say "3.15t" and "waiting on upstream"; neither was true. 3.14 free-threaded
 is what was measured here, and those artefacts have been on the python-build-standalone release
 all along.
 
-It used to report two failures. One of them — deferred deallocation — turned out to be fixable
-after all, and is fixed; see below. What is left is `CycleCollectionTest`, whose *premise* the
-free-threaded runtime does not honour, and which no change to this library can repair.
+**It is now green on both.** It used to report two failures. Deferred deallocation was the first
+and is fixed by the checkpoint below. `CycleCollectionTest` was the second, and it was written off
+twice — first as a premise the runtime does not honour, then as a queued-decrement problem a
+checkpoint would flush. Both were wrong, and it is fixed; see below and
+`docs/gc-scheduling-investigation.md`.
 
 ### The flag did nothing at all until three silent defects were fixed
 
@@ -894,31 +896,52 @@ An embedder that never reaches a checkpoint therefore never runs the cyclic coll
 either build. That is not what §9 is about and nothing here depends on it, but it is the same root
 cause, and `drainPendingReleases()` covers it for anyone who turns the automatic path on.
 
-### Heap types are not reference counted at all, which voids a test's premise
+### Heap types are deferred-reference-counted, and a collection is what makes the count readable
 
-This is the one remaining free-threaded failure.
-`CycleCollectionTest.testHandleReleasedWhenProxyDiesWithoutCycle` fails, and its own guard
-assertion is what caught it — the one documented as "not decoration: it is what proves the probe
-reads a real refcount". It refused to proceed, exactly as designed.
+This was the last free-threaded failure, and it is fixed.
+`CycleCollectionTest.testHandleReleasedWhenProxyDiesWithoutCycle` had two independent defects, and
+its own guard assertion caught both — the one documented as "not decoration: it is what proves the
+probe reads a real refcount". It refused to proceed twice, exactly as designed.
 
-Two separate things are wrong with it free-threaded, and only the second matters:
+- **The probe read eight bytes at offset 0 of `PyObject`.** Measured on 3.14.7: on the default
+  build that word is `ob_refcnt` and steps with the count; free-threaded it is `ob_tid` and never
+  moves, while the count is `ob_ref_local` (a `uint32` at +12) plus `ob_ref_shared >> 2` (at +16).
+  The failure reported `6171668704` for both "before" and "alive" — a thread id, read as a
+  refcount. The probe now branches on `BuildConfig.pythonFreeThreaded`.
+- **Fixing the offset was necessary and not sufficient.** With the right fields, "before" and
+  "alive" still read identically — `1152921504606846978` — because a free-threaded heap type
+  carries `_PyGC_BITS_DEFERRED` and `PyType_GenericAlloc`'s `_Py_INCREF_TYPE` is a no-op for a
+  deferred type on its owning thread. Measured on the proxy type: `ob_gc_bits == 0x41`
+  (`TRACKED | DEFERRED`) and `ob_ref_shared == 0x3ffffffffffffffd`, a shared count of
+  `PY_SSIZE_T_MAX / 8` — the deferred sentinel. Creating 100 instances left all six header words
+  bit-identical.
 
-- The probe reads eight bytes at offset 0 of `PyObject`. Measured on 3.14.7: on the default build
-  that word is `ob_refcnt` and steps 1 → 2 with the count; on the free-threaded build it is
-  `ob_tid` and never moves, while the count lives in a `uint32` at offset 12 (`ob_ref_local`)
-  plus `ob_ref_shared >> 2` at offset 16. The failure reported `6173044960` for both "before" and
-  "alive" — a thread id, read as a refcount.
-- Fixing the offset would not save the test. Its premise is that "each live instance of a heap
-  type holds one reference to that type", and free-threaded CPython gives heap types **deferred
-  reference counting**: measured, a heap type's count reads `1152921504606846980` and does not
-  move when 100 instances are created or destroyed. The invariant simply does not exist there, so
-  `tp_dealloc`'s obligation to release the type reference cannot be checked this way at all.
+**The conclusion this section used to draw from that is what was wrong.** It said the invariant
+"each live instance of a heap type holds one reference to that type" *does not exist* on a
+free-threaded build, and that no change to this library could repair the test. It does exist. It is
+simply not **observable** until a collection materialises the deferred references — measured, after
+one `PyGC_Collect()` the same 100 instances show up as exactly `100 << 2` on `ob_ref_shared`, and
+`tp_dealloc` then gives back exactly 100, returning the total to its pre-instantiation value to the
+unit. The test now takes a collection on either side of its instantiation loop, free-threaded only.
+**The assertions are unchanged** — the same "rises by exactly 100" and "returns to exactly where it
+started" hold on both builds.
 
-This also corrects what this section previously claimed: *"nothing in this codebase dereferences
-`PyObject`, so `abi3t` making it an incomplete type does not break us."* Something does — that
-test — and it is the one place that would have to change for `abi3t`. The library proper is still
-clean: `ProxyTypeFactory` writes only into memory it obtained from `PyObject_GetTypeData`, and
-nothing reads inside a `PyObject`.
+**A checkpoint is not the fix here, and this is worth keeping straight.** The obvious guess, given
+the rest of this section, is that the missing decrements were queued by biased reference counting
+and that `drainPendingReleases()` would flush them. Measured: it does not. The header is
+bit-identical before and after a checkpoint, because there is nothing queued to merge — the
+increments were never made. Deferred reference counting and BRC queueing are different mechanisms
+with different remedies, and only the second is what §9's checkpoint is for.
+
+This also revisits what this section previously claimed about `abi3t`. The library proper is clean —
+`ProxyTypeFactory` writes only into memory it obtained from `PyObject_GetTypeData` — but that test
+does read inside a `PyObject`, and it is the one place that would have to change. That is a
+property of using a direct probe, not of the invariant; counting through `sys.getrefcount` would
+also work, at the price of the argument's own temporary reference.
+
+The full trace, with the header dumps, is in `docs/gc-scheduling-investigation.md`. That document
+also records the half of this that is **not** free-threading-specific: `_Py_ScheduleGC` only sets
+`_PY_GC_SCHEDULED_BIT`, so a pure C API embedder never runs the cyclic collector on *either* build.
 
 ### What each platform can actually get
 

@@ -13,6 +13,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import python.native.ffi.bindings
 import python.native.ffi.Panama
+import python.multiplatform.BuildConfig
 
 class Node(var ref: PyObject? = null) {
     var rawPtr: Long = 0L
@@ -122,13 +123,44 @@ class CycleCollectionTest {
      * every instance holds a strong reference to its type, and the default `subtype_dealloc`
      * releases it. A hand-written `tp_dealloc` that forgets to leaks one type reference per
      * instance; one that releases it twice eventually frees the type out from under the process.
-     * Both are checked here by reading `ob_refcnt`, which is the first field of `PyObject` and
-     * fixed by the stable ABI. Reading it directly rather than through `sys.getrefcount` keeps
-     * the argument's own temporary reference out of the number.
+     * Both are checked here by reading the type's reference count out of its object header
+     * directly. Reading it rather than calling `sys.getrefcount` keeps the argument's own
+     * temporary reference out of the number.
+     *
+     * ### Two headers, not one
+     *
+     * `ob_refcnt` sits at offset 0 only on a build with the global lock. Free-threaded CPython
+     * lays `PyObject` out differently (`Include/object.h`): offset 0 is `ob_tid`, the owning
+     * thread's id, and the count is split between a thread-local `uint32 ob_ref_local` at +12 and
+     * an atomic `Py_ssize_t ob_ref_shared` at +16 whose value is shifted left by
+     * `_Py_REF_SHARED_SHIFT` (2). `Py_REFCNT` is the sum, and [typeRefCount] reproduces it.
+     *
+     * An earlier version of this probe read offset 0 unconditionally and therefore reported a
+     * thread id on the free-threaded build -- the same ten-digit number for "before" and for
+     * "alive", which is what the guard assertion below caught.
+     *
+     * ### Deferred references have to be materialised before the count means anything
+     *
+     * Fixing the offset is necessary and not sufficient. A heap type on the free-threaded build
+     * carries `_PyGC_BITS_DEFERRED`, and its `ob_ref_shared` is initialised to the deferred
+     * sentinel -- measured here on 3.14.7: `ob_gc_bits == 0x41` (`TRACKED | DEFERRED`) and
+     * `ob_ref_shared == 0x3ffffffffffffffd`, i.e. a shared count of `PY_SSIZE_T_MAX / 8`. While
+     * that bit is set, `PyType_GenericAlloc`'s `_Py_INCREF_TYPE` is a no-op for the owning thread,
+     * so creating instances does not move the count at all. Measured: 100 instantiations left all
+     * six header words bit-identical, and an eval-loop checkpoint
+     * ([Python3.drainPendingReleases]) left them bit-identical too -- there is nothing queued to
+     * merge, because the increments were never made.
+     *
+     * A collection is the one thing that converts deferred references into real ones. After
+     * [PyGC_Collect] the same 100 instances show up as exactly 100 on the count, and `tp_dealloc`
+     * then gives back exactly 100. So the invariant this test asserts does hold on both builds;
+     * free-threaded it is simply not *observable* until a collection has run, which is why one is
+     * taken on either side of the instantiation loop below. See
+     * `docs/gc-scheduling-investigation.md`.
      *
      * The "rises while alive" assertion is not decoration: it is what proves the probe reads a
      * real refcount, so that the "returns afterwards" assertion cannot pass vacuously on a
-     * garbage address.
+     * garbage address -- and it is what caught both of the above.
      */
     @Test
     fun testHandleReleasedWhenProxyDiesWithoutCycle() {
@@ -140,7 +172,24 @@ class CycleCollectionTest {
             val theUnsafe = unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }.get(null)
             val putLong = unsafeClass.getMethod("putLong", Long::class.javaPrimitiveType, Long::class.javaPrimitiveType)
             val getLong = unsafeClass.getMethod("getLong", Long::class.javaPrimitiveType)
-            fun typeRefCount(): Long = getLong.invoke(theUnsafe, proxyTypeAddr) as Long
+            val getInt = unsafeClass.getMethod("getInt", Long::class.javaPrimitiveType)
+
+            // `Py_REFCNT`, for whichever object header this build actually has. See the KDoc above:
+            // offset 0 is `ob_refcnt` only on a build with the global lock.
+            fun typeRefCount(): Long =
+                if (!BuildConfig.pythonFreeThreaded) {
+                    getLong.invoke(theUnsafe, proxyTypeAddr) as Long
+                } else {
+                    val local = (getInt.invoke(theUnsafe, proxyTypeAddr + 12) as Int).toLong() and 0xFFFF_FFFFL
+                    val shared = getLong.invoke(theUnsafe, proxyTypeAddr + 16) as Long
+                    local + (shared shr 2)
+                }
+
+            // Free-threaded only: materialise whatever deferred references this type already
+            // carries, so that `before` and `alive` are read in the same state and the difference
+            // between them is the instantiation loop and nothing else. On a build with the global
+            // lock the count is always accurate and this would only cost a heap walk.
+            if (BuildConfig.pythonFreeThreaded) python.native.ffi.PyGC_Collect()
 
             val liveBefore = HandleTable.liveCount
             val typeRefBefore = typeRefCount()
@@ -164,6 +213,10 @@ class CycleCollectionTest {
                 liveBefore + rounds, HandleTable.liveCount,
                 "setup failed: $rounds handles should be rooted while the proxies are alive"
             )
+            // The instantiations above were deferred on a free-threaded build; this is what turns
+            // them into countable references. Without it `alive` reads exactly `before`.
+            if (BuildConfig.pythonFreeThreaded) python.native.ffi.PyGC_Collect()
+
             val typeRefAlive = typeRefCount()
             assertEquals(
                 typeRefBefore + rounds, typeRefAlive,
