@@ -340,9 +340,9 @@ Kotlin 이 `Future` 를 만들어 Python 이벤트 루프에 넘기고, 완료 �
 | 타깃 | 컴파일 | 실행 |
 |---|---|---|
 | desktop | ✔ | ✔ — `await` · 예외 · 빠른 경로 전부 관측 |
-| androidNativeArm64 | ✔ | 미확인 (기기 없음) |
-| iosSimulatorArm64 | ✔ | 미확인 |
-| wasmJs | ✔ | **성립하지 않을 것이다 — 추론.** 아래 |
+| androidNativeArm64 | ✔ | 미확인 (기기 없음) — §11.5 도 그대로 |
+| iosSimulatorArm64 | ✔ | ~~미확인~~ **✔ — §11 이 채웠다.** 전달·이른 취소 통지·조용한 드롭 셋 다 통과 |
+| wasmJs | ✔ | **성립하지 않을 것이다 — 추론.** 아래 (§9.5 가 뒤집었다: 교착이 아니라 `import asyncio` 자체가 트랩) |
 | android (JVM) | **미확인** — 이 워크스페이스에 Android SDK 가 없어 태스크가 구성조차 안 된다 |
 
 전달 코드는 전부 `commonMain` 이고 `expect`/`actual` 이 하나도 없다. 즉 컴파일된 다섯 소스가
@@ -636,10 +636,100 @@ no-op** 이고, 슬롯이 이미 남에게 재발급된 뒤라도 세대가 어�
 `runningLoop()` 와 `settleFunction()` 이 이미 같은 종류의 조회를 하고 있고, 진짜로 suspend 한 호출은
 속성 조회를 세는 처지가 아니다(§8.3 과 같은 논거).
 
-### 10.6 확인하지 않은 것
+### 10.6 확인하지 않은 것 — §11 이 iOS 를 채웠다
 
-- **desktop 외의 실행.** 통지 경로는 `expect`/`actual` 이 하나도 없는 `commonMain` 이고 바인딩만
-  타깃별이다. androidNative(cinterop 포함)와 wasmJs 는 **컴파일만** 확인했다. iOS·Android 기기에서
-  돌려보지 않았다 — §7.1 이 (B) 의 완료 스레드에 대해 남겨 둔 질문이 여기에도 그대로 남는다.
+- ~~**desktop 외의 실행.**~~ **§11 이 iOS 시뮬레이터로 채웠다.** 아래 원문은 대조용으로 남긴다.
+
+  > 통지 경로는 `expect`/`actual` 이 하나도 없는 `commonMain` 이고 바인딩만 타깃별이다.
+  > androidNative(cinterop 포함)와 wasmJs 는 **컴파일만** 확인했다. iOS·Android 기기에서 돌려보지
+  > 않았다 — §7.1 이 (B) 의 완료 스레드에 대해 남겨 둔 질문이 여기에도 그대로 남는다.
+
+  androidNative 는 여전히 컴파일만이다 — 실행하려면 에뮬레이터가 필요하고, 이번 회차에는 다른
+  작업이 쓰고 있어 쓰지 않았다(`CLAUDE.md` 의 규정). Android(JVM/ART)·iOS 실기기는 여전히 미확인.
 - **루프가 죽은 채로 남은 핸들.** Kotlin 쪽 `finally` 해제가 그것을 막도록 되어 있지만, 그 경우를
   일부러 만들어 관측하지는 않았다.
+
+---
+
+## 11. desktop 밖에서의 실행 — 측정 (iOS 시뮬레이터)
+
+§10.6 이 남긴 질문: 통지 경로(그리고 그 아래 전달 경로 전체)가 desktop 이 아닌 타깃에서 **실제로
+도는가.** 컴파일이 아니라 실행이다.
+
+### 11.1 iOS 에 `asyncio` 가 있는가 — 측정, 그리고 기존 문서의 유추는 틀렸다
+
+`docs/upcall-design.md` §"Can Python call an address at all?" 는 "이 프로젝트의 iOS
+`Python.framework` 는 `_ctypes` 도, `lib-dynload` 도 없다"고 적었고, §4·§8.5 는 그 문장에 기대어
+iOS 의 `asyncio` 가능성을 유추만 했다(직접 확인은 하지 않았다). 그 유추는 **성립하지 않는다** —
+"`Python.framework` 가 `lib-dynload` 를 안 담고 있다"는 진술 자체는 맞지만, 그것이 가리키는 대상은
+앱이 링크하는 **xcframework 바이너리**(헤더 + 인터프리터 심볼뿐)이고, `asyncio` 가 실제로 찾는
+곳은 **별도로 풀리는 BeeWare stdlib 아카이브**(`extractIosSimulatorStdlib` 가
+`build/python-stdlib/ios-simulator` 에 푸는 것, `PYTHONHOME` 이 가리키는 자리)다. 둘은 다른 것이고,
+후자를 직접 열어 확인했다:
+
+    build/python-stdlib/ios-simulator/lib/python3.14/asyncio/               (순수 파이썬, 전부 있음)
+    build/python-stdlib/ios-simulator/lib/python3.14/lib-dynload/
+        _asyncio.cpython-314-iphonesimulator.so
+        _socket.cpython-314-iphonesimulator.so
+        select.cpython-314-iphonesimulator.so
+
+파일이 있다는 것과 실제로 동작한다는 것은 다른 진술이므로, `AsyncioAvailabilityProbeTest`
+(`iosSimulatorArm64Test`, 자기 파일 하나로 격리 — wasmJs 의 트랩과 같은 모양이 여기서도 날 경우
+번지는 범위를 파일 하나로 막기 위해서다)로 직접 돌렸다:
+
+```python
+import asyncio
+async def _pmp_probe(): return 41 + 1
+_pmp_result = asyncio.new_event_loop().run_until_complete(_pmp_probe())
+```
+
+**통과한다.** import 도, `run_until_complete` 도 트랩 없이 정상 동작한다 — wasmJs 와 달리 iOS 는
+이 지점에서 막히지 않는다. `_ctypes` 유추가 `asyncio` 에는 적용되지 않는다는 것이 이제 유추가
+아니라 측정이다.
+
+### 11.2 그런데 데스크톱의 세 테스트는 "그대로 옮길 수 있는" 것이 아니었다
+
+`AsyncUpcallDeliveryTest`·`AsyncUpcallCancellationTest`·`AsyncUpcallEarlyCancellationTest` 를
+검토한 결과, 셋 다 `commonTest`/`nativeTest` 로 옮길 수 없었다. 이유는 `asyncio` 가 아니라
+**완료/관찰 스레드를 만드는 방법**이다 — 셋 다 `java.lang.Thread` 와
+`java.util.concurrent.{LinkedBlockingQueue,TimeUnit}` 을 쓰고, 이것은 JVM 전용이라 Kotlin/Native
+어디에도 없다. `asyncio` 만 봤다면 "옮길 수 있다"고 잘못 판단했을 것이다 — 이 저장소가 이미 가진
+포터블한 부분(`AsyncUpcallPortabilityTest`, `commonTest`)이 정확히 asyncio 를 건드리기 전에
+끝나는 두 경로만 남긴 이유이기도 하다: 그 두 경로는 스레드가 아예 필요 없다.
+
+그래서 데스크톱 파일을 옮기는 대신, 같은 주장을 **새로 만든 iOS/androidNative 쪽 완료 스레드**로
+다시 검증했다.
+
+### 11.3 `NativeThread` — JVM 스레드의 자리를 대신하는 것, 그리고 왜 `Worker` 가 아닌가
+
+`nativeTest/.../NativeThread.kt`: `pthread_create` 를 직접 부르는 얇은 래퍼
+(`StableRef` + `staticCFunction` 트램폴린). `kotlin.native.concurrent.Worker` 를 쓰지 않은 이유는
+이 테스트들이 답해야 하는 질문 자체가 "Kotlin/Native 런타임이 **스스로 붙인 적 없는** 스레드에서
+완료가 와도 되는가"이기 때문이다 — `Worker` 는 Kotlin/Native 자신의 스레드 기계이므로 그 질문을
+우회한다. 순수 `pthread_create` 는 `CycleCollectionTest.testDeallocOnAThreadCPythonCreated` 가 이미
+같은 모양으로 측정해 둔 것과 정확히 같은 처지의 스레드다 — 거기서는 CPython 이 만든 pthread 가
+`tp_dealloc` 슬롯을 불렀고, 여기서는 이 테스트가 만든 pthread 가 `PendingCall` 의 리스너를 부른다.
+
+### 11.4 측정한 것 — 셋, 전부 iOS 시뮬레이터에서 통과
+
+| 테스트 (`nativeTest`) | 데스크톱 대응 | 무엇을 다시 확인했나 | 결과 |
+|---|---|---|---|
+| `AsyncUpcallNativeDeliveryTest.pythonAwaitsASuspendedKotlinCallAndTheValueArrivesFromAThreadTheRuntimeNeverAttachedItself` | `AsyncUpcallDeliveryTest.pythonAwaitsASuspendedKotlinCallAndTheValueArrivesFromAKotlinThread` | (C)/(B) 의 실제 전달: 루프가 도는 동안 낯선 스레드가 GIL 을 얻어 `call_soon_threadsafe` 로 `Future` 를 해소 | **통과** |
+| `AsyncUpcallNativeDeliveryTest.theFastPathStillTakesNoAsyncioOnThisTargetEither` | `theSameAwaitExpressionTakesTheShortcutWhenTheKotlinBodyNeverSuspends` | 빠른 경로가 이 타깃에서도 `asyncio` 를 안 타는가 | **통과** |
+| `AsyncUpcallNativeEarlyCancellationTest.cancellingTheFutureReachesEnsureActiveWhileTheKotlinCallIsStillSuspendedOnAThreadTheRuntimeNeverAttachedItself` | `AsyncUpcallEarlyCancellationTest.cancellingTheFutureReachesEnsureActiveWhileTheKotlinCallIsStillSuspended` | §10 의 이른 통지: `_pm_cancel` → `ensureActive()` 가 **완료 전에** 던지는가 | **통과** |
+| `AsyncUpcallNativeCancellationTest.aCompletionLandingOnACancelledFutureIsDroppedInsteadOfRaisingInsideTheLoop` | `AsyncUpcallCancellationTest.aCompletionLandingOnACancelledFutureIsDroppedInsteadOfRaisingInsideTheLoop` | §9.2 의 조용한 드롭: 비협조 본문이 취소된 `Future` 에 완료를 배달해도 루프가 다치지 않는가, 에러 지시자가 새지 않는가 | **통과** |
+
+세 번 반복 실행해 타이밍에 의한 우연이 아님을 확인했다(§ "검증" 참고). `_pm_cancel` 은
+`UpcallEntry.publish` 가 `_pm_resolve`/`_pm_bind`/`_pm_release` 와 함께 통째로 까는 바인딩이라
+(§10.2 표가 이미 "nativeMain, iOS·androidNative 공용"이라고 적어 둔 대로) 새 배선은 필요 없었다 —
+`bindUpcallOrNull` 의 native `actual`(`UpcallRawEntryPointTest.kt`)이 이미 부르고 있었다.
+
+### 11.5 이번에도 확인하지 않은 것
+
+- **androidNative 의 실행.** `compileTestKotlinAndroidNativeArm64` 로 새 테스트 세 파일이 그
+  타깃에서도 컴파일된다는 것만 확인했다. 실행하려면 에뮬레이터가 필요하고, 이번 회차에는 다른
+  작업이 쓰고 있어 비워 두지 않았다 — `_pm_cancel` 이 androidNative 에도 같은 방식으로 깔려 있으므로
+  (§10.2) **성립할 것으로 기대하지만, 이것은 추론이지 측정이 아니다.**
+- **Android(JVM/ART), iOS 실기기.** §8.5 가 이미 적어 둔 공백 그대로다 — 이 워크스페이스에 Android
+  SDK 가 없고, 실기기를 쓰지 않았다.
+- **루프가 죽은 채로 남은 핸들.** §10.6 이 남긴 그대로.
