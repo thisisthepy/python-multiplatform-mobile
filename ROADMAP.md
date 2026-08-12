@@ -137,16 +137,36 @@ PyErr_GetRaisedException  fault addr 0xc2411160   PyException.fromCurrentError -
 Both truncated pointers, which is the signature of the name-linked `@CName` fallback described
 below. An unregistered call does not fail cleanly; it corrupts a pointer and kills the process.
 
-**The real numbers:**
+**The real numbers**, recounted from the two files rather than carried forward (parse
+`external fun` out of `androidMain/.../bindings.kt`, parse the `JNINativeMethod` table out of
+`artMain/cinterop/jni_onload.def`, join on the method name and compare JNI signatures):
 
 ```
-bindings.kt external fun    366
-registered                   71
-unregistered                295
-  ...reachable from commonMain with an Android actual    68     every one a latent process kill
+                          was      now
+bindings.kt external fun  369      365
+registered                145      187
+unregistered              224      178
+signature mismatches        0        0     (all 187 entries agree with their Kotlin declaration)
 ```
 
-So the surface is roughly a fifth done, not finished. `docs/android-unregistered-surface.md`
+**The string half of it is finished.** Declarations that still carry a `jstring` across the
+boundary went from **52 to 6**, and of those six none is a defect:
+
+- `asmExec`, `asmGetAttr`, `testUpcallString` are registered *with* a jstring signature and their
+  C wrappers use `GetStringUTFChars` — that is the composition-probe design, not the broken path
+- `ffiAllocUtf8`, `ffiReadUtf8` are name-linked but hand-written in `artMain/JNIOnLoadExporter.kt`
+  with the correct `JNIEnv*`/`jclass` prologue, so the convention matches
+- `ffiSymbolRaw` is the one genuine leftover on the name-linked `@CName` path. It has no caller
+  anywhere in `src/` — `jvmMain`'s `ffiSymbol` that wraps it is itself unreferenced — so it is a
+  landmine rather than a live crash. Fixing it means a `dlsym` wrapper taking a jlong, and it
+  belongs with whatever revives the shape vocabulary on Android.
+
+The 42 functions migrated in this pass are listed with their per-argument intern/scratch
+judgement in `docs/marshalling-design.md`. Every symbol they bind was checked to exist in the
+shipped `libpython3.14.so` before registering (`llvm-nm -D --defined-only`), and the linked
+`libmultiplatform_python3.14.so` has no unresolved `Py*` symbol.
+
+What is left of §2 is the 178 unregistered non-string functions. `docs/android-unregistered-surface.md`
 carries the reachability analysis; its counts came from a script and were spot-checked, not
 audited line by line.
 
@@ -568,17 +588,44 @@ list still needs a manual read of Pyodide's ABI page. See `docs/wasm-design.md`.
 
 ## 11. Build wiring
 
-`connectedDebugAndroidTest` does not force `linkAndroidNative*` or the
-`copyAndroidPythonBinaries` / `copyAndroidPythonAssets` staging. A changed `.def` or a cleaned
-`build/` therefore produces an APK with a stale or missing library, surfacing as
-`UnsatisfiedLinkError` that reads like a code bug. This cost three debugging cycles.
+**Closed.** The dependencies are declared now, and the graph was read rather than assumed:
+`./gradlew :python-multiplatform:connectedDebugAndroidTest --dry-run` plans 93 tasks, and every
+staging step is in it, in the right order:
 
-The configuration-time `copy {}` that staged the *previous* build's library has been fixed
-(moved into `doLast`), but the task dependencies themselves are still not declared. Until they
-are, run before any instrumented test:
+```
+16, 20  linkMultiplatform_python3.14DebugSharedAndroidNativeArm64 / X64   (before preBuild at 23)
+49      copyAndroidPythonAssets        (before generateDebugAndroidTestAssets 52, merge…Assets 58)
+76, 81  linkAndroidNativeArm64 / X64
+82      copyAndroidPythonBinaries      (before mergeDebugJniLibFolders 83, …AndroidTest… 86)
+```
 
-    ./gradlew :python-multiplatform:linkAndroidNativeArm64 :python-multiplatform:linkAndroidNativeX64 \
-              :python-multiplatform:copyAndroidPythonBinaries :python-multiplatform:copyAndroidPythonAssets
+`:sample:assembleDebug --dry-run` pulls the same four in, so the app path is covered too, not
+just the instrumented tests. The manual pre-step this section used to prescribe is no longer
+needed.
+
+Three edges do the work, all of them lazy-safe:
+
+- `copyAndroidPythonBinaries` declares `dependsOn(linkAndroidNativeArm64, linkAndroidNativeX64,
+  downloadAllPythonBuilds)`
+- `tasks.configureEach` attaches it to every `merge*JniLibFolders` / `merge*NativeLibs`, and
+  attaches `copyAndroidPythonAssets` to every task whose name ends in `Assets`. This is
+  `configureEach`, not the `whenTaskAdded` that used to miss tasks registered later — which is
+  how the stdlib went unpackaged and `Py_Initialize()` aborted.
+- `preBuild.dependsOn(linkTaskProvider)` for each shared-library binary, so the `.so` is relinked
+  and staged into `build/android/<type>/jniLibs/<abi>/` before AGP looks there.
+
+The configuration-time `copy {}` that staged the *previous* build's library was fixed earlier by
+moving it into `doLast`; that fix is still in place and is the only `copy {}` in the script that
+is not already inside a task action (checked: lines 201, 245, 281 and 475 are all `doLast`).
+
+**One hardcoded count of the same family was removed.** `jni_onload.def` still carried
+`#define NUM_METHODS 127` after `RegisterNatives` had been switched to `sizeof(methods) /
+sizeof(methods[0])`. It was dead, but it is exactly the constant that once drifted out of step
+with the table and silently bound a prefix of it, so it is gone and a comment says why.
+
+No other drifting constant or configuration-time side effect was found in
+`python-multiplatform/build.gradle.kts` or `sample/build.gradle.kts`; there are no
+`whenTaskAdded` uses left in the repository.
 
 ## 11b. Android does not run the object-model tests
 

@@ -151,6 +151,63 @@ extern const char* PyUnicode_AsUTF8(jlong);
 extern jlong PyUnicode_FromString(const char*);
 
 
+/*
+ * The remaining string-carrying surface.
+ *
+ * Every one of these used to be reached with a Kotlin `String` argument through the name-linked
+ * @CName export, which does not fail cleanly -- it corrupts a pointer and kills the process
+ * (ROADMAP §2). The Kotlin side now hands over an already-encoded C string address as a jlong,
+ * from the intern cache for repeated identifiers and from the per-thread scratch pool for
+ * arbitrary content, so these wrappers only have to cast.
+ *
+ * All ordinary JNI, per §3's default: several of them run arbitrary Python (module top-level
+ * code, __getattr__, codec lookup), and the rest are cold enough that a promotion would buy
+ * nothing.
+ */
+extern jlong Py_CompileString(const char*, const char*, jint);
+extern jlong PyErr_SetFromErrnoWithFilename(jlong, const char*);
+extern void PyErr_SyntaxLocationEx(const char*, jint, jint);
+extern void PyErr_SyntaxLocation(const char*, jint);
+extern jint PyErr_WarnExplicit(jlong, const char*, const char*, jint, const char*, jlong);
+extern jlong PyErr_NewException(const char*, jlong, jlong);
+extern jlong PyErr_NewExceptionWithDoc(const char*, const char*, jlong, jlong);
+extern jint PyUnicodeTranslateError_SetReason(jlong, const char*);
+extern jint Py_EnterRecursiveCall(const char*);
+extern jlong PySys_GetObject(const char*);
+extern jint PySys_SetObject(const char*, jlong);
+extern jint PySys_AuditTuple(const char*, jlong);
+extern void Py_FatalError(const char*);
+extern jlong PyImport_ImportModuleNoBlock(const char*);
+extern jlong PyImport_ImportModuleLevel(const char*, jlong, jlong, jlong, jint);
+extern jlong PyImport_ExecCodeModule(const char*, jlong);
+extern jlong PyImport_ExecCodeModuleEx(const char*, jlong, const char*);
+extern jlong PyImport_ExecCodeModuleWithPathnames(const char*, jlong, const char*, const char*);
+extern const char* PyImport_GetMagicTag(void);
+extern jint PyImport_ImportFrozenModule(const char*);
+extern const char* PyEval_GetFuncName(jlong);
+extern const char* PyEval_GetFuncDesc(jlong);
+extern jint PyObject_HasAttrStringWithError(jlong, const char*);
+extern jint PyObject_HasAttrString(jlong, const char*);
+extern jlong PySequence_Fast(jlong, const char*);
+extern jlong PyMapping_GetItemString(jlong, const char*);
+extern jint PyMapping_SetItemString(jlong, const char*, jlong);
+extern jint PyMapping_HasKeyStringWithError(jlong, const char*);
+extern jint PyMapping_HasKeyString(jlong, const char*);
+extern jlong PyBytes_FromString(const char*);
+extern char* PyBytes_AsString(jlong);
+extern char* PyByteArray_AsString(jlong);
+extern jlong PyUnicode_FromEncodedObject(jlong, const char*, const char*);
+extern jlong PyUnicode_DecodeLocale(const char*, const char*);
+extern jlong PyUnicode_EncodeLocale(jlong, const char*);
+extern jlong PyUnicode_DecodeFSDefault(const char*);
+extern jlong PyUnicode_AsEncodedString(jlong, const char*, const char*);
+extern jlong PyUnicode_Translate(jlong, jlong, const char*);
+extern jint PyUnicode_EqualToUTF8(jlong, const char*);
+extern jint PyUnicode_CompareWithASCIIString(jlong, const char*);
+extern jlong PyUnicode_InternFromString(const char*);
+extern jint PyDict_DelItemString(jlong, const char*);
+
+
 jlong critical_echo0(jlong x) { return x; }
 jlong critical_echo1(jlong x) { return x; }
 jlong critical_echo2(jlong x) { return x; }
@@ -307,6 +364,50 @@ static jlong f_Py_GetCopyrightN(JNIEnv *e, jclass c) { return (jlong)Py_GetCopyr
 static jlong f_Py_GetPlatformN(JNIEnv *e, jclass c) { return (jlong)Py_GetPlatform(); }
 static jint f_Py_RunMainN(JNIEnv *e, jclass c) { return Py_RunMain(); }
 
+/* ---- string-carrying surface, jlong C-string addresses in and out ---- */
+static jlong f_Py_CompileStringN(JNIEnv *e, jclass c, jlong str, jlong filename, jint start) { return Py_CompileString((const char*)str, (const char*)filename, start); }
+static jlong f_PyErr_SetFromErrnoWithFilenameN(JNIEnv *e, jclass c, jlong type, jlong filename) { return PyErr_SetFromErrnoWithFilename(type, (const char*)filename); }
+static void f_PyErr_SyntaxLocationExN(JNIEnv *e, jclass c, jlong filename, jint lineno, jint col) { PyErr_SyntaxLocationEx((const char*)filename, lineno, col); }
+static void f_PyErr_SyntaxLocationN(JNIEnv *e, jclass c, jlong filename, jint lineno) { PyErr_SyntaxLocation((const char*)filename, lineno); }
+static jint f_PyErr_WarnExplicitN(JNIEnv *e, jclass c, jlong category, jlong message, jlong filename, jint lineno, jlong module, jlong registry) { return PyErr_WarnExplicit(category, (const char*)message, (const char*)filename, lineno, (const char*)module, registry); }
+static jlong f_PyErr_NewExceptionN(JNIEnv *e, jclass c, jlong name, jlong base, jlong dict) { return PyErr_NewException((const char*)name, base, dict); }
+static jlong f_PyErr_NewExceptionWithDocN(JNIEnv *e, jclass c, jlong name, jlong doc, jlong base, jlong dict) { return PyErr_NewExceptionWithDoc((const char*)name, (const char*)doc, base, dict); }
+static jint f_PyUnicodeTranslateError_SetReasonN(JNIEnv *e, jclass c, jlong exc, jlong reason) { return PyUnicodeTranslateError_SetReason(exc, (const char*)reason); }
+static jint f_Py_EnterRecursiveCallN(JNIEnv *e, jclass c, jlong where) { return Py_EnterRecursiveCall((const char*)where); }
+static jlong f_PySys_GetObjectN(JNIEnv *e, jclass c, jlong name) { return PySys_GetObject((const char*)name); }
+static jint f_PySys_SetObjectN(JNIEnv *e, jclass c, jlong name, jlong v) { return PySys_SetObject((const char*)name, v); }
+static jint f_PySys_AuditTupleN(JNIEnv *e, jclass c, jlong event, jlong args) { return PySys_AuditTuple((const char*)event, args); }
+static void f_Py_FatalErrorN(JNIEnv *e, jclass c, jlong message) { Py_FatalError((const char*)message); }
+static jlong f_PyImport_ImportModuleNoBlockN(JNIEnv *e, jclass c, jlong name) { return PyImport_ImportModuleNoBlock((const char*)name); }
+static jlong f_PyImport_ImportModuleLevelN(JNIEnv *e, jclass c, jlong name, jlong globals, jlong locals, jlong fromlist, jint level) { return PyImport_ImportModuleLevel((const char*)name, globals, locals, fromlist, level); }
+static jlong f_PyImport_ExecCodeModuleN(JNIEnv *e, jclass c, jlong name, jlong co) { return PyImport_ExecCodeModule((const char*)name, co); }
+static jlong f_PyImport_ExecCodeModuleExN(JNIEnv *e, jclass c, jlong name, jlong co, jlong pathname) { return PyImport_ExecCodeModuleEx((const char*)name, co, (const char*)pathname); }
+static jlong f_PyImport_ExecCodeModuleWithPathnamesN(JNIEnv *e, jclass c, jlong name, jlong co, jlong pathname, jlong cpathname) { return PyImport_ExecCodeModuleWithPathnames((const char*)name, co, (const char*)pathname, (const char*)cpathname); }
+static jlong f_PyImport_GetMagicTagN(JNIEnv *e, jclass c) { return (jlong)PyImport_GetMagicTag(); }
+static jint f_PyImport_ImportFrozenModuleN(JNIEnv *e, jclass c, jlong name) { return PyImport_ImportFrozenModule((const char*)name); }
+static jlong f_PyEval_GetFuncNameN(JNIEnv *e, jclass c, jlong func) { return (jlong)PyEval_GetFuncName(func); }
+static jlong f_PyEval_GetFuncDescN(JNIEnv *e, jclass c, jlong func) { return (jlong)PyEval_GetFuncDesc(func); }
+static jint f_PyObject_HasAttrStringWithErrorN(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_HasAttrStringWithError(o, (const char*)n); }
+static jint f_PyObject_HasAttrStringN(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_HasAttrString(o, (const char*)n); }
+static jlong f_PySequence_FastN(JNIEnv *e, jclass c, jlong o, jlong m) { return PySequence_Fast(o, (const char*)m); }
+static jlong f_PyMapping_GetItemStringN(JNIEnv *e, jclass c, jlong o, jlong key) { return PyMapping_GetItemString(o, (const char*)key); }
+static jint f_PyMapping_SetItemStringN(JNIEnv *e, jclass c, jlong o, jlong key, jlong v) { return PyMapping_SetItemString(o, (const char*)key, v); }
+static jint f_PyMapping_HasKeyStringWithErrorN(JNIEnv *e, jclass c, jlong o, jlong key) { return PyMapping_HasKeyStringWithError(o, (const char*)key); }
+static jint f_PyMapping_HasKeyStringN(JNIEnv *e, jclass c, jlong o, jlong key) { return PyMapping_HasKeyString(o, (const char*)key); }
+static jlong f_PyBytes_FromStringN(JNIEnv *e, jclass c, jlong v) { return PyBytes_FromString((const char*)v); }
+static jlong f_PyBytes_AsStringN(JNIEnv *e, jclass c, jlong o) { return (jlong)PyBytes_AsString(o); }
+static jlong f_PyByteArray_AsStringN(JNIEnv *e, jclass c, jlong b) { return (jlong)PyByteArray_AsString(b); }
+static jlong f_PyUnicode_FromEncodedObjectN(JNIEnv *e, jclass c, jlong obj, jlong encoding, jlong errors) { return PyUnicode_FromEncodedObject(obj, (const char*)encoding, (const char*)errors); }
+static jlong f_PyUnicode_DecodeLocaleN(JNIEnv *e, jclass c, jlong str, jlong errors) { return PyUnicode_DecodeLocale((const char*)str, (const char*)errors); }
+static jlong f_PyUnicode_EncodeLocaleN(JNIEnv *e, jclass c, jlong unicode, jlong errors) { return PyUnicode_EncodeLocale(unicode, (const char*)errors); }
+static jlong f_PyUnicode_DecodeFSDefaultN(JNIEnv *e, jclass c, jlong str) { return PyUnicode_DecodeFSDefault((const char*)str); }
+static jlong f_PyUnicode_AsEncodedStringN(JNIEnv *e, jclass c, jlong unicode, jlong encoding, jlong errors) { return PyUnicode_AsEncodedString(unicode, (const char*)encoding, (const char*)errors); }
+static jlong f_PyUnicode_TranslateN(JNIEnv *e, jclass c, jlong unicode, jlong table, jlong errors) { return PyUnicode_Translate(unicode, table, (const char*)errors); }
+static jint f_PyUnicode_EqualToUTF8N(JNIEnv *e, jclass c, jlong unicode, jlong string) { return PyUnicode_EqualToUTF8(unicode, (const char*)string); }
+static jint f_PyUnicode_CompareWithASCIIStringN(JNIEnv *e, jclass c, jlong unicode, jlong string) { return PyUnicode_CompareWithASCIIString(unicode, (const char*)string); }
+static jlong f_PyUnicode_InternFromStringN(JNIEnv *e, jclass c, jlong str) { return PyUnicode_InternFromString((const char*)str); }
+static jint f_PyDict_DelItemStringN(JNIEnv *e, jclass c, jlong p, jlong key) { return PyDict_DelItemString(p, (const char*)key); }
+
 
 /*
  * Composition probes.
@@ -350,7 +451,11 @@ static jint asm_list_to_array(JNIEnv *e, jclass c, jlong list, jlongArray out) {
  * Unlike the echo probes this runs real Python, so the parse/compile/execute work is in both
  * numbers and the ratio shows what fraction of a realistic binder call the boundary actually is.
  */
-#define NUM_METHODS 127
+/*
+ * No NUM_METHODS constant lives here on purpose. There used to be one, it drifted out of step
+ * with the table, and RegisterNatives silently bound a prefix of it. The count is taken with
+ * sizeof at the call site instead, which cannot drift.
+ */
 #define PMP_FILE_INPUT 257
 
 static jint asm_exec(JNIEnv *e, jclass c, jstring code) {
@@ -602,6 +707,53 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"Py_GetCopyrightN", "()J", (void *)&f_Py_GetCopyrightN},
         {"Py_GetPlatformN", "()J", (void *)&f_Py_GetPlatformN},
         {"Py_RunMainN", "()I", (void *)&f_Py_RunMainN},
+
+        /*
+         * The rest of the string-carrying surface. Every C string crosses as a jlong address the
+         * Kotlin side already encoded, so none of these takes a jstring.
+         */
+        {"Py_CompileStringN", "(JJI)J", (void *)&f_Py_CompileStringN},
+        {"PyErr_SetFromErrnoWithFilenameN", "(JJ)J", (void *)&f_PyErr_SetFromErrnoWithFilenameN},
+        {"PyErr_SyntaxLocationExN", "(JII)V", (void *)&f_PyErr_SyntaxLocationExN},
+        {"PyErr_SyntaxLocationN", "(JI)V", (void *)&f_PyErr_SyntaxLocationN},
+        {"PyErr_WarnExplicitN", "(JJJIJJ)I", (void *)&f_PyErr_WarnExplicitN},
+        {"PyErr_NewExceptionN", "(JJJ)J", (void *)&f_PyErr_NewExceptionN},
+        {"PyErr_NewExceptionWithDocN", "(JJJJ)J", (void *)&f_PyErr_NewExceptionWithDocN},
+        {"PyUnicodeTranslateError_SetReasonN", "(JJ)I", (void *)&f_PyUnicodeTranslateError_SetReasonN},
+        {"Py_EnterRecursiveCallN", "(J)I", (void *)&f_Py_EnterRecursiveCallN},
+        {"PySys_GetObjectN", "(J)J", (void *)&f_PySys_GetObjectN},
+        {"PySys_SetObjectN", "(JJ)I", (void *)&f_PySys_SetObjectN},
+        {"PySys_AuditTupleN", "(JJ)I", (void *)&f_PySys_AuditTupleN},
+        {"Py_FatalErrorN", "(J)V", (void *)&f_Py_FatalErrorN},
+        {"PyImport_ImportModuleNoBlockN", "(J)J", (void *)&f_PyImport_ImportModuleNoBlockN},
+        {"PyImport_ImportModuleLevelN", "(JJJJI)J", (void *)&f_PyImport_ImportModuleLevelN},
+        {"PyImport_ExecCodeModuleN", "(JJ)J", (void *)&f_PyImport_ExecCodeModuleN},
+        {"PyImport_ExecCodeModuleExN", "(JJJ)J", (void *)&f_PyImport_ExecCodeModuleExN},
+        {"PyImport_ExecCodeModuleWithPathnamesN", "(JJJJ)J", (void *)&f_PyImport_ExecCodeModuleWithPathnamesN},
+        {"PyImport_GetMagicTagN", "()J", (void *)&f_PyImport_GetMagicTagN},
+        {"PyImport_ImportFrozenModuleN", "(J)I", (void *)&f_PyImport_ImportFrozenModuleN},
+        {"PyEval_GetFuncNameN", "(J)J", (void *)&f_PyEval_GetFuncNameN},
+        {"PyEval_GetFuncDescN", "(J)J", (void *)&f_PyEval_GetFuncDescN},
+        {"PyObject_HasAttrStringWithErrorN", "(JJ)I", (void *)&f_PyObject_HasAttrStringWithErrorN},
+        {"PyObject_HasAttrStringN", "(JJ)I", (void *)&f_PyObject_HasAttrStringN},
+        {"PySequence_FastN", "(JJ)J", (void *)&f_PySequence_FastN},
+        {"PyMapping_GetItemStringN", "(JJ)J", (void *)&f_PyMapping_GetItemStringN},
+        {"PyMapping_SetItemStringN", "(JJJ)I", (void *)&f_PyMapping_SetItemStringN},
+        {"PyMapping_HasKeyStringWithErrorN", "(JJ)I", (void *)&f_PyMapping_HasKeyStringWithErrorN},
+        {"PyMapping_HasKeyStringN", "(JJ)I", (void *)&f_PyMapping_HasKeyStringN},
+        {"PyBytes_FromStringN", "(J)J", (void *)&f_PyBytes_FromStringN},
+        {"PyBytes_AsStringN", "(J)J", (void *)&f_PyBytes_AsStringN},
+        {"PyByteArray_AsStringN", "(J)J", (void *)&f_PyByteArray_AsStringN},
+        {"PyUnicode_FromEncodedObjectN", "(JJJ)J", (void *)&f_PyUnicode_FromEncodedObjectN},
+        {"PyUnicode_DecodeLocaleN", "(JJ)J", (void *)&f_PyUnicode_DecodeLocaleN},
+        {"PyUnicode_EncodeLocaleN", "(JJ)J", (void *)&f_PyUnicode_EncodeLocaleN},
+        {"PyUnicode_DecodeFSDefaultN", "(J)J", (void *)&f_PyUnicode_DecodeFSDefaultN},
+        {"PyUnicode_AsEncodedStringN", "(JJJ)J", (void *)&f_PyUnicode_AsEncodedStringN},
+        {"PyUnicode_TranslateN", "(JJJ)J", (void *)&f_PyUnicode_TranslateN},
+        {"PyUnicode_EqualToUTF8N", "(JJ)I", (void *)&f_PyUnicode_EqualToUTF8N},
+        {"PyUnicode_CompareWithASCIIStringN", "(JJ)I", (void *)&f_PyUnicode_CompareWithASCIIStringN},
+        {"PyUnicode_InternFromStringN", "(J)J", (void *)&f_PyUnicode_InternFromStringN},
+        {"PyDict_DelItemStringN", "(JJ)I", (void *)&f_PyDict_DelItemStringN},
 
 
         {"testUpcallPrimitive", "(J)J", (void *)&test_upcall_primitive},
