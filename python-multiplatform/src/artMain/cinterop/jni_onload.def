@@ -123,6 +123,7 @@ extern const char* Py_GetCompiler(void);
 extern const char* Py_GetCopyright(void);
 extern const char* Py_GetPlatform(void);
 extern jint Py_RunMain(void);
+extern jlong PySys_GetObject(const char*);
 
 extern void Py_DecRef(jlong);
 extern void Py_IncRef(jlong);
@@ -294,6 +295,15 @@ static jlong f_PyImport_AddModuleRefN(JNIEnv *e, jclass c, jlong n) { return PyI
  * The two are not interchangeable at the call site and the Kotlin actual keeps that distinction.
  */
 static jlong f_PyImport_AddModuleN(JNIEnv *e, jclass c, jlong n) { return PyImport_AddModule((const char*)n); }
+/*
+ * Borrowed reference into the interpreter's sys module dict; the caller must not release it.
+ *
+ * Left on the name-linked @CName fallback it did not fail loudly -- it returned a null pointer,
+ * which surfaced as an NPE in GilParkingTest rather than as a crash, so it read like a missing
+ * "modules" entry instead of missing wiring. Ordinary JNI, not @FastNative: sys.__dict__ lookups
+ * go through PyDict_GetItemWithError, which can run a __eq__ or __hash__.
+ */
+static jlong f_PySys_GetObjectN(JNIEnv *e, jclass c, jlong n) { return PySys_GetObject((const char*)n); }
 static void f_PyErr_SetStringN(JNIEnv *e, jclass c, jlong t, jlong m) { PyErr_SetString(t, (const char*)m); }
 static jint f_PyObject_SetAttrStringN(JNIEnv *e, jclass c, jlong o, jlong n, jlong v) { return PyObject_SetAttrString(o, (const char*)n, v); }
 static jint f_PyObject_DelAttrStringN(JNIEnv *e, jclass c, jlong o, jlong n) { return PyObject_DelAttrString(o, (const char*)n); }
@@ -871,6 +881,7 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
 
         {"PyImport_AddModuleRefN", "(J)J", (void *)&f_PyImport_AddModuleRefN},
         {"PyImport_AddModuleN", "(J)J", (void *)&f_PyImport_AddModuleN},
+        {"PySys_GetObjectN", "(J)J", (void *)&f_PySys_GetObjectN},
         {"PyErr_SetStringN", "(JJ)V", (void *)&f_PyErr_SetStringN},
         {"PyObject_SetAttrStringN", "(JJJ)I", (void *)&f_PyObject_SetAttrStringN},
         {"PyObject_DelAttrStringN", "(JJ)I", (void *)&f_PyObject_DelAttrStringN},

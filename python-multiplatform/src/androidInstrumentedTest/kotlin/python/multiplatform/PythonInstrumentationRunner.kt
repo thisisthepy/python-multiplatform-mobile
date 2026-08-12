@@ -23,9 +23,17 @@ class PythonInstrumentationRunner : AndroidJUnitRunner() {
 
     /**
      * `onStart` runs on the instrumentation thread — the same thread that then executes the
-     * tests. That matters: `Python3.initialize()` leaves the GIL held by whichever thread called
-     * `Py_Initialize()`, so initialising here (rather than in `onCreate`, which runs on the main
-     * thread) keeps the GIL on the thread that is about to use it.
+     * tests.
+     *
+     * This used to say that mattered because `Py_Initialize()` leaves the GIL held by its caller,
+     * so initialising here "keeps the GIL on the thread that is about to use it". That was the
+     * pre-§1 contract and it is now exactly backwards: the GIL must **not** stay held, or no
+     * cleaner thread can ever attach to release a reference. `PythonOnDevice.ensureInitialised`
+     * parks the thread state, and every entry into Python — including the ones on this thread —
+     * goes through `withGIL`.
+     *
+     * What still matters about the thread is only that the staging and the first C API call
+     * happen off the main thread, before any test class is loaded.
      */
     override fun onStart() {
         PythonOnDevice.ensureInitialised()
