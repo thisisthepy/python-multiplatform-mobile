@@ -470,6 +470,7 @@ internal object Panama {
             segmentAddressExact.invokeExact(stub) as Long
         }
 
+        // @UpcallShape(returnType = "void", parameterTypes = ["long"])
         val buildUpcallStubI_V: (MethodHandle) -> Long = { handle ->
             val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 1)
             java.lang.reflect.Array.set(layoutParams, 0, javaLong)
@@ -783,6 +784,7 @@ internal object Panama {
             toRawLongMethod.invoke(segAddressMethod.invoke(stub)) as Long
         }
 
+        // @UpcallShape(returnType = "void", parameterTypes = ["long"])
         val buildUpcallStubI_V: (MethodHandle) -> Long = { handle ->
             val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 1)
             java.lang.reflect.Array.set(layoutParams, 0, cLongLong)

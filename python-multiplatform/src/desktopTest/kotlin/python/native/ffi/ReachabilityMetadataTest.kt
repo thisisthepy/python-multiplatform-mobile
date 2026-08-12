@@ -187,7 +187,7 @@ class ReachabilityMetadataTest {
             .toSortedSet()
 
         assertEquals(
-            setOf("createUpcallStubI_I", "createUpcallStubIII_I", "createUpcallStubLongToLong"),
+            setOf("createUpcallStubI_I", "createUpcallStubI_V", "createUpcallStubIII_I", "createUpcallStubLongToLong"),
             entryPoints.toSet(),
             "Panama's set of upcall stub entry points changed. Each one links a FunctionDescriptor " +
                 "that must appear under `foreign.upcalls`: add a `// @UpcallShape(...)` marker next " +
@@ -200,6 +200,9 @@ class ReachabilityMetadataTest {
                 Descriptor("long", listOf("long")),
                 Descriptor("int", listOf("long")),
                 Descriptor("int", listOf("long", "long", "long")),
+                // tp_dealloc: destructor returns void, so this shape exists as of the
+                // handle-leak fix. The int shape only survived that mismatch by ABI accident.
+                Descriptor("void", listOf("long")),
             ),
             declared,
             "the declared upcall descriptors no longer match the three stub shapes Panama builds"
