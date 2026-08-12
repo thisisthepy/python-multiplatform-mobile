@@ -170,22 +170,37 @@ class GCLeakTest {
         
         val refBefore = getRefCount(testTarget)
         
-        // Create 1000 lists, each containing testTarget
+        // Create 1000 lists, each containing testTarget.
+        //
+        // The wrappers are held in `held` until the count has been sampled, and only then
+        // dropped. Letting them fall out of scope inside the loop looks simpler and races the
+        // thing this test exists to prove: once GC-driven release actually works, the collector
+        // reclaims some of them *during* the loop. On Android API 36 that read 931 instead of
+        // 1002 -- the build-up assertion failing precisely because the mechanism under test had
+        // started working. Holding them makes the setup deterministic and moves the whole
+        // question to where it belongs, after the references are dropped.
         val WRAPPERS_LARGE = 1000
+        var held: MutableList<PyObject>? = ArrayList(WRAPPERS_LARGE)
         repeat(WRAPPERS_LARGE) {
             val wrapperList = listType()
             val appendMethod = wrapperList.getAttr("append")
             appendMethod(testTarget) // inner object refcount++
             appendMethod.close()
-            // We do NOT close wrapperList. It falls out of scope and should be GC'd.
+            // We do NOT close wrapperList -- it is released by the collector, not by hand.
+            held!!.add(wrapperList)
         }
-        
+
         val refAfterLoop = getRefCount(testTarget)
         assertTrue(
             refAfterLoop >= refBefore + WRAPPERS_LARGE,
             "target count should have risen by $WRAPPERS_LARGE (before: $refBefore, after: $refAfterLoop)"
         )
-        
+
+        // Drop the only strong references to the outer lists. Everything below is the
+        // collector's work.
+        held!!.clear()
+        held = null
+
         var refAfterGC = refAfterLoop
         var attempts = 0
         while (refAfterGC == refAfterLoop && attempts < 50) {

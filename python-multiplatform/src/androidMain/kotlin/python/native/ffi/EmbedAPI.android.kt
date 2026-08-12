@@ -200,7 +200,11 @@ actual fun PyOS_FSPath(path: NativePointer): NativePointer? = python.native.ffi.
 
 
 // Section 6
-actual fun PySys_GetObject(name: String): NativePointer? = python.native.ffi.bindings.PySys_GetObject(name).toNativePointer()
+// Borrowed reference. The names passed here are repeated literals ("modules", "path", ...), so they intern.
+actual fun PySys_GetObject(name: String): NativePointer? {
+    val ptr = internedUtf8(name)
+    return python.native.ffi.bindings.PySys_GetObjectN(ptr).toNativePointer()
+}
 actual inline fun PySys_SetObject(name: String, v: NativePointer): Int = python.native.ffi.bindings.PySys_SetObject(name, v.toPlatformPointer())
 actual inline fun PySys_ResetWarnOptions() = python.native.ffi.bindings.PySys_ResetWarnOptions()
 actual fun PySys_GetXOptions(): NativePointer? = python.native.ffi.bindings.PySys_GetXOptions().toNativePointer()

@@ -252,6 +252,8 @@ object bindings {
 
 
     // Section 6
+    // Migrated to RegisterNatives: takes the interned UTF-8 address, not a jstring.
+    @JvmStatic external fun PySys_GetObjectN(name: Long): Long
     external fun PySys_GetObject(name: String): JNIPointer?
     external fun PySys_SetObject(name: String, v: JNIPointer): Int
     external fun PySys_ResetWarnOptions()

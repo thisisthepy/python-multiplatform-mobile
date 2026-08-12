@@ -1,7 +1,9 @@
 package python.native.ffi
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -21,6 +23,25 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class JniWiringTest {
 
+    /**
+     * These reach the C API directly rather than through the object model, and the interpreter's
+     * main thread state is parked (see [PythonOnDevice.ensureInitialised]), so the thread has to
+     * attach for itself. The echo probes do not need it, but attaching for the whole class costs
+     * one `PyGILState_Ensure` per test and removes the question.
+     */
+    private var gilState = 0
+
+    @Before
+    fun attachToInterpreter() {
+        PythonOnDevice.ensureInitialised()
+        gilState = PythonOnDevice.attach()
+    }
+
+    @After
+    fun detachFromInterpreter() {
+        PythonOnDevice.detach(gilState)
+    }
+
     @Test
     fun argumentsArriveUnshifted() {
         // echo0/echo1/echo2 are three separate registrations of the same C body,
@@ -38,8 +59,26 @@ class JniWiringTest {
     fun zeroArgCallsWorkRegardless() {
         // Expected to pass even with a broken convention — recorded so the contrast with
         // argumentsArriveUnshifted is visible in the results.
-        val state = bindings.Py_IsInitialized()
-        assertEquals("Py_IsInitialized should report 0 before initialisation", 0, state)
+        //
+        // This used to assert 0, "before initialisation". That premise died when commonTest was
+        // connected to Android: 176 tests share one process, and whether the interpreter is
+        // already up when this runs is decided by class ordering, not by wiring. It failed on
+        // both API levels for exactly that reason — the interpreter was already up, so it read 1.
+        //
+        // Pinning the interpreter to a known state first and asserting the exact value is the
+        // stronger check anyway: a zero-arg call under a shifted convention returns whatever
+        // happened to be in the return register, which is not reliably 1.
+        python.multiplatform.ffi.PythonTestFixture.withInterpreter {
+            assertEquals(
+                "Py_IsInitialized should report 1 once the interpreter is up",
+                1, bindings.Py_IsInitialized()
+            )
+            // @CriticalNative and @FastNative are two separate registrations of the same C
+            // function, and EmbedAPI picks between them per API level. Both must agree with the
+            // actual, or one of them is bound to the wrong wrapper on this device.
+            assertEquals("the @FastNative twin must agree", 1, bindings.Py_IsInitializedF())
+            assertEquals("the EmbedAPI actual must agree", 1, Py_IsInitialized())
+        }
     }
 
     @Test

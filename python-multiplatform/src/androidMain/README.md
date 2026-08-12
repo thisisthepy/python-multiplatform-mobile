@@ -60,3 +60,45 @@ plus `GetStringUTFChars` plus malloc plus copy plus free.
 
 So string-carrying operations are the ones worth composing, regardless of how much real work
 they do.
+
+## `System.gc()` does not collect on Android
+
+Measured on both emulators, reproduced on three consecutive runs (`GCProbe` in
+`androidInstrumentedTest/.../GCLeakTest.androidInstrumented.kt` logs it every run):
+
+```
+bare System.gc():                     canary cleared = false after 20 attempts
+Runtime.gc() + System.runFinalization(): canary cleared = true  after 1 attempt
+```
+
+libcore's `System.gc()` records a request and defers the collection until the next
+`System.runFinalization()`, so a loop of bare `System.gc()` calls runs **no collection at all**.
+On HotSpot the same loop collects, which is why the desktop suite never saw this.
+
+Anything on Android that waits for the collector — every GC-driven release test — must use
+`Runtime.getRuntime().gc()` followed by `System.runFinalization()`. The whole of `GCLeakTest`
+failed on both API levels for this reason, and the failure reads as "no cleaner ran", which
+points at the cleaner threads rather than at the collector that never started.
+
+## The instrumentation runner must park the GIL, not hold it
+
+`Py_Initialize()` returns with the GIL held by its caller. `Python3.initialize()` parks that
+thread state with `PyEval_SaveThread()` immediately afterwards, and that parking is what lets a
+cleaner thread attach through `PyGILState_Ensure` and call `Py_DecRef` (ROADMAP §1).
+
+`PythonInstrumentationRunner` used to bring the interpreter up with a bare `Py_Initialize()`,
+which skipped the parking — and then made the omission permanent, because `Python3.isInitialized`
+is seeded from `Py_IsInitialized()` when the object is first touched, so it latched to `true` and
+`Python3.initialize()` returned early for the rest of the process. The instrumentation thread,
+which is also the thread every test body runs on, held the GIL for the whole run.
+
+Two consequences worth knowing, because neither looks like a GIL problem:
+
+- Cleaners block on their first `PyGILState_Ensure` and stay blocked, so the *delta* counters
+  in `GCLeakTest` read zero. `ranDelta > 0 && releasedDelta == 0` only catches a cleaner that
+  gets stuck **during** the test; one stuck in an earlier test is indistinguishable from
+  "nothing was collected".
+- Instrumented tests that reach `bindings` directly ran fine only because that thread happened
+  to hold the GIL. Once it is parked they must attach for themselves —
+  `PythonOnDevice.attach()`/`detach()` in a `@Before`/`@After` pair, which is what
+  `CompositionBenchmark`, `JniOverheadBenchmark` and `JniWiringTest` now do.
