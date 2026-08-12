@@ -131,17 +131,48 @@ private fun topLevelDecRefAction(ptr: NativePointer) {
     }
 }
 
-// TODO: !!IMPORTANT!! We need to check the case where the pointer is null one more time. (PyObject, PyType, PyException)
+/**
+ * **Invariant: [pointer] is never the null pointer**, and that is enforced by the type system
+ * rather than by a check here.
+ *
+ * This used to carry a TODO asking for one more null check across `PyObject`, `PyType` and
+ * `PyException`. It was audited instead of guessed at: every `EmbedAPI` function that can return
+ * `NULL` is declared `NativePointer?`, and all **721** pointer-returning `actual`s -- 179 desktop,
+ * 182 android, 181 native, 179 wasmJs -- route their result through a conversion that maps address
+ * 0 to Kotlin `null` (`toNativePointerFromRaw`, or Kotlin/Native's `toCPointer()?.let`). Exactly
+ * one `expect` returns a non-nullable `NativePointer`, `AddressValue.toNativePointer()`, which
+ * converts an already-valid pointer rather than obtaining one. `NativePointer`'s own constructor is
+ * `internal`, so no caller outside the FFI layer can fabricate a zero one.
+ *
+ * So a null from C cannot reach this constructor without an explicit `!!`, and the `?: throw`
+ * at each call site is the check -- adding a runtime one here would only re-test what the
+ * compiler already proved.
+ *
+ * One inconsistency the audit did turn up, recorded because nothing tests it: androidMain's
+ * `Long.toNativePointer()` uses `if (this > 0)` where every other platform uses `!= 0`. It agrees
+ * for every address Android actually hands out (arm64 user-space VAs are well below 2^63), so it
+ * is a discrepancy rather than a defect, and it is unreachable from the production path in any
+ * case -- `bindings` returns raw longs that go through `toNativePointerFromRaw`.
+ */
 open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoCloseable(
     pointer,
     ::topLevelDecRefAction
 ) {
 
     init {
-        if (borrowed) {
-            incRef()
-            // TODO: PyIncRef을 사용하는게 적절한 선택일까?
-        }
+        // Yes, Py_IncRef is the right call here, and the question this used to carry has since
+        // been answered the expensive way. `borrowed = true` states that the caller was *lent*
+        // this pointer and that the wrapper must obtain its own reference, because
+        // PyAutoCloseable has unconditionally registered a release for it. `borrowed = false`
+        // states the caller is handing over a reference it owns, so no increment is due.
+        //
+        // Both halves of that have been paid for. Wrapping a lent pointer with `borrowed = false`
+        // gave two owners for one reference; the resulting double free corrupted CPython's free
+        // lists and surfaced as a segfault in an unrelated test, which is what made §1 look
+        // unfixable for three attempts. In the other direction, declining the increment on a
+        // reference the caller only borrowed loses one per call -- see ROADMAP §4 and
+        // `OwnershipLeakTest`, where both directions are measured rather than argued.
+        if (borrowed) incRef()
     }
 
     /**
@@ -420,8 +451,36 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         return result ?: "<error decoding str>"
     }
 
+    /**
+     * Hashes on the pointer, matching [equals], which compares pointers.
+     *
+     * **TODO(open design question)**, sharpened from "the same pointer should only ever produce
+     * one wrapper". That would be *wrapper interning*: a global pointer -> `PyObject` map so
+     * `a === b` whenever `a == b`. It is not obviously right, and what decides it is not taste:
+     *
+     * - **A pointer-keyed cache aliases across a free.** CPython reuses addresses aggressively
+     *   (free lists, obmalloc pools), so an entry left behind after the last reference goes away
+     *   can be handed out for a *different* object that happens to land on the same address. This
+     *   is the hazard `reflection/HandleTable` already answers with a generation counter (§7), and
+     *   it is why interning cannot be added without a removal path keyed to release.
+     * - **[PyType.getInstance] is the existing precedent and it dodges the problem by never
+     *   evicting**, which makes every type ever wrapped immortal for the life of the interpreter.
+     *   That is affordable for types and not obviously affordable for every object.
+     *
+     * What to measure before deciding, rather than "is this right?":
+     * 1. the cost of the lookup on the hot path -- a map probe per wrapper construction against
+     *    the ~2.65 ns an `invokeExact` FFI call costs on desktop (§8), since wrappers are built
+     *    per element in bulk conversion;
+     * 2. how many wrappers a realistic workload builds for pointers it already holds -- if the
+     *    hit rate is low, interning is pure overhead;
+     * 3. whether any caller actually needs `===`. Nothing in this repo does today: `equals`/
+     *    `hashCode` already make wrappers interchangeable as map keys and in `contains`, which is
+     *    what the collection wrappers rely on.
+     *
+     * Until (3) produces a caller, the answer is "no", and the cost of being wrong is a leak plus
+     * an aliasing bug rather than a missing feature.
+     */
     override fun hashCode(): Int {
-        // TODO: 같은 포인터 객체는 한번만 생성하도록 해야 함
         return pointer.hashCode()
     }
 
@@ -432,45 +491,4 @@ open class PyObject(val pointer: NativePointer, borrowed: Boolean): PyAutoClosea
         return false
     }
 
-
-    // TODO: 밑에 세 함수 수정 (return type 불일치 등)
-//    operator fun invoke(arg0: PyObject): PyObject {
-//        return python.multiplatform.ffi.Python3.withPython { PyObject_CallObject(pointer, arg0) }
-//    }
-//
-//    operator fun invoke(arg0: PyObject, arg1: PyObject): PyObject {
-//        return python.multiplatform.ffi.Python3.withPython { PyObject_CallObject(pointer, arg0, arg1) }
-//    }
-//
-//    //...
-//
-//    operator fun invoke(vararg args: PyObject): PyObject {
-//        return python.multiplatform.ffi.Python3.withPython { PyObject_CallObject(pointer, args) }  // TODO: 이거는 변수 하나로 잡히던가? 아님 여러개인가?
-//        // 리스트로 들어오는 거였던가?
-//    }
-
-//    actual fun pyLongFromLong(arg0: Long): Long {
-//        if (!Python3.isInitialized) return -1
-//        memScoped {
-////            val pyLong = python.multiplatform.ffi.Python3.withPython { PyLong_FromLong(arg0) } // TODO: PyLong_FromLong을 PyLong_FromLongLong으로 교체
-//            val pyLong = python.multiplatform.ffi.Python3.withPython { PyLong_FromLongLong(arg0) }
-//            if (pyLong == null) {
-//                throw IllegalStateException("Python long from long failed")
-//            }
-//            return pyLong.toLong()
-//        }
-//    }
-//
-//    actual fun pyLongAsLong(arg0: Long): Long {
-//        if (!Python3.isInitialized) return -1
-//        memScoped {
-//            val restoredPyObj: CValuesRef<_object>? = arg0.toCPointer()
-////            val ktLong = python.multiplatform.ffi.Python3.withPython { PyLong_AsLong(restoredPyObj) } // TODO: PyLong_AsLong을 PyLong_AsLongLong으로 교체
-//            val ktLong = python.multiplatform.ffi.Python3.withPython { PyLong_AsLongLong(restoredPyObj) }
-//            if (ktLong == -1L && python.multiplatform.ffi.Python3.withPython { PyErr_Occurred() } != null) {
-//                throw IllegalStateException("Python long as long failed")
-//            }
-//            return ktLong
-//        }
-//    }
 }

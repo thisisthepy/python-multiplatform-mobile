@@ -145,4 +145,38 @@ class OwnershipLeakTest {
             getrefcount.close()
         }
     }
+
+    /**
+     * The same defect, in the fixture the rest of the suite is built on.
+     *
+     * `PythonTestFixture.mainGlobals()` reads `__main__.__dict__` with `PyObject_GetAttrString`,
+     * which returns a **new** reference, and used to wrap it with `borrowed = true` -- i.e. take
+     * a *second* reference on top of the one it was already handed. The wrapper releases one, so
+     * every call left one behind, and `PythonTestFixture.eval()` calls it once per evaluation.
+     *
+     * It was survivable only because the object leaked is `__main__`'s namespace, which outlives
+     * the interpreter anyway. It is measured here because it is the exact inverse of the
+     * `borrowed = false` misuse that ROADMAP §1 spent three attempts on, and because a fixture
+     * that models the ownership rule wrongly is the worst place to keep one.
+     */
+    @Test
+    fun theTestFixtureDoesNotLeakMainGlobals() = PythonTestFixture.withInterpreter {
+        val (getrefcount, refCount) = refCounter()
+        // Not part of the measurement: this handle is held for the whole test, so its own
+        // reference is constant across the loop below.
+        val probe = PythonTestFixture.mainGlobals()
+        try {
+            val before = refCount(probe)
+            val calls = 50
+            repeat(calls) { PythonTestFixture.mainGlobals().close() }
+            assertEquals(
+                before, refCount(probe),
+                "$calls balanced mainGlobals() calls must leave __main__.__dict__'s count where " +
+                    "they found it; a rise means the wrapper took a reference it was already given"
+            )
+        } finally {
+            probe.close()
+            getrefcount.close()
+        }
+    }
 }
