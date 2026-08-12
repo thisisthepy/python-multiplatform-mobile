@@ -16,9 +16,11 @@ import kotlin.test.assertTrue
  * Also runs, unmodified, on `-PpythonFreeThreaded=true`, where the automatic checkpoint reliably
  * fires but does not reliably reclaim: under this heavy single-thread, C-API-only workload the
  * residue swings between the GIL build's ~1,970 and the full ~20,000, run to run, so only the GIL
- * build gets a bound. What *is* asserted on both builds is that the residue is ordinary
- * collectable cyclic garbage -- see [assertResidueIsOrdinaryCollectableGarbage] and the KDoc on
- * [measureCyclicGarbageWithAutoDrain].
+ * build gets a bound here. That swing is not a mystery any more -- it tracks the *JVM's* memory
+ * footprint, see `docs/gc-scheduling-investigation.md` §8d and [FreeThreadedGCGateTest], which
+ * does bound the free-threaded case once the responsible gate is opened. What *is* asserted on
+ * both builds is that the residue is ordinary collectable cyclic garbage -- see
+ * [assertResidueIsOrdinaryCollectableGarbage] and the KDoc on [measureCyclicGarbageWithAutoDrain].
  *
  * **Do not restore the inline `gc.get_objects()` chain.** Every temporary in it has to be closed;
  * the list holds the whole heap. See [countTrackedObjects].
@@ -186,8 +188,20 @@ class GCSchedulingMeasurementTest {
      * [assertResidueIsOrdinaryCollectableGarbage].
      *
      * So the residue *is* collectable garbage. What differs free-threaded is what makes the
-     * collector run, not what it can reclaim, and that difference is not root-caused here. See
-     * `docs/gc-scheduling-investigation.md` §8 for the measurements and the open question.
+     * collector run, not what it can reclaim.
+     *
+     * ### Why no bound is asserted free-threaded
+     *
+     * That difference is root-caused in `docs/gc-scheduling-investigation.md` §8d: free-threaded,
+     * `_Py_RunGC` re-asks `gc_should_collect` after the checkpoint has read the scheduled bit, and
+     * `gc_should_collect_mem_usage` (`Python/gc_free_threading.c:2080`) gates generation 0 on
+     * whether the **whole process's** memory footprint has grown by more than a tenth since the
+     * last collection. In this JVM that number is JVM memory, so the outcome here depends on the
+     * host process's allocation history rather than on anything this test does -- which is exactly
+     * why it is bimodal, and why bounding it would be a coin flip rather than a regression test.
+     *
+     * The bound that *can* be asserted free-threaded, once that gate is deliberately opened, is in
+     * [FreeThreadedGCGateTest], which also pins the mechanism itself on both builds.
      */
     @Test
     fun measureCyclicGarbageWithAutoDrain() = PythonTestFixture.withInterpreter {

@@ -2,11 +2,12 @@
 
 Two things this document is careful about, because it corrects a previous document that was not:
 
-- **CPython file:line citations are inherited, not verified here.** No CPython source is vendored in
-  this repo and none was fetched for this write-up. The line numbers below come from an earlier
-  source trace against the 3.14 series (which is what this build pins —
-  `gradle.properties: pythonVersion=3.14.7`). Treat them as pointers, not as evidence. Where a
-  claim matters, §3 and §4 back it with a measurement taken here instead.
+- **CPython file:line citations are now verified against the tagged source.** The v3.14.7 tarball
+  (the version this build pins — `gradle.properties: pythonVersion=3.14.7`) was fetched to
+  `/Volumes/macMini/cpython-src` for §8d and every line number in this document was re-checked
+  against it. Two in §1 were wrong by ~100 lines and are corrected below; the rest were right.
+  Nothing is vendored into this repo. Where a claim matters, §3, §4 and §8 still back it with a
+  measurement taken here rather than with a citation.
 - **Every number in §3, §5 and §8 was measured on this machine**, on `desktopTest`, macOS arm64,
   CPython 3.14.7, both the default and the `-PpythonFreeThreaded=true` builds.
 - **§8 corrects §7.** A measurement probe in `GCSchedulingMeasurementTest` was leaking the list
@@ -34,21 +35,27 @@ not.
 - **The checkpoint fixes §1 on the build with the global lock, and on the free-threaded build it
   often does not.** It fires exactly as designed there and still reclaims nothing. This is *not*
   caused by the FFI wrapper's per-call GIL scopes — that hypothesis was tested by holding the
-  checkpoint count fixed and widening the scope, and rejected. It is an open question about the
-  free-threaded collector, and it is stated as one. (§8)
+  checkpoint count fixed and widening the scope, and rejected. (§8)
+
+  The cause is that free-threaded, `_Py_RunGC` re-asks `gc_should_collect` *after* the checkpoint
+  has read the scheduled bit, and that check gates generation 0 on the growth of the **whole
+  process's** memory footprint — the JVM's. Python-side allocation cannot move it, so the gate
+  shuts one-way as soon as the JVM's footprint settles. Confirmed by opening and closing the gate
+  on demand, including by faulting in 400 MB of ballast and watching Python cycles get collected
+  with no threshold changed. (§8d)
 
 ## 1. `_Py_ScheduleGC` only sets a bit
 
 Allocation-driven collection has not been a direct call since 3.12. `_Py_ScheduleGC` sets
 `_PY_GC_SCHEDULED_BIT` on the eval breaker and returns:
 
-| build | function | file:line (inherited) |
+| build | function | file:line (v3.14.7, verified) |
 |---|---|---|
-| global lock | `_Py_ScheduleGC` | `Python/gc.c:1967` |
-| free-threaded | `_Py_ScheduleGC` | `Python/gc_free_threading.c:2700` |
+| global lock | `_Py_ScheduleGC` | `Python/gc.c:1846` |
+| free-threaded | `_Py_ScheduleGC` | `Python/gc_free_threading.c:2795` |
 
-The bit's only reader is `_Py_HandlePending`, which calls `_Py_RunGC` when it is set
-(`Python/ceval_gil.c:1397`). `_Py_HandlePending` in turn has one caller family: the
+The bit's only reader is `_Py_HandlePending` (`Python/ceval_gil.c:1357`), which calls `_Py_RunGC`
+when it is set (`Python/ceval_gil.c:1397-1399`). `_Py_HandlePending` in turn has one caller family: the
 `_CHECK_PERIODIC` / `_CHECK_PERIODIC_IF_NOT_YIELD_FROM` uops in `Python/bytecodes.c`, which open
 every Python-level frame (`RESUME`) and close every call instruction. There is no public entry
 point to it.
@@ -80,15 +87,19 @@ thread is the object's owner, recorded in `ob_tid`:
 - **Not the owner.** The decrement goes to `ob_ref_shared` atomically. If that count was already at
   zero — i.e. this decrement is the one that takes the object to zero — `tp_dealloc` *cannot* run
   here, because the object belongs to another thread. It is pushed onto that thread's queue by
-  `_Py_brc_queue_object` (`Objects/object.c:413`, reached from the inline decref in
+  `_Py_brc_queue_object` (`Objects/object.c:411`, reached from the inline decref in
   `Include/refcount.h:363`).
 
 The queue is drained by `_Py_brc_merge_refcounts`, whose only caller is, again, `_Py_HandlePending`
 (`Python/ceval_gil.c:1388`), behind `_PY_EVAL_EXPLICIT_MERGE_BIT`.
 
-**And once a collection has run, every surviving object becomes a non-owner case for everybody.**
-`gc_free_threading.c` resets `ob_tid` to 0 on survivors (`Python/gc_free_threading.c:205`), so
-afterwards no thread matches and every further decrement of those objects takes the shared path.
+**And once a collection has run, a surviving object can become a non-owner case for everybody.**
+On the way out, `gc_restore_tid` (`Python/gc_free_threading.c:325`) puts each survivor's owning
+thread id back — *except* when its shared refcount has been merged, in which case `ob_tid` is left
+at 0 (`:330`) and no thread matches any more, so every further decrement of that object takes the
+shared path. (The inherited citation for this was `:205`, which is not the mechanism; merging
+itself is at `:264`. The behaviour is as described, but it applies to merged survivors rather than
+to all of them.)
 
 That is the mechanism behind the ROADMAP §9 measurement: 1000 wrappers released by the JVM cleaner,
 2003 `Py_DecRef` calls demonstrably made, and `sys.getrefcount` frozen at 1002 through 50 forced
@@ -361,19 +372,143 @@ The same sweep on the build with the global lock is stable and near-complete in 
 Three checkpoints reclaim ~90% on the GIL build. Two thousand reclaim nothing free-threaded. That
 gap — not the scope shape, which is irrelevant on both builds — is the whole finding.
 
-### 8d. The open question, stated precisely
+### 8d. Answered: the checkpoint is fine, the collector asks a second question
 
-Why does an eval-loop checkpoint that demonstrably runs (`CheckpointCounter.reached` climbs by an
-identical, deterministic amount every run) fail to trigger a generational collection on the
-free-threaded build, when the same number of checkpoints — or three of them — suffices with the
-global lock? And why does the same configuration latch from "reclaims" to "never reclaims" partway
-through a single JVM's life?
+The question §8c leaves open is why a checkpoint that demonstrably runs
+(`CheckpointCounter.reached` climbs by an identical, deterministic amount every run) triggers no
+collection free-threaded, and why the same configuration latches from "reclaims" to "never
+reclaims" inside one JVM.
 
-Answering it needs CPython 3.14's `gc_free_threading.c`, in particular whatever gates
-`gc_should_collect` and how per-thread allocation counters reach the interpreter-wide one. **No
-CPython source is vendored in this workspace and none was fetched**, so no mechanism is claimed
-here. What is recorded above is only what was measured.
+CPython v3.14.7 was fetched to `/Volumes/macMini/cpython-src` (not vendored here) and read. **The
+checkpoint is not where this goes wrong.** The checkpoint reads the scheduled bit exactly as §1
+describes, on both builds. What differs is that free-threaded, `_Py_RunGC` then asks a *second*
+question, and it is that one that answers no.
 
-Until it is answered, the supported way to collect cycles in an embedder that runs no Python
-bytecode is the one that works identically on both builds and is already documented in §4:
-`PyGC_Collect()`, at a cost proportional to the heap.
+#### The asymmetry, in four lines of source
+
+| | global lock (`Python/gc.c`) | free-threaded (`Python/gc_free_threading.c`) |
+|---|---|---|
+| schedules on | `generations[0].count > threshold`, and nothing else (`gc.c:1866`) | `gc_should_collect` (`:2153`) |
+| re-checked when the checkpoint runs it | `gc_select_generation` — generation 0 on count alone (`gc.c:1258`) | `gc_should_collect` **again** (`:2328`) |
+| process-memory gate | **none**; `gc.c` has no `last_mem` field and never calls `get_process_mem_usage` | `gc_should_collect_mem_usage` (`:2080`) |
+| `long_lived_total / 4` | oldest generation only (`gc.c:1300`) | **every** generation-0 decision (`:2131`) |
+
+`gc_should_collect` (`gc_free_threading.c:2117`) is:
+
+```c
+if (count <= threshold || threshold == 0 || !gc_enabled) return false;   // :2123
+if (gcstate->old[0].threshold == 0) return true;                        // :2126
+if (count < gcstate->long_lived_total / 4) return false;                 // :2131
+return gc_should_collect_mem_usage(gcstate);                            // :2136
+```
+
+and `gc_should_collect_mem_usage` (`:2080`) is, in substance:
+
+```c
+if (deferred > threshold * 40) return true;                             // :2089
+if ((footprint - last_mem) > Py_MAX(last_mem / 10, 128)) return true;   // :2100
+young.count = 0; deferred_count += young.count;  return false;          // :2109-2113
+```
+
+`footprint` is `get_process_mem_usage()`, which on macOS is
+`task_info(TASK_VM_INFO).phys_footprint` (`:2010`) — **the whole process**, i.e. the JVM.
+`last_mem` is written in exactly one place, after a collection (`:2301`).
+
+So, in a JVM-hosted embedder: 20,000 small Python lists cannot move a JVM's physical footprint by
+the required `last_mem / 10`, the gate returns false, and on the way out it **zeroes `young.count`
+into `deferred_count`** — which means the count has to climb from zero to 2,000 again before the
+question is even asked again. The only escape is `deferred_count > threshold * 40` = 80,000
+container allocations at the default threshold, and this workload makes ~20,000. Checkpoints are
+irrelevant to all of it; the bit gets read and `gc_collect_main` declines at `:2328`.
+
+**This is also the latch.** `last_mem` only moves when a collection runs, and it moves to the
+whole process's current footprint. Early in a JVM's life the footprint is still climbing steeply,
+so the gate opens and collections happen; once a collection records the JVM's settled footprint,
+the bar becomes a tenth of a large number that Python-side allocation cannot move, and it is shut
+one-way. Nothing about the scope shape is involved, which is consistent with §8b rejecting it.
+
+#### Confirmed by experiment, not by reading
+
+The repo has been wrong before about causes derived from source reading, so each claim above was
+turned into a prediction that could fail. All of it is in
+`python-multiplatform/src/desktopTest/.../ref/FreeThreadedGCGateTest.kt`.
+
+**Which gate declines** — `gc_should_collect_mem_usage`'s failing branch zeroes `young.count`
+(`:2109`); the `long_lived_total/4` branch (`:2131`) does not. So the shape of `gc.get_count()[0]`
+across the workload tells them apart. Free-threaded it is a **sawtooth**
+(`[1728, 1488, 976, 464, 2464, 1488, 976, 464, 2464, 1488]`) with 0 collections and residue 20,000:
+the memory gate, repeatedly.
+
+> This probe took two attempts, and the first one was wrong in the direction that would have
+> produced a confident false answer. `gc_get_count_impl` (`Modules/gcmodule.c:215`) flushes the
+> per-thread allocation buffer and sets `gc->alloc_count = 0`, and `record_allocation` only
+> consults `gc_should_collect` when that buffer reaches `LOCAL_ALLOC_COUNT_THRESHOLD` = 512
+> (`:69`, `:2147`). Sampling every 500 allocations therefore stopped the collector from ever being
+> asked, and produced a perfectly linear trace (`226, 726, 1226, … 19726`) that reads exactly like
+> proof of the *other* hypothesis. Sampling every 2,000 allocations instead gives the sawtooth.
+
+**The one-line falsifier** — `:2126` says `old[0].threshold == 0` short-circuits the whole chain.
+Nothing in `gc.c` reads that field while scheduling. So `gc.set_threshold(2000, 0, 0)` — a setting
+about *generation 1* — must switch *generation 0* collection on free-threaded and do nothing at all
+with the global lock. Run A/B/A in one JVM so the latch cannot explain the difference; residue out
+of 20,000, and the number of collections that actually ran:
+
+| arm | free-threaded | global lock |
+|---|---|---|
+| `(2000, 10, 10)` | 20,000 — 0 collections | 1,968 — 9 collections |
+| `(2000, 0, 0)` | **1,318 — 8 collections** | 1,966 — 5 collections |
+| `(2000, 10, 10)` again | 20,000 — 0 collections | 1,970 — 9 collections |
+
+**The `deferred_count` arithmetic** — the escape bar is `40 × threshold0`, and `deferred_count`
+grows *only* in the memory gate's failing branch. Against a ~20,000-allocation workload that
+predicts no collection at threshold0 = 2000 (bar 80,000) or 500 (bar 20,000), and collection at
+100 (bar 4,000). Free-threaded: 20,000 / 20,000 / **1,466 with 3 collections**. The same sweep with
+the global lock just scales smoothly with the threshold (9 / 36 / 172 collections), because there
+is no such bar. This also proves the `long_lived_total/4` gate at `:2131` is being *passed* —
+nothing else feeds `deferred_count`.
+
+**The latch, driven directly** — if the gate is whole-process footprint, then faulting in 400 MB of
+ballast partway through the workload must open it, while changing no threshold, allocating no extra
+Python container and touching nothing the collector tracks. Dropping the ballast must shut it
+again. Residue out of 20,000:
+
+| arm | free-threaded | global lock |
+|---|---|---|
+| baseline | 20,000 — 0 collections | 1,972 — 9 collections |
+| 400 MB faulted in midway | **9,754 — 1 collection** | 1,988 — 9 collections |
+| ballast dropped | 20,000 — 0 collections | 1,968 — 9 collections |
+
+Reproduced identically to the object in three consecutive JVMs. **JVM memory growth, and nothing
+else, collected Python cycles.** That is the finding: on a free-threaded build the Python cyclic
+collector's schedule is a function of the host process's memory, which for an embedder is not
+Python's memory at all.
+
+One experiment did **not** confirm what it was built to test and is recorded as such: scaling the
+workload (10,000 / 30,000 / 60,000 cycles) at default thresholds to cross the 80,000 bar gave
+1 / 2 / 2 collections, but the 10,000-cycle arm should have given 0. It ran first in its JVM, while
+the footprint was still climbing, so the memory gate — the very thing being controlled for —
+supplied the collections. The scaling prediction is untested, not confirmed.
+
+#### What this changes
+
+- The free-threaded case now has a **bound**, where §8 could only say the residue was bimodal and
+  refuse to assert one. `FreeThreadedGCGateTest` holds free-threading to the same
+  "reclaims more than half" bound as the GIL build *once the gate the source names is open*, and
+  asserts the matched no-op on the GIL build so that a CPython change to either gate fails the test
+  and says which one.
+- `GCSchedulingMeasurementTest.measureCyclicGarbageWithAutoDrain` still asserts no bound
+  free-threaded in the default configuration, and that is now a documented consequence rather than
+  an unknown: at default thresholds the outcome depends on the JVM's footprint history, so it is
+  genuinely not boundable, and the two arms that reclaimed in §8b's single-scope row were the JVM
+  still warming up.
+- §8b's rejection stands and is now explained: scope shape cannot matter because the gate never
+  looks at thread state.
+
+#### The advice does not change
+
+An embedder can open the gate deliberately — `gc.set_threshold(t0, 0, 0)` restores count-driven
+collection free-threaded, and a small `threshold0` lowers the `40 × threshold0` bar — but both
+trade throughput for it, and both are tuning of CPython internals that the Stable ABI does not
+promise. The supported way to collect cycles in an embedder that runs no Python bytecode is still
+the one that works identically on both builds, documented in §4: `PyGC_Collect()`, at a cost
+proportional to the heap.
