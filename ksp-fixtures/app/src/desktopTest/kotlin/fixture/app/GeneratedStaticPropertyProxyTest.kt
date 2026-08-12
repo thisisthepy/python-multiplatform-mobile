@@ -122,6 +122,33 @@ class GeneratedStaticPropertyProxyTest {
     }
 
     @Test
+    fun aCompanionFunctionOfARenderedClassGoesOnTheSameMetaclassItsCompanionPropertiesDo() {
+        // The other half of a companion, and the one that used to be lost: KSP emits
+        // `WithCompanion.create` as a `CallableKind.FUNCTION`, which is by name indistinguishable
+        // from `Registry.ping` -- an `object`'s function, which must stay on its module. Only the
+        // `ReflectedClassKind` tells them apart, so both are asserted here against the real table.
+        val kinds = UpcallTable.entries().associate { it.name to it.kind }
+        assertEquals(CallableKind.FUNCTION, kinds["fixture.library.WithCompanion.create"], "companion fun")
+        assertEquals(CallableKind.FUNCTION, kinds["fixture.library.Greeter.polite"], "interface companion fun")
+
+        val source = render()
+
+        assertContains(source, "    def create(cls, a0):")
+        assertContains(source, "    def polite(cls):")
+        assertFalse(
+            source.contains("_pm_module('fixture.library.WithCompanion')"),
+            "a module of that name is exactly what the class rendering overwrites:\n$source",
+        )
+        assertFalse(source.contains("_pm_module('fixture.library.Greeter')"))
+        // and the same metaclass carries the companion's properties: one companion, one type object
+        val metaclass = Regex("class (_pm_t_\\d+)\\(type\\):\\n(?:.|\\n)*?class WithCompanion\\(metaclass=\\1\\):")
+            .find(source)
+        assertTrue(metaclass != null, "WithCompanion needs one metaclass for both halves:\n$source")
+        assertContains(metaclass.value, "    def create(cls, a0):")
+        assertContains(metaclass.value, "    def TAG(cls):")
+    }
+
+    @Test
     fun aVarWhoseSetterIsNotPublicApiRendersReadOnlyRatherThanGainingOneBack() {
         // ROADMAP §13's rule, carried through to the last stage: the table has no STATIC_SETTER
         // entry for these, and this stage must not invent one. What it emits instead is a

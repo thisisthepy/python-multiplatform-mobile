@@ -73,7 +73,8 @@ import python.multiplatform.reflection.UpcallTable
  * therefore just that integer, and a plain Python class holding one in an attribute is sufficient
  * -- no C type, no new slot, no new platform code.
  *
- * ### Static surfaces: [CallableKind.STATIC_GETTER], [CallableKind.STATIC_SETTER]
+ * ### Static surfaces: [CallableKind.STATIC_GETTER], [CallableKind.STATIC_SETTER], and a
+ * companion's [CallableKind.FUNCTION]
  *
  * A static property is an **attribute**, not a callable: rendering it as `libraryVersion()` would
  * make the Python surface disagree with the Kotlin declaration, and rendering it as a plain
@@ -101,6 +102,31 @@ import python.multiplatform.reflection.UpcallTable
  * [CallableKind.FUNCTION] entry named `..Registry.ping` and has always gone through the module
  * path, so its sibling property has to follow it there.
  *
+ * #### A companion **function** goes on the metaclass too
+ *
+ * `FragmentScanner.companionEntries` emits a companion function as a [CallableKind.FUNCTION] named
+ * `pkg.Owner.fn` -- the same shape an `object`'s function has, and indistinguishable from it by
+ * name alone. Sent down the module path it landed in a module `pkg.Owner`, which [renderClass] then
+ * overwrote on the parent module with the class of that name. **Observed, in a real interpreter:**
+ * `Counter.make(3)` raised `type object 'Counter' has no attribute 'make'` while a
+ * `sys.modules['proxycls.Counter']` that still held `make` was left behind -- one Kotlin name with
+ * two contradictory Python answers, only one of which anything pointed at.
+ *
+ * The judgement is that **one Python name cannot be both a module and a class**, so one of the two
+ * has to move, and it is the function: the class is the thing an instance surface needs. That puts
+ * it on the metaclass beside the static properties, which also gets Kotlin's own rule for free.
+ * Rejected:
+ *
+ * | alternative | why not |
+ * |---|---|
+ * | a `staticmethod`/`classmethod` in the **class body** | reachable through an *instance* (`Counter(1).make(3)` resolves), which is a shape Kotlin does not have -- and it would contradict the sibling static *property*, which is on the metaclass precisely so instances cannot see it. The two halves of one companion would then disagree about what a companion is |
+ * | merging the module into the class (the class absorbs the module's attributes) | the collision is only ever between a class and a module named after that class, i.e. between a class and its own companion. Building a general module/class merge for one case buys nothing the metaclass does not, and gives `pkg.Owner` a `__getattr__` that has to arbitrate between two namespaces |
+ * | reversing the publication order so the module wins | the same bug pointed the other way: `Counter(1)` would stop working, and an instance surface is what the class rendering exists for. It also leaves the loser in `sys.modules`/on the parent module rather than removing it |
+ *
+ * An `object`'s function is deliberately **not** moved: a [ReflectedClassKind.OBJECT] is not
+ * rendered as a Python class, so nothing overwrites its module and `Registry.ping()` and
+ * `Registry.size` keep resolving against the same module object.
+ *
  * #### What this cost, and the alternatives it was chosen over
  *
  * The price is one extra type object per class that has static members, and one more shape in the
@@ -124,7 +150,6 @@ import python.multiplatform.reflection.UpcallTable
  * | kind | why not |
  * |---|---|
  * | a `TypeTag.OBJECT` value returned from an arbitrary [CallableKind.FUNCTION] or [CallableKind.METHOD] | still crosses as the bare handle integer, not wrapped in the class rendered for it. Only a value that came from *this* proxy's own `__init__` -- i.e. something Python itself constructed -- gets the class. A factory function that should hand back a `Counter` today hands back an `int` |
- * | a `companion object` **function** on a class that is also rendered as a Python class | it is a [CallableKind.FUNCTION] whose name is `pkg.Owner.fn`, so the function path publishes it into a *module* named `pkg.Owner`, and the class rendering then overwrites `pkg.Owner` with the class. Its static *properties* are reachable (they are on the metaclass); its static functions are not. Unverified by a test here -- read off the two `setattr` sites, not observed |
  *
  * These are skipped silently *here* because the skip is a property of this stage, not a policy
  * decision -- `docs/binding-policy.md` already decided they are exposed, and they remain reachable
@@ -301,16 +326,23 @@ object PythonProxySource {
         rootModule: String = DEFAULT_ROOT_MODULE,
     ): String {
         val byName = entries.associateBy { it.name }
-        val functions = entries.filter { it.kind == CallableKind.FUNCTION }
         val renderableClasses = classes.filter {
             it.kind == ReflectedClassKind.CLASS || it.kind == ReflectedClassKind.INTERFACE
         }
         // A static member of a class that gets a Python `class` of its own belongs on that class's
         // metaclass, not on a module named after the class -- the two would collide, since
         // `renderClass` publishes the class under exactly that name. Everything else static (a
-        // top-level property, and an `object`'s or an `enum`'s, neither of which is rendered as a
-        // Python class) is a module attribute, which is where its sibling functions already went.
+        // top-level property or function, and an `object`'s or an `enum`'s, neither of which is
+        // rendered as a Python class) is a module attribute, which is where its siblings went.
         val claimedByClasses = renderableClasses.flatMapTo(HashSet()) { it.memberNames }
+        // A companion function is a FUNCTION named `pkg.Owner.fn`, so the module path below would
+        // publish it into a *module* `pkg.Owner` -- which `renderClass` then overwrites with the
+        // class of that name. Observed, not inferred: `Counter.make` raised
+        // "type object 'Counter' has no attribute 'make'" while a half-populated
+        // `sys.modules['proxycls.Counter']` held it, an answer nothing pointed at any more.
+        val functions = entries.filter {
+            it.kind == CallableKind.FUNCTION && it.name !in claimedByClasses
+        }
         val moduleStatics = entries.filter {
             it.kind == CallableKind.STATIC_GETTER && it.name !in claimedByClasses
         }
@@ -558,6 +590,7 @@ object PythonProxySource {
         // list instead of keeping them adjacent, which is what a reader expects of one property.
         val propertyNames = LinkedHashSet<String>()
         val staticNames = LinkedHashSet<String>()
+        val staticFunctionNames = LinkedHashSet<String>()
         for (memberName in cls.memberNames) {
             val entry = byName[memberName] ?: continue
             when (entry.kind) {
@@ -569,9 +602,12 @@ object PythonProxySource {
                 }
                 CallableKind.GETTER -> propertyNames += entry.name.substringAfterLast('.')
                 CallableKind.STATIC_GETTER -> staticNames += entry.name.substringAfterLast('.')
+                // A companion's function. `render` no longer publishes it as a module function --
+                // the module it would land in is the one this class overwrites -- so the metaclass
+                // below is now the only place it exists.
+                CallableKind.FUNCTION -> staticFunctionNames += entry.name.substringAfterLast('.')
                 // SETTER and STATIC_SETTER are picked up alongside their getters below;
-                // CONSTRUCTOR was handled above; a FUNCTION member of this class (a companion's)
-                // already went through the ordinary function path in `render`.
+                // CONSTRUCTOR was handled above.
                 else -> {}
             }
         }
@@ -603,6 +639,19 @@ object PythonProxySource {
         // class's type -- which is what a metaclass is. See the KDoc's "Static surfaces" section
         // for the alternatives this was chosen over.
         val metaBody = StringBuilder()
+        // A companion *function* goes on the same metaclass its companion *properties* do, for the
+        // same two reasons: one Python name cannot be both a module and a class, and Kotlin reaches
+        // a companion member through the class and never through an instance. A `staticmethod` in
+        // the class body would answer the first but not the second -- Python resolves a
+        // `staticmethod` through an instance quite happily, which is a shape Kotlin does not have.
+        for (staticFunctionName in staticFunctionNames) {
+            val entry = byName["${cls.name}.$staticFunctionName"] ?: continue
+            val handle = bindHandle()
+            binds.appendLine("$handle = _pm_bind(${entry.name.quoted()})")
+            metaBody.append(renderStaticFunctionBody(staticFunctionName, handle, entry))
+            metaBody.appendLine()
+            metaBody.appendLine()
+        }
         for (staticName in staticNames) {
             val getter = byName["${cls.name}.$staticName"] ?: continue
             val getterHandle = bindHandle()
@@ -656,6 +705,35 @@ object PythonProxySource {
         val paramList = params(entry.arity).joinToString(", ")
         val callParams = if (paramList.isEmpty()) "self" else "self, $paramList"
         val argsTuple = tupleOf(listOf("self._pm_handle") + params(entry.arity))
+
+        return if (entry.isSuspend) {
+            """
+            |    async def $name($callParams):
+            |        _pm_r = _pm_invoke($handle, $argsTuple)
+            |        if hasattr(_pm_r, '__await__'):
+            |            return await _pm_r
+            |        return _pm_r
+            """.trimMargin()
+        } else {
+            """
+            |    def $name($callParams):
+            |        return _pm_invoke($handle, $argsTuple)
+            """.trimMargin()
+        }
+    }
+
+    /**
+     * The companion-function half of [renderClass]'s metaclass: like [renderMethodBody], but the
+     * first parameter is the class object and it is **not** passed across the boundary.
+     *
+     * A `CallableKind.FUNCTION` emitted for a companion member takes no receiver -- its arguments
+     * start at `args[0]`, exactly as a top-level function's do -- so `cls` is a Python-side
+     * formality, the same one [renderClass]'s static properties already have.
+     */
+    private fun renderStaticFunctionBody(name: String, handle: String, entry: ExposedCallable): String {
+        val paramList = params(entry.arity).joinToString(", ")
+        val callParams = if (paramList.isEmpty()) "cls" else "cls, $paramList"
+        val argsTuple = tupleOf(params(entry.arity))
 
         return if (entry.isSuspend) {
             """
