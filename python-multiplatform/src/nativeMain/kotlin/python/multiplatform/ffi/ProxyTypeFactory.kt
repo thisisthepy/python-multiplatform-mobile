@@ -55,8 +55,11 @@ private fun handleSlot(self: CPointer<CPyObject>?): CPointer<LongVar>? {
  *
  * `String.cstr.getPointer` wants an [kotlinx.cinterop.AutofreeScope], which frees on scope exit --
  * exactly the wrong lifetime here, since `PyType_FromSpec` keeps the pointer.
+ *
+ * `internal` rather than private because `PyMethodDef.ml_name` has the same requirement and the
+ * same non-lifetime; see `python.native.ffi.UpcallEntry`.
  */
-private fun allocPermanentCString(s: String): CPointer<ByteVar> {
+internal fun allocPermanentCString(s: String): CPointer<ByteVar> {
     val bytes = s.encodeToByteArray()
     val buffer = nativeHeap.allocArray<ByteVar>(bytes.size + 1)
     for (i in bytes.indices) buffer[i] = bytes[i]

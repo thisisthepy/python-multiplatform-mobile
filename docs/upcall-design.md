@@ -95,11 +95,13 @@ CPython 콜백 규약은 **전부 관련 객체를 인자로 넘긴다.** 헤더
 |---|---|
 | Desktop | FFM `Linker.upcallStub` |
 | Android | FFM/JNI upcall |
-| iOS / androidNative | `@CName` 심볼 + Python 쪽 `ctypes.CDLL(None)` |
+| iOS / androidNative | `PyMethodDef` + `PyCMethod_New` (`@CName` 심볼은 androidNative 에서만 유효) |
 
-iOS 는 Python 과 Kotlin/Native 가 같은 바이너리에 **정적 링킹**되므로, `ctypes.CDLL(None)` 으로 전역
-심볼 테이블에서 `@CName` 심볼에 바로 닿는다. **별도 C 글루 코드가 필요 없다.** Python 쪽 인터페이스가
-다른 플랫폼의 FFM 업콜과 동일해진다.
+원래 여기에는 "iOS 는 Python 과 Kotlin/Native 가 같은 바이너리이므로 `ctypes.CDLL(None)` 으로 `@CName`
+심볼에 바로 닿는다"고 적혀 있었다. **측정해 보니 iOS 에서는 양쪽 절반이 모두 성립하지 않는다.**
+[아래 표](#what-each-platform-still-owes)에 측정값이 있다. 실제 경로는
+`nativeMain` 의 `python.native.ffi.UpcallEntry` 이며, C 글루가 필요 없다는 결론 자체는 유지된다 —
+`PyMethodDef` 를 Kotlin/Native 가 직접 채우기 때문이다.
 
 ---
 
@@ -200,12 +202,42 @@ Only the address-publishing step; the marshalling is shared.
 | Platform | What is needed | Cost |
 |---|---|---|
 | **Desktop** | done — `Panama.createUpcallStubII_L`, `UpcallStub.invokeWithArgsStubAddr` | — |
-| **iOS / androidNative** | `@CName("pm_upcall_invoke") fun(handle: Long, args: COpaquePointer?): COpaquePointer?` delegating to `UpcallTrampoline.invoke`, reached from Python via `ctypes.CDLL(None)`. Python and Kotlin/Native are one binary, so the symbol is already in the global table and no C glue is needed | cheapest of the three |
+| **iOS / androidNative** | done — `python.native.ffi.UpcallEntry` (`nativeMain`), a `PyMethodDef` whose `ml_meth` is a `staticCFunction` over `UpcallTrampoline.invoke` and whose `self` carries the handle. `UpcallEntryTest` (`nativeTest`) runs it on the simulator and compiles it for androidNative | cheapest of the three |
 | **Android** | a JNI `static jlong` native method registered with `RegisterNatives`, and a C shim of `PyCFunction` shape that calls it — the boundary is primitives only (`androidMain/README.md`), which `(jlong, jlong) -> jlong` already is | one shim per shape |
 | **wasm** | `@WasmExport` on the entry point plus `Table.set` to publish it, measured at 3.1 ns/call in `wasm-experiment` | already proven |
 
 Nothing in that list touches `UpcallTrampoline`; each is the platform's existing upcall mechanism
 pointed at it.
+
+### The `@CName` + `ctypes.CDLL(None)` route, measured
+
+The row above used to read "`@CName` symbol, reached from Python via `ctypes.CDLL(None)`; one
+binary, so the symbol is already in the global table". Both halves were checked when the entry
+point was actually built, and on iOS **neither one holds**.
+
+*Is the `@CName` symbol in the binary?* `nm` on each artifact this project produces, for the same
+three functions (`pm_upcall_invoke`, `pm_upcall_resolve`, `pm_upcall_release_object`):
+
+| Binary | Result |
+|---|---|
+| androidNative `libmultiplatform_python3.14.so` | **exported** (`T` in `nm -D`) |
+| iOS `PythonMultiplatform.framework` | **absent** — a Kotlin/Native framework's export set is the Objective-C surface plus the Konan runtime, and a `@CName` alias is not in it |
+| Kotlin/Native test executable, either target | **absent**, and absent from the per-file caches as well, so it is never emitted rather than dropped at link time |
+
+*Can Python call an address at all?* Only where `_ctypes` exists. This project's iOS
+`Python.framework` exports `PyInit__abc` … `PyInit_time` and ships no `lib-dynload` at all, so
+`import ctypes` raises `ModuleNotFoundError` there. Android's CPython does ship `_ctypes.so`.
+
+So the route is real for androidNative and unavailable on iOS in both directions at once. The
+`@CName` functions are kept because they are what a C host embeds against and what `ctypes`
+reaches on Android, and `UpcallEntry.invokeAddress` publishes the same addresses without
+depending on the link — `UpcallEntryTest.theRawEntryPointsAreCallableCFunctionsOfTheDocumentedShape`
+calls all three through the C ABI that way.
+
+What replaces it is not a workaround but the destination: a `PyMethodDef` is what the generated
+proxy type installs anyway, and `UpcallArgumentsTest`'s `ctypes` shim on desktop exists precisely
+to stand in for a `PyCFunction` slot. Kotlin/Native fills the struct itself, so the claim that no
+C glue is needed survives — it was the reason for the claim that did not.
 
 ## 테이블 생성 — KSP
 
