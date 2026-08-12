@@ -367,6 +367,7 @@ export const PyType_FromSpec = bind("PyType_FromSpec");
 export const PyObject_GetTypeData = bind("PyObject_GetTypeData");
 export const PyType_GetSlot = bind("PyType_GetSlot");
 export const PyObject_GC_UnTrack = bind("PyObject_GC_UnTrack");
+export const PyCFunction_NewEx = bind("PyCFunction_NewEx");
 
 // =================================================================================================
 // Upcalls -- ROADMAP §7 on this target.
