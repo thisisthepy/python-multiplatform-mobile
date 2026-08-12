@@ -18,6 +18,8 @@ extern void PyGILState_Release(jint);
 extern jlong PyGILState_GetThisThreadState(void);
 extern jlong PyEval_SaveThread(void);
 extern void PyEval_RestoreThread(jlong);
+extern jint Py_MakePendingCalls(void);
+extern jlong PyGC_Collect(void);
 extern void PyEval_InitThreads(void);
 extern jlong PyThreadState_GetDict(void);
 extern jlong PyTuple_New(jlong);
@@ -452,6 +454,8 @@ static void f_PyGILState_ReleaseN(JNIEnv *e, jclass c, jint s) { PyGILState_Rele
 static jlong f_PyGILState_GetThisThreadStateN(JNIEnv *e, jclass c) { return PyGILState_GetThisThreadState(); }
 static jlong f_PyEval_SaveThreadN(JNIEnv *e, jclass c) { return PyEval_SaveThread(); }
 static void f_PyEval_RestoreThreadN(JNIEnv *e, jclass c, jlong t) { PyEval_RestoreThread(t); }
+static jint f_Py_MakePendingCallsN(JNIEnv *e, jclass c) { return Py_MakePendingCalls(); }
+static jlong f_PyGC_CollectN(JNIEnv *e, jclass c) { return PyGC_Collect(); }
 static void f_PyEval_InitThreadsN(JNIEnv *e, jclass c) { PyEval_InitThreads(); }
 static jlong f_PyThreadState_GetDictN(JNIEnv *e, jclass c) { return PyThreadState_GetDict(); }
 static jlong f_PyTuple_NewN(JNIEnv *e, jclass c, jlong len) { return PyTuple_New(len); }
@@ -1356,6 +1360,8 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyGILState_GetThisThreadStateN", "()J", (void *)&f_PyGILState_GetThisThreadStateN},
         {"PyEval_SaveThreadN", "()J", (void *)&f_PyEval_SaveThreadN},
         {"PyEval_RestoreThreadN", "(J)V", (void *)&f_PyEval_RestoreThreadN},
+        {"Py_MakePendingCallsN", "()I", (void *)&f_Py_MakePendingCallsN},
+        {"PyGC_CollectN", "()J", (void *)&f_PyGC_CollectN},
         {"PyEval_InitThreadsN", "()V", (void *)&f_PyEval_InitThreadsN},
         {"PyThreadState_GetDictN", "()J", (void *)&f_PyThreadState_GetDictN},
         {"PyTuple_NewN", "(J)J", (void *)&f_PyTuple_NewN},

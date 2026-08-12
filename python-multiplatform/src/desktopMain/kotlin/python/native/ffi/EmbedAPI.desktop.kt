@@ -44,6 +44,8 @@ actual inline fun PyGILState_Release(state: Int) = python.native.ffi.bindings.Py
 actual fun PyGILState_GetThisThreadState(): NativePointer? = python.native.ffi.bindings.PyGILState_GetThisThreadState().toNativePointerFromRaw()
 actual fun PyEval_SaveThread(): NativePointer? = python.native.ffi.bindings.PyEval_SaveThread().toNativePointerFromRaw()
 actual inline fun PyEval_RestoreThread(tstate: NativePointer) = python.native.ffi.bindings.PyEval_RestoreThread(tstate.toRawValue())
+actual fun Py_MakePendingCalls(): Int = python.native.ffi.bindings.Py_MakePendingCalls()
+actual fun PyGC_Collect(): Long = python.native.ffi.bindings.PyGC_Collect()
 
 
 // Section 2

@@ -58,6 +58,11 @@ external fun PyGILState_GetThisThreadState(): Int
 external fun PyEval_SaveThread(): Int
 @WasmImport(MODULE, "PyEval_RestoreThread")
 external fun PyEval_RestoreThread(tstate: Int): Unit
+@WasmImport(MODULE, "Py_MakePendingCalls")
+external fun Py_MakePendingCalls(): Int
+// Py_ssize_t is 32-bit on wasm32, so PyGC_Collect returns i32 here.
+@WasmImport(MODULE, "PyGC_Collect")
+external fun PyGC_Collect(): Int
 @WasmImport(MODULE, "PyRun_SimpleString")
 external fun PyRun_SimpleString(command: Int): Int
 @WasmImport(MODULE, "PyRun_String")
