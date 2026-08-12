@@ -129,7 +129,10 @@ class JniWiringTest {
             android.util.Log.d("JniWiringTest", "Calling Py_GetVersion()")
             val version = Py_GetVersion()
             android.util.Log.d("JniWiringTest", "Version: $version")
-            org.junit.Assert.assertTrue("Version should start with 3.14, got $version", version?.startsWith("3.14") == true)
+            // Against the *configured* version, not a literal: this checks that the interpreter
+            // loaded is the one the build downloaded, and does not need hand-editing on a bump.
+            val expected = python.multiplatform.Versions.currentVersion.compactVersionString
+            org.junit.Assert.assertTrue("Version should start with $expected, got $version", version?.startsWith(expected) == true)
             
             android.util.Log.d("JniWiringTest", "Calling PyImport_ImportModule()")
             val sysModule = PyImport_ImportModule("sys")

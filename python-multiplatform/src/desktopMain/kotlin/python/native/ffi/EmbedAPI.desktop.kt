@@ -125,7 +125,6 @@ actual fun PyOS_FSPath(path: NativePointer): NativePointer? = python.native.ffi.
 // Section 6
 actual fun PySys_GetObject(name: String): NativePointer? = python.native.ffi.bindings.PySys_GetObject(name).toNativePointerFromRaw()
 actual inline fun PySys_SetObject(name: String, v: NativePointer): Int = python.native.ffi.bindings.PySys_SetObject(name, v.toPlatformPointer())
-actual inline fun PySys_ResetWarnOptions() = python.native.ffi.bindings.PySys_ResetWarnOptions()
 actual fun PySys_GetXOptions(): NativePointer? = python.native.ffi.bindings.PySys_GetXOptions().toNativePointerFromRaw()
 actual inline fun PySys_AuditTuple(event: String, args: NativePointer): Int = python.native.ffi.bindings.PySys_AuditTuple(event, args.toPlatformPointer())
 
@@ -140,7 +139,6 @@ actual fun PyImport_ImportModule(name: String): NativePointer? {
     val ptr = internedUtf8(name)
     return (python.native.ffi.bindings.PyImport_ImportModuleHandle.invokeExact(ptr) as Long).toNativePointerFromRaw()
 }
-actual fun PyImport_ImportModuleNoBlock(name: String): NativePointer? = python.native.ffi.bindings.PyImport_ImportModuleNoBlock(name).toNativePointerFromRaw()
 actual fun PyImport_ImportModuleLevelObject(name: NativePointer, globals: NativePointer, locals: NativePointer, fromlist: NativePointer, level: Int): NativePointer? = python.native.ffi.bindings.PyImport_ImportModuleLevelObject(name.toPlatformPointer(), globals.toPlatformPointer(), locals.toPlatformPointer(), fromlist.toPlatformPointer(), level).toNativePointerFromRaw()
 actual fun PyImport_ImportModuleLevel(name: String, globals: NativePointer, locals: NativePointer, fromlist: NativePointer, level: Int): NativePointer? = python.native.ffi.bindings.PyImport_ImportModuleLevel(name, globals.toPlatformPointer(), locals.toPlatformPointer(), fromlist.toPlatformPointer(), level).toNativePointerFromRaw()
 actual fun PyImport_Import(name: NativePointer): NativePointer? = python.native.ffi.bindings.PyImport_Import(name.toPlatformPointer()).toNativePointerFromRaw()
@@ -405,7 +403,7 @@ actual fun PyCallIter_New(callable: NativePointer, sentinel: NativePointer): Nat
 // Section 26
 actual fun PyWeakref_NewRef(ob: NativePointer, callback: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_NewRef(ob.toPlatformPointer(), callback.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyWeakref_NewProxy(ob: NativePointer, callback: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_NewProxy(ob.toPlatformPointer(), callback.toPlatformPointer()).toNativePointerFromRaw()
-actual fun PyWeakref_GetObject(ref: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_GetObject(ref.toPlatformPointer()).toNativePointerFromRaw()
+actual fun PyWeakref_GetRef(ref: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_GetRef(ref.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyObject_ClearWeakRefs(o: NativePointer) = python.native.ffi.bindings.PyObject_ClearWeakRefs(o.toPlatformPointer())
 
 

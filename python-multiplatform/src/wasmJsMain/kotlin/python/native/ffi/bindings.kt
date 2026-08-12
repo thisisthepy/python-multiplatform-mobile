@@ -185,8 +185,6 @@ external fun PyOS_FSPath(path: Int): Int
 external fun PySys_GetObject(name: Int): Int
 @WasmImport(MODULE, "PySys_SetObject")
 external fun PySys_SetObject(name: Int, v: Int): Int
-@WasmImport(MODULE, "PySys_ResetWarnOptions")
-external fun PySys_ResetWarnOptions(): Unit
 @WasmImport(MODULE, "PySys_GetXOptions")
 external fun PySys_GetXOptions(): Int
 @WasmImport(MODULE, "PySys_AuditTuple")
@@ -197,8 +195,6 @@ external fun Py_FatalError(message: Int): Unit
 external fun Py_Exit(status: Int): Unit
 @WasmImport(MODULE, "PyImport_ImportModule")
 external fun PyImport_ImportModule(name: Int): Int
-@WasmImport(MODULE, "PyImport_ImportModuleNoBlock")
-external fun PyImport_ImportModuleNoBlock(name: Int): Int
 @WasmImport(MODULE, "PyImport_ImportModuleLevelObject")
 external fun PyImport_ImportModuleLevelObject(name: Int, globals: Int, locals: Int, fromlist: Int, level: Int): Int
 @WasmImport(MODULE, "PyImport_ImportModuleLevel")
@@ -613,8 +609,8 @@ external fun PyCallIter_New(callable: Int, sentinel: Int): Int
 external fun PyWeakref_NewRef(ob: Int, callback: Int): Int
 @WasmImport(MODULE, "PyWeakref_NewProxy")
 external fun PyWeakref_NewProxy(ob: Int, callback: Int): Int
-@WasmImport(MODULE, "PyWeakref_GetObject")
-external fun PyWeakref_GetObject(ref: Int): Int
+@WasmImport(MODULE, "PyWeakref_GetRef")
+external fun PyWeakref_GetRef(ref: Int, pobj: Int): Int
 @WasmImport(MODULE, "PyObject_ClearWeakRefs")
 external fun PyObject_ClearWeakRefs(o: Int): Unit
 @WasmImport(MODULE, "PyType_IsSubtype")
