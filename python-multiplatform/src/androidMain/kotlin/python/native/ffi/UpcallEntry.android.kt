@@ -41,6 +41,28 @@ import python.multiplatform.reflection.UpcallTable
  *   the second one costs a counter bump.
  * - **Reference conventions belong to the trampoline too.** Arguments arrive borrowed and the
  *   result leaves as a new reference; nothing on this file's path touches a refcount.
+ *
+ * ### What this still costs
+ *
+ * Measured by `UpcallOverheadTest` on `pmp_api26` / `pmp_api36`, two runs each, per upcall:
+ *
+ * | | API 26 | API 36 |
+ * |---|---|---|
+ * | steady state, any thread | 1209–1329 ns | 2301–3086 ns |
+ * | **first upcall on a Python worker thread** | **139625–141958 ns** | **55917–125083 ns** |
+ * | the same call shape as a downcall, for scale | 1213–1217 ns | 980–1541 ns |
+ *
+ * The first row is the JNI upcall and the trampoline's marshalling, and it is now within ~1-2x of
+ * a downcall of the same shape. The second is the one cost that could not be removed: a
+ * `threading.Thread` is a bare pthread, so the first time one reaches ART it must be attached.
+ * `pmp_attach` holds that attachment for the life of the thread and gives it back from a
+ * `pthread_key_create` destructor, which is what turned it from a per-call charge of 14–62 µs into
+ * a per-thread one — but a thread that upcalls exactly once still pays all of it.
+ *
+ * It is not marked with [HighOverheadNativeCall]. That marker is `@RequiresOptIn`, and its job is
+ * to make a Kotlin *caller* acknowledge a cost; nothing in Kotlin calls these — C does, from
+ * CPython — so applying it here would be inert. The cost is recorded instead where the callers
+ * that can act on it will look: here, in `pmp_upcall_invoke_meth`, and in `docs/upcall-design.md`.
  */
 object UpcallCallbacks {
 

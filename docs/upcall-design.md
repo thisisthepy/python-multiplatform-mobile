@@ -227,11 +227,91 @@ That is not a new mechanism. It is exactly the inversion the cycle-collecting pr
 makes for `tp_traverse`/`tp_clear` (`ProxyCallbacks`), down to reusing `pmp_attach` — so the third
 consequence falls out with it: **a Python worker thread is a bare pthread ART has never seen**.
 Every `threading.Thread` is one, so `GetEnv` fails and the shim must
-`AttachCurrentThreadAsDaemon` and detach again on the way out. Skipping the detach is not an
-option — ART aborts the process when a thread it knows about exits without detaching, and a CPython
-worker exits outside our control. `UpcallEntryTest.anUpcallArrivesOnAThreadCPythonCreatedRatherThanFailingToFindTheJvm`
+`AttachCurrentThreadAsDaemon`. `UpcallEntryTest.anUpcallArrivesOnAThreadCPythonCreatedRatherThanFailingToFindTheJvm`
 runs the upcall inside a `threading.Thread` and asserts the thread it landed on is not the
 instrumentation thread, so a pass cannot come from `GetEnv` having succeeded after all.
+
+#### The attach is paid once per thread, and the reason it used to be once per call was wrong
+
+This paragraph used to end "and detach again on the way out. Skipping the detach is not an option —
+ART aborts the process when a thread it knows about exits without detaching." The first run of
+`UpcallOverheadTest` priced that decision, and it was the most expensive thing on the Android upcall
+path by an order of magnitude:
+
+| per upcall | API 26 | API 36 |
+|---|---|---|
+| instrumentation thread (ART already knows it) | 1307–1695 ns | 5307–6693 ns |
+| Python worker thread, steady state | 59712–63293 ns | 19820–31219 ns |
+| **the attach/detach pair** | **58405–61598 ns** | **14514–24526 ns** |
+| upcall / downcall of the same shape, worker | 44.59–47.93x | 11.69–13.23x |
+
+(Two runs per device, in each table below; where they differ the range is given, because a single
+emulator reading is not a measurement.)
+
+The justification does not survive contact with ART. `Thread::ThreadExitCallback`
+(`runtime/thread.cc`, same shape in `android-8.0.0_r1` and in `main`) logs a warning on its first
+invocation and only reaches `LOG(FATAL)` on a second one — and the only thing that arms a second
+invocation is a `pthread_setspecific` in an `#else` branch that Android does not compile, because
+on Android it restores `__get_tls()[TLS_SLOT_ART_THREAD_SELF]` instead. Bionic clears a key's value
+before running its destructor and never re-reads it, so the callback fires at most once and the
+abort is unreachable.
+
+Read, then run: `UpcallThreadAttachTest.aThreadThatExitsWithoutDetachingLeaksItsPeerRatherThanAbortingArt`
+attaches a bare pthread as a daemon, lets it exit without detaching, and continues — on both
+`pmp_api26` and `pmp_api36`, with no `Native thread exiting without having called
+DetachCurrentThread` line in logcat at all.
+
+**The detach is still mandatory, for a different reason.** The same test then asks whether the peer
+became reclaimable, and it did not: an attachment that is never given back leaves a
+`java.lang.Thread` in the thread list as a GC root, with a recorded stack the pthread has already
+unmapped. So the detach moved from call exit to *thread death* — a `pthread_key_create` destructor
+(`pmp_thread_exit_detach`), which is the case ART's own warning text points at. It defers to its
+second invocation rather than detaching on its first, so it cannot run before ART's own exit
+callback whatever order bionic visits the keys in.
+
+Re-measured, same test, same devices:
+
+| per upcall | API 26 | API 36 |
+|---|---|---|
+| instrumentation thread | 1280–1327 ns | 2982–5086 ns |
+| Python worker thread, steady state | **1209–1329 ns** | **2301–3086 ns** |
+| worker minus instrumentation thread | −118 to +49 ns | −681 to −2000 ns |
+| upcall / downcall of the same shape, worker | 44.59–47.93x → **0.99–1.09x** | 11.69–13.23x → **2.00–2.34x** |
+
+The attach is no longer visible in the steady state at all: on both devices the difference between
+a Python worker and a thread ART already knows now straddles zero, i.e. it is inside the run-to-run
+spread rather than being a cost. On API 26 an upcall from a Python worker is the same price as a
+downcall of the same shape.
+
+**The first upcall on each worker still pays the attach in full** — 56–142 µs, larger than the
+per-call charge it replaced — and that is the honest shape of the cost now: once per thread, not
+once per call. A worker that upcalls once is no better off than before; a worker that upcalls in a
+loop is 20–50x better off.
+
+#### What holding the attachments costs, and why it is not a new risk
+
+Keeping a thread attached makes ART's collector responsible for it: the peer is a GC root, the
+thread carries a JNI local reference table, and every `SuspendAll` walks the thread list. So "what
+if there are hundreds of Python workers?" is a fair question to ask of this change.
+
+It is largely the wrong question, because **peak simultaneous attachments do not change.** Under
+the per-call scheme every worker that is upcalling at a given instant is attached at that instant;
+what the destructor changes is how long each attachment is *resident*, not how many can exist at
+once. The ceiling either way is the number of live Python threads, which the application already
+pays for in pthread stacks.
+
+What does change is that an attachment now outlives the call, so the release has to be reliable.
+`UpcallThreadAttachTest.manyConcurrentWorkersAreEachAttachedOnceAndAllReleased` holds 32 Python
+workers on a `threading.Barrier` so that all 32 are attached simultaneously, checks each one sees a
+single ART thread across the barrier and that no two share one, and then requires every peer to
+become reclaimable once the workers finish. Green on both devices.
+
+The instrument for that matters as much as the result. It reads GC reachability of the peer, not
+`ThreadGroup.enumerate`, because the first version did use `enumerate` and it is **unusable on API
+26**: it does not report the peer of an attached native thread even while that thread is running and
+upcalling, so every release assertion passed while measuring nothing. A positive control — assert
+the peer is *un*reclaimable while its worker is deliberately parked mid-upcall — is what caught it,
+and it is kept in the test for that reason.
 
 The GIL rule is unchanged and is what makes this safe: CPython holds the GIL when it calls a
 `PyCFunction`, so the C shims take nothing, and `UpcallTrampoline` still takes its own
@@ -241,9 +321,9 @@ GIL from stalling the JVM collector — a `@FastNative` or `@CriticalNative` bin
 deadlock the two runtimes against each other the moment upcalls exist. `androidMain/README.md`
 step 3 says this in the abstract; this is the path that makes it concrete.
 
-Cost, which the row's "one shim per shape" understated: one JNI upcall per call, plus an
-attach/detach pair whenever Python calls from a thread it created. Neither is on the marshalling
-path, and neither has been measured yet.
+Cost, which the row's "one shim per shape" understated: one JNI upcall per call, plus an attach the
+*first* time Python calls from a thread it created. Both are now measured — see the table above and
+`UpcallOverheadTest`. Neither is on the marshalling path.
 
 ### The `@CName` + `ctypes.CDLL(None)` route, measured
 

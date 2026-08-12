@@ -912,6 +912,7 @@ static JavaVM *g_vm = NULL;
 static jclass g_upcallClass = NULL;
 static jmethodID g_upcallPrimitive = NULL;
 static jmethodID g_upcallString = NULL;
+static jmethodID g_upcallTrack = NULL;
 
 static jlong test_upcall_primitive(JNIEnv *env, jclass clazz, jlong x) {
     return (*env)->CallStaticLongMethod(env, g_upcallClass, g_upcallPrimitive, x);
@@ -945,6 +946,47 @@ static jlong test_upcall_unattached(JNIEnv *env, jclass clazz, jlong x) {
     pthread_create(&t, NULL, unattached_thread_func, &d);
     pthread_join(t, NULL);
     return d.res;
+}
+
+/*
+ * The experiment `pmp_attach`'s design rests on: a pthread that attaches as a daemon, calls into
+ * the JVM, and exits without detaching.
+ *
+ * The claim being tested is the one this file used to assert as fact -- that ART aborts the
+ * process for this. Reading `Thread::ThreadExitCallback` says it does not (see the block above
+ * `pmp_attach`), but a reading is not an observation, and the whole per-thread attach depends on
+ * which of the two is true. So it is run.
+ *
+ * The `java.lang.Thread` id of the attachment is handed back, because "did not abort" is only
+ * half the answer: the other half is what the process is left holding, and the caller can ask the
+ * thread list whether that peer is still in it.
+ *
+ * Deliberately does not register `g_detachKey` -- this is the *un*fixed path, kept as the
+ * evidence for the fixed one.
+ */
+struct LeakedAttachData { jlong id; };
+
+static void* leaked_attach_thread_func(void* arg) {
+    struct LeakedAttachData* d = (struct LeakedAttachData*)arg;
+    JNIEnv *env = NULL;
+    if ((*g_vm)->AttachCurrentThreadAsDaemon(g_vm, &env, NULL) != JNI_OK) return NULL;
+
+    if (g_upcallClass != NULL && g_upcallTrack != NULL) {
+        d->id = (*env)->CallStaticLongMethod(env, g_upcallClass, g_upcallTrack);
+    }
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    /* No DetachCurrentThread, and that is the point. */
+    return NULL;
+}
+
+static jlong test_attach_without_detach(JNIEnv *env, jclass clazz, jlong unused) {
+    struct LeakedAttachData d = {-1};
+    pthread_t t;
+    if (g_vm == NULL) return -1;
+    if (pthread_create(&t, NULL, leaked_attach_thread_func, &d) != 0) return -1;
+    /* Returns only once the thread's TSD destructors have run, so ART's exit callback is past. */
+    pthread_join(t, NULL);
+    return d.id;
 }
 
 static void* empty_thread_func(void* arg) { return NULL; }
@@ -1031,25 +1073,98 @@ static jmethodID g_proxyClear = NULL;
  * instrumentation thread -- so a pass cannot come from GetEnv having succeeded after all. Green
  * on pmp_api26 and pmp_api36.
  *
- * The caller must detach again if *attached is set on return. Leaving an attachment behind is
- * not an option: ART aborts the process when a thread it knows about exits without detaching
- * ("Native thread exiting without having called DetachCurrentThread"), and a CPython worker
- * thread is exactly a thread that will exit outside our control. The cost is an attach and a
- * detach per callback on such threads, which is only paid there. Neither device printed that
- * line during the runs above, which is the balance being checked rather than argued.
+ * ### The attachment is kept for the life of the thread, not the life of the call
+ *
+ * This used to detach on every exit, on the stated grounds that "ART aborts the process when a
+ * thread it knows about exits without detaching". That is measurably expensive and, on Android,
+ * it is not what ART does. `Thread::ThreadExitCallback` (runtime/thread.cc, unchanged in shape
+ * from android-8.0.0_r1 to main) reads:
+ *
+ *     if (self->tls32_.thread_exit_check_count == 0) {
+ *       LOG(WARNING) << "Native thread exiting without having called DetachCurrentThread (maybe "
+ *           "it's going to use a pthread_key_create destructor?): " << *self;
+ *       CHECK(is_started_);
+ *     #ifdef __BIONIC__
+ *       __get_tls()[TLS_SLOT_ART_THREAD_SELF] = self;
+ *     #else
+ *       CHECK_PTHREAD_CALL(pthread_setspecific, (Thread::pthread_key_self_, self), "reattach self");
+ *     #endif
+ *       self->tls32_.thread_exit_check_count = 1;
+ *     } else {
+ *       LOG(FATAL) << "Native thread exited without calling DetachCurrentThread: " << *self;
+ *     }
+ *
+ * The LOG(FATAL) is reached only on a *second* invocation of the callback, and the only thing
+ * that arms a second invocation is the `pthread_setspecific` in the `#else` -- which Android does
+ * not take. Bionic clears a key's value before running its destructor and never re-reads it, so
+ * on Android the callback fires exactly once and the abort is unreachable. What is left is a
+ * warning, and a leak: the `java.lang.Thread` peer stays a GC root in the thread list with a
+ * recorded stack the pthread has already unmapped.
+ *
+ * So the detach is still mandatory -- but it belongs at thread death, not at call exit, which is
+ * the case the warning text itself points at. `pmp_thread_exit_detach` below is that destructor.
+ * Threads that reach here from ART (GetEnv succeeds) are untouched: nothing was attached, so
+ * nothing is registered and nothing is detached.
+ *
+ * `*attached` therefore now means "this call owns the attachment and must give it back", and it
+ * is set only on the fallback path where no destructor could be registered. Callers keep their
+ * `if (attached) DetachCurrentThread` exactly as before.
  */
+
+/*
+ * Set on a thread this file attached, so that thread's exit can detach it. The value is a
+ * sentinel; the attachment itself lives in ART's own TLS.
+ */
+static pthread_key_t g_detachKey;
+static int g_detachKeyReady = 0;
+
+#define PMP_DETACH_PENDING ((void *)1)
+#define PMP_DETACH_ARMED   ((void *)2)
+
+/*
+ * Detaches at thread death. Registered on g_detachKey, so bionic calls it while the pthread is
+ * unwinding its thread-specific data.
+ *
+ * The first invocation re-arms instead of detaching, which is what makes this independent of the
+ * order bionic happens to visit keys in. Bionic iterates keys by index, ascending, for up to
+ * PTHREAD_DESTRUCTOR_ITERATIONS rounds, clearing each value before calling its destructor; ART's
+ * own key is created during runtime startup and ours in JNI_OnLoad, so ours is almost certainly
+ * the higher index and ART's callback would run first -- but "almost certainly" is not a
+ * guarantee, and getting it wrong is not benign. Detaching first would free the ART `Thread`
+ * while ART's key still holds a pointer to it, and ART's callback would then run `LOG(WARNING)
+ * << *self` over freed memory. Deferring to the second round removes the question: ART's callback
+ * can only run in a round where its value is still set, i.e. the first, and it does not re-arm
+ * itself on Android, so by the time this detaches it has already been and gone.
+ *
+ * Detaching from here is safe for the same reason that ordering is: on Android `Thread::Current()`
+ * comes from TLS_SLOT_ART_THREAD_SELF, a dedicated bionic slot that the pthread-key teardown does
+ * not touch, and which ART's callback re-populates on its way past.
+ *
+ * A thread that was detached by other means before exiting still lands here with the sentinel
+ * set; ART's DetachCurrentThread returns JNI_ERR for a thread it does not know, which is why that
+ * case needs no separate guard.
+ */
+static void pmp_thread_exit_detach(void *value) {
+    if (value == PMP_DETACH_PENDING &&
+        g_detachKeyReady &&
+        pthread_setspecific(g_detachKey, PMP_DETACH_ARMED) == 0) {
+        return;
+    }
+    if (g_vm != NULL) (*g_vm)->DetachCurrentThread(g_vm);
+}
+
 static JNIEnv *pmp_attach(int *attached) {
     JNIEnv *env = NULL;
     *attached = 0;
     if (g_vm == NULL) return NULL;
     jint r = (*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6);
     if (r == JNI_OK) return env;
-    if (r == JNI_EDETACHED &&
-        (*g_vm)->AttachCurrentThreadAsDaemon(g_vm, &env, NULL) == JNI_OK) {
-        *attached = 1;
-        return env;
-    }
-    return NULL;
+    if (r != JNI_EDETACHED) return NULL;
+    if ((*g_vm)->AttachCurrentThreadAsDaemon(g_vm, &env, NULL) != JNI_OK) return NULL;
+    /* Kept until the thread dies, unless there is no destructor to release it with. */
+    if (g_detachKeyReady && pthread_setspecific(g_detachKey, PMP_DETACH_PENDING) == 0) return env;
+    *attached = 1;
+    return env;
 }
 
 /* The 8 bytes of relative type data on a proxy instance, or NULL if this is not one. */
@@ -1308,11 +1423,22 @@ static jlong ob_refcnt(JNIEnv *e, jclass c, jlong obj) {
  *
  * ### Cost
  *
- * One JNI upcall per call, plus an attach/detach pair when Python calls from a thread ART has
- * never seen -- every `threading.Thread` is a bare pthread, so that is not a corner case. The
- * detach is not optional: ART aborts the process when a thread it knows about exits without
- * calling DetachCurrentThread, and a CPython worker thread exits outside our control. That is the
- * same balance pmp_attach already strikes for tp_traverse, and it is why this reuses it.
+ * One JNI upcall per call, plus an attach the first time Python calls from a thread ART has never
+ * seen -- every `threading.Thread` is a bare pthread, so that is not a corner case.
+ *
+ * The attach used to be paid on every call, because this file asserted that ART aborts a process
+ * whose thread exits without detaching. It does not (see the block above pmp_attach, and
+ * UpcallThreadAttachTest, which runs the case). Measured by UpcallOverheadTest on pmp_api26 /
+ * pmp_api36, two runs each, per upcall from a Python worker in steady state:
+ *
+ *              was (attach per call)    now (attach per thread)
+ *   API 26        59712-63293 ns             1209-1329 ns
+ *   API 36        19820-31219 ns             2301-3086 ns
+ *
+ * against 1280-1327 ns / 2982-5086 ns for the same upcall on a thread ART already knows -- i.e.
+ * the difference now straddles zero and the attach has stopped being visible in the steady state
+ * at all. What is left is the JNI upcall itself, and the first call on each worker, which still
+ * pays the whole attach: 56-142 us.
  */
 
 /* From methodobject.h. Flag values are ABI, not header-version-dependent. */
@@ -1540,11 +1666,20 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     if (clazz == NULL) return JNI_ERR;
 
     g_vm = vm;
+
+    /*
+     * Registered before anything can attach, so no thread can ever be attached without a
+     * destructor to release it. A failure here is not fatal: pmp_attach falls back to detaching on
+     * the way out of each call, which is what this file did unconditionally before.
+     */
+    g_detachKeyReady = (pthread_key_create(&g_detachKey, pmp_thread_exit_detach) == 0);
+
     jclass upcallClazz = (*env)->FindClass(env, "python/native/ffi/UpcallTarget");
     if (upcallClazz != NULL) {
         g_upcallClass = (jclass)(*env)->NewGlobalRef(env, upcallClazz);
         g_upcallPrimitive = (*env)->GetStaticMethodID(env, g_upcallClass, "upcallPrimitive", "(J)J");
         g_upcallString = (*env)->GetStaticMethodID(env, g_upcallClass, "upcallString", "(Ljava/lang/String;)J");
+        g_upcallTrack = (*env)->GetStaticMethodID(env, g_upcallClass, "trackCurrentThread", "()J");
     }
 
     /*
@@ -1978,7 +2113,8 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"testUpcallPrimitive", "(J)J", (void *)&test_upcall_primitive},
         {"testUpcallString", "(Ljava/lang/String;)J", (void *)&test_upcall_string},
         {"testUpcallUnattached", "(J)J", (void *)&test_upcall_unattached},
-        {"testThreadCreateFloor", "(J)J", (void *)&test_thread_create_floor}
+        {"testThreadCreateFloor", "(J)J", (void *)&test_thread_create_floor},
+        {"testAttachWithoutDetach", "(J)J", (void *)&test_attach_without_detach}
     };
     (*env)->RegisterNatives(env, clazz, methods, sizeof(methods) / sizeof(methods[0]));
     return JNI_VERSION_1_6;
