@@ -64,6 +64,7 @@ class AsyncUpcallDeliveryTest {
     fun install() {
         UpcallTable.install(listOf(AsyncTrampolineFragment))
         AsyncTrampolineFragment.parked.clear()
+        AsyncTrampolineFragment.started.clear()
     }
 
     @AfterTest
@@ -71,6 +72,7 @@ class AsyncUpcallDeliveryTest {
         UpcallTable.clear()
         HandleTable.releaseAll()
         AsyncTrampolineFragment.parked.clear()
+        AsyncTrampolineFragment.started.clear()
         keepAlive.clear()
     }
 
@@ -356,6 +358,15 @@ object AsyncTrampolineFragment : FunctionTableFragment {
     /** Resumptions waiting for the completer thread; one per outstanding suspended call. */
     val parked = LinkedBlockingQueue<() -> Unit>()
 
+    /**
+     * The [PendingCall] each `async.tickUntilCancelled` invocation produced.
+     *
+     * The trampoline consumes what a generated body returns, so a test that wants to read the
+     * Kotlin side of a call in flight -- `isCancelled` while it is still suspended, which is the
+     * whole subject of `AsyncUpcallEarlyCancellationTest` -- has no other way to reach it.
+     */
+    val started = LinkedBlockingQueue<PendingCall>()
+
     private suspend fun doubleLater(x: Long): Long = suspendCoroutine { c -> parked.put { c.resume(x * 2) } }
 
     private suspend fun greetLater(name: String): String =
@@ -368,6 +379,28 @@ object AsyncTrampolineFragment : FunctionTableFragment {
     private suspend fun doubleNow(x: Long): Long = x * 2
 
     private suspend fun failNow(): Long = throw IllegalStateException("early boom")
+
+    /**
+     * A cooperating body: one suspension per tick, and [ensureActive] immediately after each
+     * resumption.
+     *
+     * Written this way so "the coroutine learned it was cancelled" and "the coroutine finished"
+     * are two separately observable events. A body that only checked at the end could not tell an
+     * early notice from a late one, which is exactly the distinction under test. The tick ceiling
+     * is a runaway guard: a run that never observes cancellation ends rather than hanging the
+     * suite, and it ends with a value the assertions reject.
+     */
+    private suspend fun tickUntilCancelled(): Long {
+        var ticks = 0L
+        while (ticks < TICK_CEILING) {
+            suspendCoroutine { c: kotlin.coroutines.Continuation<Unit> -> parked.put { c.resume(Unit) } }
+            ticks++
+            ensureActive()
+        }
+        return ticks
+    }
+
+    private const val TICK_CEILING = 1000L
 
     override fun entries(): List<ExposedCallable> = listOf(
         ExposedCallable(
@@ -405,5 +438,12 @@ object AsyncTrampolineFragment : FunctionTableFragment {
             returnType = TypeTag.INT,
             isSuspend = true,
         ) { PendingCall.start { failNow() } },
+        ExposedCallable(
+            name = "async.tickUntilCancelled",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.INT,
+            isSuspend = true,
+        ) { PendingCall.start { tickUntilCancelled() }.also { started.put(it) } },
     )
 }

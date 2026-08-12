@@ -88,6 +88,22 @@ fun pmUpcallReleaseObject(objectHandle: Long): Int =
         0
     }
 
+/**
+ * `int pm_upcall_cancel_call(long callHandle)` -- what a cancelled `asyncio.Future`'s done callback
+ * calls, so a suspended Kotlin coroutine hears about it at its next `ensureActive()` rather than at
+ * completion.
+ *
+ * 1 if it cancelled a live call, 0 for a handle that is stale, never issued, or names something
+ * that is not a pending call. Same `(long) -> int` shape as [pmUpcallReleaseObject], deliberately.
+ */
+@CName("pm_upcall_cancel_call")
+fun pmUpcallCancelCall(callHandle: Long): Int =
+    try {
+        UpcallTrampoline.cancelCall(callHandle)
+    } catch (t: Throwable) {
+        0
+    }
+
 // -------------------------------------------------------------------------------------------
 // The same entry points, shaped as real PyCFunctions
 // -------------------------------------------------------------------------------------------
@@ -152,6 +168,18 @@ private fun pmReleaseMethod(self: CPointer<CPyObject>?, handle: CPointer<CPyObje
             val raw = handle?.let { PyLong_AsLongLong(NativePointer(it)) } ?: 0L
             if (PyErr_Occurred() != null) null
             else PyLong_FromLongLong(UpcallTrampoline.releaseObject(raw).toLong())?.toPlatformPointer()
+        }
+    } catch (t: Throwable) {
+        null
+    }
+
+/** `PyCFunction`, `METH_O`: pending-call handle -> 1 if it cancelled a live call. */
+private fun pmCancelMethod(self: CPointer<CPyObject>?, handle: CPointer<CPyObject>?): CPointer<CPyObject>? =
+    try {
+        entered {
+            val raw = handle?.let { PyLong_AsLongLong(NativePointer(it)) } ?: 0L
+            if (PyErr_Occurred() != null) null
+            else PyLong_FromLongLong(UpcallTrampoline.cancelCall(raw).toLong())?.toPlatformPointer()
         }
     } catch (t: Throwable) {
         null
@@ -244,7 +272,7 @@ private fun bindHandle(raw: Long): CPointer<CPyObject>? {
  *
  * The `PyMethodDef`s and their names are allocated on [nativeHeap] and never freed: a
  * `PyCFunction` object stores the `PyMethodDef *` it was built from rather than copying it, so
- * freeing one would leave every callable built from it pointing at released memory. Four structs
+ * freeing one would leave every callable built from it pointing at released memory. Five structs
  * for the life of the process.
  */
 object UpcallEntry {
@@ -257,6 +285,9 @@ object UpcallEntry {
 
     /** Address of [pmUpcallReleaseObject], `(long) -> int`. */
     val releaseObjectAddress: Long by lazy { staticCFunction(::pmUpcallReleaseObject).toLong() }
+
+    /** Address of [pmUpcallCancelCall], `(long) -> int`. */
+    val cancelCallAddress: Long by lazy { staticCFunction(::pmUpcallCancelCall).toLong() }
 
     internal val invokeDef: CPointer<PyMethodDef> by lazy {
         methodDef("pm_invoke", METH_VARARGS, staticCFunction(::pmInvokeMethod))
@@ -274,6 +305,10 @@ object UpcallEntry {
         methodDef("pm_release", METH_O, staticCFunction(::pmReleaseMethod))
     }
 
+    private val cancelDef: CPointer<PyMethodDef> by lazy {
+        methodDef("pm_cancel", METH_O, staticCFunction(::pmCancelMethod))
+    }
+
     /**
      * A **new** reference to a Python callable that invokes [handle], or `null`.
      *
@@ -282,19 +317,25 @@ object UpcallEntry {
     fun bind(handle: Long): NativePointer? = entered { bindHandle(handle)?.let { NativePointer(it) } }
 
     /**
-     * Installs `_pm_resolve`, `_pm_bind` and `_pm_release` into [namespace] (a Python dict).
+     * Installs `_pm_resolve`, `_pm_bind`, `_pm_release` and `_pm_cancel` into [namespace] (a
+     * Python dict).
      *
-     * That trio is the whole bootstrap: everything after it is Python calling Python objects.
+     * That set is the whole bootstrap: everything after it is Python calling Python objects.
      * `_pm_invoke` is deliberately *not* published -- it is only ever reached through the
      * callable `_pm_bind` returns, which is what keeps the handle out of Python's hands as a
      * separate argument.
      *
-     * @return true if all three landed.
+     * `_pm_cancel` is what `PythonProxySource`'s `_pm_watch` needs to exist before it will arm a
+     * cancellation notice at all; without it the async boundary still works, but a `Future.cancel()`
+     * only reaches Kotlin when the coroutine finishes.
+     *
+     * @return true if all four landed.
      */
     fun publish(namespace: NativePointer): Boolean = entered {
         install(namespace, "_pm_resolve", resolveDef) &&
             install(namespace, "_pm_bind", bindDef) &&
-            install(namespace, "_pm_release", releaseDef)
+            install(namespace, "_pm_release", releaseDef) &&
+            install(namespace, "_pm_cancel", cancelDef)
     }
 
     /** `PyDict_SetItemString` takes a reference of its own, so the one built here is given back. */

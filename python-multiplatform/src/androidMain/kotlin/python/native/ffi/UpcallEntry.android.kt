@@ -108,6 +108,23 @@ object UpcallCallbacks {
         } catch (t: Throwable) {
             0
         }
+
+    /**
+     * `_pm_cancel`: what a cancelled `asyncio.Future`'s done callback calls, so a suspended Kotlin
+     * coroutine hears about the cancellation at its next `ensureActive()` rather than only when it
+     * finishes.
+     *
+     * 1 if it cancelled a live call, 0 for a handle that is stale, never issued, or names something
+     * that is not a pending call. Same `(long) -> int` shape as [release], so the C side is a copy
+     * of `pmp_upcall_release_meth` with one method ID changed.
+     */
+    @JvmStatic
+    fun cancel(callHandle: Long): Int =
+        try {
+            UpcallTrampoline.cancelCall(callHandle)
+        } catch (t: Throwable) {
+            0
+        }
 }
 
 /**
@@ -121,16 +138,17 @@ object UpcallCallbacks {
 object UpcallEntry {
 
     /**
-     * Installs `_pm_resolve`, `_pm_bind` and `_pm_release` into [namespace] (a Python dict).
+     * Installs `_pm_resolve`, `_pm_bind`, `_pm_release` and `_pm_cancel` into [namespace] (a
+     * Python dict).
      *
-     * That trio is the whole bootstrap: everything after it is Python calling Python objects.
+     * That set is the whole bootstrap: everything after it is Python calling Python objects.
      * `pm_invoke` is deliberately *not* published -- it is only ever reached through the callable
      * `_pm_bind` returns, which is what keeps the handle out of Python's hands as a separate
      * argument.
      *
      * Callable from Kotlin without the GIL; takes it for the duration.
      *
-     * @return true if all three landed.
+     * @return true if all four landed.
      */
     fun publish(namespace: NativePointer): Boolean {
         // Forces UpcallCallbacks' <clinit> -- and with it UpcallTrampoline's and UpcallTable's --

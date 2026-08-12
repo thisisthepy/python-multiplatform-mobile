@@ -89,6 +89,17 @@ object PythonProxySource {
     /** The name [AsyncUpcall] resolves out of `__main__` to settle a `Future` safely. */
     internal const val SETTLE_FUNCTION = "_pm_settle"
 
+    /** The name [AsyncUpcall] resolves out of `__main__` to arm a `Future`'s cancellation notice. */
+    internal const val WATCH_FUNCTION = "_pm_watch"
+
+    /** The `(long) -> int` entry point `_pm_watch` routes a cancellation to; per-platform. */
+    internal const val CANCEL_ENTRY_POINT = "_pm_cancel"
+
+    /** The `(long) -> int` entry point that gives a [python.multiplatform.reflection.HandleTable]
+     * handle back; already bound by every target's bootstrap, and reused here rather than
+     * duplicated -- the handle `_pm_watch` carries is an ordinary object handle. */
+    internal const val RELEASE_ENTRY_POINT = "_pm_release"
+
     /** Where names with no package of their own land; `docs/upcall-table-design.md` §Runtime. */
     const val DEFAULT_ROOT_MODULE: String = "kotlin"
 
@@ -120,6 +131,32 @@ object PythonProxySource {
                 _fut.set_result(_payload)
             else:
                 _fut.set_exception(_payload)
+
+
+        def _pm_watch(_fut, _handle):
+            # Early cancellation notice, and the only scheduled release of the handle that carries
+            # it. Both halves are one callback because `add_done_callback` fires on *every* way a
+            # Future can settle -- cancelled, resolved, or rejected -- which is exactly the set of
+            # moments at which Kotlin either needs to be told something or no longer needs the
+            # handle.
+            #
+            # Without this, the only point at which Kotlin could observe a cancellation was when its
+            # coroutine finished and the delivery found the Future already settled: correct, and far
+            # too late for a body that was still checking `ensureActive()` in a loop.
+            #
+            # Scheduled, not immediate: `Future.cancel()` settles the Future synchronously but hands
+            # its callbacks to `call_soon`, so the notice arrives on the loop's next turn. That is
+            # still arbitrarily earlier than completion, which is the whole claim.
+            def _pm_done(_f, _h=_handle):
+                try:
+                    if _f.cancelled():
+                        _pm_cancel(_h)
+                finally:
+                    # Unconditional, and safe to be beaten to it: a handle table release is
+                    # generational, so a second one -- from Kotlin's own completion path -- is a
+                    # no-op rather than a slot handed to somebody else.
+                    _pm_release(_h)
+            _fut.add_done_callback(_pm_done)
 
 
         def _pm_module(_name):
@@ -229,6 +266,32 @@ object PythonProxySource {
         main.getAttrOrNull(SETTLE_FUNCTION)?.let { return it }
         Python3.exec(support)
         return main.getAttr(SETTLE_FUNCTION)
+    }
+
+    /**
+     * Makes sure `_pm_watch` exists and hands it back, or `null` if arming it would not work.
+     *
+     * `null` is not a failure. `_pm_watch` calls [CANCEL_ENTRY_POINT] and [RELEASE_ENTRY_POINT],
+     * which are per-platform bindings a host installs alongside `_pm_resolve`/`_pm_invoke`; a host
+     * that has not installed them gets the behaviour that existed before early notice was possible
+     * -- cancellation observed at completion -- rather than a `NameError` raised inside a loop
+     * callback, where nobody would see it and nobody could act on it.
+     *
+     * Both names are checked here rather than inside the Python callback for a second reason: a
+     * `_pm_watch` that could not be armed must not be paid for. [AsyncUpcall] registers the handle
+     * only when this returns non-null, so a target without the bindings roots nothing and leaks
+     * nothing.
+     *
+     * Looked up rather than cached for the reason [settleFunction] gives: a `PyObject` held across
+     * an interpreter that gets finalized and re-initialised is a dangling pointer.
+     */
+    internal fun watchFunctionOrNull(): PyObject? {
+        val main = Python3.import("__main__")
+        if (main.getAttrOrNull(CANCEL_ENTRY_POINT) == null) return null
+        if (main.getAttrOrNull(RELEASE_ENTRY_POINT) == null) return null
+        main.getAttrOrNull(WATCH_FUNCTION)?.let { return it }
+        Python3.exec(support)
+        return main.getAttrOrNull(WATCH_FUNCTION)
     }
 
     // ------------------------------------------------------------------------------- rendering

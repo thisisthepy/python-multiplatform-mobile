@@ -69,6 +69,17 @@ object UpcallTarget {
      */
     @JvmStatic
     fun upcallReleaseObject(objectHandle: Long): Int = UpcallTrampoline.releaseObject(objectHandle)
+
+    /**
+     * Tells a suspended Kotlin call that the `asyncio.Future` carrying its result was cancelled,
+     * returning 1 if that was news.
+     *
+     * Same `(long) -> int` shape as [upcallReleaseObject], so it reuses `Panama`'s existing stub
+     * builder and costs no new shape. `PythonProxySource`'s `_pm_watch` is what calls it, from a
+     * `Future.add_done_callback`; see [UpcallTrampoline.cancelCall].
+     */
+    @JvmStatic
+    fun upcallCancelCall(callHandle: Long): Int = UpcallTrampoline.cancelCall(callHandle)
 }
 
 object UpcallStub {
@@ -113,6 +124,13 @@ object UpcallStub {
     /** `ctypes.CFUNCTYPE(c_int, c_long)` target: object handle -> 1 if it released a live entry. */
     val releaseObjectStubAddr: Long by lazy {
         val method = UpcallTarget::class.java.methods.first { it.name == "upcallReleaseObject" }
+        val handle = MethodHandles.lookup().unreflect(method)
+        Panama.createUpcallStubI_I(handle)
+    }
+
+    /** `ctypes.CFUNCTYPE(c_int, c_long)` target: pending-call handle -> 1 if it cancelled a live call. */
+    val cancelCallStubAddr: Long by lazy {
+        val method = UpcallTarget::class.java.methods.first { it.name == "upcallCancelCall" }
         val handle = MethodHandles.lookup().unreflect(method)
         Panama.createUpcallStubI_I(handle)
     }

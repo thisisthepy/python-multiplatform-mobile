@@ -140,6 +140,14 @@ class PendingCall private constructor() : CoroutineContext.Element {
      * dropped: [AsyncUpcall] refuses to deliver a result to a `Future` that is already settled.
      * That is the guarantee this half is actually responsible for.
      *
+     * ### When Kotlin hears about it
+     *
+     * At the moment Python calls `Future.cancel()`, near enough: the `Future` the slow path hands
+     * out carries a handle on this object, and its `add_done_callback` routes back through
+     * [UpcallTrampoline.cancelCall] on the loop's next turn (`AsyncUpcall.armCancellationNotice`).
+     * Before that existed, this flag was only ever set by the delivery path -- i.e. when the
+     * coroutine had already finished, which is exactly when the news stops being worth anything.
+     *
      * @return `true` if this call was live and is now cancelled; `false` if it had already
      *   completed (there was nothing left to stop) or was already cancelled.
      */

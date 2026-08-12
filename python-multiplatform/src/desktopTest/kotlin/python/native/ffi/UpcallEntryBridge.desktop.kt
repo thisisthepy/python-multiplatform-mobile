@@ -31,6 +31,12 @@ actual fun bindUpcallOrNull(name: String): Boolean {
         _pm_release = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_long)(
             ${UpcallStub.releaseObjectStubAddr}
         )
+        # What a cancelled asyncio.Future's done callback calls, so a suspended Kotlin coroutine
+        # hears about the cancellation at its next `ensureActive()` rather than at completion.
+        # Same (long) -> int shape as _pm_release, so it is one more binding and no new stub shape.
+        _pm_cancel = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_long)(
+            ${UpcallStub.cancelCallStubAddr}
+        )
         """.trimIndent(),
     )
     Python3.exec("_pm_h = _pm_resolve('$name'.encode('utf-8'))")

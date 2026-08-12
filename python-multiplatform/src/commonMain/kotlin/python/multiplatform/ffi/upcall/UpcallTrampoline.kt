@@ -168,6 +168,37 @@ object UpcallTrampoline {
     fun releaseObject(objectHandle: Long): Int =
         if (HandleTable.release(ObjectReference(objectHandle))) 1 else 0
 
+    /**
+     * Tells the [PendingCall] behind [callHandle] that the Python side has stopped waiting for it.
+     *
+     * The Python end of `docs/upcall-async-design.md` §9.3's missing half. Without this, the only
+     * moment Kotlin could learn that a `Future` had been cancelled was when the coroutine finished
+     * and [AsyncUpcall] found the `Future` already settled -- which is the moment the news becomes
+     * useless. `PythonProxySource`'s `_pm_watch` hangs a `Future.add_done_callback` on the `Future`
+     * the slow path hands out and routes it here, so a body checking
+     * [python.multiplatform.ffi.upcall.ensureActive] stops at its next checkpoint instead of running
+     * to the end for a result nobody will read.
+     *
+     * Shape `(long) -> int`, deliberately the same one [releaseObject] already has, so no target
+     * grows a new stub *shape* for this -- only one more binding of a shape it already builds.
+     *
+     * @param callHandle a raw [ObjectReference] issued by [HandleTable] for a [PendingCall]. A
+     *   stale one -- the ordinary case for a callback that fires after the call was reclaimed --
+     *   resolves to nothing and is a no-op, which is what the table's generation tag is for.
+     * @return 1 if this call cancelled a live, not-yet-cancelled [PendingCall]; 0 otherwise,
+     *   including for a handle that names something that is not a [PendingCall] at all.
+     */
+    fun cancelCall(callHandle: Long): Int = attached {
+        try {
+            val call = HandleTable.resolveRaw(callHandle) as? PendingCall ?: return@attached 0
+            if (call.cancel()) 1 else 0
+        } catch (t: Throwable) {
+            // Reached from C on a path whose only job is to deliver news. Nothing above this can
+            // act on a failure, and unwinding into C would take the process with it.
+            0
+        }
+    }
+
     // ---------------------------------------------------------------------------------------
     // Arguments: Python tuple -> Array<Any?>
     // ---------------------------------------------------------------------------------------

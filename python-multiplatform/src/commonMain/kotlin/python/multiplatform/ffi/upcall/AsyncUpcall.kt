@@ -4,9 +4,12 @@ import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.exceptions.PyException
 import python.multiplatform.ffi.types.basic.PyBool
+import python.multiplatform.ffi.types.basic.PyInt
 import python.multiplatform.ffi.types.basic.PyString
 import python.multiplatform.ffi.withGIL
 import python.multiplatform.reflection.ExposedCallable
+import python.multiplatform.reflection.HandleTable
+import python.multiplatform.reflection.ObjectReference
 import python.multiplatform.reflection.TypeTag
 import python.native.ffi.Py_IncRef
 import python.native.ffi.toNativePointer
@@ -36,11 +39,17 @@ import python.native.ffi.toRawValue
  *
  * ### Cancellation
  *
- * `Future.cancel()` settles the `Future` immediately and tells the Kotlin coroutine nothing, so a
- * completion can arrive for a call nobody is waiting for any more. Delivering it would raise
- * `InvalidStateError` inside a loop callback; [resolve] documents what that was measured to cost and
- * what is done about it. The Kotlin side of cancellation -- what [PendingCall.cancel] can and cannot
- * do -- is on [PendingCall].
+ * `Future.cancel()` settles the `Future` immediately, so a completion can arrive for a call nobody
+ * is waiting for any more. Delivering it would raise `InvalidStateError` inside a loop callback;
+ * [resolve] documents what that was measured to cost and what is done about it. The Kotlin side of
+ * cancellation -- what [PendingCall.cancel] can and cannot do -- is on [PendingCall].
+ *
+ * It used to tell the Kotlin coroutine nothing at all until it finished. [armCancellationNotice] is
+ * the other direction: the `Future` carries a handle on the [PendingCall], and its own done callback
+ * hands the cancellation back over the same `(long) -> int` shape `_pm_release` uses. A body that
+ * checks `ensureActive()` therefore stops at its next checkpoint rather than at the end. Where the
+ * host has not bound `_pm_cancel`, nothing is armed and nothing is rooted, and the behaviour is the
+ * one that existed before -- cancellation observed at completion by [resolve]'s `done()` check.
  *
  * ### What requires the application to be async
  *
@@ -111,10 +120,11 @@ internal object AsyncUpcall {
         // thread may be one CPython has never seen, and this keeps its GIL scope down to the calls
         // that have to be there. `PythonProxySource` installs it if nothing else has.
         val settle = PythonProxySource.settleFunction()
+        val handle = armCancellationNotice(call, future)
         // Registering after the future exists: a completion that lands between the isDone check
         // above and this line fires the listener inline, on this thread, with the GIL already held
         // -- which is exactly what the listener is written to tolerate.
-        call.onCompleted { completed -> resolve(loop, future, settle, tag, completed) }
+        call.onCompleted { completed -> resolve(loop, future, settle, tag, completed, handle) }
 
         // The trampoline's contract: the result is a new reference. The wrapper keeps its own,
         // because the completion still needs it.
@@ -132,6 +142,53 @@ internal object AsyncUpcall {
      */
     private fun runningLoop(): PyObject =
         Python3.import("asyncio").getAttr("get_running_loop").invoke()
+
+    /**
+     * Gives Python a way to tell [call] it has been abandoned, and returns the handle that costs.
+     *
+     * `docs/upcall-async-design.md` §9.3 could only offer cancellation observed *at completion*,
+     * because nothing carried the identity of a running [PendingCall] across to Python. This is the
+     * thing it said was missing: a [HandleTable] handle rides on the `Future` -- captured by the
+     * done callback `_pm_watch` attaches, not stored as an attribute, so nothing depends on whether
+     * `asyncio.Future` tolerates having attributes set on it -- and `_pm_cancel` brings it back.
+     *
+     * ### Lifetime
+     *
+     * The handle is a GC root; [HandleTable] reclaims nothing on its own. Two things give it back,
+     * and they are deliberately not the same thing:
+     *
+     * - **`_pm_watch`'s done callback**, on every way the `Future` can settle. This is the one that
+     *   covers a body that never cooperates: the call is cancelled, the coroutine runs on forever,
+     *   and Kotlin's completion path never gets a chance to release anything.
+     * - **[resolve]**, when the coroutine finishes. This covers a `Future` whose loop stopped
+     *   before it could run the callback, and it is what makes the common outcome self-sufficient.
+     *
+     * Either may run first and neither has to know about the other, because a handle table release
+     * is generational: the second one finds a slot whose generation has moved on and does nothing,
+     * even if the slot has since been reissued to someone else.
+     *
+     * What is still not reclaimed is a call whose `Future` is never settled *and* whose coroutine
+     * never finishes. That call has leaked its continuation as well, and no handle scheme can be
+     * the thing that notices.
+     *
+     * @return the handle to release at completion, or `null` when no notice was armed -- either
+     *   because the host has not bound `_pm_cancel`/`_pm_release`, or because arming it failed.
+     *   Nothing is rooted in that case.
+     */
+    private fun armCancellationNotice(call: PendingCall, future: PyObject): ObjectReference? {
+        val watch = PythonProxySource.watchFunctionOrNull() ?: return null
+        val handle = HandleTable.register(call)
+        return try {
+            watch.invoke(future, PyInt.from(handle.raw))
+            handle
+        } catch (t: Throwable) {
+            // `add_done_callback` on a Future that is somehow already settled runs the callback via
+            // call_soon rather than raising, so this is the unusual path -- but a root that nothing
+            // will ever be asked to give back is worse than no notice at all.
+            HandleTable.release(handle)
+            null
+        }
+    }
 
     /**
      * Hands one completed [call]'s outcome to [future], from whichever thread finished it.
@@ -162,47 +219,68 @@ internal object AsyncUpcall {
      * second is a guarantee: the check here and the callback are separated by a hand-off to another
      * thread, and the cancellation can land in between.
      */
-    private fun resolve(loop: PyObject, future: PyObject, settle: PyObject, tag: TypeTag, call: PendingCall) {
+    private fun resolve(
+        loop: PyObject,
+        future: PyObject,
+        settle: PyObject,
+        tag: TypeTag,
+        call: PendingCall,
+        handle: ObjectReference?,
+    ) {
         withGIL {
-            // A loop that has been closed cannot be handed anything; `call_soon_threadsafe` would
-            // raise, and that exception has nowhere useful to go from here. Checking is not a
-            // guarantee -- the loop can close between here and the call -- so the raise is still
-            // possible, and PendingCall.deliver parks it in `deliveryFailure`.
-            if (loop.getAttr("is_closed").invoke().toString() == "True") return@withGIL
+            try {
+                // A loop that has been closed cannot be handed anything; `call_soon_threadsafe`
+                // would raise, and that exception has nowhere useful to go from here. Checking is
+                // not a guarantee -- the loop can close between here and the call -- so the raise
+                // is still possible, and PendingCall.deliver parks it in `deliveryFailure`.
+                if (loop.getAttr("is_closed").invoke().toString() == "True") return@withGIL
 
-            // Already settled: cancelled, or resolved by something else. Nothing to deliver, and
-            // recording it on the call keeps `isCancelled` honest for anyone who reads it after the
-            // fact. This is a shortcut, not the guard -- see the class-level note above.
-            if (future.getAttr("done").invoke().toString() == "True") {
-                call.cancel()
-                return@withGIL
+                // Already settled: cancelled, or resolved by something else. Nothing to deliver,
+                // and recording it on the call keeps `isCancelled` honest for anyone who reads it
+                // after the fact. This is a shortcut, not the guard -- see the class-level note
+                // above. It is also the fallback for a host with no `_pm_cancel` binding, which is
+                // the only place cancellation is observed at all on such a target.
+                if (future.getAttr("done").invoke().toString() == "True") {
+                    call.cancel()
+                    return@withGIL
+                }
+
+                // A body that cooperated with `PendingCall.cancel` unwinds with
+                // CancellationException. Turning that into a `set_exception` would be answering a
+                // question nobody is still asking -- and the Future it would answer is the settled
+                // one that caused the cancellation. Dropped here rather than in the guard so no
+                // Python exception object is built for it at all.
+                if (call.isCancelled) return@withGIL
+
+                val callSoonThreadsafe = loop.getAttr("call_soon_threadsafe")
+                val failure = call.failure
+                if (failure != null) {
+                    callSoonThreadsafe.invoke(settle, future, PyBool.from(false), pythonExceptionFor(failure))
+                    return@withGIL
+                }
+
+                // Marshalling can fail on its own (a tag the value does not match, an allocation
+                // that did not come back). Turning that into a rejection rather than letting it
+                // escape is what keeps the awaiting coroutine from hanging forever on a Future
+                // nobody resolved.
+                val marshalled = try {
+                    val raw = UpcallTrampoline.marshalResult(tag, call.value)
+                    PyObject(
+                        raw.toNativePointer() ?: error("marshalling ${call.value} produced NULL"),
+                        borrowed = false,
+                    )
+                } catch (t: Throwable) {
+                    callSoonThreadsafe.invoke(settle, future, PyBool.from(false), pythonExceptionFor(t))
+                    return@withGIL
+                }
+                callSoonThreadsafe.invoke(settle, future, PyBool.from(true), marshalled)
+            } finally {
+                // The completion half of the handle's lifetime; see [armCancellationNotice]. Under
+                // the GIL, which is the rule every HandleTable mutation lives under, and in a
+                // `finally` so a delivery that raised does not turn into a permanent root. A
+                // release the Future's done callback already performed is a no-op.
+                if (handle != null) HandleTable.release(handle)
             }
-
-            // A body that cooperated with `PendingCall.cancel` unwinds with CancellationException.
-            // Turning that into a `set_exception` would be answering a question nobody is still
-            // asking -- and the Future it would answer is the settled one that caused the
-            // cancellation. Dropped here rather than in the guard so no Python exception object is
-            // built for it at all.
-            if (call.isCancelled) return@withGIL
-
-            val callSoonThreadsafe = loop.getAttr("call_soon_threadsafe")
-            val failure = call.failure
-            if (failure != null) {
-                callSoonThreadsafe.invoke(settle, future, PyBool.from(false), pythonExceptionFor(failure))
-                return@withGIL
-            }
-
-            // Marshalling can fail on its own (a tag the value does not match, an allocation that
-            // did not come back). Turning that into a rejection rather than letting it escape is
-            // what keeps the awaiting coroutine from hanging forever on a Future nobody resolved.
-            val marshalled = try {
-                val raw = UpcallTrampoline.marshalResult(tag, call.value)
-                PyObject(raw.toNativePointer() ?: error("marshalling ${call.value} produced NULL"), borrowed = false)
-            } catch (t: Throwable) {
-                callSoonThreadsafe.invoke(settle, future, PyBool.from(false), pythonExceptionFor(t))
-                return@withGIL
-            }
-            callSoonThreadsafe.invoke(settle, future, PyBool.from(true), marshalled)
         }
     }
 
