@@ -790,9 +790,58 @@ so a stock build cannot advertise the tag even where the flags line up. Also set
 list is needed** for the Stable ABI. Only `wasmExports` and `wasmMemory` have to be added to
 `-sEXPORTED_RUNTIME_METHODS`, and neither is ABI-sensitive.
 
-**What still defers §10** is upcalls: `addFunction` re-entering WasmGC still goes through JS and is
-unmeasured, so §7's shape has to settle before `wasmJsMain`'s `actual`s are written. The `wasmJs`
-target in `python-multiplatform/build.gradle.kts` is still commented out.
+### The target is on, and `commonTest` runs on it
+
+`wasmJs` is a real target now — a leaf directly under `commonMain`, beside `jvmMain` and
+`nativeMain`. It is not a partial bring-up: **all 310 C symbols have `actual`s**, and the whole
+shared object-model suite runs against a live interpreter.
+
+```
+:python-multiplatform:wasmJsNodeTest    190 tests, 3 failed, 0 skipped
+                    desktopTest, unchanged    204 tests, 0 failed, 1 skipped
+Embedded CPython version: 3.14.2 ... [Clang 23.0.0git]   on wasm32-emscripten
+```
+
+Nothing skipped: `PythonTestFixture.available` was true, so `Python3.initialize()` brought CPython
+up through an ordinary `@WasmImport` call to `Py_Initialize` — the library's own bring-up path,
+rather than a JS-side `Py_InitializeEx` as in `wasm-experiment/`.
+
+Three questions the experiment did not have to answer, and how they came out:
+
+* **`Py_ssize_t` is 32-bit on wasm32**, and `EmbedAPI.kt` types it as `Long`. Fourteen functions are
+  affected (`PyList_*`, `PyTuple_*`, `PyDict_Size`, `PySet_Size`, `PyObject_Size/Length`) and
+  `EmbedAPI.wasmJs.kt` converts at the boundary. This is the **only** ABI divergence across the
+  whole surface — and it is not a compile error, it is a `LinkError` at instantiation, so
+  `bindings.kt`'s types are read off `python.wasm`'s own type section rather than transliterated
+  from the `expect`s.
+* **All 310 symbols really are exported**, checked against the ABI build's 8287 — which confirms the
+  `-sMAIN_MODULE`/`LINKABLE` reading above on the surface this library actually needs.
+* **The Gradle integration is the one substitution** the design predicted. The compiler emits
+  `intrinsics: { memory: new WebAssembly.Memory({ initial: 0 }), … }` into `*.import-object.mjs`;
+  a `doFirst` on the test task rewrites that to Emscripten's `wasmMemory` and stages
+  `python.mjs`/`python.wasm` beside the bundle. No binary patching, no `-sIMPORTED_MEMORY`.
+
+### What §10 still owes
+
+**Lifetimes, and this is the real gap.** Kotlin/Wasm has no finalisation hook — verified against
+`kotlin-stdlib-wasm-js-2.4.20-Beta2.klib`, which contains no `FinalizationRegistry`, no `WeakRef`
+and no `Cleaner`. So `registerCleaner` is explicit-`close()`-only, a `PyObject` dropped without
+`close()` leaks its reference, and `GCLeakTest`'s three cases fail. They are **left failing rather
+than weakened** — that is what the platform does today. Reaching JS's `FinalizationRegistry` through
+a `JsReference` is the only candidate route and is unmeasured.
+
+**Upcalls.** `ProxyTypeFactory` throws. The mechanism is no longer the open question this section
+used to call it: `@WasmExport` plus `WebAssembly.Table.set` reaches Kotlin through `call_indirect`
+at **3.1 ns**, against 10.9 ns for the `addFunction`-and-JS-closure route §5 specified, and a Kotlin
+`@WasmExport` has been called from Python as a real `PyMethodDef`. What is missing is plumbing plus
+one constraint — a table index cannot be obtained from inside Kotlin, so registration is a JS-side
+startup step this target does not have yet; and `call_indirect` does not coerce, so trampoline arity
+is a runtime correctness requirement rather than a compile-time one.
+
+**Interning.** Every `actual` taking a `String` allocates and frees a C string per call, which is
+the 259.5 ns row above. `PyObject_GetAttrString` measures **377 ns** here as a result. Caching the
+addresses of repeated names is the Android fix (2238 ns → 148 ns there) and is the largest remaining
+win that costs nothing.
 
 Kotlin/Native once had a `wasm32` target that could have shared CPython's linear memory; it was
 deprecated in 1.8.20 and removed in 1.9.20. That history no longer costs anything — `@WasmImport`
