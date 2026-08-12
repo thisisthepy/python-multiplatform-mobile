@@ -28,6 +28,22 @@ made without one is undefined behaviour, and the resulting segfault lands far fr
 This is true on free-threaded builds too. Dropping the global lock removes contention, not the
 requirement that a thread be attached before touching any object.
 
+## Attaching is not enough — someone has to reach an eval-loop checkpoint
+
+`_Py_HandlePending` is the only place CPython merges the free-threaded build's deferred
+reference-count queue, processes QSBR-deferred frees, runs a *scheduled* cyclic collection and
+drains pending calls and signals. Nothing in the C API calls it; only the `_CHECK_PERIODIC` uop
+that opens every Python-level frame does. So an embedder that never executes bytecode never
+reaches one, and a reference the cleaner gave back on a free-threaded build stays unreclaimed
+however long you wait — the count is right, the memory is not returned.
+
+`Python3.drainPendingReleases()` reaches one, by calling a cached empty Python function
+(measured 355 ns, against 11 µs for `exec("pass")`). It also runs automatically once every
+`Python3.autoDrainInterval` outermost `withGIL` scopes, which defaults to on for free-threaded
+builds and off otherwise. **Never take a checkpoint from a cleaner**: the queue belongs to the
+thread that *owns* the object, so it would drain nothing while running Python exactly where §1
+proved that deadlocks. See ROADMAP §9.
+
 ## Reference conventions, stated at every call site
 
 CPython's C API is inconsistent about ownership and getting it wrong is silent. Write which one

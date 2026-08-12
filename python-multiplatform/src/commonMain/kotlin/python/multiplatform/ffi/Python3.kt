@@ -1,5 +1,6 @@
 package python.multiplatform.ffi
 
+import python.multiplatform.BuildConfig
 import python.multiplatform.ffi.exceptions.PyException
 import python.multiplatform.ffi.types.modules.PyModule
 import python.native.ffi.*
@@ -85,6 +86,9 @@ object Python3 {
         // C API at all. One already inside its GIL scope still holds the GIL, and Py_Finalize()
         // waits for it, so that case finishes safely before teardown begins.
         isInitialized = false
+        // The checkpoint function dies with the interpreter; drop the pointer so a later
+        // initialize() rebuilds it instead of calling through a dangling one.
+        checkpointCallable = null
         memScoped {
             Py_Finalize()
             // No error message is printable here, and that is a property of the C API rather than
@@ -150,6 +154,163 @@ object Python3 {
 
     /** `Py_file_input`, the compiler-mode token for a sequence of statements (as opposed to a single expression). */
     private const val PY_FILE_INPUT: Int = 257
+
+    /**
+     * Outermost [withGIL] scopes between automatic checkpoints when they are enabled.
+     *
+     * Chosen against the measured cost of one checkpoint relative to one outermost `withGIL`
+     * scope: see `EvalCheckpointTest.testCheckpointCostAgainstTheAlternatives`. Amortised over
+     * this many scopes the checkpoint is a small fraction of the attach/detach it rides on, while
+     * still bounding how much the deferred-release queue can grow.
+     */
+    private const val DEFAULT_AUTO_DRAIN_INTERVAL: Int = 32
+
+
+    ////////////////////////////////////////////////////////////////////////////////////////////
+    // Eval-loop checkpoints (ROADMAP §9)
+    ////////////////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * CPython defers a set of housekeeping jobs to a *checkpoint* that only the evaluation loop
+     * reaches. `_Py_HandlePending` — called from the `_CHECK_PERIODIC` uop that begins every
+     * Python-level frame and closes every call instruction — is the single place that
+     *
+     * - merges the free-threaded build's biased reference-counting queue
+     *   (`_PY_EVAL_EXPLICIT_MERGE_BIT` → `_Py_brc_merge_refcounts`),
+     * - processes QSBR-deferred frees,
+     * - runs a scheduled cyclic collection (`_PY_GC_SCHEDULED_BIT`),
+     * - drains the pending-call queue and runs pending signal handlers.
+     *
+     * An embedder that drives CPython purely through the C API never executes a bytecode frame and
+     * therefore never reaches one. On a free-threaded build that is not merely untidy: a
+     * `Py_DecRef` issued from a thread that does not own the object cannot run `tp_dealloc` there,
+     * so the object is pushed onto its owner's queue and stays alive until the owner reaches a
+     * checkpoint. Every reference the cleaner gives back is in exactly that position, so a process
+     * that only ever calls `PyObject_Call` grows without bound while its reference counts stay
+     * perfectly correct.
+     *
+     * This is the cheapest way to reach a checkpoint: one call to a cached, empty, Python-level
+     * function. It is not `exec("pass")`, which recompiles a module on every call.
+     *
+     * The merge happens on the **calling** thread, for objects that thread owns. That is the whole
+     * reason this is not done from the cleaner: the cleaner owns nothing, so a checkpoint taken
+     * there would drain an empty queue while running Python on a thread whose only job is to hand
+     * references back. Use [PyGC_Collect] instead if you need to reclaim on behalf of some other
+     * thread — it stops the world and merges every thread's queue, at a cost proportional to the
+     * heap rather than to the queue.
+     *
+     * Safe to call at any time, including before initialisation and on a thread that has never
+     * touched Python; it returns without doing anything when there is nothing it may legally do.
+     */
+    fun drainPendingReleases() {
+        if (!isInitialized) return
+        val tState = getThreadGILState()
+        // Already inside a checkpoint (or on a thread that forbids them, i.e. a cleaner).
+        if (tState.checkpointsSuppressed) return
+        tState.checkpointsSuppressed = true
+        try {
+            withGIL { reachEvalCheckpointHoldingGIL() }
+        } finally {
+            tState.checkpointsSuppressed = false
+            tState.checkpointCountdown = autoDrainInterval
+        }
+    }
+
+    /**
+     * How many outermost [withGIL] scopes a thread may enter between automatic checkpoints, or 0
+     * to take none automatically. A checkpoint is additionally skipped when nothing has been
+     * released since the previous one, so a workload that never drops a wrapper never pays.
+     *
+     * Defaults to on for free-threaded builds, where deferred release is the defect described on
+     * [drainPendingReleases], and off otherwise — a build with the global lock frees on the
+     * cleaner's `Py_DecRef` immediately, so there is nothing to reclaim and the checkpoint would
+     * be pure overhead. Set it explicitly to opt in or out; [drainPendingReleases] always works
+     * regardless of this setting.
+     */
+    var autoDrainInterval: Int = if (BuildConfig.pythonFreeThreaded) DEFAULT_AUTO_DRAIN_INTERVAL else 0
+
+    /** Diagnostic counters for the checkpoint machinery. Test-visible. */
+    internal object CheckpointCounter {
+        /** Checkpoints actually taken. */
+        var reached: Long = 0
+        /** Checkpoints declined because the caller had an unread error indicator. */
+        var skipped: Long = 0
+        /** Checkpoints that could not be taken, or that came back with an exception. */
+        var failed: Long = 0
+    }
+
+    /**
+     * `ReleaseCounter.released` as of the last checkpoint. Read and written without
+     * synchronisation on purpose: a stale value can only cost one redundant checkpoint or delay
+     * one by an interval, and an `Int` does not tear.
+     */
+    internal var lastCheckpointReleaseMark: Int = -1
+
+    /** The cached zero-argument Python-level function whose body is `pass`. */
+    private var checkpointCallable: NativePointer? = null
+
+    private const val CHECKPOINT_SOURCE = "def __pmp_eval_checkpoint__():\n    pass\n"
+
+    /**
+     * Compiles and evaluates [CHECKPOINT_SOURCE] once into a private globals dict and keeps a
+     * strong reference to the resulting function.
+     *
+     * A module-level `def` needs no `__builtins__` entry of its own: frame setup falls back to
+     * the interpreter's builtins when the globals mapping has none.
+     *
+     * The caller must hold the GIL.
+     */
+    private fun checkpointCallableHoldingGIL(): NativePointer? {
+        checkpointCallable?.let { return it }
+        val code = Py_CompileString(CHECKPOINT_SOURCE, "<python-multiplatform:checkpoint>", PY_FILE_INPUT)
+            ?: run { PyErr_Clear(); return null }
+        try {
+            val globals = PyDict_New() ?: run { PyErr_Clear(); return null }
+            try {
+                val evaluated = PyEval_EvalCode(code, globals, globals)
+                    ?: run { PyErr_Clear(); return null }
+                Py_DecRef(evaluated)
+                // PyDict_GetItemString returns a borrowed reference, so take one of our own.
+                val borrowed = PyDict_GetItemString(globals, "__pmp_eval_checkpoint__")
+                    ?: run { PyErr_Clear(); return null }
+                Py_IncRef(borrowed)
+                checkpointCallable = borrowed
+                return borrowed
+            } finally {
+                Py_DecRef(globals)
+            }
+        } finally {
+            Py_DecRef(code)
+        }
+    }
+
+    /** Takes one checkpoint. The caller must hold the GIL and have suppressed re-entry. */
+    internal fun reachEvalCheckpointHoldingGIL() {
+        // Do not disturb an error indicator its owner has not read yet. Several call sites read
+        // the indicator *after* their `withPython { ... }` scope has closed (see
+        // `PyObject.getAttr`), and entering the eval loop can replace it — a pending signal
+        // handler or a finaliser raising is enough.
+        if (PyErr_Occurred() != null) {
+            CheckpointCounter.skipped++
+            return
+        }
+        val callable = checkpointCallableHoldingGIL() ?: run {
+            CheckpointCounter.failed++
+            return
+        }
+        val result = PyObject_CallNoArgs(callable)
+        if (result == null) {
+            // The body is `pass`, so nothing raised here belongs to the caller: it came out of
+            // the checkpoint itself — a pending signal, a pending call, a finaliser. There is no
+            // caller to hand it to, and leaving it set would surface as a spurious failure in
+            // whatever ran next, so it is cleared and counted.
+            PyErr_Clear()
+            CheckpointCounter.failed++
+        } else {
+            Py_DecRef(result)
+        }
+        CheckpointCounter.reached++
+    }
 
     /**
      * Run Simple String

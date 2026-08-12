@@ -651,6 +651,8 @@ object bindings {
     @JvmStatic external fun PyGILState_GetThisThreadStateN(): Long
     @JvmStatic external fun PyEval_SaveThreadN(): Long
     @JvmStatic external fun PyEval_RestoreThreadN(tstate: Long)
+    @JvmStatic external fun Py_MakePendingCallsN(): Int
+    @JvmStatic external fun PyGC_CollectN(): Long
     @JvmStatic external fun PyEval_InitThreadsN()
     @JvmStatic external fun PyThreadState_GetDictN(): Long
     @JvmStatic external fun PyTuple_NewN(len: Long): Long
