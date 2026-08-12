@@ -233,8 +233,11 @@ fun pythonOrgSigstoreIdentity(version: String): SigstoreIdentity {
  * that *somebody* with a Sigstore certificate signed these bytes, which is a check anyone on the
  * internet can pass.
  */
-fun verifySigstoreBundle(archive: File, bundleUrl: String, bundleFile: File, identity: SigstoreIdentity) {
+fun verifySigstoreBundle(archive: File, bundleUrl: String?, bundleFile: File, identity: SigstoreIdentity) {
     if (!bundleFile.exists()) {
+        if (bundleUrl == null) {
+            throw GradleException("Sigstore bundle $bundleFile does not exist and no URL provided")
+        }
         println("Downloading $bundleUrl")
         bundleFile.parentFile.mkdirs()
         URL(bundleUrl).openStream().use { input ->
@@ -314,6 +317,43 @@ fun maybeVerifySigstore(archive: File, archiveUrl: String) {
         bundleUrl = "$archiveUrl.sigstore",
         bundleFile = file("$downloadDir/${archive.name}.sigstore"),
         identity = pythonOrgSigstoreIdentity(configuredPythonVersion)
+    )
+}
+
+/** Verifies a python-build-standalone archive using GitHub Attestations API if `-PverifyPythonSignatures=true`. */
+fun maybeVerifyPbsSigstore(archive: File, actualHash: String) {
+    if (!verifySigstore) return
+    val bundleFile = file("$downloadDir/${archive.name}.sigstore")
+    if (!bundleFile.exists()) {
+        val apiUrl = "https://api.github.com/repos/astral-sh/python-build-standalone/attestations/sha256:$actualHash"
+        println("Downloading attestation from $apiUrl")
+        val conn = URL(apiUrl).openConnection() as java.net.HttpURLConnection
+        conn.setRequestProperty("Accept", "application/vnd.github+json")
+        conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+        conn.setRequestProperty("User-Agent", "Gradle-Python-Multiplatform")
+        
+        if (conn.responseCode != 200) {
+            throw GradleException("Failed to fetch attestation for ${archive.name} (HTTP ${conn.responseCode}): ${conn.errorStream?.bufferedReader()?.readText()}")
+        }
+        
+        val response = conn.inputStream.bufferedReader().readText()
+        val parsed = groovy.json.JsonSlurper().parseText(response) as Map<*, *>
+        val attestations = parsed["attestations"] as List<*>
+        val bundle = (attestations[0] as Map<*, *>)["bundle"]
+        val bundleJson = groovy.json.JsonOutput.toJson(bundle)
+        
+        bundleFile.parentFile.mkdirs()
+        bundleFile.writeText(bundleJson)
+    }
+    
+    verifySigstoreBundle(
+        archive = archive,
+        bundleUrl = null,
+        bundleFile = bundleFile,
+        identity = SigstoreIdentity(
+            "https://github.com/astral-sh/python-build-standalone/.github/workflows/release.yml@refs/heads/main",
+            "https://token.actions.githubusercontent.com"
+        )
     )
 }
 
@@ -426,6 +466,7 @@ val downloadTasks = desktopTargets.map { (platform, pbsTarget) ->
             }
             
             verifyChecksum(lockKey, archive)
+            maybeVerifyPbsSigstore(archive, astralActualHash)
             
             val isEmpty = extractDir.list()?.isEmpty() ?: true
             if (isEmpty) {
