@@ -19,22 +19,37 @@ object Benchmark {
         iterations: Int = 100_000,
         block: () -> Unit
     ) {
-        // Warmup
+        val nsPerOp = measure(warmupIterations, iterations, block)
+        results.add(BenchmarkResult(name, iterations, (nsPerOp * iterations).toLong(), nsPerOp))
+    }
+
+    /**
+     * The same warmup-then-time loop [run] performs, returned instead of appended to the report.
+     *
+     * For a caller that needs the number *during* the test -- to compute a ratio against something
+     * measured in the same run, which is the only kind of ratio worth having -- and that would
+     * otherwise have to either re-implement the loop (so the two figures stop being comparable) or
+     * append to a shared report it does not own and cannot print without clearing someone else's
+     * rows. `UpcallOverheadTest` does exactly this.
+     */
+    fun measure(
+        warmupIterations: Int = 1000,
+        iterations: Int = 100_000,
+        block: () -> Unit
+    ): Double {
+        // Warmup. Same shape and same block as the measured loop: an unwarmed first loop in this
+        // repo once made a subset of the work look cheaper than the whole of it.
         for (i in 0 until warmupIterations) {
             block()
         }
 
-        // Measure
         val time = measureTime {
             for (i in 0 until iterations) {
                 block()
             }
         }
-        
-        val totalNs = time.inWholeNanoseconds
-        val nsPerOp = totalNs.toDouble() / iterations
-        
-        results.add(BenchmarkResult(name, iterations, totalNs, nsPerOp))
+
+        return time.inWholeNanoseconds.toDouble() / iterations
     }
 
     fun printReport() {
