@@ -1,6 +1,21 @@
 # Reachability Analysis: Android Unregistered Surface
 
-> **Status: the string half of this report is closed; the counts below are stale.**
+> **Status: superseded. Every count and every risk ranking below is historical.**
+>
+> The unregistered surface is empty as of the pass recorded in ROADMAP §2: 363 of 367 `external fun`
+> are bound through `RegisterNatives`, and the four that are not are deliberate — `ffiAllocUtf8`,
+> `ffiFreeUtf8` and `ffiReadUtf8` are hand-written JNI exports with the correct prologue, and
+> `echoCriticalNamed` exists in order to be name-linked, so that a benchmark can measure that path.
+>
+> The claim here worth carrying forward is that the *ordering* was right and the *counts* were not.
+> When the last 157 were registered, a recount found **zero** of them reachable from
+> `commonMain`/`commonTest` — the earlier passes had already taken the whole reachable surface, so
+> the "71 reachable" figure below had long since been consumed. The call-graph traces are kept
+> because they are still the record of which public API path reaches which C function.
+>
+> Everything from here down is retained unedited.
+
+> **Earlier status: the string half of this report is closed; the counts below are stale.**
 >
 > Recounted from the two files: 187 registered, 178 unregistered (was 145 / 224). Declarations
 > still carrying a `jstring` across the boundary went from 52 to 6, and none of those six is on

@@ -36,7 +36,9 @@ internal actual fun downcallIIIIII_I(fn: Long, a0: Long, a1: Long, a2: Long, a3:
 
 // ---- Symbol lookup ----
 
-internal actual fun ffiSymbolRaw(name: String): Long = bindings.ffiSymbolRaw(name)
+// Symbol names are a small fixed set (~330 CPython entry points) and `ffiSymbol` caches the
+// resolved address by name, so each one is encoded at most once -- the intern cache, not scratch.
+internal actual fun ffiSymbolRaw(name: String): Long = bindings.ffiSymbolRawN(internedUtf8(name))
 
 
 
