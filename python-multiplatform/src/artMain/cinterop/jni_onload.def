@@ -538,6 +538,217 @@ static jlong test_thread_create_floor(JNIEnv *env, jclass clazz, jlong x) {
     return x;
 }
 
+/*
+ * ===========================================================================
+ * Cycle-collecting proxy type.
+ * ===========================================================================
+ *
+ * Desktop builds tp_traverse/tp_clear as Panama upcall stubs; Kotlin/Native builds them with
+ * staticCFunction. Android has neither -- androidMain is Kotlin/JVM without Panama -- so the two
+ * slots are plain C functions here, and they reach Kotlin the same way everything else on this
+ * path does: through JNI, against a class registered in JNI_OnLoad.
+ *
+ * That inversion decides the division of labour. `visit` is a C function pointer that the JVM
+ * side has no way to call, so C keeps the visiting: Kotlin is asked only "which raw PyObject
+ * pointers does the object behind this handle hold?" and answers with a jlong[]. The loop over
+ * that array, and every call to `visit`, happens on this side.
+ *
+ * CPython holds the GIL when it calls both slots. Nothing here takes it and nothing here may
+ * release it.
+ *
+ * Layout note: the type is declared with a NEGATIVE basicsize, so the 8-byte handle lives in
+ * relative type data reached through PyObject_GetTypeData. Nothing here reads inside PyObject,
+ * which is what keeps the abi3 assumption the rest of the FFI layer makes.
+ */
+
+typedef int (*pmp_visitproc)(void *, void *);
+
+/* Mirrors CPython's PyType_Slot / PyType_Spec. Declared rather than included: this .def has no
+ * Python.h on its include path (only the `python` cinterop does), and both structs are part of
+ * the stable ABI, so their layout is fixed. */
+typedef struct { int slot; void *pfunc; } pmp_type_slot;
+typedef struct {
+    const char *name;
+    int basicsize;
+    int itemsize;
+    unsigned int flags;
+    pmp_type_slot *slots;
+} pmp_type_spec;
+
+extern jlong PyType_FromSpec(void *spec);
+extern void *PyObject_GetTypeData(jlong obj, jlong type);
+
+static jlong g_proxyType = 0;
+static pmp_type_slot g_proxySlots[3];
+static pmp_type_spec g_proxySpec;
+
+static jclass g_proxyCallbacks = NULL;
+static jmethodID g_proxyTraverse = NULL;
+static jmethodID g_proxyClear = NULL;
+
+/*
+ * A JNIEnv for a thread CPython may or may not have entered from the JVM.
+ *
+ * On every path this project currently exercises, the collector runs on the thread that called
+ * into Python, and that thread came *from* ART -- so GetEnv succeeds and nothing is attached.
+ * The exception is a thread CPython created itself (threading.Thread is a bare pthread), where
+ * an allocation can trip the generational threshold and run a collection on a thread ART has
+ * never seen. That is the case AttachCurrentThreadAsDaemon covers.
+ *
+ * The caller must detach again if *attached is set on return. Leaving an attachment behind is
+ * not an option: ART aborts the process when a thread it knows about exits without detaching
+ * ("Native thread exiting without having called DetachCurrentThread"), and a CPython worker
+ * thread is exactly a thread that will exit outside our control. The cost is an attach and a
+ * detach per callback on such threads, which is only paid there.
+ */
+static JNIEnv *pmp_attach(int *attached) {
+    JNIEnv *env = NULL;
+    *attached = 0;
+    if (g_vm == NULL) return NULL;
+    jint r = (*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6);
+    if (r == JNI_OK) return env;
+    if (r == JNI_EDETACHED &&
+        (*g_vm)->AttachCurrentThreadAsDaemon(g_vm, &env, NULL) == JNI_OK) {
+        *attached = 1;
+        return env;
+    }
+    return NULL;
+}
+
+/* The 8 bytes of relative type data on a proxy instance, or NULL if this is not one. */
+static jlong *pmp_handle_slot(jlong obj) {
+    if (g_proxyType == 0 || obj == 0) return NULL;
+    return (jlong *)PyObject_GetTypeData(obj, g_proxyType);
+}
+
+/*
+ * int tp_traverse(PyObject *self, visitproc visit, void *arg)
+ *
+ * The early returns are silent by design -- an object whose class is not registered with
+ * ClassLookup simply has nothing to report. That silence is worth knowing about: it reads
+ * exactly like "the object was never GC-tracked". If a cycle is not collected, check the
+ * registration before suspecting the slots.
+ *
+ * A pending JVM exception is cleared rather than propagated. There is no error channel back
+ * into a running collection except the return value, and a non-zero return aborts the traversal
+ * instead of reporting anything.
+ */
+static int pmp_proxy_traverse(void *self, pmp_visitproc visit, void *arg) {
+    if (visit == NULL) return 0;
+    jlong *slot = pmp_handle_slot((jlong)self);
+    if (slot == NULL) return 0;
+    jlong handle = *slot;
+    if (handle == 0) return 0;
+    if (g_proxyCallbacks == NULL || g_proxyTraverse == NULL) return 0;
+
+    int attached = 0;
+    JNIEnv *env = pmp_attach(&attached);
+    if (env == NULL) return 0;
+
+    int rc = 0;
+    jlongArray targets =
+        (jlongArray)(*env)->CallStaticObjectMethod(env, g_proxyCallbacks, g_proxyTraverse, handle);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        targets = NULL;
+    }
+    if (targets != NULL) {
+        jsize n = (*env)->GetArrayLength(env, targets);
+        if (n > 0) {
+            jlong *buf = (*env)->GetLongArrayElements(env, targets, NULL);
+            if (buf != NULL) {
+                for (jsize i = 0; i < n; i++) {
+                    if (buf[i] == 0) continue;
+                    int r = visit((void *)buf[i], arg);
+                    if (r != 0) { rc = r; break; }
+                }
+                (*env)->ReleaseLongArrayElements(env, targets, buf, JNI_ABORT);
+            }
+        }
+        (*env)->DeleteLocalRef(env, targets);
+    }
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+    return rc;
+}
+
+/*
+ * int tp_clear(PyObject *self)
+ *
+ * Releases the HandleTable entry and nothing else. That entry is the Kotlin-side half of the
+ * cycle and dropping it is what breaks the loop; calling PyObject.close() on the Kotlin object's
+ * fields from here would decrement references the collector is in the middle of accounting for,
+ * which double-frees. The collector reclaims the Python side on its own.
+ *
+ * The slot is zeroed before the upcall, so a second tp_clear on the same object -- or a
+ * tp_dealloc-time release, once one exists -- is a no-op rather than a double release.
+ */
+static int pmp_proxy_clear(void *self) {
+    jlong *slot = pmp_handle_slot((jlong)self);
+    if (slot == NULL) return 0;
+    jlong handle = *slot;
+    if (handle == 0) return 0;
+    *slot = 0;
+    if (g_proxyCallbacks == NULL || g_proxyClear == NULL) return 0;
+
+    int attached = 0;
+    JNIEnv *env = pmp_attach(&attached);
+    if (env == NULL) return 0;
+
+    (*env)->CallStaticVoidMethod(env, g_proxyCallbacks, g_proxyClear, handle);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+    return 0;
+}
+
+/*
+ * Creates the proxy type once and returns its address.
+ *
+ * The spec, its slot array and the name are statics rather than heap allocations, because
+ * PyType_FromSpec stores spec->name directly as tp_name instead of copying it -- a freed name
+ * would leave the type pointing at released memory. The type lives for the process anyway.
+ *
+ * Ordinary JNI: it runs type creation, which can execute arbitrary Python.
+ */
+static jlong proxy_create_type(JNIEnv *e, jclass c) {
+    if (g_proxyType != 0) return g_proxyType;
+
+    /* Slot ids from CPython's typeslots.h; they are ABI, not header-version-dependent. */
+    g_proxySlots[0].slot = 71; /* Py_tp_traverse */
+    g_proxySlots[0].pfunc = (void *)&pmp_proxy_traverse;
+    g_proxySlots[1].slot = 51; /* Py_tp_clear */
+    g_proxySlots[1].pfunc = (void *)&pmp_proxy_clear;
+    g_proxySlots[2].slot = 0;  /* sentinel */
+    g_proxySlots[2].pfunc = NULL;
+
+    g_proxySpec.name = "KotlinProxy";
+    g_proxySpec.basicsize = -8; /* 8 bytes of relative type data: the handle */
+    g_proxySpec.itemsize = 0;
+    /* Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC */
+    g_proxySpec.flags = (1u << 10) | (1u << 14);
+    g_proxySpec.slots = g_proxySlots;
+
+    g_proxyType = PyType_FromSpec(&g_proxySpec);
+    return g_proxyType;
+}
+
+/*
+ * Handle accessors, composed on this side.
+ *
+ * androidMain could not do this itself: writing 8 bytes at a raw address from Kotlin/JVM needs
+ * sun.misc.Unsafe, which is a restricted non-SDK interface on Android. Crossing once with both
+ * the object and the value is also cheaper than exposing PyObject_GetTypeData and poking at the
+ * result, which is what artMain/README.md means by composed functions.
+ */
+static jlong proxy_get_handle(JNIEnv *e, jclass c, jlong obj) {
+    jlong *slot = pmp_handle_slot(obj);
+    return slot == NULL ? 0 : *slot;
+}
+
+static void proxy_set_handle(JNIEnv *e, jclass c, jlong obj, jlong handle) {
+    jlong *slot = pmp_handle_slot(obj);
+    if (slot != NULL) *slot = handle;
+}
+
 int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -553,6 +764,25 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         g_upcallPrimitive = (*env)->GetStaticMethodID(env, g_upcallClass, "upcallPrimitive", "(J)J");
         g_upcallString = (*env)->GetStaticMethodID(env, g_upcallClass, "upcallString", "(Ljava/lang/String;)J");
     }
+
+    /*
+     * The Kotlin half of tp_traverse/tp_clear. A global ref, because the slots are called from
+     * whichever thread the collector runs on, long after this frame is gone.
+     *
+     * Every failure here is cleared rather than propagated: FindClass and GetStaticMethodID both
+     * leave a pending exception on failure, and RegisterNatives below must not run with one set.
+     * A missing class leaves the slots as no-ops, which surfaces as an uncollected cycle rather
+     * than as a crash -- and, unlike an abort during library load, leaves the rest of the
+     * bindings usable.
+     */
+    jclass proxyClazz = (*env)->FindClass(env, "python/multiplatform/ffi/ProxyCallbacks");
+    if (proxyClazz != NULL) {
+        g_proxyCallbacks = (jclass)(*env)->NewGlobalRef(env, proxyClazz);
+        g_proxyTraverse = (*env)->GetStaticMethodID(env, g_proxyCallbacks, "traverse", "(J)[J");
+        g_proxyClear = (*env)->GetStaticMethodID(env, g_proxyCallbacks, "clear", "(J)V");
+        (*env)->DeleteLocalRef(env, proxyClazz);
+    }
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 
     JNINativeMethod methods[] = {
         {"Py_Initialize", "()V", (void *)&Py_Initialize},
@@ -755,6 +985,11 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyUnicode_InternFromStringN", "(J)J", (void *)&f_PyUnicode_InternFromStringN},
         {"PyDict_DelItemStringN", "(JJ)I", (void *)&f_PyDict_DelItemStringN},
 
+
+        /* Cycle-collecting proxy type. See the block above pmp_proxy_traverse. */
+        {"proxyCreateType", "()J", (void *)&proxy_create_type},
+        {"proxyGetHandle", "(J)J", (void *)&proxy_get_handle},
+        {"proxySetHandle", "(JJ)V", (void *)&proxy_set_handle},
 
         {"testUpcallPrimitive", "(J)J", (void *)&test_upcall_primitive},
         {"testUpcallString", "(Ljava/lang/String;)J", (void *)&test_upcall_string},
