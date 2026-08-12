@@ -381,9 +381,6 @@ actual fun PySys_GetObject(name: String): NativePointer? = python.native.ffi.bin
 @CName("${namePrefix}PySys_1SetObject")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PySys_SetObject(name: String, v: NativePointer): Int = python.native.ffi.bindings.PySys_SetObject(name, v.toPlatformPointer())
-@CName("${namePrefix}PySys_1ResetWarnOptions")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun PySys_ResetWarnOptions() = python.native.ffi.bindings.PySys_ResetWarnOptions()
 @CName("${namePrefix}PySys_1GetXOptions")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PySys_GetXOptions(): NativePointer? = python.native.ffi.bindings.PySys_GetXOptions().toNativePointer()
@@ -404,9 +401,6 @@ actual inline fun Py_Exit(status: Int) = python.native.ffi.bindings.Py_Exit(stat
 // Section 8
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyImport_ImportModule(name: String): NativePointer? = python.native.ffi.bindings.PyImport_ImportModule(name).toNativePointer()
-@CName("${namePrefix}PyImport_1ImportModuleNoBlock")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual fun PyImport_ImportModuleNoBlock(name: String): NativePointer? = python.native.ffi.bindings.PyImport_ImportModuleNoBlock(name).toNativePointer()
 @CName("${namePrefix}PyImport_1ImportModuleLevelObject")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyImport_ImportModuleLevelObject(name: NativePointer, globals: NativePointer, locals: NativePointer, fromlist: NativePointer, level: Int): NativePointer? = python.native.ffi.bindings.PyImport_ImportModuleLevelObject(name.toPlatformPointer(), globals.toPlatformPointer(), locals.toPlatformPointer(), fromlist.toPlatformPointer(), level).toNativePointer()
@@ -1078,9 +1072,17 @@ actual fun PyWeakref_NewRef(ob: NativePointer, callback: NativePointer): NativeP
 @CName("${namePrefix}PyWeakref_1NewProxy")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyWeakref_NewProxy(ob: NativePointer, callback: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_NewProxy(ob.toPlatformPointer(), callback.toPlatformPointer()).toNativePointer()
-@CName("${namePrefix}PyWeakref_1GetObject")
+@CName("${namePrefix}PyWeakref_1GetRef")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual fun PyWeakref_GetObject(ref: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_GetObject(ref.toPlatformPointer()).toNativePointer()
+actual fun PyWeakref_GetRef(ref: NativePointer): NativePointer? = kotlinx.cinterop.memScoped {
+    // The out-parameter's slot comes off the C stack here, which is why this target needs no
+    // equivalent of the desktop backend's `allocatePointerSlot`.
+    val slot = alloc<CPointerVarOf<CPointer<PyObject>>>()
+    val status = python.native.ffi.bindings.PyWeakref_GetRef(ref.toPlatformPointer(), slot.ptr)
+    // Only status 1 means "referent is alive and the slot was written". 0 (dead) and -1 (error)
+    // both yield null; the error indicator is what distinguishes them, per the `expect` doc.
+    if (status == 1) slot.value.toNativePointer() else null
+}
 @CName("${namePrefix}PyObject_1ClearWeakRefs")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun PyObject_ClearWeakRefs(o: NativePointer) = python.native.ffi.bindings.PyObject_ClearWeakRefs(o.toPlatformPointer())

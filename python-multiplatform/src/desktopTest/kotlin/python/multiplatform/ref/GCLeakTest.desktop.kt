@@ -25,3 +25,18 @@ actual fun forceGC() {
     // scheduled and run its action, which is a separate event.
     Thread.sleep(50)
 }
+
+actual val cleanerReleasesAutomatically: Boolean = true
+
+/**
+ * This platform's finalisation runs on a thread, so a test can force a collection and watch for
+ * the result inside one call. `Unit` is what a `@Test` returns here; see `commonTest`'s
+ * [CollectorTestResult] for the target where it cannot be.
+ */
+actual typealias CollectorTestResult = Unit
+
+actual fun collectorTest(
+    maxAttempts: Int,
+    attempt: () -> Boolean,
+    finish: () -> Unit
+): CollectorTestResult = runCollectorLoopBlocking(maxAttempts, attempt, finish)

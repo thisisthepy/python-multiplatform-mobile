@@ -19,6 +19,24 @@ plugins {
     alias(libs.plugins.jetpack.compose)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.graalvm.native)
+
+    // The one id the plugin advertises, applied to a module that also carries an Android plugin
+    // -- which is the whole of ROADMAP §13. It applies `com.google.devtools.ksp`, and KSP 2.3.11
+    // declares `MINIMUM_SUPPORTED_AGP_VERSION = 8.10.0`; against this build's former AGP 8.5.2 it
+    // died at configuration time with
+    //
+    //   java.lang.NoSuchMethodError: 'void com.android.build.api.variant
+    //       .AndroidComponentsExtension.addKspConfigurations(boolean)'
+    //     at com.google.devtools.ksp.gradle.KspConfigurations$3$1.execute(KspConfigurations.kt:114)
+    //
+    // in *any* module carrying an Android plugin, so the demo was split into `:sample` and an
+    // Android-free `:sample-bindings` to get a generated table at all. AGP is 8.10.1 now (and
+    // Gradle 8.11.1, which AGP 8.10 requires), so the split is gone and this module holds its own
+    // Python-facing declarations again -- `src/*/kotlin/.../demo/bindings/`.
+    //
+    // `ksp-fixtures/android` is the regression test. It is the first fixture to apply an Android
+    // plugin, which is exactly why nothing caught this.
+    id("io.github.thisisthepy.python.multiplatform.bindings")
 }
 
 kotlin {
@@ -141,6 +159,22 @@ dependencies {
     debugImplementation(compose.uiTooling)
 }
 
+pythonBindings {
+    // `role` is not stated: `com.android.application` is applied, so the plugin infers `app` and
+    // this module aggregates. That inference is half the reason the plugin exists.
+
+    // In-repo consumer: the processor is a project here rather than published coordinates.
+    processor.set(projects.pythonMultiplatformKsp)
+
+    // Exposure is a blacklist, so applying the plugin offers *every* public declaration in this
+    // module to Python -- including the Compose UI. A `@Composable` function may only be called
+    // from another composable, and the generated fragment's entry is an ordinary lambda, so a
+    // scanned `@Composable` is a compile failure of generated code rather than a useless entry.
+    // The demo's Python-facing surface lives in `...demo.bindings`; the UI package is the one
+    // that has to be kept out.
+    excludePackages.set(listOf("org.thisisthepy.python.multiplatform.demo.ui"))
+}
+
 compose.desktop {
     application {
         mainClass = "org.thisisthepy.python.multiplatform.demo.MainKt"
@@ -217,6 +251,18 @@ tasks.register<JavaExec>("runNativeImageUpcallDemo") {
     // at a prefix with a `lib/python3.14` stdlib -- the standalone build embeds the path from the
     // machine that built it, not this one. Mirrors python-multiplatform's own desktopTest task.
     environment("PYTHONHOME", pythonHomeForHost.get().asFile.absolutePath)
+}
+
+// `:sample:run` (Compose Desktop's own task) needs the same two things the task above needs, and
+// used to get neither: `Py_Initialize()` aborts with "Failed to import encodings module" without
+// a PYTHONHOME holding a real stdlib, and `manager.loadLibPython` finds no `libpython` on the
+// classpath because a project dependency resolves to class directories rather than to
+// `desktopJar` -- it falls back to `$PYTHONHOME/lib`, which only exists once the archive has been
+// extracted. Both fixed here rather than in `runNativeImageUpcallDemo`'s style (an explicit
+// classpath), because `run`'s classpath is Compose's to build.
+tasks.matching { it.name == "run" }.configureEach {
+    dependsOn(":python-multiplatform:downloadAllPythonBuilds")
+    (this as? JavaExec)?.environment("PYTHONHOME", pythonHomeForHost.get().asFile.absolutePath)
 }
 
 // ---------------------------------------------------------------------------------------------

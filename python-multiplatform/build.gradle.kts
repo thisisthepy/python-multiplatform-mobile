@@ -1014,8 +1014,248 @@ val wasmPythonDir: String = (project.findProperty("wasmPythonDir")?.toString()
     ?: System.getenv("PMP_PYTHON_DIR")
     ?: "/Volumes/macMini/wasm-build/cpython314-abi/cross-build/wasm32-emscripten/build/python")
 
+// -------------------------------------------------------------------------------------------------
+// ROADMAP §10 -- the LinkError guard.
+//
+// Wasm import types are checked *exactly*, and they are checked at instantiation rather than at the
+// call. So one wrong parameter type in `wasmJsMain/.../bindings.kt` does not fail to compile and
+// does not fail one test: it raises a `LinkError` that takes out the whole module, and the run
+// reports zero tests with a message naming neither the function nor the type.
+//
+// The declarations were originally read off `python.wasm`'s own type section by hand, precisely
+// because they cannot be transliterated from `EmbedAPI.kt` -- `Py_ssize_t` is `Long` there and `i32`
+// here, on 14 functions. A hand-read fact rots the way a checked-in metadata file does (ROADMAP §7),
+// so this reads it again from the artefact on every run and fails with the offending function named.
+//
+// Same shape as `generateDesktopReachabilityMetadata`: derive from the thing that decides, never
+// from a copy of the answer.
+// -------------------------------------------------------------------------------------------------
+
+/**
+ * Reads `python.wasm`'s type, import, function and export sections and returns
+ * `export name -> (parameter valtypes, result valtypes)` for every exported function.
+ *
+ * Only the four sections that matter are decoded; the rest are skipped by their declared size.
+ */
+fun readWasmExportedFunctionTypes(file: File): Map<String, Pair<List<String>, List<String>>> {
+    val bytes = file.readBytes()
+    var p = 0
+
+    fun u8(): Int = bytes[p++].toInt() and 0xFF
+    fun leb(): Int {
+        var result = 0
+        var shift = 0
+        while (true) {
+            val b = u8()
+            result = result or ((b and 0x7F) shl shift)
+            if (b and 0x80 == 0) return result
+            shift += 7
+        }
+    }
+    fun name(): String {
+        val n = leb()
+        val s = String(bytes, p, n, Charsets.UTF_8)
+        p += n
+        return s
+    }
+    fun valtype(): String = when (val v = u8()) {
+        0x7F -> "i32"; 0x7E -> "i64"; 0x7D -> "f32"; 0x7C -> "f64"; 0x7B -> "v128"
+        0x70 -> "funcref"; 0x6F -> "externref"
+        else -> "valtype:0x%02x".format(v)
+    }
+
+    require(
+        bytes.size > 8 && bytes[0] == 0x00.toByte() && bytes[1] == 0x61.toByte() &&
+            bytes[2] == 0x73.toByte() && bytes[3] == 0x6D.toByte()
+    ) { "$file is not a wasm module" }
+    p = 8
+
+    val types = mutableListOf<Pair<List<String>, List<String>>>()
+    val funcTypeIndex = mutableListOf<Int>()   // funcidx space: imported functions occupy the low end
+    val exports = mutableListOf<Pair<String, Int>>()
+
+    while (p < bytes.size) {
+        val id = u8()
+        val size = leb()
+        val end = p + size
+        when (id) {
+            1 -> repeat(leb()) {
+                val form = u8()
+                check(form == 0x60) {
+                    ("$file: type section entry 0x%02x is not a plain functype. The GC rec-group " +
+                        "encodings are not decoded here; if CPython's toolchain started emitting " +
+                        "them this parser needs extending rather than deleting.").format(form)
+                }
+                val params = List(leb()) { valtype() }
+                val results = List(leb()) { valtype() }
+                types += params to results
+            }
+            2 -> repeat(leb()) {
+                name(); name()
+                when (u8()) {
+                    0x00 -> funcTypeIndex += leb()
+                    0x01 -> { valtype(); val f = u8(); leb(); if (f == 1) leb() }
+                    0x02 -> { val f = u8(); leb(); if (f == 1) leb() }
+                    0x03 -> { valtype(); u8() }
+                    0x04 -> { u8(); leb() }
+                    else -> error("$file: unknown import descriptor")
+                }
+            }
+            3 -> repeat(leb()) { funcTypeIndex += leb() }
+            7 -> repeat(leb()) {
+                val n = name()
+                val kind = u8()
+                val idx = leb()
+                if (kind == 0x00) exports += n to idx
+            }
+        }
+        p = end
+    }
+
+    return exports.mapNotNull { (n, idx) ->
+        funcTypeIndex.getOrNull(idx)?.let { t -> types.getOrNull(t)?.let { n to it } }
+    }.toMap()
+}
+
+/**
+ * The `@WasmImport` declarations of `bindings.kt`, keyed by the imported C name.
+ *
+ * The return type is optional in the pattern because Kotlin lets a `Unit`-returning declaration
+ * omit it, and `free`, `PyObject_GC_UnTrack` and `pmpCallFree` all do. Requiring it made this
+ * function skip them silently -- three declarations checked by nothing, in a check whose entire
+ * purpose is to notice a wrong type. The caller asserts that every `external fun` in the file was
+ * matched, so a future shape change fails loudly instead of shrinking the covered set.
+ */
+fun readWasmImportDeclarations(file: File): Map<String, Triple<String, List<String>, String>> {
+    val decl = Regex(
+        """@WasmImport\(MODULE,\s*"([^"]+)"\)\s*\r?\n\s*external\s+fun\s+(\w+)\s*\(([^)]*)\)(\s*:\s*\w+)?"""
+    )
+    return decl.findAll(file.readText()).associate { m ->
+        val (cName, ktName, params, ret) = m.destructured
+        val paramTypes = params.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+            .map { it.substringAfter(':').trim() }
+        cName to Triple(ktName, paramTypes, ret.substringAfter(':').trim().ifEmpty { "Unit" })
+    }
+}
+
+/** Kotlin type -> wasm valtypes, over the primitive subset a `@WasmImport` may use. */
+fun kotlinTypeToValtypes(type: String): List<String>? = when (type) {
+    "Int" -> listOf("i32")
+    "Long" -> listOf("i64")
+    "Float" -> listOf("f32")
+    "Double" -> listOf("f64")
+    "Unit" -> emptyList()
+    else -> null
+}
+
+val verifyWasmAbiSignatures by tasks.registering {
+    group = "verification"
+    description = "Checks wasmJs @WasmImport declarations against python.wasm's own type section " +
+        "-- a mismatch is a LinkError at instantiation, not a compile error."
+
+    val bindingsFile = layout.projectDirectory
+        .file("src/wasmJsMain/kotlin/python/native/ffi/bindings.kt").asFile
+    val glueFile = layout.projectDirectory.file("src/wasmJsMain/resources/cpython.mjs").asFile
+    val wasmFile = file(wasmPythonDir).resolve("python.wasm")
+
+    inputs.file(bindingsFile)
+    inputs.file(glueFile)
+    outputs.upToDateWhen { false }
+
+    onlyIf {
+        val present = wasmFile.exists()
+        if (!present) logger.lifecycle("SKIPPING verifyWasmAbiSignatures -- no python.wasm at $wasmFile")
+        present
+    }
+
+    doLast {
+        val actualTypes = readWasmExportedFunctionTypes(wasmFile)
+        val declared = readWasmImportDeclarations(bindingsFile)
+        val glueText = glueFile.readText()
+        val reExported = Regex("""export const \w+ = bind\("([^"]+)"\)""")
+            .findAll(glueText).map { it.groupValues[1] }.toSet()
+        // The handful of imports that are JavaScript rather than CPython -- upcall registration and
+        // the two `call_indirect` stand-ins. They have no entry in python.wasm's type section, so
+        // all that can be checked is that the glue really defines them.
+        val glueFunctions = Regex("""export function (\w+)\s*\(""")
+            .findAll(glueText).map { it.groupValues[1] }.toSet()
+
+        // Without this a change to the declaration shape would make the whole check pass on a
+        // subset, which is the failure mode ROADMAP §2 records for `AssembledApiTest`: a green
+        // acceptance test measuring its own scope. It has already happened here once -- requiring
+        // an explicit return type quietly excluded the three `Unit`-returning declarations.
+        val externalFunCount = Regex("""^\s*external\s+fun\s""", RegexOption.MULTILINE)
+            .findAll(bindingsFile.readText()).count()
+        check(declared.size == externalFunCount) {
+            "${bindingsFile.name} has $externalFunCount `external fun` declarations but only " +
+                "${declared.size} were parsed. The unparsed ones are checked by nothing."
+        }
+        check(declared.size > 250) {
+            "only ${declared.size} @WasmImport declarations in ${bindingsFile.name} -- that is far " +
+                "below the surface this target is supposed to bind"
+        }
+        check(actualTypes.size > 5000) {
+            "only ${actualTypes.size} exported functions decoded out of ${wasmFile.name} -- " +
+                "the parser is not reading the module it thinks it is"
+        }
+
+        val problems = mutableListOf<String>()
+        var glueChecked = 0
+        for ((cName, d) in declared.entries.sortedBy { it.key }) {
+            val (ktName, paramTypes, retType) = d
+            if (cName in glueFunctions) {
+                glueChecked++
+                continue
+            }
+            if (cName !in reExported) {
+                problems += "$cName: declared @WasmImport, but cpython.mjs neither re-exports it " +
+                    "from python.wasm nor defines it as glue, so the binding resolves to a thrower"
+            }
+            val real = actualTypes[cName]
+            if (real == null) {
+                problems += "$cName: not an exported function of ${wasmFile.name}"
+                continue
+            }
+            val wantParams = paramTypes.flatMap {
+                kotlinTypeToValtypes(it) ?: listOf("?").also { _ ->
+                    problems += "$ktName: parameter type '$it' is not a wasm primitive"
+                }
+            }
+            val wantResults = kotlinTypeToValtypes(retType) ?: listOf("?").also {
+                problems += "$ktName: return type '$retType' is not a wasm primitive"
+            }
+            if (wantParams != real.first || wantResults != real.second) {
+                problems += "$cName: bindings.kt declares (${wantParams.joinToString()}) -> " +
+                    "(${wantResults.joinToString()}), python.wasm has " +
+                    "(${real.first.joinToString()}) -> (${real.second.joinToString()})"
+            }
+        }
+
+        if (problems.isNotEmpty()) {
+            throw GradleException(
+                "wasmJs ABI mismatch -- ${problems.size} problem(s). Each is a LinkError at " +
+                    "instantiation, which kills the whole module rather than one call:\n  " +
+                    problems.joinToString("\n  ")
+            )
+        }
+        logger.lifecycle(
+            "verifyWasmAbiSignatures: ${declared.size - glueChecked} @WasmImport declarations " +
+                "agree with ${wasmFile.name}'s type section, plus $glueChecked glue functions " +
+                "defined in ${glueFile.name}"
+        )
+    }
+}
+
 tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().configureEach {
     if (!name.startsWith("wasmJs")) return@configureEach
+    dependsOn(verifyWasmAbiSignatures)
+
+    // ROADMAP §10 -- lifetimes. `GCLeakTest` and `WasmFinalizationTest` need to *ask* for a
+    // collection, and on this target the collector is the host engine's. `--expose-gc` is the only
+    // way to reach it; there is no library-callable equivalent, which is why `forceGC()` degrades to
+    // a no-op when it is absent rather than pretending. Node accepts it on the command line only --
+    // `NODE_OPTIONS` rejects V8 flags -- so it goes here.
+    nodeJsArgs.add("--expose-gc")
 
     val pythonDir = file(wasmPythonDir)
     // The npm project the Kotlin/Wasm node runner actually executes out of, which is under the
@@ -1074,6 +1314,44 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
         } else {
             importObject.writeText(placeholder.replace(text, "memory: $ns.wasmMemory"))
             logger.lifecycle("Pointed ${importObject.name}'s intrinsics.memory at Emscripten's wasmMemory")
+        }
+
+        // --- (4) hand Kotlin's raw wasm exports to the glue, for upcalls -------------------------
+        //
+        // ROADMAP §7 on this target. `ProxyTypeFactory` fills `tp_traverse`/`tp_clear`/`tp_dealloc`
+        // with Kotlin `@WasmExport`s, which become C function pointers by being placed in CPython's
+        // `__indirect_function_table`. `WebAssembly.Table.prototype.set` is reachable only from the
+        // host, and it needs the *funcref* -- which lives in `wasmInstance.exports`.
+        //
+        // `cpython.mjs` cannot fetch that itself: it is imported by Kotlin's import object, so
+        // importing the entry module back would be an ES cycle across a top-level await. The
+        // generated entry module has the value in scope and nothing else does, which is why this is
+        // a second substitution rather than the one the design set out with.
+        //
+        // Note what is *not* patched: the exports themselves, the table, the call path. After this
+        // line runs, CPython reaches Kotlin through `call_indirect` with no JavaScript in it.
+        val entry = dir.listFiles()
+            ?.firstOrNull { it.name.endsWith(".mjs") && !it.name.contains("import-object") &&
+                !it.name.contains("js-builtins") && it.name.startsWith(rootProject.name) }
+            ?: throw GradleException("No Kotlin/Wasm entry module in $dir -- the output layout changed.")
+        val entryText = entry.readText()
+        val handoff = "pmpSetKotlinExports"
+        if (!entryText.contains(handoff)) {
+            if (!entryText.contains("const exports = wasmInstance.exports")) {
+                throw GradleException(
+                    "${entry.name} has no `const exports = wasmInstance.exports` to hand to " +
+                        "cpython.mjs. Upcalls need the Kotlin instance's raw exports; if the " +
+                        "generated entry module changed shape, ROADMAP §10's upcall wiring needs " +
+                        "revisiting rather than deleting."
+                )
+            }
+            entry.appendText(
+                "\n// Added by python-multiplatform's build: upcall registration needs the raw\n" +
+                    "// wasm exports, and this is the only scope that has them. See ROADMAP §7/§10.\n" +
+                    "import { $handoff } from './cpython.mjs';\n" +
+                    "$handoff(exports);\n"
+            )
+            logger.lifecycle("Handed ${entry.name}'s wasm exports to cpython.mjs for upcall registration")
         }
     }
 }

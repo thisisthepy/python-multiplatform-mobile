@@ -43,3 +43,7 @@ include(":python-multiplatform")
 include(":python-multiplatform-ksp")
 include(":ksp-fixtures:library")
 include(":ksp-fixtures:app")
+// The fixture that carries an Android plugin. `:library` and `:app` apply none, which is why the
+// KSP/AGP minimum-version wall of ROADMAP §13 stayed invisible to them while it broke every
+// Android consumer of the bindings plugin.
+include(":ksp-fixtures:android")

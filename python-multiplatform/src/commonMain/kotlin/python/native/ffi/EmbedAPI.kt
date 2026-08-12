@@ -1389,16 +1389,12 @@ expect fun PySys_GetObject(name: String): NativePointer?
  */
 expect inline fun PySys_SetObject(name: String, v: NativePointer): Int
 
-/**
- *  *Part of the Stable ABI.*
- *
- * Reset "sys.warnoptions" to an empty list. This function may be
- * called prior to "Py_Initialize()".
- *
- * Deprecated since version 3.13, will be removed in version 3.15:
- * Clear "sys.warnoptions" and "warnings.filters" instead.
- */
-expect inline fun PySys_ResetWarnOptions()
+// `PySys_ResetWarnOptions` was bound here until CPython 3.15 removed it. It has no replacement
+// in the C API: the documented migration is to configure `sys.warnoptions` through `PyConfig`
+// before initialisation, or to clear `sys.warnoptions` and `warnings.filters` from Python.
+// The symbol is still *exported* by the 3.15 shared library and only gone from the headers, so
+// desktop (which resolves by name at run time) never noticed; cinterop and the hand-written C
+// in `jni_onload.def` compile against the headers, so the native targets did. See ROADMAP §9.
 
 /**
  *  *Return value: Borrowed reference.*
@@ -1474,19 +1470,28 @@ expect fun PyImport_ImportModule(name: String): NativePointer?
 
 /**
  *  *Return value: New reference.*
- *  *Part of the Stable ABI.*
  *
- * This function is a deprecated alias of "PyImport_ImportModule()".
+ * A deprecated alias of [PyImport_ImportModule].
  *
  * Changed in version 3.3: This function used to fail immediately when
  * the import lock was held by another thread.  In Python 3.3 though,
  * the locking scheme switched to per-module locks for most purposes,
  * so this function’s special behaviour isn’t needed anymore.
  *
- * Deprecated since version 3.13, will be removed in version 3.15: Use
- * "PyImport_ImportModule()" instead.
+ * Deprecated since version 3.13, removed in version 3.15: use
+ * [PyImport_ImportModule] instead.
+ *
+ * This is no longer bound to a C symbol. CPython 3.15 removed the entry point, and since 3.3
+ * it had been an exact alias of `PyImport_ImportModule` — not a distinct code path — so
+ * forwarding here is behaviour-preserving on every supported version rather than an
+ * approximation. Keeping the name costs nothing at the FFI boundary and lets existing source
+ * compile through the version bump; `EmbedApiLowLevelTest` pins it to the function it aliases.
  */
-expect fun PyImport_ImportModuleNoBlock(name: String): NativePointer?
+@Deprecated(
+    "Removed in CPython 3.15; it has been an exact alias of PyImport_ImportModule since 3.3.",
+    ReplaceWith("PyImport_ImportModule(name)")
+)
+fun PyImport_ImportModuleNoBlock(name: String): NativePointer? = PyImport_ImportModule(name)
 
 /**
  *  *Return value: New reference.*
@@ -4095,24 +4100,28 @@ expect fun PyWeakref_NewRef(ob: NativePointer, callback: NativePointer): NativeP
 expect fun PyWeakref_NewProxy(ob: NativePointer, callback: NativePointer): NativePointer?
 
 /**
- *  *Return value: Borrowed reference.*
- *  *Part of the Stable ABI.*
+ *  *Return value: New reference.*
+ *  *Part of the Stable ABI since version 3.13.*
  *
- * Return a *borrowed reference* to the referenced object from a weak
- * reference, *ref*.  If the referent is no longer live, returns
- * "Py_None".
+ * Resolve the weak reference *ref* to its referent.
  *
- * Note:
+ * Returns a **new (strong) reference** to the referent, which the caller owns and must release
+ * with [Py_DecRef]. Returns `null` if the referent is no longer live, and also `null` if *ref*
+ * is not a weak reference object.
  *
- *   This function returns a *borrowed reference* to the referenced
- *   object. This means that you should always call "Py_INCREF()" on
- *   the object except when it cannot be destroyed before the last
- *   usage of the borrowed reference.
+ * The C function distinguishes those two outcomes by its `int` return — `0` for a dead referent
+ * and `-1` for an error — while writing the object through an out-parameter. An out-parameter
+ * does not survive this FFI boundary (Android requires primitives only across JNI), so both
+ * arrive here as `null`. No information is lost: the error case sets the error indicator and the
+ * dead case does not, so [PyErr_Occurred] separates them. `EmbedApiLowLevelTest` asserts that a
+ * dead referent leaves the indicator clear.
  *
- * Deprecated since version 3.13, will be removed in version 3.15: Use
- * "PyWeakref_GetRef()" instead.
+ * This replaces `PyWeakref_GetObject`, which CPython removed in 3.15. The two are not
+ * interchangeable: the removed function returned a *borrowed* reference and `Py_None` — not
+ * `null` — for a dead referent. `PyWeakref_GetRef` exists in 3.13 and 3.14 as well, so binding
+ * it does not cost support for the version this build defaults to.
  */
-expect fun PyWeakref_GetObject(ref: NativePointer): NativePointer?
+expect fun PyWeakref_GetRef(ref: NativePointer): NativePointer?
 
 /**
  *  *Part of the Stable ABI.*

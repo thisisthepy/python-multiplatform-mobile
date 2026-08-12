@@ -185,8 +185,6 @@ external fun PyOS_FSPath(path: Int): Int
 external fun PySys_GetObject(name: Int): Int
 @WasmImport(MODULE, "PySys_SetObject")
 external fun PySys_SetObject(name: Int, v: Int): Int
-@WasmImport(MODULE, "PySys_ResetWarnOptions")
-external fun PySys_ResetWarnOptions(): Unit
 @WasmImport(MODULE, "PySys_GetXOptions")
 external fun PySys_GetXOptions(): Int
 @WasmImport(MODULE, "PySys_AuditTuple")
@@ -197,8 +195,6 @@ external fun Py_FatalError(message: Int): Unit
 external fun Py_Exit(status: Int): Unit
 @WasmImport(MODULE, "PyImport_ImportModule")
 external fun PyImport_ImportModule(name: Int): Int
-@WasmImport(MODULE, "PyImport_ImportModuleNoBlock")
-external fun PyImport_ImportModuleNoBlock(name: Int): Int
 @WasmImport(MODULE, "PyImport_ImportModuleLevelObject")
 external fun PyImport_ImportModuleLevelObject(name: Int, globals: Int, locals: Int, fromlist: Int, level: Int): Int
 @WasmImport(MODULE, "PyImport_ImportModuleLevel")
@@ -613,8 +609,8 @@ external fun PyCallIter_New(callable: Int, sentinel: Int): Int
 external fun PyWeakref_NewRef(ob: Int, callback: Int): Int
 @WasmImport(MODULE, "PyWeakref_NewProxy")
 external fun PyWeakref_NewProxy(ob: Int, callback: Int): Int
-@WasmImport(MODULE, "PyWeakref_GetObject")
-external fun PyWeakref_GetObject(ref: Int): Int
+@WasmImport(MODULE, "PyWeakref_GetRef")
+external fun PyWeakref_GetRef(ref: Int, pobj: Int): Int
 @WasmImport(MODULE, "PyObject_ClearWeakRefs")
 external fun PyObject_ClearWeakRefs(o: Int): Unit
 @WasmImport(MODULE, "PyType_IsSubtype")
@@ -657,3 +653,63 @@ external fun malloc(size: Int): Int
 @WasmImport(MODULE, "free")
 external fun free(ptr: Int)
 
+
+// -------------------------------------------------------------------------------------------------
+// The type-construction surface, for `ProxyTypeFactory` (ROADMAP §7 and §10)
+//
+// These are not in `EmbedAPI.kt` -- no `expect` declares them, because each platform's proxy type
+// factory reaches them its own way (desktop through a `MethodHandle`, Android through
+// `RegisterNatives`). All four are stable-ABI functions.
+// -------------------------------------------------------------------------------------------------
+
+@WasmImport(MODULE, "PyType_FromSpec")
+external fun PyType_FromSpec(spec: Int): Int
+
+/** `void *PyObject_GetTypeData(PyObject *o, PyTypeObject *cls)` -- where the handle is kept. */
+@WasmImport(MODULE, "PyObject_GetTypeData")
+external fun PyObject_GetTypeData(obj: Int, type: Int): Int
+
+/** `void *PyType_GetSlot(PyTypeObject *type, int slot)` -- the only abi3 route to `tp_free`. */
+@WasmImport(MODULE, "PyType_GetSlot")
+external fun PyType_GetSlot(type: Int, slot: Int): Int
+
+@WasmImport(MODULE, "PyObject_GC_UnTrack")
+external fun PyObject_GC_UnTrack(op: Int)
+
+// -------------------------------------------------------------------------------------------------
+// The glue, and why it is here rather than in `python.wasm`
+//
+// These three are the *only* declarations in this file that are not CPython exports; they are
+// JavaScript functions in `src/wasmJsMain/resources/cpython.mjs`. Each exists because of something
+// Kotlin/Wasm cannot express, not because a JS hop was wanted:
+//
+//   * a table index cannot be obtained from inside Kotlin, so installing a `@WasmExport` into
+//     CPython's `__indirect_function_table` has to happen from JS (`pmpRegisterUpcall`);
+//   * Kotlin/Wasm has no `call_indirect` primitive, so calling a C function *pointer* -- which is
+//     what `visitproc` and `tp_free` are -- has to go through `WebAssembly.Table.get`
+//     (`pmpCallVisit`, `pmpCallFree`).
+//
+// All three are cold: registration runs three times per process, and the other two run inside a
+// cyclic collection or a proxy's deallocation. Nothing on the ordinary downcall path touches
+// JavaScript, and nothing in the *upcall* path does either -- CPython reaches the Kotlin export
+// through `call_indirect`, measured at 3.1 ns in `wasm-experiment/`.
+//
+// `verifyWasmAbiSignatures` knows these are glue: it checks that `cpython.mjs` really exports them,
+// and does not look for them in `python.wasm`.
+// -------------------------------------------------------------------------------------------------
+
+/**
+ * Installs the Kotlin `@WasmExport` named by the NUL-terminated C string at [namePtr] into
+ * CPython's `__indirect_function_table` and returns its index -- which *is* the C function pointer.
+ * Returns a negative value if there is no such export or if the table refused to grow.
+ */
+@WasmImport(MODULE, "pmpRegisterUpcall")
+external fun pmpRegisterUpcall(namePtr: Int): Int
+
+/** `visit(obj, arg)`, where `visit` is the `visitproc` at table index [fp]. */
+@WasmImport(MODULE, "pmpCallVisit")
+external fun pmpCallVisit(fp: Int, obj: Int, arg: Int): Int
+
+/** `free(obj)`, where `free` is the `freefunc` at table index [fp]. */
+@WasmImport(MODULE, "pmpCallFree")
+external fun pmpCallFree(fp: Int, obj: Int)

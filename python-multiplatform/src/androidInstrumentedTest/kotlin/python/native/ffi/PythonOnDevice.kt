@@ -1,5 +1,7 @@
 package python.native.ffi
 
+import python.multiplatform.Versions
+
 import android.content.res.AssetManager
 import androidx.test.platform.app.InstrumentationRegistry
 import python.multiplatform.ffi.Python3
@@ -19,7 +21,13 @@ import java.io.FileOutputStream
  */
 object PythonOnDevice {
 
-    private const val PYTHON_DIR = "lib/python3.14"
+    /**
+     * Derived rather than literal. `MainActivity` already builds the same path this way, and a
+     * hardcoded release line silently stops matching the staged assets on every version bump --
+     * `copyAndroidPythonAssets` stages `<abi>/lib/python$libVersion`. `taggedVersionString`
+     * also carries the `t` suffix for a free-threaded build, which the literal could not.
+     */
+    private val PYTHON_DIR = "lib/python${Versions.currentVersion.taggedVersionString}"
 
     @Volatile
     private var stdlibStaged = false

@@ -34,17 +34,38 @@ private const val ROLE_APP = "app"
  *   projects. Please use target-specific configurations like 'kspJvm' instead" -- so
  *   [isMultiplatform] decides whether it counts.
  *
+ * **A test compilation is not always a name that ends in `Test`.** On a module carrying an Android
+ * plugin, KSP names its configurations after AGP's source sets, and AGP puts the build type last:
+ *
+ *     main          kspAndroid              kspAndroidDebug              kspAndroidRelease
+ *     unit test     kspAndroidTest          kspAndroidTestDebug          kspAndroidTestRelease
+ *     instrumented  kspAndroidAndroidTest   kspAndroidAndroidTestDebug   kspAndroidAndroidTestRelease
+ *     testFixtures  kspAndroidTestFixtures  kspAndroidTestFixturesDebug  kspAndroidTestFixturesRelease
+ *
+ * so `endsWith("Test")` caught only the variant-less three of those nine. The processor landed on
+ * `kspAndroidTestDebug`, scanned the *test* sources, and emitted a second `Fragment_<module>` --
+ * and a second `FunctionTable` -- into the test compilation, where they shadowed the real ones
+ * from `main`, because a compilation's own generated sources win over its classpath. The symptom
+ * is a table holding the test classes and nothing the module actually exposes.
+ * `ksp-fixtures/android` is what surfaced this; no module without an Android plugin can.
+ *
+ * `Test` is therefore matched as a camel-case *word* rather than as a suffix: it must start a word
+ * and end one. A target or product flavour genuinely named `testing` is not a test compilation and
+ * must keep the processor.
+ *
  * Matching on names rather than walking the Kotlin extension's targets keeps this plugin free of
  * a Kotlin Gradle plugin dependency, and so free of its version. The observed name set is pinned
  * in `WiringTest`.
  */
+private val TEST_WORD = Regex("(?:^|[a-z0-9])Test(?:[A-Z]|$)")
+
 internal fun isBindingKspConfiguration(name: String, isMultiplatform: Boolean): Boolean {
     if (!name.startsWith("ksp")) return false
     if (name == "ksp") return !isMultiplatform
     if (name == "kspCommonMainMetadata") return false
     if (name.startsWith("kspPluginClasspath")) return false
     if (name.endsWith("ProcessorClasspath")) return false
-    if (name.endsWith("Test")) return false
+    if (TEST_WORD.containsMatchIn(name)) return false
     return true
 }
 

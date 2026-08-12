@@ -31,6 +31,10 @@ internal object Panama {
     /** The null-pointer sentinel as a Long. */
     const val NULL: Long = 0L
 
+    /** Width of a native pointer. Every desktop target this build ships for is 64-bit
+     *  (`macos-aarch64`, `macos-x86_64`, `linux-x86_64`, `windows-x86_64`). */
+    private const val POINTER_BYTES: Long = 8L
+
     /** Create a native C string from a Kotlin String and return its address as Long. */
     val allocateUtf8String: (String) -> Long
 
@@ -59,6 +63,24 @@ internal object Panama {
      *  (e.g. a CPython-owned `const char*`) is undefined behaviour, same as misusing `free()`. */
     val freeUtf8Address: (Long) -> Unit
 
+    /** Allocate one pointer-sized, uninitialised native slot to serve as a C out-parameter.
+     *
+     *  CPython is steadily replacing borrowed-reference getters with `int f(..., PyObject **result)`
+     *  forms -- `PyWeakref_GetRef` (which replaced the removed `PyWeakref_GetObject`),
+     *  `PyDict_GetItemRef`, `PyObject_GetOptionalAttr`. Each needs somewhere for the callee to
+     *  write, and on this backend that has to be real native memory. The other targets never need
+     *  this: the JNI thunks in `jni_onload.def` take the slot from the C stack, and cinterop has
+     *  `memScoped`. Desktop has no C of its own, so the slot is allocated here.
+     *
+     *  Release with [freePointerSlot]. */
+    val allocatePointerSlot: () -> Long
+
+    /** Read back the pointer a callee wrote into a slot obtained from [allocatePointerSlot]. */
+    val readPointerSlot: (Long) -> Long
+
+    /** Release a slot obtained from [allocatePointerSlot]. */
+    val freePointerSlot: (Long) -> Unit
+
     /** One `MethodHandle` per ABI shape, **unbound** to any specific target function: its
      *  leading parameter is the callee's address (as a plain `long`, adapted from
      *  `MemorySegment`/`MemoryAddress` so the handle's static Java type is exactly
@@ -70,7 +92,20 @@ internal object Panama {
 
     /** Create a Panama upcall stub for a (Long) -> Long MethodHandle */
     val createUpcallStubLongToLong: (MethodHandle) -> Long
-    
+
+    /** Create a Panama upcall stub for a (Long, Long) -> Long MethodHandle.
+     *
+     *  The argument-carrying upcall shape, and the only one argument passing needs: a callable
+     *  handle plus a `PyObject *` argument tuple in, a new `PyObject *` reference out
+     *  ([python.multiplatform.ffi.upcall.UpcallTrampoline]). Arity and per-argument types travel
+     *  inside the tuple and the table entry rather than in the C signature, so this does not
+     *  multiply with the number of exposed Kotlin functions.
+     *
+     *  It is also exactly `PyCFunction` (`PyObject *(PyObject *self, PyObject *args)`), so a
+     *  generated proxy type's methods bind to a stub of this shape with `self` in the handle's
+     *  place -- no further stub shape is needed for that step either. */
+    val createUpcallStubII_L: (MethodHandle) -> Long
+
     /** Create a Panama upcall stub for a (Long, Long, Long) -> Int MethodHandle */
     val createUpcallStubIII_I: (MethodHandle) -> Long
     
@@ -101,8 +136,12 @@ internal object Panama {
                 findSymbolAddress = data.findSymbolAddress
                 allocateUtf8Freeable = data.allocateUtf8Freeable
                 freeUtf8Address = data.freeUtf8Address
+                allocatePointerSlot = data.allocatePointerSlot
+                readPointerSlot = data.readPointerSlot
+                freePointerSlot = data.freePointerSlot
                 unboundDowncallHandle = data.unboundDowncallHandle
                 createUpcallStubLongToLong = data.createUpcallStubLongToLong
+                createUpcallStubII_L = data.createUpcallStubII_L
                 createUpcallStubIII_I = data.createUpcallStubIII_I
                 createUpcallStubI_I = data.createUpcallStubI_I
                 createUpcallStubI_V = data.createUpcallStubI_V
@@ -115,8 +154,12 @@ internal object Panama {
                 findSymbolAddress = data.findSymbolAddress
                 allocateUtf8Freeable = data.allocateUtf8Freeable
                 freeUtf8Address = data.freeUtf8Address
+                allocatePointerSlot = data.allocatePointerSlot
+                readPointerSlot = data.readPointerSlot
+                freePointerSlot = data.freePointerSlot
                 unboundDowncallHandle = data.unboundDowncallHandle
                 createUpcallStubLongToLong = data.createUpcallStubLongToLong
+                createUpcallStubII_L = data.createUpcallStubII_L
                 createUpcallStubIII_I = data.createUpcallStubIII_I
                 createUpcallStubI_I = data.createUpcallStubI_I
                 createUpcallStubI_V = data.createUpcallStubI_V
@@ -133,8 +176,12 @@ internal object Panama {
         val findSymbolAddress: (String) -> Long,
         val allocateUtf8Freeable: (String) -> Long,
         val freeUtf8Address: (Long) -> Unit,
+        val allocatePointerSlot: () -> Long,
+        val readPointerSlot: (Long) -> Long,
+        val freePointerSlot: (Long) -> Unit,
         val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle,
         val createUpcallStubLongToLong: (MethodHandle) -> Long,
+        val createUpcallStubII_L: (MethodHandle) -> Long,
         val createUpcallStubIII_I: (MethodHandle) -> Long,
         val createUpcallStubI_I: (MethodHandle) -> Long,
         val createUpcallStubI_V: (MethodHandle) -> Long
@@ -404,6 +451,30 @@ internal object Panama {
             }
         }
 
+        // ---- Pointer-sized out-parameter slots ----
+        //
+        // Built from the same three handles `allocFreeable` uses, only with the copy running the
+        // other way: native slot -> byte[] instead of byte[] -> native. Nothing new is looked up
+        // reflectively, so this adds no additional JDK-version surface.
+
+        val allocSlot: () -> Long = {
+            val addr = mallocHandle.invokeExact(POINTER_BYTES) as Long
+            if (addr == 0L) throw OutOfMemoryError("native malloc failed for a pointer slot")
+            addr
+        }
+
+        val readSlot: (Long) -> Long = { addr ->
+            val bytes = ByteArray(POINTER_BYTES.toInt())
+            val srcSeg: Any = addressToSegmentExact.invokeExact(addr, POINTER_BYTES) as Any
+            val dstSeg: Any = ofArrayExact.invokeExact(bytes) as Any
+            copyExact.invokeExact(srcSeg, 0L, dstSeg, 0L, POINTER_BYTES) as Unit
+            // The callee wrote a native `PyObject *`, so it has to be decoded in the platform's
+            // byte order rather than ByteBuffer's big-endian default.
+            java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.nativeOrder()).getLong(0)
+        }
+
+        val freeSlot: (Long) -> Unit = freeAddr
+
         // ---- Shape vocabulary: unbound downcall handles, one per (intArgs, floatArgs, returnKind) ----
 
         val downcallHandle2Method = linkerClass.getMethod("downcallHandle", functionDescriptorClass, optionArrayType)
@@ -450,6 +521,16 @@ internal object Panama {
             segmentAddressExact.invokeExact(stub) as Long
         }
 
+        // @UpcallShape(returnType = "long", parameterTypes = ["long", "long"])
+        val buildUpcallStubII_L: (MethodHandle) -> Long = { handle ->
+            val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 2)
+            java.lang.reflect.Array.set(layoutParams, 0, javaLong)
+            java.lang.reflect.Array.set(layoutParams, 1, javaLong)
+            val fd = fdOfMethod.invoke(null, javaLong, layoutParams)
+            val stub: Any = upcallStubMethod.invoke(linker, handle, fd, globalArena, emptyOptions)
+            segmentAddressExact.invokeExact(stub) as Long
+        }
+
         // @UpcallShape(returnType = "int", parameterTypes = ["long", "long", "long"])
         val buildUpcallStubIII_I: (MethodHandle) -> Long = { handle ->
             val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 3)
@@ -479,7 +560,7 @@ internal object Panama {
             segmentAddressExact.invokeExact(stub) as Long
         }
 
-        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape, buildUpcallStub, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
+        return ModernData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, freeSlot, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
     }
 
     private fun adaptModernHandle(
@@ -548,8 +629,12 @@ internal object Panama {
         val findSymbolAddress: (String) -> Long,
         val allocateUtf8Freeable: (String) -> Long,
         val freeUtf8Address: (Long) -> Unit,
+        val allocatePointerSlot: () -> Long,
+        val readPointerSlot: (Long) -> Long,
+        val freePointerSlot: (Long) -> Unit,
         val unboundDowncallHandle: (Int, Int, ReturnKind) -> MethodHandle,
         val createUpcallStubLongToLong: (MethodHandle) -> Long,
+        val createUpcallStubII_L: (MethodHandle) -> Long,
         val createUpcallStubIII_I: (MethodHandle) -> Long,
         val createUpcallStubI_I: (MethodHandle) -> Long,
         val createUpcallStubI_V: (MethodHandle) -> Long
@@ -711,6 +796,28 @@ internal object Panama {
             raw
         }
 
+        // ---- Pointer-sized out-parameter slots: not available on this backend ----
+        //
+        // Allocating one would be easy here, but *reading* it back is not: this backend reaches
+        // native memory only through `toCString`/`toJavaString`, which stop at the first NUL and
+        // so cannot recover a pointer, and the bulk-access class that could (`MemoryAccess`)
+        // changed shape across JDK 16, 17 and 18. Guessing at it would produce a wrong
+        // `PyObject *` -- a use-after-free at the caller, found far from here.
+        //
+        // So this refuses at the first step instead, which is also the only step that has not
+        // yet allocated anything. JDK 21+ resolves the modern backend, where these are
+        // implemented, so nothing this repo builds or tests reaches this message.
+        val slotsUnsupported: () -> Nothing = {
+            throw UnsupportedOperationException(
+                "Pointer out-parameter slots are not implemented on the jdk.incubator.foreign " +
+                    "backend (JDK 16-18). Run on JDK 19 or newer, where java.lang.foreign provides " +
+                    "the bulk memory access this needs."
+            )
+        }
+        val allocSlot: () -> Long = { slotsUnsupported() }
+        val readSlot: (Long) -> Long = { slotsUnsupported() }
+        val freeSlot: (Long) -> Unit = { slotsUnsupported() }
+
         val freeAddr: (Long) -> Unit = { addr ->
             freeableScopes.remove(addr)?.let { scopeCloseMethod.invoke(it) }
             Unit
@@ -764,6 +871,16 @@ internal object Panama {
             toRawLongMethod.invoke(segAddressMethod.invoke(stub)) as Long
         }
 
+        // @UpcallShape(returnType = "long", parameterTypes = ["long", "long"])
+        val buildUpcallStubII_L: (MethodHandle) -> Long = { handle ->
+            val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 2)
+            java.lang.reflect.Array.set(layoutParams, 0, cLongLong)
+            java.lang.reflect.Array.set(layoutParams, 1, cLongLong)
+            val fd = fdOfMethod.invoke(null, cLongLong, layoutParams)
+            val stub = upcallStubMethod.invoke(clinker, handle, fd)
+            toRawLongMethod.invoke(segAddressMethod.invoke(stub)) as Long
+        }
+
         // @UpcallShape(returnType = "int", parameterTypes = ["long", "long", "long"])
         val buildUpcallStubIII_I: (MethodHandle) -> Long = { handle ->
             val layoutParams = java.lang.reflect.Array.newInstance(memoryLayoutClass, 3)
@@ -793,7 +910,7 @@ internal object Panama {
             toRawLongMethod.invoke(segAddressMethod.invoke(stub)) as Long
         }
 
-        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, buildShape, buildUpcallStub, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
+        return IncubatorData(allocStr, readStr, findSym, findAddr, allocFreeable, freeAddr, allocSlot, readSlot, freeSlot, buildShape, buildUpcallStub, buildUpcallStubII_L, buildUpcallStubIII_I, buildUpcallStubI_I, buildUpcallStubI_V)
     }
 
     private fun adaptIncubatorHandle(

@@ -182,7 +182,6 @@ extern jlong PySys_GetObject(const char*);
 extern jint PySys_SetObject(const char*, jlong);
 extern jint PySys_AuditTuple(const char*, jlong);
 extern void Py_FatalError(const char*);
-extern jlong PyImport_ImportModuleNoBlock(const char*);
 extern jlong PyImport_ImportModuleLevel(const char*, jlong, jlong, jlong, jint);
 extern jlong PyImport_ExecCodeModule(const char*, jlong);
 extern jlong PyImport_ExecCodeModuleEx(const char*, jlong, const char*);
@@ -268,7 +267,6 @@ extern void Py_LeaveRecursiveCall(void);
 extern jint Py_ReprEnter(jlong o);
 extern void Py_ReprLeave(jlong o);
 extern jlong PyOS_FSPath(jlong path);
-extern void PySys_ResetWarnOptions(void);
 extern jlong PySys_GetXOptions(void);
 extern void Py_Exit(jint status);
 extern jlong PyImport_ImportModuleLevelObject(jlong name, jlong globals, jlong locals, jlong fromlist, jint level);
@@ -381,7 +379,11 @@ extern jlong PySeqIter_New(jlong seq);
 extern jlong PyCallIter_New(jlong callable, jlong sentinel);
 extern jlong PyWeakref_NewRef(jlong ob, jlong callback);
 extern jlong PyWeakref_NewProxy(jlong ob, jlong callback);
-extern jlong PyWeakref_GetObject(jlong ref);
+/* int PyWeakref_GetRef(PyObject *ref, PyObject **pobj) -- replaces PyWeakref_GetObject,
+   which 3.15 removed. PyObject* travels as jlong here like every other pointer in this
+   file; the out-parameter takes void** so the pointer is never punned through an integer
+   pointer. Both android ABIs this builds for (arm64-v8a, x86_64) are 64-bit. */
+extern jint PyWeakref_GetRef(jlong ref, void **pobj);
 extern void PyObject_ClearWeakRefs(jlong o);
 extern jint PyType_Ready(jlong type);
 extern jlong PyType_GetFullyQualifiedName(jlong type);
@@ -579,7 +581,6 @@ static jint f_Py_EnterRecursiveCallN(JNIEnv *e, jclass c, jlong where) { return 
 static jint f_PySys_SetObjectN(JNIEnv *e, jclass c, jlong name, jlong v) { return PySys_SetObject((const char*)name, v); }
 static jint f_PySys_AuditTupleN(JNIEnv *e, jclass c, jlong event, jlong args) { return PySys_AuditTuple((const char*)event, args); }
 static void f_Py_FatalErrorN(JNIEnv *e, jclass c, jlong message) { Py_FatalError((const char*)message); }
-static jlong f_PyImport_ImportModuleNoBlockN(JNIEnv *e, jclass c, jlong name) { return PyImport_ImportModuleNoBlock((const char*)name); }
 static jlong f_PyImport_ImportModuleLevelN(JNIEnv *e, jclass c, jlong name, jlong globals, jlong locals, jlong fromlist, jint level) { return PyImport_ImportModuleLevel((const char*)name, globals, locals, fromlist, level); }
 static jlong f_PyImport_ExecCodeModuleN(JNIEnv *e, jclass c, jlong name, jlong co) { return PyImport_ExecCodeModule((const char*)name, co); }
 static jlong f_PyImport_ExecCodeModuleExN(JNIEnv *e, jclass c, jlong name, jlong co, jlong pathname) { return PyImport_ExecCodeModuleEx((const char*)name, co, (const char*)pathname); }
@@ -649,7 +650,6 @@ static void f_Py_LeaveRecursiveCallN(JNIEnv *e, jclass c) { Py_LeaveRecursiveCal
 static jint f_Py_ReprEnterN(JNIEnv *e, jclass c, jlong o) { return Py_ReprEnter(o); }
 static void f_Py_ReprLeaveN(JNIEnv *e, jclass c, jlong o) { Py_ReprLeave(o); }
 static jlong f_PyOS_FSPathN(JNIEnv *e, jclass c, jlong path) { return PyOS_FSPath(path); }
-static void f_PySys_ResetWarnOptionsN(JNIEnv *e, jclass c) { PySys_ResetWarnOptions(); }
 static jlong f_PySys_GetXOptionsN(JNIEnv *e, jclass c) { return PySys_GetXOptions(); }
 static void f_Py_ExitN(JNIEnv *e, jclass c, jint status) { Py_Exit(status); }
 static jlong f_PyImport_ImportModuleLevelObjectN(JNIEnv *e, jclass c, jlong name, jlong globals, jlong locals, jlong fromlist, jint level) { return PyImport_ImportModuleLevelObject(name, globals, locals, fromlist, level); }
@@ -762,7 +762,14 @@ static jlong f_PySeqIter_NewN(JNIEnv *e, jclass c, jlong seq) { return PySeqIter
 static jlong f_PyCallIter_NewN(JNIEnv *e, jclass c, jlong callable, jlong sentinel) { return PyCallIter_New(callable, sentinel); }
 static jlong f_PyWeakref_NewRefN(JNIEnv *e, jclass c, jlong ob, jlong callback) { return PyWeakref_NewRef(ob, callback); }
 static jlong f_PyWeakref_NewProxyN(JNIEnv *e, jclass c, jlong ob, jlong callback) { return PyWeakref_NewProxy(ob, callback); }
-static jlong f_PyWeakref_GetObjectN(JNIEnv *e, jclass c, jlong ref) { return PyWeakref_GetObject(ref); }
+/* The out-parameter's slot is an ordinary C local, so the boundary still carries only
+   primitives. Status 1 means the slot was written; 0 (dead referent) and -1 (error) both
+   collapse to 0, which the caller separates with PyErr_Occurred. */
+static jlong f_PyWeakref_GetRefN(JNIEnv *e, jclass c, jlong ref) {
+    void *obj = NULL;
+    if (PyWeakref_GetRef(ref, &obj) != 1) return 0;
+    return (jlong)obj;
+}
 static void f_PyObject_ClearWeakRefsN(JNIEnv *e, jclass c, jlong o) { PyObject_ClearWeakRefs(o); }
 static jint f_PyType_ReadyN(JNIEnv *e, jclass c, jlong type) { return PyType_Ready(type); }
 static jlong f_PyType_GetFullyQualifiedNameN(JNIEnv *e, jclass c, jlong type) { return PyType_GetFullyQualifiedName(type); }
@@ -1474,7 +1481,6 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PySys_SetObjectN", "(JJ)I", (void *)&f_PySys_SetObjectN},
         {"PySys_AuditTupleN", "(JJ)I", (void *)&f_PySys_AuditTupleN},
         {"Py_FatalErrorN", "(J)V", (void *)&f_Py_FatalErrorN},
-        {"PyImport_ImportModuleNoBlockN", "(J)J", (void *)&f_PyImport_ImportModuleNoBlockN},
         {"PyImport_ImportModuleLevelN", "(JJJJI)J", (void *)&f_PyImport_ImportModuleLevelN},
         {"PyImport_ExecCodeModuleN", "(JJ)J", (void *)&f_PyImport_ExecCodeModuleN},
         {"PyImport_ExecCodeModuleExN", "(JJJ)J", (void *)&f_PyImport_ExecCodeModuleExN},
@@ -1546,7 +1552,6 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"Py_ReprEnterN", "(J)I", (void *)&f_Py_ReprEnterN},
         {"Py_ReprLeaveN", "(J)V", (void *)&f_Py_ReprLeaveN},
         {"PyOS_FSPathN", "(J)J", (void *)&f_PyOS_FSPathN},
-        {"PySys_ResetWarnOptionsN", "()V", (void *)&f_PySys_ResetWarnOptionsN},
         {"PySys_GetXOptionsN", "()J", (void *)&f_PySys_GetXOptionsN},
         {"Py_ExitN", "(I)V", (void *)&f_Py_ExitN},
         {"PyImport_ImportModuleLevelObjectN", "(JJJJI)J", (void *)&f_PyImport_ImportModuleLevelObjectN},
@@ -1659,7 +1664,7 @@ int CustomJNI_OnLoad(JavaVM *vm, void *reserved) {
         {"PyCallIter_NewN", "(JJ)J", (void *)&f_PyCallIter_NewN},
         {"PyWeakref_NewRefN", "(JJ)J", (void *)&f_PyWeakref_NewRefN},
         {"PyWeakref_NewProxyN", "(JJ)J", (void *)&f_PyWeakref_NewProxyN},
-        {"PyWeakref_GetObjectN", "(J)J", (void *)&f_PyWeakref_GetObjectN},
+        {"PyWeakref_GetRefN", "(J)J", (void *)&f_PyWeakref_GetRefN},
         {"PyObject_ClearWeakRefsN", "(J)V", (void *)&f_PyObject_ClearWeakRefsN},
         {"PyType_ReadyN", "(J)I", (void *)&f_PyType_ReadyN},
         {"PyType_GetFullyQualifiedNameN", "(J)J", (void *)&f_PyType_GetFullyQualifiedNameN},

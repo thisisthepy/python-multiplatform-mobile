@@ -59,6 +59,57 @@ internal inline fun Int.toNativePointerFromRaw(): NativePointer? =
     if (this == 0) null else NativePointer(this)
 
 
+// ------------------------------------------------------------------------------------------------
+// Py_ssize_t: the one place where `EmbedAPI.kt`'s types and this target's ABI disagree
+// ------------------------------------------------------------------------------------------------
+//
+// `EmbedAPI.kt` types `Py_ssize_t` as `Long`, which is right on every other target this library
+// builds for. On wasm32 it is `i32`. Fourteen functions are affected -- `PyList_New/Size/GetItem/
+// SetItem/Insert`, `PyTuple_New/Size/GetItem/GetSlice/SetItem`, `PyDict_Size`, `PySet_Size`,
+// `PyObject_Size`, `PyObject_Length` -- and the two are reconciled here, at the `expect`/`actual`
+// boundary, rather than by changing either side.
+//
+// Getting the *declaration* wrong is a `LinkError` at instantiation rather than a compile error, so
+// `bindings.kt` is checked against `python.wasm`'s own type section by the Gradle task
+// `verifyWasmAbiSignatures`. What that check cannot see is the conversion, which is what the two
+// functions below exist to make explicit and testable
+// (`wasmJsTest/.../WasmPySsizeTBoundaryTest`).
+
+/**
+ * A `Py_ssize_t` coming back from C.
+ *
+ * Sign-extending, and that is the point: **-1 is the error return** of nearly every function in
+ * this group, and an unsigned widening would turn it into 4294967295 -- a value that passes an
+ * `if (n < 0)` check and is then used as a length.
+ */
+@Suppress("NOTHING_TO_INLINE")
+@PublishedApi
+internal inline fun Int.pySsizeToLong(): Long = this.toLong()
+
+/**
+ * A `Py_ssize_t` going the other way, narrowed with its range checked rather than assumed.
+ *
+ * A bare `toInt()` truncates silently, and silently is the problem: `PyList_New(0x1_0000_0000)`
+ * would become `PyList_New(0)` and hand back an empty list instead of failing. No value outside
+ * `Int` can be legitimate here -- wasm32's whole address space is 4 GiB, so no container holds that
+ * many elements -- which makes an out-of-range argument a caller bug, and the useful thing to do
+ * with a caller bug is name it where it happened instead of returning a wrong answer from
+ * somewhere else.
+ */
+@Suppress("NOTHING_TO_INLINE")
+@PublishedApi
+internal inline fun Long.toPySsize(): Int {
+    val narrowed = this.toInt()
+    if (narrowed.toLong() != this) {
+        throw IllegalArgumentException(
+            "Py_ssize_t is 32-bit on wasm32 and $this does not fit; truncating it would silently " +
+                "change the request rather than fail it"
+        )
+    }
+    return narrowed
+}
+
+
 actual inline fun Py_Initialize() = python.native.ffi.bindings.Py_Initialize()
 actual inline fun Py_InitializeEx(initsigs: Int) = python.native.ffi.bindings.Py_InitializeEx(initsigs)
 actual inline fun Py_IsInitialized(): Int = python.native.ffi.bindings.Py_IsInitialized()
@@ -81,30 +132,17 @@ actual inline fun PyEval_RestoreThread(tstate: NativePointer) = python.native.ff
 actual fun Py_MakePendingCalls(): Int = python.native.ffi.bindings.Py_MakePendingCalls()
 actual fun PyGC_Collect(): Long = python.native.ffi.bindings.PyGC_Collect().toLong()
 actual inline fun PyRun_SimpleString(command: String): Int {
-    val __command = Wasm.allocUtf8(command)
-    try {
-        return python.native.ffi.bindings.PyRun_SimpleString(__command)
-    } finally {
-        Wasm.freeUtf8(__command)
-    }
+    val __command = Wasm.scratchUtf8(command)
+    return python.native.ffi.bindings.PyRun_SimpleString(__command)
 }
 actual fun PyRun_String(str: String, start: Int, globals: NativePointer, locals: NativePointer): NativePointer? {
-    val __str = Wasm.allocUtf8(str)
-    try {
-        return python.native.ffi.bindings.PyRun_String(__str, start, globals.toPlatformPointer(), locals.toPlatformPointer()).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__str)
-    }
+    val __str = Wasm.scratchUtf8(str)
+    return python.native.ffi.bindings.PyRun_String(__str, start, globals.toPlatformPointer(), locals.toPlatformPointer()).toNativePointerFromRaw()
 }
 actual fun Py_CompileString(str: String, filename: String, start: Int): NativePointer? {
-    val __str = Wasm.allocUtf8(str)
-    val __filename = Wasm.allocUtf8(filename)
-    try {
-        return python.native.ffi.bindings.Py_CompileString(__str, __filename, start).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__str)
-        Wasm.freeUtf8(__filename)
-    }
+    val __str = Wasm.scratchUtf8(str)
+    val __filename = Wasm.internedUtf8(filename)
+    return python.native.ffi.bindings.Py_CompileString(__str, __filename, start).toNativePointerFromRaw()
 }
 actual fun PyEval_EvalCode(co: NativePointer, globals: NativePointer, locals: NativePointer): NativePointer? = python.native.ffi.bindings.PyEval_EvalCode(co.toPlatformPointer(), globals.toPlatformPointer(), locals.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyErr_Clear() = python.native.ffi.bindings.PyErr_Clear()
@@ -113,12 +151,8 @@ actual inline fun PyErr_Print() = python.native.ffi.bindings.PyErr_Print()
 actual inline fun PyErr_WriteUnraisable(obj: NativePointer) = python.native.ffi.bindings.PyErr_WriteUnraisable(obj.toPlatformPointer())
 actual inline fun PyErr_DisplayException(exc: NativePointer) = python.native.ffi.bindings.PyErr_DisplayException(exc.toPlatformPointer())
 actual inline fun PyErr_SetString(type: NativePointer, message: String) {
-    val __message = Wasm.allocUtf8(message)
-    try {
-        return python.native.ffi.bindings.PyErr_SetString(type.toPlatformPointer(), __message)
-    } finally {
-        Wasm.freeUtf8(__message)
-    }
+    val __message = Wasm.scratchUtf8(message)
+    return python.native.ffi.bindings.PyErr_SetString(type.toPlatformPointer(), __message)
 }
 actual inline fun PyErr_SetObject(type: NativePointer, value: NativePointer) = python.native.ffi.bindings.PyErr_SetObject(type.toPlatformPointer(), value.toPlatformPointer())
 actual inline fun PyErr_SetNone(type: NativePointer) = python.native.ffi.bindings.PyErr_SetNone(type.toPlatformPointer())
@@ -128,43 +162,25 @@ actual fun PyErr_SetFromErrno(type: NativePointer): NativePointer? = python.nati
 actual fun PyErr_SetFromErrnoWithFilenameObject(type: NativePointer, filenameObject: NativePointer): NativePointer? = python.native.ffi.bindings.PyErr_SetFromErrnoWithFilenameObject(type.toPlatformPointer(), filenameObject.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyErr_SetFromErrnoWithFilenameObjects(type: NativePointer, filenameObject: NativePointer, filenameObject2: NativePointer): NativePointer? = python.native.ffi.bindings.PyErr_SetFromErrnoWithFilenameObjects(type.toPlatformPointer(), filenameObject.toPlatformPointer(), filenameObject2.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyErr_SetFromErrnoWithFilename(type: NativePointer, filename: String): NativePointer? {
-    val __filename = Wasm.allocUtf8(filename)
-    try {
-        return python.native.ffi.bindings.PyErr_SetFromErrnoWithFilename(type.toPlatformPointer(), __filename).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__filename)
-    }
+    val __filename = Wasm.scratchUtf8(filename)
+    return python.native.ffi.bindings.PyErr_SetFromErrnoWithFilename(type.toPlatformPointer(), __filename).toNativePointerFromRaw()
 }
 actual fun PyErr_SetImportError(msg: NativePointer, name: NativePointer, path: NativePointer): NativePointer? = python.native.ffi.bindings.PyErr_SetImportError(msg.toPlatformPointer(), name.toPlatformPointer(), path.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyErr_SetImportErrorSubclass(exception: NativePointer, msg: NativePointer, name: NativePointer, path: NativePointer): NativePointer? = python.native.ffi.bindings.PyErr_SetImportErrorSubclass(exception.toPlatformPointer(), msg.toPlatformPointer(), name.toPlatformPointer(), path.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyErr_SyntaxLocationEx(filename: String, lineno: Int, col_offset: Int) {
-    val __filename = Wasm.allocUtf8(filename)
-    try {
-        return python.native.ffi.bindings.PyErr_SyntaxLocationEx(__filename, lineno, col_offset)
-    } finally {
-        Wasm.freeUtf8(__filename)
-    }
+    val __filename = Wasm.scratchUtf8(filename)
+    return python.native.ffi.bindings.PyErr_SyntaxLocationEx(__filename, lineno, col_offset)
 }
 actual inline fun PyErr_SyntaxLocation(filename: String, lineno: Int) {
-    val __filename = Wasm.allocUtf8(filename)
-    try {
-        return python.native.ffi.bindings.PyErr_SyntaxLocation(__filename, lineno)
-    } finally {
-        Wasm.freeUtf8(__filename)
-    }
+    val __filename = Wasm.scratchUtf8(filename)
+    return python.native.ffi.bindings.PyErr_SyntaxLocation(__filename, lineno)
 }
 actual inline fun PyErr_BadInternalCall() = python.native.ffi.bindings.PyErr_BadInternalCall()
 actual inline fun PyErr_WarnExplicit(category: NativePointer, message: String, filename: String, lineno: Int, module: String, registry: NativePointer): Int {
-    val __message = Wasm.allocUtf8(message)
-    val __filename = Wasm.allocUtf8(filename)
-    val __module = Wasm.allocUtf8(module)
-    try {
-        return python.native.ffi.bindings.PyErr_WarnExplicit(category.toPlatformPointer(), __message, __filename, lineno, __module, registry.toPlatformPointer())
-    } finally {
-        Wasm.freeUtf8(__message)
-        Wasm.freeUtf8(__filename)
-        Wasm.freeUtf8(__module)
-    }
+    val __message = Wasm.scratchUtf8(message)
+    val __filename = Wasm.internedUtf8(filename)
+    val __module = Wasm.internedUtf8(module)
+    return python.native.ffi.bindings.PyErr_WarnExplicit(category.toPlatformPointer(), __message, __filename, lineno, __module, registry.toPlatformPointer())
 }
 actual fun PyErr_Occurred(): NativePointer? = python.native.ffi.bindings.PyErr_Occurred().toNativePointerFromRaw()
 actual inline fun PyErr_ExceptionMatches(exc: NativePointer): Int = python.native.ffi.bindings.PyErr_ExceptionMatches(exc.toPlatformPointer())
@@ -179,22 +195,13 @@ actual inline fun PyErr_CheckSignals(): Int = python.native.ffi.bindings.PyErr_C
 actual inline fun PyErr_SetInterrupt() = python.native.ffi.bindings.PyErr_SetInterrupt()
 actual inline fun PyErr_SetInterruptEx(signum: Int): Int = python.native.ffi.bindings.PyErr_SetInterruptEx(signum)
 actual fun PyErr_NewException(name: String, base: NativePointer, dict: NativePointer): NativePointer? {
-    val __name = Wasm.allocUtf8(name)
-    try {
-        return python.native.ffi.bindings.PyErr_NewException(__name, base.toPlatformPointer(), dict.toPlatformPointer()).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__name)
-    }
+    val __name = Wasm.internedUtf8(name)
+    return python.native.ffi.bindings.PyErr_NewException(__name, base.toPlatformPointer(), dict.toPlatformPointer()).toNativePointerFromRaw()
 }
 actual fun PyErr_NewExceptionWithDoc(name: String, doc: String, base: NativePointer, dict: NativePointer): NativePointer? {
-    val __name = Wasm.allocUtf8(name)
-    val __doc = Wasm.allocUtf8(doc)
-    try {
-        return python.native.ffi.bindings.PyErr_NewExceptionWithDoc(__name, __doc, base.toPlatformPointer(), dict.toPlatformPointer()).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__name)
-        Wasm.freeUtf8(__doc)
-    }
+    val __name = Wasm.internedUtf8(name)
+    val __doc = Wasm.scratchUtf8(doc)
+    return python.native.ffi.bindings.PyErr_NewExceptionWithDoc(__name, __doc, base.toPlatformPointer(), dict.toPlatformPointer()).toNativePointerFromRaw()
 }
 actual fun PyException_GetTraceback(ex: NativePointer): NativePointer? = python.native.ffi.bindings.PyException_GetTraceback(ex.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyException_SetTraceback(ex: NativePointer, tb: NativePointer): Int = python.native.ffi.bindings.PyException_SetTraceback(ex.toPlatformPointer(), tb.toPlatformPointer())
@@ -208,20 +215,12 @@ actual fun PyUnicodeEncodeError_GetEncoding(exc: NativePointer): NativePointer? 
 actual fun PyUnicodeTranslateError_GetObject(exc: NativePointer): NativePointer? = python.native.ffi.bindings.PyUnicodeTranslateError_GetObject(exc.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyUnicodeTranslateError_GetReason(exc: NativePointer): NativePointer? = python.native.ffi.bindings.PyUnicodeTranslateError_GetReason(exc.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyUnicodeTranslateError_SetReason(exc: NativePointer, reason: String): Int {
-    val __reason = Wasm.allocUtf8(reason)
-    try {
-        return python.native.ffi.bindings.PyUnicodeTranslateError_SetReason(exc.toPlatformPointer(), __reason)
-    } finally {
-        Wasm.freeUtf8(__reason)
-    }
+    val __reason = Wasm.scratchUtf8(reason)
+    return python.native.ffi.bindings.PyUnicodeTranslateError_SetReason(exc.toPlatformPointer(), __reason)
 }
 actual inline fun Py_EnterRecursiveCall(where: String): Int {
-    val __where = Wasm.allocUtf8(where)
-    try {
-        return python.native.ffi.bindings.Py_EnterRecursiveCall(__where)
-    } finally {
-        Wasm.freeUtf8(__where)
-    }
+    val __where = Wasm.scratchUtf8(where)
+    return python.native.ffi.bindings.Py_EnterRecursiveCall(__where)
 }
 actual inline fun Py_LeaveRecursiveCall() = python.native.ffi.bindings.Py_LeaveRecursiveCall()
 actual inline fun Py_ReprEnter(o: NativePointer): Int = python.native.ffi.bindings.Py_ReprEnter(o.toPlatformPointer())
@@ -232,114 +231,58 @@ actual inline fun Py_IncRef(o: NativePointer) = python.native.ffi.bindings.Py_In
 actual inline fun Py_DecRef(o: NativePointer) = python.native.ffi.bindings.Py_DecRef(o.toPlatformPointer())
 actual fun PyOS_FSPath(path: NativePointer): NativePointer? = python.native.ffi.bindings.PyOS_FSPath(path.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PySys_GetObject(name: String): NativePointer? {
-    val __name = Wasm.allocUtf8(name)
-    try {
-        return python.native.ffi.bindings.PySys_GetObject(__name).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__name)
-    }
+    val __name = Wasm.internedUtf8(name)
+    return python.native.ffi.bindings.PySys_GetObject(__name).toNativePointerFromRaw()
 }
 actual inline fun PySys_SetObject(name: String, v: NativePointer): Int {
-    val __name = Wasm.allocUtf8(name)
-    try {
-        return python.native.ffi.bindings.PySys_SetObject(__name, v.toPlatformPointer())
-    } finally {
-        Wasm.freeUtf8(__name)
-    }
+    val __name = Wasm.internedUtf8(name)
+    return python.native.ffi.bindings.PySys_SetObject(__name, v.toPlatformPointer())
 }
-actual inline fun PySys_ResetWarnOptions() = python.native.ffi.bindings.PySys_ResetWarnOptions()
 actual fun PySys_GetXOptions(): NativePointer? = python.native.ffi.bindings.PySys_GetXOptions().toNativePointerFromRaw()
 actual inline fun PySys_AuditTuple(event: String, args: NativePointer): Int {
-    val __event = Wasm.allocUtf8(event)
-    try {
-        return python.native.ffi.bindings.PySys_AuditTuple(__event, args.toPlatformPointer())
-    } finally {
-        Wasm.freeUtf8(__event)
-    }
+    val __event = Wasm.internedUtf8(event)
+    return python.native.ffi.bindings.PySys_AuditTuple(__event, args.toPlatformPointer())
 }
 actual inline fun Py_FatalError(message: String) {
-    val __message = Wasm.allocUtf8(message)
-    try {
-        return python.native.ffi.bindings.Py_FatalError(__message)
-    } finally {
-        Wasm.freeUtf8(__message)
-    }
+    val __message = Wasm.scratchUtf8(message)
+    return python.native.ffi.bindings.Py_FatalError(__message)
 }
 actual inline fun Py_Exit(status: Int) = python.native.ffi.bindings.Py_Exit(status)
 actual fun PyImport_ImportModule(name: String): NativePointer? {
-    val __name = Wasm.allocUtf8(name)
-    try {
-        return python.native.ffi.bindings.PyImport_ImportModule(__name).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__name)
-    }
-}
-actual fun PyImport_ImportModuleNoBlock(name: String): NativePointer? {
-    val __name = Wasm.allocUtf8(name)
-    try {
-        return python.native.ffi.bindings.PyImport_ImportModuleNoBlock(__name).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__name)
-    }
+    val __name = Wasm.internedUtf8(name)
+    return python.native.ffi.bindings.PyImport_ImportModule(__name).toNativePointerFromRaw()
 }
 actual fun PyImport_ImportModuleLevelObject(name: NativePointer, globals: NativePointer, locals: NativePointer, fromlist: NativePointer, level: Int): NativePointer? = python.native.ffi.bindings.PyImport_ImportModuleLevelObject(name.toPlatformPointer(), globals.toPlatformPointer(), locals.toPlatformPointer(), fromlist.toPlatformPointer(), level).toNativePointerFromRaw()
 actual fun PyImport_ImportModuleLevel(name: String, globals: NativePointer, locals: NativePointer, fromlist: NativePointer, level: Int): NativePointer? {
-    val __name = Wasm.allocUtf8(name)
-    try {
-        return python.native.ffi.bindings.PyImport_ImportModuleLevel(__name, globals.toPlatformPointer(), locals.toPlatformPointer(), fromlist.toPlatformPointer(), level).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__name)
-    }
+    val __name = Wasm.internedUtf8(name)
+    return python.native.ffi.bindings.PyImport_ImportModuleLevel(__name, globals.toPlatformPointer(), locals.toPlatformPointer(), fromlist.toPlatformPointer(), level).toNativePointerFromRaw()
 }
 actual fun PyImport_Import(name: NativePointer): NativePointer? = python.native.ffi.bindings.PyImport_Import(name.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyImport_ReloadModule(m: NativePointer): NativePointer? = python.native.ffi.bindings.PyImport_ReloadModule(m.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyImport_AddModuleRef(name: String): NativePointer? {
-    val __name = Wasm.allocUtf8(name)
-    try {
-        return python.native.ffi.bindings.PyImport_AddModuleRef(__name).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__name)
-    }
+    val __name = Wasm.internedUtf8(name)
+    return python.native.ffi.bindings.PyImport_AddModuleRef(__name).toNativePointerFromRaw()
 }
 actual fun PyImport_AddModuleObject(name: NativePointer): NativePointer? = python.native.ffi.bindings.PyImport_AddModuleObject(name.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyImport_AddModule(name: String): NativePointer? {
-    val __name = Wasm.allocUtf8(name)
-    try {
-        return python.native.ffi.bindings.PyImport_AddModule(__name).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__name)
-    }
+    val __name = Wasm.internedUtf8(name)
+    return python.native.ffi.bindings.PyImport_AddModule(__name).toNativePointerFromRaw()
 }
 actual fun PyImport_ExecCodeModule(name: String, co: NativePointer): NativePointer? {
-    val __name = Wasm.allocUtf8(name)
-    try {
-        return python.native.ffi.bindings.PyImport_ExecCodeModule(__name, co.toPlatformPointer()).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__name)
-    }
+    val __name = Wasm.internedUtf8(name)
+    return python.native.ffi.bindings.PyImport_ExecCodeModule(__name, co.toPlatformPointer()).toNativePointerFromRaw()
 }
 actual fun PyImport_ExecCodeModuleEx(name: String, co: NativePointer, pathname: String): NativePointer? {
-    val __name = Wasm.allocUtf8(name)
-    val __pathname = Wasm.allocUtf8(pathname)
-    try {
-        return python.native.ffi.bindings.PyImport_ExecCodeModuleEx(__name, co.toPlatformPointer(), __pathname).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__name)
-        Wasm.freeUtf8(__pathname)
-    }
+    val __name = Wasm.internedUtf8(name)
+    val __pathname = Wasm.scratchUtf8(pathname)
+    return python.native.ffi.bindings.PyImport_ExecCodeModuleEx(__name, co.toPlatformPointer(), __pathname).toNativePointerFromRaw()
 }
 actual fun PyImport_ExecCodeModuleObject(name: NativePointer, co: NativePointer, pathname: NativePointer, cpathname: NativePointer): NativePointer? = python.native.ffi.bindings.PyImport_ExecCodeModuleObject(name.toPlatformPointer(), co.toPlatformPointer(), pathname.toPlatformPointer(), cpathname.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyImport_ExecCodeModuleWithPathnames(name: String, co: NativePointer, pathname: String, cpathname: String): NativePointer? {
-    val __name = Wasm.allocUtf8(name)
-    val __pathname = Wasm.allocUtf8(pathname)
-    val __cpathname = Wasm.allocUtf8(cpathname)
-    try {
-        return python.native.ffi.bindings.PyImport_ExecCodeModuleWithPathnames(__name, co.toPlatformPointer(), __pathname, __cpathname).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__name)
-        Wasm.freeUtf8(__pathname)
-        Wasm.freeUtf8(__cpathname)
-    }
+    val __name = Wasm.internedUtf8(name)
+    val __pathname = Wasm.scratchUtf8(pathname)
+    val __cpathname = Wasm.scratchUtf8(cpathname)
+    return python.native.ffi.bindings.PyImport_ExecCodeModuleWithPathnames(__name, co.toPlatformPointer(), __pathname, __cpathname).toNativePointerFromRaw()
 }
 actual inline fun PyImport_GetMagicTag(): String? = Wasm.readUtf8String(python.native.ffi.bindings.PyImport_GetMagicTag())
 actual fun PyImport_GetModuleDict(): NativePointer? = python.native.ffi.bindings.PyImport_GetModuleDict().toNativePointerFromRaw()
@@ -347,12 +290,8 @@ actual fun PyImport_GetModule(name: NativePointer): NativePointer? = python.nati
 actual fun PyImport_GetImporter(path: NativePointer): NativePointer? = python.native.ffi.bindings.PyImport_GetImporter(path.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyImport_ImportFrozenModuleObject(name: NativePointer): Int = python.native.ffi.bindings.PyImport_ImportFrozenModuleObject(name.toPlatformPointer())
 actual inline fun PyImport_ImportFrozenModule(name: String): Int {
-    val __name = Wasm.allocUtf8(name)
-    try {
-        return python.native.ffi.bindings.PyImport_ImportFrozenModule(__name)
-    } finally {
-        Wasm.freeUtf8(__name)
-    }
+    val __name = Wasm.internedUtf8(name)
+    return python.native.ffi.bindings.PyImport_ImportFrozenModule(__name)
 }
 actual fun PyEval_GetBuiltins(): NativePointer? = python.native.ffi.bindings.PyEval_GetBuiltins().toNativePointerFromRaw()
 actual fun PyEval_GetLocals(): NativePointer? = python.native.ffi.bindings.PyEval_GetLocals().toNativePointerFromRaw()
@@ -364,50 +303,30 @@ actual inline fun PyEval_GetFuncName(func: NativePointer): String? = Wasm.readUt
 actual inline fun PyEval_GetFuncDesc(func: NativePointer): String? = Wasm.readUtf8String(python.native.ffi.bindings.PyEval_GetFuncDesc(func.toPlatformPointer()))
 actual inline fun PyObject_HasAttrWithError(o: NativePointer, attr_name: NativePointer): Int = python.native.ffi.bindings.PyObject_HasAttrWithError(o.toPlatformPointer(), attr_name.toPlatformPointer())
 actual inline fun PyObject_HasAttrStringWithError(o: NativePointer, attr_name: String): Int {
-    val __attr_name = Wasm.allocUtf8(attr_name)
-    try {
-        return python.native.ffi.bindings.PyObject_HasAttrStringWithError(o.toPlatformPointer(), __attr_name)
-    } finally {
-        Wasm.freeUtf8(__attr_name)
-    }
+    val __attr_name = Wasm.internedUtf8(attr_name)
+    return python.native.ffi.bindings.PyObject_HasAttrStringWithError(o.toPlatformPointer(), __attr_name)
 }
 actual inline fun PyObject_HasAttr(o: NativePointer, attr_name: NativePointer): Int = python.native.ffi.bindings.PyObject_HasAttr(o.toPlatformPointer(), attr_name.toPlatformPointer())
 actual inline fun PyObject_HasAttrString(o: NativePointer, attr_name: String): Int {
-    val __attr_name = Wasm.allocUtf8(attr_name)
-    try {
-        return python.native.ffi.bindings.PyObject_HasAttrString(o.toPlatformPointer(), __attr_name)
-    } finally {
-        Wasm.freeUtf8(__attr_name)
-    }
+    val __attr_name = Wasm.internedUtf8(attr_name)
+    return python.native.ffi.bindings.PyObject_HasAttrString(o.toPlatformPointer(), __attr_name)
 }
 actual fun PyObject_GetAttr(o: NativePointer, attr_name: NativePointer): NativePointer? = python.native.ffi.bindings.PyObject_GetAttr(o.toPlatformPointer(), attr_name.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyObject_GetAttrString(o: NativePointer, attr_name: String): NativePointer? {
-    val __attr_name = Wasm.allocUtf8(attr_name)
-    try {
-        return python.native.ffi.bindings.PyObject_GetAttrString(o.toPlatformPointer(), __attr_name).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__attr_name)
-    }
+    val __attr_name = Wasm.internedUtf8(attr_name)
+    return python.native.ffi.bindings.PyObject_GetAttrString(o.toPlatformPointer(), __attr_name).toNativePointerFromRaw()
 }
 actual fun PyObject_GenericGetAttr(o: NativePointer, name: NativePointer): NativePointer? = python.native.ffi.bindings.PyObject_GenericGetAttr(o.toPlatformPointer(), name.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyObject_SetAttr(o: NativePointer, attr_name: NativePointer, v: NativePointer): Int = python.native.ffi.bindings.PyObject_SetAttr(o.toPlatformPointer(), attr_name.toPlatformPointer(), v.toPlatformPointer())
 actual inline fun PyObject_SetAttrString(o: NativePointer, attr_name: String, v: NativePointer): Int {
-    val __attr_name = Wasm.allocUtf8(attr_name)
-    try {
-        return python.native.ffi.bindings.PyObject_SetAttrString(o.toPlatformPointer(), __attr_name, v.toPlatformPointer())
-    } finally {
-        Wasm.freeUtf8(__attr_name)
-    }
+    val __attr_name = Wasm.internedUtf8(attr_name)
+    return python.native.ffi.bindings.PyObject_SetAttrString(o.toPlatformPointer(), __attr_name, v.toPlatformPointer())
 }
 actual inline fun PyObject_GenericSetAttr(o: NativePointer, name: NativePointer, value: NativePointer): Int = python.native.ffi.bindings.PyObject_GenericSetAttr(o.toPlatformPointer(), name.toPlatformPointer(), value.toPlatformPointer())
 actual inline fun PyObject_DelAttr(o: NativePointer, attr_name: NativePointer): Int = python.native.ffi.bindings.PyObject_DelAttr(o.toPlatformPointer(), attr_name.toPlatformPointer())
 actual inline fun PyObject_DelAttrString(o: NativePointer, attr_name: String): Int {
-    val __attr_name = Wasm.allocUtf8(attr_name)
-    try {
-        return python.native.ffi.bindings.PyObject_DelAttrString(o.toPlatformPointer(), __attr_name)
-    } finally {
-        Wasm.freeUtf8(__attr_name)
-    }
+    val __attr_name = Wasm.internedUtf8(attr_name)
+    return python.native.ffi.bindings.PyObject_DelAttrString(o.toPlatformPointer(), __attr_name)
 }
 actual fun PyObject_RichCompare(o1: NativePointer, o2: NativePointer, opid: Int): NativePointer? = python.native.ffi.bindings.PyObject_RichCompare(o1.toPlatformPointer(), o2.toPlatformPointer(), opid).toNativePointerFromRaw()
 actual inline fun PyObject_RichCompareBool(o1: NativePointer, o2: NativePointer, opid: Int): Int = python.native.ffi.bindings.PyObject_RichCompareBool(o1.toPlatformPointer(), o2.toPlatformPointer(), opid)
@@ -421,8 +340,8 @@ actual inline fun PyObject_IsInstance(inst: NativePointer, cls: NativePointer): 
 actual inline fun PyObject_IsTrue(o: NativePointer): Int = python.native.ffi.bindings.PyObject_IsTrue(o.toPlatformPointer())
 actual inline fun PyObject_Not(o: NativePointer): Int = python.native.ffi.bindings.PyObject_Not(o.toPlatformPointer())
 actual fun PyObject_Type(o: NativePointer): NativePointer? = python.native.ffi.bindings.PyObject_Type(o.toPlatformPointer()).toNativePointerFromRaw()
-actual inline fun PyObject_Size(o: NativePointer): Long = python.native.ffi.bindings.PyObject_Size(o.toPlatformPointer()).toLong()
-actual inline fun PyObject_Length(o: NativePointer): Long = python.native.ffi.bindings.PyObject_Length(o.toPlatformPointer()).toLong()
+actual inline fun PyObject_Size(o: NativePointer): Long = python.native.ffi.bindings.PyObject_Size(o.toPlatformPointer()).pySsizeToLong()
+actual inline fun PyObject_Length(o: NativePointer): Long = python.native.ffi.bindings.PyObject_Length(o.toPlatformPointer()).pySsizeToLong()
 actual fun PyObject_GetItem(o: NativePointer, key: NativePointer): NativePointer? = python.native.ffi.bindings.PyObject_GetItem(o.toPlatformPointer(), key.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyObject_SetItem(o: NativePointer, key: NativePointer, v: NativePointer): Int = python.native.ffi.bindings.PyObject_SetItem(o.toPlatformPointer(), key.toPlatformPointer(), v.toPlatformPointer())
 actual inline fun PyObject_DelItem(o: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PyObject_DelItem(o.toPlatformPointer(), key.toPlatformPointer())
@@ -478,47 +397,27 @@ actual inline fun PySequence_Contains(o: NativePointer, value: NativePointer): I
 actual fun PySequence_List(o: NativePointer): NativePointer? = python.native.ffi.bindings.PySequence_List(o.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PySequence_Tuple(o: NativePointer): NativePointer? = python.native.ffi.bindings.PySequence_Tuple(o.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PySequence_Fast(o: NativePointer, m: String): NativePointer? {
-    val __m = Wasm.allocUtf8(m)
-    try {
-        return python.native.ffi.bindings.PySequence_Fast(o.toPlatformPointer(), __m).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__m)
-    }
+    val __m = Wasm.scratchUtf8(m)
+    return python.native.ffi.bindings.PySequence_Fast(o.toPlatformPointer(), __m).toNativePointerFromRaw()
 }
 actual inline fun PyMapping_Check(o: NativePointer): Int = python.native.ffi.bindings.PyMapping_Check(o.toPlatformPointer())
 actual fun PyMapping_GetItemString(o: NativePointer, key: String): NativePointer? {
-    val __key = Wasm.allocUtf8(key)
-    try {
-        return python.native.ffi.bindings.PyMapping_GetItemString(o.toPlatformPointer(), __key).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__key)
-    }
+    val __key = Wasm.internedUtf8(key)
+    return python.native.ffi.bindings.PyMapping_GetItemString(o.toPlatformPointer(), __key).toNativePointerFromRaw()
 }
 actual inline fun PyMapping_SetItemString(o: NativePointer, key: String, v: NativePointer): Int {
-    val __key = Wasm.allocUtf8(key)
-    try {
-        return python.native.ffi.bindings.PyMapping_SetItemString(o.toPlatformPointer(), __key, v.toPlatformPointer())
-    } finally {
-        Wasm.freeUtf8(__key)
-    }
+    val __key = Wasm.internedUtf8(key)
+    return python.native.ffi.bindings.PyMapping_SetItemString(o.toPlatformPointer(), __key, v.toPlatformPointer())
 }
 actual inline fun PyMapping_HasKeyWithError(o: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PyMapping_HasKeyWithError(o.toPlatformPointer(), key.toPlatformPointer())
 actual inline fun PyMapping_HasKeyStringWithError(o: NativePointer, key: String): Int {
-    val __key = Wasm.allocUtf8(key)
-    try {
-        return python.native.ffi.bindings.PyMapping_HasKeyStringWithError(o.toPlatformPointer(), __key)
-    } finally {
-        Wasm.freeUtf8(__key)
-    }
+    val __key = Wasm.internedUtf8(key)
+    return python.native.ffi.bindings.PyMapping_HasKeyStringWithError(o.toPlatformPointer(), __key)
 }
 actual inline fun PyMapping_HasKey(o: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PyMapping_HasKey(o.toPlatformPointer(), key.toPlatformPointer())
 actual inline fun PyMapping_HasKeyString(o: NativePointer, key: String): Int {
-    val __key = Wasm.allocUtf8(key)
-    try {
-        return python.native.ffi.bindings.PyMapping_HasKeyString(o.toPlatformPointer(), __key)
-    } finally {
-        Wasm.freeUtf8(__key)
-    }
+    val __key = Wasm.internedUtf8(key)
+    return python.native.ffi.bindings.PyMapping_HasKeyString(o.toPlatformPointer(), __key)
 }
 actual fun PyMapping_Keys(o: NativePointer): NativePointer? = python.native.ffi.bindings.PyMapping_Keys(o.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyMapping_Values(o: NativePointer): NativePointer? = python.native.ffi.bindings.PyMapping_Values(o.toPlatformPointer()).toNativePointerFromRaw()
@@ -540,12 +439,8 @@ actual fun PyFloat_GetInfo(): NativePointer? = python.native.ffi.bindings.PyFloa
 actual inline fun PyFloat_GetMax(): Double = python.native.ffi.bindings.PyFloat_GetMax()
 actual inline fun PyFloat_GetMin(): Double = python.native.ffi.bindings.PyFloat_GetMin()
 actual fun PyBytes_FromString(v: String): NativePointer? {
-    val __v = Wasm.allocUtf8(v)
-    try {
-        return python.native.ffi.bindings.PyBytes_FromString(__v).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__v)
-    }
+    val __v = Wasm.scratchUtf8(v)
+    return python.native.ffi.bindings.PyBytes_FromString(__v).toNativePointerFromRaw()
 }
 actual fun PyBytes_FromObject(o: NativePointer): NativePointer? = python.native.ffi.bindings.PyBytes_FromObject(o.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyBytes_AsString(o: NativePointer): String? = Wasm.readUtf8String(python.native.ffi.bindings.PyBytes_AsString(o.toPlatformPointer()))
@@ -554,60 +449,33 @@ actual fun PyByteArray_Concat(a: NativePointer, b: NativePointer): NativePointer
 actual inline fun PyByteArray_AsString(bytearray: NativePointer): String? = Wasm.readUtf8String(python.native.ffi.bindings.PyByteArray_AsString(bytearray.toPlatformPointer()))
 actual inline fun PyUnicode_IsIdentifier(unicode: NativePointer): Int = python.native.ffi.bindings.PyUnicode_IsIdentifier(unicode.toPlatformPointer())
 actual fun PyUnicode_FromString(str: String): NativePointer? {
-    val __str = Wasm.allocUtf8(str)
-    try {
-        return python.native.ffi.bindings.PyUnicode_FromString(__str).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__str)
-    }
+    val __str = Wasm.scratchUtf8(str)
+    return python.native.ffi.bindings.PyUnicode_FromString(__str).toNativePointerFromRaw()
 }
 actual fun PyUnicode_FromObject(obj: NativePointer): NativePointer? = python.native.ffi.bindings.PyUnicode_FromObject(obj.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyUnicode_FromEncodedObject(obj: NativePointer, encoding: String, errors: String): NativePointer? {
-    val __encoding = Wasm.allocUtf8(encoding)
-    val __errors = Wasm.allocUtf8(errors)
-    try {
-        return python.native.ffi.bindings.PyUnicode_FromEncodedObject(obj.toPlatformPointer(), __encoding, __errors).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__encoding)
-        Wasm.freeUtf8(__errors)
-    }
+    val __encoding = Wasm.internedUtf8(encoding)
+    val __errors = Wasm.scratchUtf8(errors)
+    return python.native.ffi.bindings.PyUnicode_FromEncodedObject(obj.toPlatformPointer(), __encoding, __errors).toNativePointerFromRaw()
 }
 actual fun PyUnicode_DecodeLocale(str: String, errors: String): NativePointer? {
-    val __str = Wasm.allocUtf8(str)
-    val __errors = Wasm.allocUtf8(errors)
-    try {
-        return python.native.ffi.bindings.PyUnicode_DecodeLocale(__str, __errors).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__str)
-        Wasm.freeUtf8(__errors)
-    }
+    val __str = Wasm.scratchUtf8(str)
+    val __errors = Wasm.scratchUtf8(errors)
+    return python.native.ffi.bindings.PyUnicode_DecodeLocale(__str, __errors).toNativePointerFromRaw()
 }
 actual fun PyUnicode_EncodeLocale(unicode: NativePointer, errors: String): NativePointer? {
-    val __errors = Wasm.allocUtf8(errors)
-    try {
-        return python.native.ffi.bindings.PyUnicode_EncodeLocale(unicode.toPlatformPointer(), __errors).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__errors)
-    }
+    val __errors = Wasm.scratchUtf8(errors)
+    return python.native.ffi.bindings.PyUnicode_EncodeLocale(unicode.toPlatformPointer(), __errors).toNativePointerFromRaw()
 }
 actual fun PyUnicode_DecodeFSDefault(str: String): NativePointer? {
-    val __str = Wasm.allocUtf8(str)
-    try {
-        return python.native.ffi.bindings.PyUnicode_DecodeFSDefault(__str).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__str)
-    }
+    val __str = Wasm.scratchUtf8(str)
+    return python.native.ffi.bindings.PyUnicode_DecodeFSDefault(__str).toNativePointerFromRaw()
 }
 actual fun PyUnicode_EncodeFSDefault(unicode: NativePointer): NativePointer? = python.native.ffi.bindings.PyUnicode_EncodeFSDefault(unicode.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyUnicode_AsEncodedString(unicode: NativePointer, encoding: String, errors: String): NativePointer? {
-    val __encoding = Wasm.allocUtf8(encoding)
-    val __errors = Wasm.allocUtf8(errors)
-    try {
-        return python.native.ffi.bindings.PyUnicode_AsEncodedString(unicode.toPlatformPointer(), __encoding, __errors).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__encoding)
-        Wasm.freeUtf8(__errors)
-    }
+    val __encoding = Wasm.internedUtf8(encoding)
+    val __errors = Wasm.scratchUtf8(errors)
+    return python.native.ffi.bindings.PyUnicode_AsEncodedString(unicode.toPlatformPointer(), __encoding, __errors).toNativePointerFromRaw()
 }
 actual fun PyUnicode_AsUTF8String(unicode: NativePointer): NativePointer? = python.native.ffi.bindings.PyUnicode_AsUTF8String(unicode.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyUnicode_AsUTF8(unicode: NativePointer): String? = Wasm.readUtf8String(python.native.ffi.bindings.PyUnicode_AsUTF8(unicode.toPlatformPointer()))
@@ -619,86 +487,58 @@ actual fun PyUnicode_AsLatin1String(unicode: NativePointer): NativePointer? = py
 actual fun PyUnicode_AsASCIIString(unicode: NativePointer): NativePointer? = python.native.ffi.bindings.PyUnicode_AsASCIIString(unicode.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyUnicode_AsCharmapString(unicode: NativePointer, mapping: NativePointer): NativePointer? = python.native.ffi.bindings.PyUnicode_AsCharmapString(unicode.toPlatformPointer(), mapping.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyUnicode_Translate(unicode: NativePointer, table: NativePointer, errors: String): NativePointer? {
-    val __errors = Wasm.allocUtf8(errors)
-    try {
-        return python.native.ffi.bindings.PyUnicode_Translate(unicode.toPlatformPointer(), table.toPlatformPointer(), __errors).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__errors)
-    }
+    val __errors = Wasm.scratchUtf8(errors)
+    return python.native.ffi.bindings.PyUnicode_Translate(unicode.toPlatformPointer(), table.toPlatformPointer(), __errors).toNativePointerFromRaw()
 }
 actual fun PyUnicode_Concat(left: NativePointer, right: NativePointer): NativePointer? = python.native.ffi.bindings.PyUnicode_Concat(left.toPlatformPointer(), right.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyUnicode_Splitlines(unicode: NativePointer, keepends: Int): NativePointer? = python.native.ffi.bindings.PyUnicode_Splitlines(unicode.toPlatformPointer(), keepends).toNativePointerFromRaw()
 actual fun PyUnicode_Join(separator: NativePointer, seq: NativePointer): NativePointer? = python.native.ffi.bindings.PyUnicode_Join(separator.toPlatformPointer(), seq.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyUnicode_Compare(left: NativePointer, right: NativePointer): Int = python.native.ffi.bindings.PyUnicode_Compare(left.toPlatformPointer(), right.toPlatformPointer())
 actual inline fun PyUnicode_EqualToUTF8(unicode: NativePointer, string: String): Int {
-    val __string = Wasm.allocUtf8(string)
-    try {
-        return python.native.ffi.bindings.PyUnicode_EqualToUTF8(unicode.toPlatformPointer(), __string)
-    } finally {
-        Wasm.freeUtf8(__string)
-    }
+    val __string = Wasm.scratchUtf8(string)
+    return python.native.ffi.bindings.PyUnicode_EqualToUTF8(unicode.toPlatformPointer(), __string)
 }
 actual inline fun PyUnicode_CompareWithASCIIString(unicode: NativePointer, string: String): Int {
-    val __string = Wasm.allocUtf8(string)
-    try {
-        return python.native.ffi.bindings.PyUnicode_CompareWithASCIIString(unicode.toPlatformPointer(), __string)
-    } finally {
-        Wasm.freeUtf8(__string)
-    }
+    val __string = Wasm.scratchUtf8(string)
+    return python.native.ffi.bindings.PyUnicode_CompareWithASCIIString(unicode.toPlatformPointer(), __string)
 }
 actual fun PyUnicode_RichCompare(left: NativePointer, right: NativePointer, op: Int): NativePointer? = python.native.ffi.bindings.PyUnicode_RichCompare(left.toPlatformPointer(), right.toPlatformPointer(), op).toNativePointerFromRaw()
 actual fun PyUnicode_Format(format: NativePointer, args: NativePointer): NativePointer? = python.native.ffi.bindings.PyUnicode_Format(format.toPlatformPointer(), args.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyUnicode_Contains(unicode: NativePointer, substr: NativePointer): Int = python.native.ffi.bindings.PyUnicode_Contains(unicode.toPlatformPointer(), substr.toPlatformPointer())
 actual fun PyUnicode_InternFromString(str: String): NativePointer? {
-    val __str = Wasm.allocUtf8(str)
-    try {
-        return python.native.ffi.bindings.PyUnicode_InternFromString(__str).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__str)
-    }
+    val __str = Wasm.internedUtf8(str)
+    return python.native.ffi.bindings.PyUnicode_InternFromString(__str).toNativePointerFromRaw()
 }
-actual fun PyList_New(len: Long): NativePointer? = python.native.ffi.bindings.PyList_New(len.toInt()).toNativePointerFromRaw()
-actual inline fun PyList_Size(list: NativePointer): Long = python.native.ffi.bindings.PyList_Size(list.toPlatformPointer()).toLong()
-actual fun PyList_GetItem(list: NativePointer, index: Long): NativePointer? = python.native.ffi.bindings.PyList_GetItem(list.toPlatformPointer(), index.toInt()).toNativePointerFromRaw()
-actual inline fun PyList_SetItem(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_SetItem(list.toPlatformPointer(), index.toInt(), item.toPlatformPointer())
-actual inline fun PyList_Insert(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_Insert(list.toPlatformPointer(), index.toInt(), item.toPlatformPointer())
+actual fun PyList_New(len: Long): NativePointer? = python.native.ffi.bindings.PyList_New(len.toPySsize()).toNativePointerFromRaw()
+actual inline fun PyList_Size(list: NativePointer): Long = python.native.ffi.bindings.PyList_Size(list.toPlatformPointer()).pySsizeToLong()
+actual fun PyList_GetItem(list: NativePointer, index: Long): NativePointer? = python.native.ffi.bindings.PyList_GetItem(list.toPlatformPointer(), index.toPySsize()).toNativePointerFromRaw()
+actual inline fun PyList_SetItem(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_SetItem(list.toPlatformPointer(), index.toPySsize(), item.toPlatformPointer())
+actual inline fun PyList_Insert(list: NativePointer, index: Long, item: NativePointer): Int = python.native.ffi.bindings.PyList_Insert(list.toPlatformPointer(), index.toPySsize(), item.toPlatformPointer())
 actual inline fun PyList_Append(list: NativePointer, item: NativePointer): Int = python.native.ffi.bindings.PyList_Append(list.toPlatformPointer(), item.toPlatformPointer())
 actual inline fun PyList_Sort(list: NativePointer): Int = python.native.ffi.bindings.PyList_Sort(list.toPlatformPointer())
 actual inline fun PyList_Reverse(list: NativePointer): Int = python.native.ffi.bindings.PyList_Reverse(list.toPlatformPointer())
 actual fun PyList_AsTuple(list: NativePointer): NativePointer? = python.native.ffi.bindings.PyList_AsTuple(list.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyDict_New(): NativePointer? = python.native.ffi.bindings.PyDict_New().toNativePointerFromRaw()
-actual inline fun PyDict_Size(p: NativePointer): Long = python.native.ffi.bindings.PyDict_Size(p.toPlatformPointer()).toLong()
+actual inline fun PyDict_Size(p: NativePointer): Long = python.native.ffi.bindings.PyDict_Size(p.toPlatformPointer()).pySsizeToLong()
 actual fun PyDictProxy_New(mapping: NativePointer): NativePointer? = python.native.ffi.bindings.PyDictProxy_New(mapping.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyDict_Clear(p: NativePointer) = python.native.ffi.bindings.PyDict_Clear(p.toPlatformPointer())
 actual inline fun PyDict_Contains(p: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PyDict_Contains(p.toPlatformPointer(), key.toPlatformPointer())
 actual fun PyDict_Copy(p: NativePointer): NativePointer? = python.native.ffi.bindings.PyDict_Copy(p.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PyDict_SetItem(p: NativePointer, key: NativePointer, v: NativePointer): Int = python.native.ffi.bindings.PyDict_SetItem(p.toPlatformPointer(), key.toPlatformPointer(), v.toPlatformPointer())
 actual inline fun PyDict_SetItemString(p: NativePointer, key: String, v: NativePointer): Int {
-    val __key = Wasm.allocUtf8(key)
-    try {
-        return python.native.ffi.bindings.PyDict_SetItemString(p.toPlatformPointer(), __key, v.toPlatformPointer())
-    } finally {
-        Wasm.freeUtf8(__key)
-    }
+    val __key = Wasm.internedUtf8(key)
+    return python.native.ffi.bindings.PyDict_SetItemString(p.toPlatformPointer(), __key, v.toPlatformPointer())
 }
 actual inline fun PyDict_DelItem(p: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PyDict_DelItem(p.toPlatformPointer(), key.toPlatformPointer())
 actual inline fun PyDict_DelItemString(p: NativePointer, key: String): Int {
-    val __key = Wasm.allocUtf8(key)
-    try {
-        return python.native.ffi.bindings.PyDict_DelItemString(p.toPlatformPointer(), __key)
-    } finally {
-        Wasm.freeUtf8(__key)
-    }
+    val __key = Wasm.internedUtf8(key)
+    return python.native.ffi.bindings.PyDict_DelItemString(p.toPlatformPointer(), __key)
 }
 actual fun PyDict_GetItem(p: NativePointer, key: NativePointer): NativePointer? = python.native.ffi.bindings.PyDict_GetItem(p.toPlatformPointer(), key.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyDict_GetItemWithError(p: NativePointer, key: NativePointer): NativePointer? = python.native.ffi.bindings.PyDict_GetItemWithError(p.toPlatformPointer(), key.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyDict_GetItemString(p: NativePointer, key: String): NativePointer? {
-    val __key = Wasm.allocUtf8(key)
-    try {
-        return python.native.ffi.bindings.PyDict_GetItemString(p.toPlatformPointer(), __key).toNativePointerFromRaw()
-    } finally {
-        Wasm.freeUtf8(__key)
-    }
+    val __key = Wasm.internedUtf8(key)
+    return python.native.ffi.bindings.PyDict_GetItemString(p.toPlatformPointer(), __key).toNativePointerFromRaw()
 }
 actual fun PyDict_Items(p: NativePointer): NativePointer? = python.native.ffi.bindings.PyDict_Items(p.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyDict_Keys(p: NativePointer): NativePointer? = python.native.ffi.bindings.PyDict_Keys(p.toPlatformPointer()).toNativePointerFromRaw()
@@ -709,7 +549,7 @@ actual inline fun PyDict_MergeFromSeq2(a: NativePointer, seq2: NativePointer, ov
 actual fun PySet_New(iterable: NativePointer): NativePointer? = python.native.ffi.bindings.PySet_New(iterable.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyFrozenSet_New(iterable: NativePointer): NativePointer? = python.native.ffi.bindings.PyFrozenSet_New(iterable.toPlatformPointer()).toNativePointerFromRaw()
 actual inline fun PySet_Contains(anyset: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PySet_Contains(anyset.toPlatformPointer(), key.toPlatformPointer())
-actual inline fun PySet_Size(anyset: NativePointer): Long = python.native.ffi.bindings.PySet_Size(anyset.toPlatformPointer()).toLong()
+actual inline fun PySet_Size(anyset: NativePointer): Long = python.native.ffi.bindings.PySet_Size(anyset.toPlatformPointer()).pySsizeToLong()
 actual inline fun PySet_Add(set: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PySet_Add(set.toPlatformPointer(), key.toPlatformPointer())
 actual inline fun PySet_Discard(set: NativePointer, key: NativePointer): Int = python.native.ffi.bindings.PySet_Discard(set.toPlatformPointer(), key.toPlatformPointer())
 actual fun PySet_Pop(set: NativePointer): NativePointer? = python.native.ffi.bindings.PySet_Pop(set.toPlatformPointer()).toNativePointerFromRaw()
@@ -718,7 +558,23 @@ actual fun PySeqIter_New(seq: NativePointer): NativePointer? = python.native.ffi
 actual fun PyCallIter_New(callable: NativePointer, sentinel: NativePointer): NativePointer? = python.native.ffi.bindings.PyCallIter_New(callable.toPlatformPointer(), sentinel.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyWeakref_NewRef(ob: NativePointer, callback: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_NewRef(ob.toPlatformPointer(), callback.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyWeakref_NewProxy(ob: NativePointer, callback: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_NewProxy(ob.toPlatformPointer(), callback.toPlatformPointer()).toNativePointerFromRaw()
-actual fun PyWeakref_GetObject(ref: NativePointer): NativePointer? = python.native.ffi.bindings.PyWeakref_GetObject(ref.toPlatformPointer()).toNativePointerFromRaw()
+@OptIn(kotlin.wasm.unsafe.UnsafeWasmMemoryApi::class)
+actual fun PyWeakref_GetRef(ref: NativePointer): NativePointer? {
+    // The out-parameter needs four bytes of linear memory (wasm32 pointers are 32-bit). There is
+    // no scope allocator on this target -- see `memScoped` above -- so the slot comes from
+    // CPython's own heap and is released here. `try`/`finally` keeps that true if the call traps.
+    val slot = python.native.ffi.bindings.malloc(4)
+    if (slot == 0) throw OutOfMemoryError("malloc(4) failed for a PyWeakref_GetRef out-parameter")
+    try {
+        val status = python.native.ffi.bindings.PyWeakref_GetRef(ref.toPlatformPointer(), slot)
+        // Status 1 alone means the slot holds a new strong reference. 0 (dead) and -1 (error)
+        // both become null; PyErr_Occurred is what separates them.
+        if (status != 1) return null
+        return kotlin.wasm.unsafe.Pointer(slot.toUInt()).loadInt().toNativePointerFromRaw()
+    } finally {
+        python.native.ffi.bindings.free(slot)
+    }
+}
 actual inline fun PyObject_ClearWeakRefs(o: NativePointer) = python.native.ffi.bindings.PyObject_ClearWeakRefs(o.toPlatformPointer())
 actual inline fun PyType_IsSubtype(a: NativePointer, b: NativePointer): Int = python.native.ffi.bindings.PyType_IsSubtype(a.toPlatformPointer(), b.toPlatformPointer())
 actual inline fun PyType_Ready(type: NativePointer): Int = python.native.ffi.bindings.PyType_Ready(type.toPlatformPointer())
@@ -726,11 +582,11 @@ actual fun PyType_GetName(type: NativePointer): NativePointer? = python.native.f
 actual fun PyType_GetFullyQualifiedName(type: NativePointer): NativePointer? = python.native.ffi.bindings.PyType_GetFullyQualifiedName(type.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyType_GetModuleName(type: NativePointer): NativePointer? = python.native.ffi.bindings.PyType_GetModuleName(type.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyType_GetModule(type: NativePointer): NativePointer? = python.native.ffi.bindings.PyType_GetModule(type.toPlatformPointer()).toNativePointerFromRaw()
-actual fun PyTuple_New(len: Long): NativePointer? = python.native.ffi.bindings.PyTuple_New(len.toInt()).toNativePointerFromRaw()
-actual inline fun PyTuple_Size(p: NativePointer): Long = python.native.ffi.bindings.PyTuple_Size(p.toPlatformPointer()).toLong()
-actual fun PyTuple_GetItem(p: NativePointer, pos: Long): NativePointer? = python.native.ffi.bindings.PyTuple_GetItem(p.toPlatformPointer(), pos.toInt()).toNativePointerFromRaw()
-actual fun PyTuple_GetSlice(p: NativePointer, low: Long, high: Long): NativePointer? = python.native.ffi.bindings.PyTuple_GetSlice(p.toPlatformPointer(), low.toInt(), high.toInt()).toNativePointerFromRaw()
-actual inline fun PyTuple_SetItem(p: NativePointer, pos: Long, o: NativePointer): Int = python.native.ffi.bindings.PyTuple_SetItem(p.toPlatformPointer(), pos.toInt(), o.toPlatformPointer())
+actual fun PyTuple_New(len: Long): NativePointer? = python.native.ffi.bindings.PyTuple_New(len.toPySsize()).toNativePointerFromRaw()
+actual inline fun PyTuple_Size(p: NativePointer): Long = python.native.ffi.bindings.PyTuple_Size(p.toPlatformPointer()).pySsizeToLong()
+actual fun PyTuple_GetItem(p: NativePointer, pos: Long): NativePointer? = python.native.ffi.bindings.PyTuple_GetItem(p.toPlatformPointer(), pos.toPySsize()).toNativePointerFromRaw()
+actual fun PyTuple_GetSlice(p: NativePointer, low: Long, high: Long): NativePointer? = python.native.ffi.bindings.PyTuple_GetSlice(p.toPlatformPointer(), low.toPySsize(), high.toPySsize()).toNativePointerFromRaw()
+actual inline fun PyTuple_SetItem(p: NativePointer, pos: Long, o: NativePointer): Int = python.native.ffi.bindings.PyTuple_SetItem(p.toPlatformPointer(), pos.toPySsize(), o.toPlatformPointer())
 actual inline fun PyModule_GetName(module: NativePointer): String? = Wasm.readUtf8String(python.native.ffi.bindings.PyModule_GetName(module.toPlatformPointer()))
 actual fun PyModule_GetDict(module: NativePointer): NativePointer? = python.native.ffi.bindings.PyModule_GetDict(module.toPlatformPointer()).toNativePointerFromRaw()
 actual fun PyModule_GetFilenameObject(module: NativePointer): NativePointer? = python.native.ffi.bindings.PyModule_GetFilenameObject(module.toPlatformPointer()).toNativePointerFromRaw()

@@ -155,4 +155,179 @@ class EmbedApiLowLevelTest {
             Python3.withPython { Py_DecRef(list) }
         }
     }
+
+    // ---------------------------------------------------------------------------------------
+    // Weak references
+    //
+    // `PyWeakref_GetObject` was deprecated in 3.13 and removed in 3.15; `PyWeakref_GetRef` is
+    // its replacement and exists in 3.13 and 3.14 too, so this binding can move without
+    // dropping the version the build actually defaults to. The two differ in the part that is
+    // silent when it is wrong -- the old one returned a *borrowed* reference and `Py_None` for
+    // a dead referent, the new one returns a *new* reference and reports death as null. A
+    // binding that returned the borrowed pointer under the new name would pass an identity
+    // check and then corrupt the heap on the caller's matching `Py_DecRef`, so the reference
+    // count is asserted directly rather than inferred.
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Fails, clearing the error indicator first.
+     *
+     * A plain `assertNotNull` on a C API result that failed leaves the indicator set, and every
+     * class in this binary shares one interpreter (see [ready]) -- so the next `PyImport_Module`
+     * to run anywhere returns null and reports a failure that has nothing to do with its own
+     * subject. That is not hypothetical: getting the weakly-referenceable type wrong below took
+     * two unrelated tests down with it, and the cascade is what showed up first.
+     */
+    private fun failClearingIndicator(message: String): Nothing {
+        Python3.withPython { PyErr_Clear() }
+        throw AssertionError(message)
+    }
+
+    /**
+     * `sys.getrefcount(target)` on a raw pointer.
+     *
+     * The returned number includes the argument tuple's temporary reference, so it is one
+     * higher than the count that exists independently of asking. Only *differences* between
+     * two readings are used below, which makes that constant offset cancel.
+     */
+    private fun refCountOf(target: NativePointer): Long = Python3.withPython {
+        val sys = PyImport_ImportModule("sys") ?: failClearingIndicator("sys could not be imported")
+        try {
+            val getrefcount = PyObject_GetAttrString(sys, "getrefcount")
+                ?: failClearingIndicator("sys.getrefcount is unavailable")
+            try {
+                val args = PyTuple_New(1L) ?: failClearingIndicator("could not allocate the argument tuple")
+                try {
+                    // PyTuple_SetItem steals, and the caller keeps its own reference.
+                    Python3.withPython { Py_IncRef(target) }
+                    if (PyTuple_SetItem(args, 0L, target) != 0) {
+                        failClearingIndicator("could not populate the argument tuple")
+                    }
+                    val result = PyObject_CallObject(getrefcount, args)
+                        ?: failClearingIndicator("sys.getrefcount() failed")
+                    try {
+                        PyLong_AsLongLong(result)
+                    } finally {
+                        Py_DecRef(result)
+                    }
+                } finally {
+                    Py_DecRef(args)
+                }
+            } finally {
+                Py_DecRef(getrefcount)
+            }
+        } finally {
+            Py_DecRef(sys)
+        }
+    }
+
+    /**
+     * A fresh, weakly-referenceable object: an empty `set`.
+     *
+     * Most of the obvious candidates are not weakly referenceable -- `int`, `str`, `tuple`,
+     * `list`, `dict` and `types.SimpleNamespace` all refuse, and `PyWeakref_NewRef` answers by
+     * returning null and raising `TypeError`. `set` and `frozenset` do support it, and `set` is
+     * reachable from the C API without constructing a class first.
+     */
+    private fun newWeaklyReferenceableObject(): NativePointer = Python3.withPython {
+        // PySet_New takes an iterable rather than NULL, so build it from an empty tuple.
+        val empty = PyTuple_New(0L) ?: failClearingIndicator("could not allocate the empty tuple")
+        try {
+            PySet_New(empty) ?: failClearingIndicator("PySet_New failed")
+        } finally {
+            Py_DecRef(empty)
+        }
+    }
+
+    /** Borrowed `Py_None`, reached through the builtins mapping since the ABI exposes no accessor. */
+    private fun noneSingleton(): NativePointer = Python3.withPython {
+        val builtins = PyEval_GetBuiltins() ?: failClearingIndicator("PyEval_GetBuiltins returned null")
+        PyDict_GetItemString(builtins, "None") ?: failClearingIndicator("builtins has no None")
+    }
+
+    @Test
+    fun getRefResolvesALiveReferentAndHandsBackANewReference() {
+        ready()
+        val referent = newWeaklyReferenceableObject()
+        val ref = Python3.withPython { PyWeakref_NewRef(referent, noneSingleton()) }
+            ?: failClearingIndicator("PyWeakref_NewRef returned null")
+        try {
+            val before = refCountOf(referent)
+
+            val resolved = Python3.withPython { PyWeakref_GetRef(ref) }
+                ?: failClearingIndicator("a live referent must resolve")
+            assertEquals(
+                referent.toRawValue(), resolved.toRawValue(),
+                "PyWeakref_GetRef must hand back the referent itself"
+            )
+
+            // The distinguishing property: it is a *new* reference, not the borrowed one the
+            // removed PyWeakref_GetObject returned. If this binding were wired to the old
+            // function the delta would be 0 and the release below would be an over-decref.
+            assertEquals(
+                before + 1, refCountOf(referent),
+                "PyWeakref_GetRef must take a reference of its own"
+            )
+
+            Python3.withPython { Py_DecRef(resolved) }
+            assertEquals(
+                before, refCountOf(referent),
+                "releasing the resolved reference must return the count to where it started"
+            )
+        } finally {
+            Python3.withPython { Py_DecRef(ref) }
+            Python3.withPython { Py_DecRef(referent) }
+        }
+    }
+
+    @Test
+    fun getRefReportsADeadReferentAsNullWithoutSettingTheErrorIndicator() {
+        ready()
+        val referent = newWeaklyReferenceableObject()
+        val ref = Python3.withPython { PyWeakref_NewRef(referent, noneSingleton()) }
+            ?: failClearingIndicator("PyWeakref_NewRef returned null")
+        try {
+            // The call above owns the only strong reference, and a weak reference does not
+            // count, so releasing it must actually finalise the object.
+            Python3.withPython { Py_DecRef(referent) }
+
+            val resolved = Python3.withPython { PyWeakref_GetRef(ref) }
+            assertNull(resolved, "a dead referent must resolve to null, not to Py_None")
+
+            // 0 (dead) and -1 (error) are different outcomes in C and both arrive here as null.
+            // A clear error indicator is what separates them, so it is part of the contract.
+            assertNull(
+                Python3.withPython { PyErr_Occurred() },
+                "a dead referent is not an error and must leave the indicator clear"
+            )
+        } finally {
+            Python3.withPython { Py_DecRef(ref) }
+        }
+    }
+
+    @Test
+    fun importModuleNoBlockRemainsAnAliasOfImportModule() {
+        ready()
+        // CPython removed PyImport_ImportModuleNoBlock in 3.15; it had been a plain alias of
+        // PyImport_ImportModule since 3.3. The name survives here as a deprecated shim so
+        // downstream source keeps compiling, and this pins the shim to the thing it aliases:
+        // both must return the same already-imported module object.
+        @Suppress("DEPRECATION")
+        val viaAlias = Python3.withPython { PyImport_ImportModuleNoBlock("sys") }
+        assertNotNull(viaAlias, "the alias returned null")
+        try {
+            val direct = Python3.withPython { PyImport_ImportModule("sys") }
+            assertNotNull(direct, "PyImport_ImportModule returned null")
+            try {
+                assertEquals(
+                    direct.toRawValue(), viaAlias.toRawValue(),
+                    "the alias must resolve to the same module object"
+                )
+            } finally {
+                Python3.withPython { Py_DecRef(direct) }
+            }
+        } finally {
+            Python3.withPython { Py_DecRef(viaAlias) }
+        }
+    }
 }

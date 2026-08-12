@@ -540,22 +540,34 @@ The runtime is in `reflection/` — `HandleTable` (slot plus generation, so a re
 cannot alias onto whatever takes its slot), `UpcallTable`, `ExposedCallable`, `ObjectReference`.
 The generator is `python-multiplatform-ksp/`, wired into a user module by
 `python-multiplatform-gradle-plugin/` (one `id(...)`, no per-target `add("ksp<Target>", ...)`).
-Fixture modules under `ksp-fixtures/` run 29 tests against a table KSP actually generated, not a
-hand-written one.
+Fixture modules under `ksp-fixtures/` run 35 tests against a table KSP actually generated, not a
+hand-written one — 29 on desktop, and 6 more from `ksp-fixtures/android`, the fixture that carries
+an Android plugin (§13).
 
 **It survives a GraalVM native image**, which is the condition the whole design was chosen for:
 
 ```
-PYTHON: resolved handle = 4294967296
-PYTHON: invoke result = 42
+KOTLIN: table = 19 entries, 3 classes, from io_github_thisisthepy_sample
+PYTHON: resolved handle = 4294967314
+PYTHON: invoke result = 7
+PYTHON: @PythonInternal entry resolves to -1
 PYTHON: UPCALL_OK
 ```
 
-Python builds a function pointer with `ctypes`, resolves `"demo.answer"` by name through
+Python builds a function pointer with `ctypes`, resolves a Kotlin declaration by name through
 `HandleTable`, and calls back into Kotlin — inside a closed world where runtime reflection is
 forbidden. Every wall hit getting there was metadata or wiring; the lookup and invoke path itself
 needed no reflection registration, because it uses none. `sample` carries the build path
 (`nativeCompile`, `runNativeUpcallDemo`, Liberica NIK).
+
+**The table it resolves against is generated now, not hand-written.** `NativeImageMain.kt` used to
+carry its own `FunctionTableFragment` returning a constant `42`, with a comment saying the
+generator did not exist yet — and a hand-written fragment passes whether or not KSP ever runs, so
+the check measured less than it appeared to. It installs `python.multiplatform.generated.FunctionTable`
+— generated from `:sample`'s own sources — instead, and the number Python reads back (`7`) is one the process
+produced by calling the Kotlin object seven times, so a stub returning a constant cannot satisfy
+it. The `-1` line is the same check applied to `@PythonInternal`: an opted-out declaration must
+not resolve.
 
 **The metadata is generated, not maintained.** `reachability-metadata.json` was a checked-in file,
 and a checked-in file rots without saying so: a native image links a `FunctionDescriptor` the
@@ -588,7 +600,9 @@ registration is gone.
 - ~~The aggregator uses `Dependencies.ALL_FILES`, correct but reprocessed every build.~~
   **Measured, and the aggregator turned out not to be the cause** — see below.
 - ~~No convenience Gradle plugin; user modules wire KSP per target by hand.~~
-  **Closed:** `python-multiplatform-gradle-plugin/`, applied by id.
+  **Closed:** `python-multiplatform-gradle-plugin/`, applied by id — **except on Android**, where
+  applying it is a configuration-time crash until AGP moves to 8.10. See §13; it is a version pin,
+  not a plugin defect, and it affects every Android consumer rather than only the sample.
 
 **Was:** entirely unimplemented — `ClassLookup.kt`, `ObjectReference.kt` and `ReflectedClass.kt`
 held 1–3 lines each, and this was README's only unchecked box.
@@ -928,7 +942,7 @@ against the full headers. "abi3" in this codebase means a self-imposed rule abou
 functions to call, not a compilation mode. The rule is what keeps one binding working across
 versions, and it is unaffected.
 
-### 3.15.0rc1: desktop is already there; the native targets need three functions migrated
+### 3.15.0rc1: the three functions are migrated, on every target
 
 `-PpythonVersion=3.15.0rc1` gives **208 tests, 0 failures, 1 skipped** on desktop — the same as
 the default. The first attempt failed 4, all of them assertions hardcoding `"3.14"` against the
@@ -952,12 +966,68 @@ with `nm` on `libpython3.15.dylib`, all three are there — and were removed onl
 Panama resolves by symbol name at run time, so nothing breaks; cinterop and the hand-written C in
 `jni_onload.def` compile against headers, so they do.
 
-That makes the porting cost concrete rather than open-ended: three functions, each appearing in
+That made the porting cost concrete rather than open-ended: three functions, each appearing in
 the `commonMain` `expect`, four platform `actual`s, `jni_onload.def` (declaration, thunk and table
 entry) and the wasmJs `@WasmImport` block. Roughly 20 sites, no behavioural change on 3.14.
 
-**The default stays 3.14.7.** A release candidate is not a default. What is established is what
-raising it costs.
+**Done.** All three were still present when this was picked up, and all three are now migrated:
+
+| was | is now |
+|---|---|
+| `PySys_ResetWarnOptions` | removed outright — there is no C replacement, and the documented migration (configure `sys.warnoptions` through `PyConfig`, or clear it from Python) is not a binding |
+| `PyImport_ImportModuleNoBlock` | kept as a `@Deprecated` **plain `commonMain` function** forwarding to `PyImport_ImportModule`, with no C symbol behind it. It had been an exact alias since 3.3, so forwarding is behaviour-preserving rather than an approximation, and existing source still compiles through the bump |
+| `PyWeakref_GetObject` | replaced by `PyWeakref_GetRef`, which 3.13 and 3.14 also export, so nothing was given up to gain it |
+
+**The out-parameter is the part that was not free.** `PyWeakref_GetRef` is
+`int f(PyObject *ref, PyObject **pobj)` — a status *and* a write-through slot, where the removed
+function was a single return. Three of the four targets already had somewhere to put that slot and
+needed no new machinery: `jni_onload.def`'s thunk uses a C local (so the JNI boundary still carries
+only primitives, per `androidMain/README.md`), cinterop uses `memScoped`, and wasmJs takes four
+bytes from CPython's own heap through the `malloc`/`free` it already imports. Desktop had nothing —
+Panama here reaches native memory only through `allocateUtf8String`/`readUtf8String`, neither of
+which can carry a pointer, since a pointer is not NUL-terminated. So `Panama` gained
+`allocatePointerSlot`/`readPointerSlot`/`freePointerSlot`, built entirely from handles the modern
+backend already had (`malloc` plus the same `MemorySegment.copy` that backs `allocateUtf8Freeable`,
+run in the other direction). **No new reflective lookups**, so no new JDK-version surface. This will
+be reused: CPython is converting more borrowed-reference getters to the same shape
+(`PyDict_GetItemRef`, `PyObject_GetOptionalAttr`).
+
+The JDK 16-18 incubator backend throws instead. Allocating there is easy; *reading* is not, and the
+class that could (`MemoryAccess`) changed shape across 16, 17 and 18. A guessed read yields a wrong
+`PyObject *`, i.e. a use-after-free landing somewhere unrelated — so it refuses at the allocation
+step, before anything has been allocated. That branch is already documented as an unverified
+best-effort mirror, and JDK 19+ resolves the modern one.
+
+Signature at the Kotlin level is `PyWeakref_GetRef(ref): NativePointer?` — a new strong reference,
+or null. C's `0` (dead) and `-1` (error) both arrive as null because an out-parameter does not
+survive the JNI boundary, but **no information is lost**: the error case sets the error indicator
+and the dead case does not, so `PyErr_Occurred` separates them.
+
+Three tests in `EmbedApiLowLevelTest` (`commonTest`, so they run on desktop, iOS and Android):
+`PyWeakref_GetRef` on a live referent returns the referent *and* raises its reference count by one,
+which is what distinguishes the new function from the borrowed-reference one it replaces — an
+implementation still wired to `PyWeakref_GetObject` would pass an identity check and then corrupt
+the heap on the caller's matching `Py_DecRef`; a dead referent returns null with a *clear* error
+indicator; and the `ImportModuleNoBlock` shim resolves to the same module object as the function it
+aliases.
+
+Writing them turned up a trap worth recording: the first version built its referent from
+`types.SimpleNamespace`, which is **not weakly referenceable** (nor are `int`, `str`, `tuple`,
+`list` or `dict`; `set` and `frozenset` are). `PyWeakref_NewRef` answered by returning null and
+raising `TypeError` — and because every class in the binary shares one interpreter, the unhandled
+indicator then took down two *unrelated* tests, which is what surfaced first. The assertions now
+clear the indicator before failing, so a failure in this file can no longer be mistaken for a
+failure elsewhere.
+
+Verified: `compileKotlinAndroidNativeArm64`, `compileKotlinIosSimulatorArm64`,
+`compileDebugKotlinAndroid` and `compileKotlinWasmJs` all compile; `desktopTest` **236 tests,
+0 failures, 1 skipped** and `iosSimulatorArm64Test` **222 tests, 0 failures** (both counted from a
+cleaned `build/test-results/`). The `jni_onload.def` invariants hold — no duplicate thunk or table
+name, registration count still taken with `sizeof`, and every table entry still has a matching
+`external fun` and vice versa.
+
+**The default stays 3.14.7.** A release candidate is not a default, and this migration is
+version-neutral: `PyWeakref_GetRef` exists on 3.14, so none of it waits for the bump.
 
 ### iOS: the source has to change with the version, and 3.15 is the switchover
 
@@ -981,13 +1051,59 @@ Neither source publishes checksums this build can use — BeeWare publishes none
 publishes sigstore material that is not reasonable to verify in Gradle — so both stay pinned by
 the local lockfile.
 
-The swap is verified as far as it can be while 3.15 is not the default:
+The swap was verified as far as it could be while 3.15 is not the default:
 `cinteropPythonIosSimulatorArm64` **succeeds** against the python.org framework, so its headers and
-`Python.framework` are consumed exactly like BeeWare's. The build then fails in
+`Python.framework` are consumed exactly like BeeWare's. The build then failed in
 `compileKotlinIosSimulatorArm64` — on the three removed functions above, with byte-identical errors
 to `androidNativeArm64`, i.e. in shared `nativeMain` source and not in anything iOS-specific.
 `compileKotlinIosSimulatorArm64` on the default 3.14 (BeeWare) still passes, so no regression was
-introduced for the version actually in use.
+introduced for the version actually in use. **That compile blocker is now gone** (see above), which
+leaves the acquisition path as the thing to be sure of.
+
+#### The acquisition path is ready; four smaller things are not
+
+Re-read against the build on 2026-08-12. The switchover itself is wired and pinned:
+
+* the predicate is `python-multiplatform/build.gradle.kts`, `iosFromPythonOrg` — it splits the
+  configured version and compares major/minor only, so the `rc1` suffix on `3.15.0rc1` does not
+  reach `toInt()` and the gate answers correctly;
+* `pythonOrgReleaseDir` strips the pre-release suffix separately, because python.org publishes
+  `3.15.0rc1` **under `ftp/python/3.15.0/`** while the archive keeps the full name;
+* the extraction directory is keyed by version, so 3.14 and 3.15 trees cannot collide;
+* `python-checksums.properties` already pins `ios-3.15.0rc1-pythonorg`, both Android ABIs, and all
+  four desktop platforms at 3.15.0rc1. A plain `-PpythonVersion=3.15.0rc1` downloads nothing
+  unpinned.
+
+What a bump would still hit, none of it iOS-specific and none of it large:
+
+1. **Free-threading has no 3.15 checksums.** There are `-freethreaded` entries for 3.14.7 only, so
+   `-PpythonVersion=3.15.0rc1 -PpythonFreeThreaded=true` fails on a missing checksum. Consistent
+   with the table above — 3.15 free-threading is desktop-only anyway — but it is a lockfile gap,
+   not a deliberate refusal.
+2. ~~**Three Android *instrumented* tests still hardcode `"3.14"`**, plus
+   `PythonOnDevice.PYTHON_DIR`~~ — **fixed.** The earlier pass that moved four assertions onto
+   `Versions.currentVersion.compactVersionString` covered the desktop and common tests and missed
+   these, because nothing compiles them without an SDK configured. The three assertions now derive
+   from `compactVersionString` and `PYTHON_DIR` from `taggedVersionString`, matching what
+   `MainActivity` already did — and `taggedVersionString` additionally carries the `t` suffix for a
+   free-threaded build, which the literal could not express.
+   **Compile-verified only** (`compileDebugAndroidTestKotlinAndroid`); not run, because the
+   emulators were reserved for other work.
+3. **The two python.org paths disagree about pre-release layout.** iOS strips the suffix to build
+   the ftp directory; the Android download uses the configured version verbatim
+   (`ftp/python/3.15.0rc1/…`). A checksum is pinned for the Android archive, so that URL evidently
+   resolves today — but only one of the two can be right in general.
+4. **The iOS *app* packaging path has no producer.** `sample/build.gradle.kts` and the Xcode project
+   both reference `sample/build/xcode-frameworks/Python.xcframework`, and no Gradle task anywhere
+   creates it. Only the simulator *test* path is connected to the download pipeline. This predates
+   3.15 and is not a version problem, but it is the reason "iOS works" should not be read as
+   covering the device app.
+
+Also stale, and cheap to correct when touched: `iosMain/README.md` still says the stdlib comes from
+BeeWare unqualified, and `extractIosSimulatorStdlib`'s KDoc still says `lib/python3.13`. Neither
+affects behaviour — the code is `$libVersion`-derived — and `extractIosSimulatorStdlib` does hardcode
+the simulator slice name and `lib-arm64`, which is correct for the arm64 host but would need
+`lib-x86_64` for an x86_64 simulator.
 
 ## 10. WASM
 
@@ -1060,10 +1176,14 @@ list is needed** for the Stable ABI. Only `wasmExports` and `wasmMemory` have to
 shared object-model suite runs against a live interpreter.
 
 ```
-:python-multiplatform:wasmJsNodeTest    190 tests, 3 failed, 0 skipped
-                    desktopTest, unchanged    204 tests, 0 failed, 1 skipped
+:python-multiplatform:wasmJsNodeTest    238 tests, 0 failed, 0 skipped
+                    desktopTest, unchanged    233 tests, 0 failed, 1 skipped
 Embedded CPython version: 3.14.2 ... [Clang 23.0.0git]   on wasm32-emscripten
 ```
+
+(190 when the target first came up, then 214 with 3 failing, then 234 with the same 3. The three
+were always `GCLeakTest`'s; they pass now — see "Lifetimes" below — and the four added with them are
+`WasmFinalizationTest`'s.)
 
 Nothing skipped: `PythonTestFixture.available` was true, so `Python3.initialize()` brought CPython
 up through an ordinary `@WasmImport` call to `Py_Initialize` — the library's own bring-up path,
@@ -1083,32 +1203,168 @@ Three questions the experiment did not have to answer, and how they came out:
   `intrinsics: { memory: new WebAssembly.Memory({ initial: 0 }), … }` into `*.import-object.mjs`;
   a `doFirst` on the test task rewrites that to Emscripten's `wasmMemory` and stages
   `python.mjs`/`python.wasm` beside the bundle. No binary patching, no `-sIMPORTED_MEMORY`.
+  *(There are two now. Upcalls need a second one, on the generated entry module — see below.)*
 
-### What §10 still owes
+### Lifetimes: closed. The candidate route was measured, and it holds
 
-**Lifetimes, and this is the real gap.** Kotlin/Wasm has no finalisation hook — verified against
-`kotlin-stdlib-wasm-js-2.4.20-Beta2.klib`, which contains no `FinalizationRegistry`, no `WeakRef`
-and no `Cleaner`. So `registerCleaner` is explicit-`close()`-only, a `PyObject` dropped without
-`close()` leaks its reference, and `GCLeakTest`'s three cases fail. They are **left failing rather
-than weakened** — that is what the platform does today. Reaching JS's `FinalizationRegistry` through
-a `JsReference` is the only candidate route and is unmeasured.
+The stdlib has no finalisation hook — that part was right, and re-checking
+`kotlin-stdlib-wasm-js-2.4.20-Beta2.klib` still turns up no `FinalizationRegistry`, no `WeakRef` and
+no `Cleaner`. **The conclusion drawn from it was wrong.** The *host* has all three, and a
+`JsReference` reaches them. `registerCleaner` is built on one now, and `GCLeakTest`'s three cases
+pass:
 
-**Upcalls.** `ProxyTypeFactory` throws. The mechanism is no longer the open question this section
-used to call it: `@WasmExport` plus `WebAssembly.Table.set` reaches Kotlin through `call_indirect`
-at **3.1 ns**, against 10.9 ns for the `addFunction`-and-JS-closure route §5 specified, and a Kotlin
-`@WasmExport` has been called from Python as a real `PyMethodDef`. What is missing is plumbing plus
-one constraint — a table index cannot be obtained from inside Kotlin, so registration is a JS-side
-startup step this target does not have yet; and `call_indirect` does not coerce, so trampoline arity
-is a runtime correctness requirement rather than a compile-time one.
+```
+:python-multiplatform:wasmJsNodeTest    238 tests, 0 failed, 0 skipped
+                    desktopTest          233 tests, 0 failed, 1 skipped
+```
 
-**Interning.** Every `actual` taking a `String` allocates and frees a C string per call, which is
-the 259.5 ns row above. `PyObject_GetAttrString` measures **377 ns** here as a result. Caching the
-addresses of repeated names is the Android fix (2238 ns → 148 ns there) and is the largest remaining
-win that costs nothing.
+(was 234 / 3 failed — the three were `GCLeakTest`'s, and the four added are `WasmFinalizationTest`.)
+
+**The question that decided it: is `JsReference` a strong reference?** If handing a Kotlin object to
+JS pinned it, registering it with a `FinalizationRegistry` would keep it alive forever and there
+would be no route at all. Measured, not reasoned:
+
+| | measured |
+|---|---|
+| 200 Kotlin objects handed over with `toJsReference()`, held from JS only by a `WeakRef` and a registry entry | **`alive 0 / 200`** — not strong |
+| `FinalizationRegistry` callbacks for those WasmGC objects | **200 / 200** |
+| 200 real `PyObject` wrappers dropped without `close()`, judged by CPython's own refcount | **`2 → 202 → 2`** |
+
+**The second finding cost more than the first: nothing on this platform can observe a collection
+without yielding to the host.** Node 26 / V8 14.6, same object, `gc()` at each step:
+
+```
+same job, after gc()      WeakRef ALIVE     registry callbacks 0
+one microtask             WeakRef ALIVE     registry callbacks 0
+two microtasks            WeakRef ALIVE     registry callbacks 0
+one macrotask             WeakRef CLEARED   registry callbacks 200
+```
+
+A `WeakRef` keeps its target alive for the job that created it, and the registry callback is
+delivered as a task. `FinalizationRegistry.prototype.cleanupSome()` would have made it synchronous
+and **has been removed from V8** — `--harmony-weak-refs-with-cleanup-some` is rejected as an
+unrecognised flag, from the command line and from `v8.setFlagsFromString` alike. So the three
+`GCLeakTest` cases could not have passed no matter what the mechanism was: a synchronous test body
+is one job, and a job that has not ended sees nothing. That is why they read as "wasm has no
+finalisation hook" — the hook was the first problem, and the harness was the second.
+
+`commonTest` therefore drives them through `collectorTest`, which is a blocking loop on every target
+whose finalisation runs on a thread and a chain of host turns on `wasmJs`. **No assertion changed.**
+`kotlin-test`'s wasm adapter awaits a returned `Promise` (`TeamcityAdapterWithPromiseSupport`),
+confirmed by a control that returned `Promise.reject` and duly failed; `WasmFinalizationTest` keeps a
+standing `@AfterTest` control so a regression cannot silently turn those assertions into ones nobody
+runs. `forceGC()` is `globalThis.gc()`, with `--expose-gc` added to the test task's `nodeJsArgs`.
+
+Two consequences worth carrying forward:
+
+- **`PyAutoCloseable.wasmJs.kt` is the only `js(…)` in `wasmJsMain`, and it has to be.** Every other
+  declaration this target makes is a `@WasmImport`, which carries primitives only — and what must
+  cross here is a *reference* to the object whose reachability is the question. The cost is confined
+  to construction: `registerCleaner` + `close()` is **88.6 ns**, of which the two `toJsReference()`
+  crossings are **44.1 ns** each; nothing on the C API call path touches it.
+- **The callback cannot arrive inside a Python call.** JS tasks run only after the stack unwinds and
+  every call into CPython here is synchronous, so the decref never re-enters the interpreter from
+  within another call. That is §1's hazard, and this target does not have it.
+
+`WasmCleanerStats` (`registered`, `released`, `finalized`, `outstanding`) is the observability half,
+and stays useful on a host with no `FinalizationRegistry`, where `outstanding` is a leak count.
 
 Kotlin/Native once had a `wasm32` target that could have shared CPython's linear memory; it was
 deprecated in 1.8.20 and removed in 1.9.20. That history no longer costs anything — `@WasmImport`
 plus an imported memory reaches the same place.
+
+### Upcalls: closed. CPython calls Kotlin, and cycles are collected
+
+`ProxyTypeFactory` builds a real `PyType_FromSpec` heap type with `tp_traverse`, `tp_clear` and
+`tp_dealloc` filled by Kotlin `@WasmExport`s installed into CPython's own
+`__indirect_function_table`. `wasmJsTest/.../WasmCycleCollectionTest` runs the same two cases
+`desktopTest/CycleCollectionTest` does, and both pass: a Kotlin↔Python cycle is broken by
+`gc.collect()`, and 100 proxies that die *without* a cycle release their `HandleTable` entries and
+leave the heap type's own refcount exactly where it started.
+
+The measurement this section already had — 3.1 ns through `call_indirect`, against 10.9 ns for the
+`addFunction`-and-JS-closure route §5 specified — was the mechanism. What this pass added was the
+wiring, and it turned up three constraints worth carrying forward:
+
+- **`@WasmExport` is honoured only in the compilation that produces the `.wasm`.** Measured, not
+  inferred: the identical annotation on the identical function exports from `wasmJsTest` and does
+  not from `wasmJsMain`, whose klib is linked in — the test binary's export section came out with
+  `startUnitTests` in it and nothing else. **A library cannot export its own trampolines.** The
+  executable module must declare three delegating lines; `wasmJsTest/.../ProxyTypeExports.kt` is
+  that file, kept in the suite precisely so the tests exercise the path an application takes.
+  Generating it from `python-multiplatform-gradle-plugin` is the obvious next step and is not done.
+- **Registration needs the Kotlin instance's raw exports, and only the generated entry module has
+  them.** `cpython.mjs` cannot fetch them: it is imported *by* Kotlin's import object, so importing
+  the entry module back would be an ES cycle across a top-level await. So `build.gradle.kts` appends
+  `pmpSetKotlinExports(exports)` to the entry module. This target now has **two** generated-file
+  substitutions, not the one this section used to advertise.
+- **Kotlin/Wasm has no `call_indirect`,** so calling a C function *pointer* — `visitproc`, `tp_free`
+  — goes through `WebAssembly.Table.get` in JS. Both are cold (a cyclic collection, a deallocation);
+  neither the downcall path nor CPython's path *into* Kotlin touches JavaScript.
+
+Also recorded because it cost time: `Module.UTF8ToString` is not available. This build exports
+`wasmExports` and `wasmMemory` and nothing else from the Emscripten runtime, deliberately, so any
+other helper fails as `undefined is not a function` inside a wasm import and arrives in Kotlin as an
+empty `JsException`.
+
+### Interning: taken, and the answer here is not Android's
+
+All 59 string-argument positions across 49 `actual`s go through `Wasm.internedUtf8` or
+`Wasm.scratchUtf8` now, with the per-argument judgement identical to `desktopMain`'s and
+`androidMain`'s on all 59. Measured at 200 000 iterations:
+
+| ns per argument | 7-char name | 54-char name |
+|---|---|---|
+| `malloc` + `encodeToByteArray` + copy + `free` (what it did) | **82.7** | |
+| `malloc` + `free` alone | 13.0 | |
+| `encodeToByteArray` alone | 59.2 | |
+| `Wasm.scratchUtf8` | **30.6** | **157.0** |
+| `Wasm.internedUtf8` (hit) | **22.2** | **26.4** |
+
+`PyObject_GetAttrString` through the `actual`, both rows back to back in one run so that only the
+marshalling differs: **258.0 → 229.2 ns**.
+
+**The rule transferred; the reasoning did not, and neither did the size of the win.** Three
+findings:
+
+- The expensive part was the **intermediate WasmGC `ByteArray`**, not the encode. Writing UTF-8
+  straight into linear memory is what takes 82.7 ns to 30.6. Shared memory is what makes that
+  possible — the destination is CPython's own heap, so there is no staging buffer — which is the
+  *opposite* of the original design note's claim that shared memory removes a string copy. It
+  removes the allocation.
+- **Interning's whole value is in the string length.** For a 7-character name it beats scratch by
+  8 ns, nothing like Android's 15x (2238 → 148). For a 54-character one it beats it by **6x**
+  (157.0 → 26.4), because a cache hit is flat in the length and an encode is linear. Reporting only
+  the short case — which is what the first measurement here did — would have argued interning is
+  barely worth having.
+- Negative result worth keeping: `BenchmarkTest`'s shared `PyObject_GetAttrString` row **did not
+  move** across this change (376.6 → 384.0 ns). That is two whole suite runs compared against a
+  ~29 ns per-call difference; it is not a usable A/B at this size, in either direction. The in-run
+  rows are the measurement.
+
+### `Py_ssize_t`: two guards, because the two halves fail differently
+
+The declaration half — `bindings.kt` against `python.wasm` — is derived now rather than remembered.
+`./gradlew :python-multiplatform:verifyWasmAbiSignatures` parses the wasm binary's type, import,
+function and export sections and compares all 316 `@WasmImport` declarations against it, plus the 3
+glue functions against `cpython.mjs`. It runs before `wasmJsNodeTest`. Confirmed by deliberately
+mis-declaring one and watching it fail with the function named:
+
+```
+PyList_Size: bindings.kt declares (i32) -> (i64), python.wasm has (i32) -> (i32)
+```
+
+Same shape as `generateDesktopReachabilityMetadata` (§7): read the artefact that decides, every
+build, never a checked-in copy of the answer. The task also asserts that every `external fun` in the
+file was parsed — the first version required an explicit return type and so silently skipped the
+three `Unit`-returning declarations, which is §2's "green test measuring its own scope" again.
+
+The conversion half links cleanly and is silently wrong, so it needed a different guard.
+`EmbedAPI.wasmJs.kt` names the two directions instead of casting inline — `Int.pySsizeToLong()`
+sign-extends, because -1 is the error return and the unsigned widening that is correct for pointers
+here would turn it into 4294967295; `Long.toPySsize()` range-checks rather than truncating, so
+`PyList_New(0x1_0000_0000)` fails instead of quietly becoming `PyList_New(0)`.
+`WasmPySsizeTBoundaryTest` covers both directions and the whole `Int` range.
 
 ## 11. Build wiring
 
@@ -1241,4 +1497,184 @@ is the actual state of the Android object model, and that is the point of doing 
   `ConversionTest`. Every one of those is implemented, so the headers invite the next reader to
   dismiss a real failure as expected. `PyTypeTest`'s was corrected; the rest were left.
 - **No CI.** The README badges point at a different repository.
-- **Sample app** has not been revisited since the object model landed.
+- ~~**Sample app** has not been revisited since the object model landed.~~ **Done — see §13.**
+
+## 13. The sample, and the AGP version that shapes it
+
+The sample now shows four things, each on the real API: the embedded interpreter (`Python3.version`
+against `currentPlatform`), a Kotlin-built `PyList` of `PyInt` published into `__main__` and
+evaluated by Python, a Python-side `ctypes` call into a Kotlin declaration resolved by name, and
+the contents of the generated table read back off `UpcallTable`. Measured on `:sample:run`:
+
+```
+runtime : 3.14.7  ·  sys.platform=darwin  ·  MacOS 26.5.1 (aarch64) / JVM 21.0.12
+eval    : sum(kotlin_numbers) * 2 -> int: 56
+table   : 19 entries, 3 classes, from io_github_thisisthepy_sample
+upcall  : Python called Kotlin through handle 4294967314 and got 0
+```
+
+and, since the AGP bump below, the same four sections on Android — observed on `pmp_api36` and on
+`pmp_api26`, which is `minSdk`:
+
+```
+1  3.14.7  ·  sys.platform=android  ·  Android 16 (SDK 36, aarch64) / ART VM 0.9
+3  table hit: handle 4294967317 -> 3   (Kotlin-side call; the boundary shim is desktop-only today)
+4  22 entries, 4 classes, from io_github_thisisthepy_sample
+   @PythonInternal held: the annotated member is absent from the table
+```
+
+Twenty-two rather than desktop's nineteen because the Android compilation also scans
+`MainActivity`; the module name is the same one, since it is one module now.
+
+`:sample:run` did not work before this and it was not the sample's fault twice over: the task had
+no `PYTHONHOME`, so `Py_Initialize` could not find `encodings`, and a project dependency resolves
+to class directories rather than to `desktopJar`, so `manager.loadLibPython` found no bundled
+`libpython` either. Both are wired in `sample/build.gradle.kts` now, the second by falling back to
+`$PYTHONHOME/lib` — which is the fallback `manager.kt` already had, it just had nowhere to look.
+
+**What was there before:** the Compose template screen (a button, an image, the platform name),
+and a `desktopMain` `main()` doing raw `PyLong_FromLongLong`/`PyRun_SimpleString` with a pointer
+round-tripped through a `Double`. It compiled. Nothing in it touched the object model, and
+`PyRun_SimpleString` is the call `Python3.exec` exists to avoid (it calls `PyErr_Print`, which
+clears the error indicator before anything can read it).
+
+### The convenience plugin could not be applied to an Android module — closed
+
+This was the finding, and it was a property of the repo rather than of the sample.
+
+```
+java.lang.NoSuchMethodError: 'void com.android.build.api.variant
+    .AndroidComponentsExtension.addKspConfigurations(boolean)'
+  at com.google.devtools.ksp.gradle.KspConfigurations$3$1.execute(KspConfigurations.kt:114)
+```
+
+KSP 2.3.11 declares `MINIMUM_SUPPORTED_AGP_VERSION = 8.10.0` (read off its `agpUtils` class), and
+this build pinned AGP 8.5.2, whose `AndroidComponentsExtension` has no such method (`javap` on
+`gradle-api-8.5.2.jar`). So `id("io.github.thisisthepy.python.multiplatform.bindings")` — which
+applies `com.google.devtools.ksp` — died at configuration time in any module carrying an Android
+plugin, which is **every Android consumer of the plugin, not just this sample.** `ksp-fixtures`
+never hit it because neither fixture module applied an Android plugin: the fixtures were verifying
+their own shape rather than the plugin's advertised one, the same failure mode §2's
+`AssembledApiTest` had.
+
+**Two versions moved, and nothing else had to.**
+
+| | was | now | why |
+|---|---|---|---|
+| AGP | 8.5.2 | **8.10.1** | KSP's declared minimum is 8.10.0 |
+| Gradle | 8.9 | **8.11.1** | AGP 8.10's own minimum |
+
+Kotlin (2.4.20-Beta2), KSP (2.3.11) and the Compose Multiplatform plugin (1.6.11) are untouched —
+the bump needed no chain beyond those two. `python-multiplatform`'s Android wiring is the part
+that was expected to complain, since it hangs hand-written `Copy` tasks, a `tasks.configureEach`
+name match on `merge*JniLibFolders`/`*NativeLibs`, and a `preBuild.dependsOn(linkTaskProvider)`
+off AGP internals — none of it needed changing. `compileSdk` stays at 34.
+
+`:sample` applies the bindings plugin directly now and `:sample-bindings` is gone; its sources moved
+back under `sample/src/*/kotlin/.../demo/bindings/`. The Android `UpcallDemo` actual, which used to
+answer "unavailable on Android" to every member, is an ordinary one-line delegation like the others.
+
+Two things the fold-back exposed that the split had hidden:
+
+- **`androidMain` can name the generated table; `iosMain` cannot.** `androidMain` *is* the Android
+  target's source set, compiled together with each variant's KSP output, so its `actual` names
+  `FunctionTable` directly. `iosMain` is an intermediate source set the generating leaves depend
+  on, so it still needs one `actual` per leaf. Same processor, opposite answer, and the difference
+  is which side of the compilation the source set sits on.
+- **Exposure is a blacklist, so applying the plugin offers the whole module to Python — including
+  Compose.** A `@Composable` may only be called from another composable and a generated entry is an
+  ordinary lambda, so a scanned `@Composable` is a compile failure of *generated* code. `:sample`
+  therefore sets `excludePackages` to keep `...demo.ui` out. A separate module made this invisible;
+  any real app has UI in the same module as its bindings.
+
+### `ksp-fixtures/android`, and the second defect it found immediately
+
+`ksp-fixtures/android` is the fixture that carries `com.android.library` — the one thing neither
+existing fixture does. It applies the bindings plugin, exposes the same declaration shapes the
+desktop fixture uses, and runs 6 tests against the generated `FunctionTable` as a plain JVM unit
+test (`testDebugUnitTest`, no device). If the AGP/KSP pair ever drifts apart again it stops
+configuring, which is the failure worth having.
+
+It earned itself on the first run, by failing for an unrelated reason:
+
+```
+6 tests completed, 5 failed
+```
+
+The plugin decided which KSP configurations to put the processor on with `name.endsWith("Test")`.
+That holds for Kotlin target names (`kspDesktopTest`), but **AGP names its source sets with the
+build type last**:
+
+```
+main          kspAndroid              kspAndroidDebug              kspAndroidRelease
+unit test     kspAndroidTest          kspAndroidTestDebug          kspAndroidTestRelease
+instrumented  kspAndroidAndroidTest   kspAndroidAndroidTestDebug   kspAndroidAndroidTestRelease
+testFixtures  kspAndroidTestFixtures  kspAndroidTestFixturesDebug  kspAndroidTestFixturesRelease
+```
+
+so the suffix check caught three of those nine. The processor ran over the *test* sources on
+`kspAndroidTestDebug` and emitted a second `Fragment_<module>` and a second `FunctionTable` into
+the test compilation, where they shadowed the real ones from `main` — a compilation's own
+generated sources win over its classpath. The table the test read held the test class's own
+members and nothing the module exposes.
+
+This is exactly the duplicate-fragment hazard the plugin's own doc comment describes, arriving
+through a name shape that comment did not anticipate. `Test` is now matched as a camel-case *word*
+(`(?:^|[a-z0-9])Test(?:[A-Z]|$)`), not as a suffix, so a flavour or target named `testing` still
+keeps its processor. `WiringTest` pins the full observed Android configuration list.
+
+**Nothing without an Android plugin could have found this**, which is the point of the fixture.
+
+### Two smaller things the sample found
+
+- **The generated table is reachable only from the source set of the target that generated it.**
+  KSP writes `FunctionTable` into `iosSimulatorArm64Main` and its siblings, so `iosMain` — which
+  those leaves depend on — cannot name it, exactly as `commonMain` cannot. `installGeneratedUpcallTable`
+  is therefore one line per leaf target. Anything designed to touch the generated table from
+  shared code has to route through an `expect`/`actual` like this. The rule is about *intermediate*
+  source sets, not about "not being `commonMain`": `androidMain` is the Android target's own source
+  set and names `FunctionTable` directly, which the fold-back above made visible.
+- **A `var` with a `private set` would generate a fragment that does not compile.** `FragmentScanner`
+  decides on `property.isMutable` alone and emits a `STATIC_SETTER`/`SETTER` assigning to it, so
+  the generated file assigns to an inaccessible setter. Read off the scanner, not observed — the
+  sample avoids the shape. Worth a `BindingPolicy` check, since a read-only-to-callers `var` is an
+  ordinary Kotlin idiom.
+
+### ~~What the sample still cannot show~~ — the trampoline exists now
+
+**What it was.** `UpcallStub` was desktop-only and both its stubs were `(long) -> long`, so the
+entry the demo called took no arguments and returned a `Long`. The *table* had carried arity and
+per-argument `TypeTag`s from the day it was written; nothing read them. Python could call Kotlin
+and could not pass it anything.
+
+**What it is.** `python.multiplatform.ffi.upcall.UpcallTrampoline` marshals both directions and is
+`commonMain` — the argument handling was never platform-specific, only the address publishing was.
+Desktop reaches it through one new Panama stub. Python now calls Kotlin with real arguments of
+every marshalled tag, constructs a Kotlin object and calls a method on it, and gets a Python
+exception when the Kotlin side raises: `python.native.ffi.UpcallArgumentsTest`, which drives the
+whole path from inside the interpreter, and `UpcallTrampolineTest` (commonTest, so it compiles for
+every target) which drives the marshaller directly. Desktop: 233 tests, 0 failed.
+
+Three things the work settled, each recorded in `docs/upcall-design.md`:
+
+- **One shape, not a family.** Argument passing needed exactly one new C shape,
+  `(long, long) -> long`. Arity and types ride in the tuple and in the table entry, never in the C
+  signature, so the stub count does not grow with the exposed surface. It is also, exactly,
+  `PyCFunction` — so the generated proxy type will not need a new shape either. Every other CPython
+  slot shape was already in `Panama`'s vocabulary.
+- **`ctypes.CFUNCTYPE` releases the GIL.** The first version segfaulted in `_PyThreadState_GET`
+  (`PyErr_Occurred+0x1c`) on a thread whose own `withGIL` depth counter said it held the GIL. That
+  counter records scopes *Kotlin* opened, and C is free to have dropped the GIL inside one. An
+  entry point reached from C must take its own `PyGILState_Ensure` unconditionally — which applies
+  to every platform's entry point, not only this one.
+- **`bytes` has no fast route in this ABI subset.** `PyBytes_AsString` is bound as a
+  NUL-terminated UTF-8 *string* read, which destroys exactly the payloads `ByteArray` exists for,
+  and `PyBytes_AsStringAndSize` is in no platform's `EmbedAPI`. The trampoline goes an item at a
+  time — correct, and the slowest path across this boundary by a wide margin.
+
+**What is still open.** The other platforms' entry points, which are the address-publishing step
+and nothing more: iOS/androidNative want a `@CName` pair reached through `ctypes.CDLL(None)` (still
+the cheapest — one binary, no C glue), Android a `RegisterNatives` method behind a `PyCFunction`
+shim, wasm a `@WasmExport` plus `Table.set` (3.1 ns, measured in §11). Per-platform detail is in
+`docs/upcall-design.md`'s "What each platform still owes". The generated proxy type that would let
+Python write `obj.method(x)` instead of resolving through a `ctypes` shim is §7's remaining half.
