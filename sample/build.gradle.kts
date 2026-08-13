@@ -352,9 +352,15 @@ tasks.register<Exec>("runNativeUpcallDemo") {
 
     doLast {
         val text = captured.toString(Charsets.UTF_8)
-        if (!text.contains("PYTHON: UPCALL_OK")) {
+        // Two markers, because the binary now verifies two layers. `UPCALL_OK` is the raw boundary
+        // (resolve a name, invoke a handle); `PROXY_OK` is the generated Python proxy module on top
+        // of it -- a Kotlin class constructed from Python, a companion on a metaclass, and `await`
+        // over a `suspend fun`. The second binds two more Panama stub shapes than the first, so a
+        // reachability gap can pass `UPCALL_OK` and die immediately afterwards.
+        val missing = listOf("PYTHON: UPCALL_OK", "PYTHON: PROXY_OK").filterNot(text::contains)
+        if (missing.isNotEmpty()) {
             throw GradleException(
-                "upcall-native-demo exited successfully but never printed `PYTHON: UPCALL_OK`. " +
+                "upcall-native-demo exited successfully but never printed ${missing.joinToString(" or ") { "`$it`" }}. " +
                     "The Python -> Kotlin upcall path did not complete inside the native image. " +
                     "A `MissingForeignRegistrationError` here means the shipped " +
                     "reachability-metadata.json is missing a descriptor -- regenerate it with " +

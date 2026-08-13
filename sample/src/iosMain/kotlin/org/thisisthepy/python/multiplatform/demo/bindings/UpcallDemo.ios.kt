@@ -22,13 +22,14 @@ import python.multiplatform.reflection.UpcallTable
 
 /**
  * The generated table is real here -- same processor, same fragments, discovered through the
- * `.klib` rather than a jar. What does not exist yet is the *boundary shim*: desktop's
- * `python.native.ffi.UpcallStub` is a pair of Panama upcall stubs and iOS has no equivalent
- * written, even though it is the platform where one should be cheapest (Python and Kotlin share
- * one binary, so a `@CName`-exported resolve/invoke pair needs no marshalling layer at all).
+ * `.klib` rather than a jar. This particular call is still made from the **Kotlin** side, and says
+ * so: reporting it as a call Python made would hide which half of the path was exercised.
  *
- * So this calls the generated entry from the Kotlin side and says so. Reporting it as a call
- * Python made would hide the one part of ROADMAP §7 that is still open.
+ * What is *not* true any more is the reason this file used to give. It said iOS had no boundary
+ * shim at all, and that stopped being the case when `python.native.ffi.UpcallEntry` landed in
+ * `nativeMain`: it publishes real `PyMethodDef`-backed builtins, which is the only route on this
+ * target because this project's `Python.framework` ships no `_ctypes`. `ProxyDemo.ios.kt` next
+ * door uses it, and records the one place the library's two halves disagree about the bootstrap.
  */
 actual fun callKotlinFromPython(): String {
     val handle = UpcallTable.resolve(UPCALL_ENTRY_NAME)

@@ -29,8 +29,15 @@ import org.thisisthepy.python.multiplatform.demo.PythonDemo
 import org.thisisthepy.python.multiplatform.demo.UpcallDemo
 
 /**
- * Four sections, one per thing the library can do that it could not do when this sample was last
- * touched. Deliberately plain: the interesting part is what each button reaches, not the layout.
+ * One section per thing the library can do that it could not do when this sample was last touched.
+ * Deliberately plain: the interesting part is what each button reaches, not the layout.
+ *
+ * Sections 1-4 are the original four: the interpreter, the object model, the raw upcall table, and
+ * proof the processor ran. Sections 5-7 are the surface that grew *after* those and had no consumer
+ * outside `python-multiplatform`'s own tests -- a Kotlin class constructed and driven from Python,
+ * a companion reached through a metaclass, and `await` over a `suspend fun`. Where a target has no
+ * boundary shim they report that rather than being hidden, because "unavailable here" is the
+ * finding on those targets.
  *
  * Every composable in this app lives under this package because `build.gradle.kts` excludes it
  * from the upcall table -- a `@Composable` cannot be called from a generated non-composable
@@ -51,6 +58,9 @@ fun App() {
                 EvaluateSection()
                 UpcallSection()
                 TableSection()
+                ClassProxySection()
+                StaticSurfaceSection()
+                AwaitSection()
             }
         }
     }
@@ -120,6 +130,58 @@ private fun TableSection() {
                 },
             )
         }
+    }
+}
+
+/**
+ * 5. Python constructing and driving a Kotlin object -- the shape none of sections 1-4 could show,
+ * because `DemoCounter` is an `object` and has no constructor, no receiver and no properties.
+ */
+@Composable
+private fun ClassProxySection() {
+    DemoCard("5 — Python drives a Kotlin class") {
+        var result by remember { mutableStateOf("") }
+
+        Mono(remember { PythonDemo.proxyInstallReport() })
+        Text("g = Greeter('Kotlin'); g.greet(2); g.subject = 'Python'; g.greetings = 99")
+        Button(onClick = { result = PythonDemo.classProxy() }) { Text("run") }
+        if (result.isNotEmpty()) Mono(result)
+    }
+}
+
+/** 6. The companion object, reached through the class and never through an instance. */
+@Composable
+private fun StaticSurfaceSection() {
+    DemoCard("6 — companion members on the metaclass") {
+        var result by remember { mutableStateOf("") }
+
+        Text("Greeter.built = 100; Greeter.forget(); Greeter.PUNCTUATION = '?'")
+        Button(onClick = { result = PythonDemo.staticSurface() }) { Text("run") }
+        if (result.isNotEmpty()) Mono(result)
+    }
+}
+
+/**
+ * 7. `await kotlin_fn(x)`.
+ *
+ * Two buttons because the two paths are deliberately indistinguishable from Python and only the
+ * `create_future` count tells them apart: the fast one never reaches the event loop, the slow one
+ * hands back a `Future` that a Kotlin thread settles.
+ */
+@Composable
+private fun AwaitSection() {
+    DemoCard("7 — await over a suspend fun") {
+        var fast by remember { mutableStateOf("") }
+        var slow by remember { mutableStateOf("") }
+
+        Text("await g.greetNow(1) and await g.greetLater(2) — same call site, two paths underneath.")
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(onClick = { fast = PythonDemo.awaitFastPath() }) { Text("fast path") }
+            Spacer(Modifier.width(4.dp))
+            Button(onClick = { slow = PythonDemo.awaitSuspending() }) { Text("really suspends") }
+        }
+        if (fast.isNotEmpty()) Mono(fast)
+        if (slow.isNotEmpty()) Mono(slow)
     }
 }
 

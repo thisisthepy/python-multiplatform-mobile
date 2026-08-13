@@ -1,5 +1,10 @@
 package org.thisisthepy.python.multiplatform.demo
 
+import org.thisisthepy.python.multiplatform.demo.bindings.awaitFastPathDemo
+import org.thisisthepy.python.multiplatform.demo.bindings.awaitSuspendingDemo
+import org.thisisthepy.python.multiplatform.demo.bindings.classProxyDemo
+import org.thisisthepy.python.multiplatform.demo.bindings.installPythonProxies
+import org.thisisthepy.python.multiplatform.demo.bindings.staticSurfaceDemo
 import python.multiplatform.currentPlatform
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.Python3
@@ -28,6 +33,8 @@ object PythonDemo {
 
     private var started = false
 
+    private var proxyReport = "not started"
+
     /**
      * Brings up the interpreter, publishes a Kotlin-built object into Python, and installs the
      * generated upcall table. Idempotent; the platform entry points differ in when they can call
@@ -48,8 +55,34 @@ object PythonDemo {
         Python3.import("__main__").setAttr("kotlin_numbers", numbers)
 
         UpcallDemo.install()
+        // Strictly after `install()`: the proxy module is rendered from whatever `UpcallTable` and
+        // `ClassLookup` hold at the moment it runs, so installing it against an empty table would
+        // generate a module with nothing in it and no error anywhere.
+        proxyReport = installPythonProxies()
         started = true
     }
+
+    /** What [installPythonProxies] said during [start] -- including "this target has no shim". */
+    fun proxyInstallReport(): String = proxyReport
+
+    /**
+     * Python constructs a Kotlin object, calls a method, reads a property, writes a property, and
+     * is refused the one whose Kotlin setter is `private`.
+     *
+     * Named differently from the top-level function it delegates to on purpose: a member with the
+     * same name would shadow the import and recurse into itself, which
+     * [UpcallDemo.optOutHeld]'s actuals already had to work around once.
+     */
+    fun classProxy(): String = classProxyDemo()
+
+    /** The companion's properties and function, reached through the class object's metaclass. */
+    fun staticSurface(): String = staticSurfaceDemo()
+
+    /** `await` over a `suspend fun` whose body never suspends: no `Future`, no event loop. */
+    fun awaitFastPath(): String = awaitFastPathDemo()
+
+    /** `await` over one that really does, settled from a Kotlin thread. */
+    fun awaitSuspending(): String = awaitSuspendingDemo()
 
     /** One line naming what is actually loaded, so a broken bring-up is visible immediately. */
     fun runtimeSummary(): String = buildString {
