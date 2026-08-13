@@ -502,6 +502,11 @@ import 훅이 필요 없는 이유는 CPython 이 finder 를 보기 전에 `sys.
 
 ### 9.5 wasm — §4·§8.5 의 추론을 측정이 뒤집었다
 
+> **§15 가 이 절의 진단을 뒤집었다.** 아래의 *관측*(무엇이 죽었는가)은 맞다. *원인*은 틀렸다 —
+> `RuntimeError: unreachable` 은 3차 증상이었고, 진짜 원인은 Emscripten 의 **런타임** JSPI 감지와
+> `main` 을 부르지 않는 우리 부트 코드가 어긋난 것이다. `cpython.mjs` 에서 고쳤고, 지금은
+> `import selectors` 도 `import asyncio` 도 통과한다. 아래의 "첫 걸음에서 없다" 는 **틀렸다.**
+
 §4 와 §8.5 는 wasmJs 에서 (C) 가 **교착**으로 실패할 것이라고 추론했다. 그게 아니다. 훨씬 이르다.
 
     import json  OK    import math   OK    import select     OK
@@ -963,6 +968,11 @@ callable 을 만든다. 파이썬이 부르는 함수 포인터는 그 하나뿐
 
 ### 14.4 asyncio 는 여전히 안 된다 — 그래서 상수가 둘이다
 
+> **§15 가 이 절의 전제를 뒤집었다.** `import asyncio` 는 이제 **통과한다.** 상수를 `false` 로
+> 두는 결론 자체는 유지되지만 **이유가 바뀌었다** — trap 이 아니라, 이 상수가 게이트하는 테스트가
+> 만드는 *기본* 이벤트 루프를 아직 만들 수 없기 때문이다(`socketpair` → `require('ws')`, §15.7).
+> 아래 문단의 "trap 시킨다" 는 더 이상 사실이 아니다.
+
 §9.5 는 그대로다: `import asyncio` 가 이 wasm 빌드에서 **인스턴스를 trap** 시킨다. 파이썬 예외가
 아니라 프로세스가 죽는 것이므로 Kotlin 에서도 파이썬에서도 잡을 수 없고, 부트스트랩이 생겼다고
 달라지지 않는다.
@@ -1016,7 +1026,133 @@ HandleTable roots before the timed loops: 1, after: 1
 
 ### 14.6 남은 것
 
-- **async 프록시.** §9.5 의 trap 이 풀리지 않는 한 불가능하다. 이 빌드의 `selectors` 가
+- **async 프록시.** ~~§9.5 의 trap 이 풀리지 않는 한 불가능하다. 이 빌드의 `selectors` 가
   `RuntimeError: unreachable` 로 죽는 것이 원인이고, 그것은 이 문서가 아니라 CPython wasm 빌드
-  쪽 문제다.
+  쪽 문제다.~~ **§15 가 이 항목을 뒤집었다.** trap 은 풀렸고, 원인은 CPython wasm 빌드가 아니라
+  우리 부트 코드였다. 남은 것은 trap 이 아니라 **기본 이벤트 루프**다 (§15.7).
 - **`sample` 의 wasm 경로.** §13.5 가 Android 에 대해 한 것을 wasm 에 대해서는 하지 않았다.
+
+---
+
+## 15. `selectors` trap 의 원인 — 측정, 그리고 §9.5·§14.4·§14.6 의 진단은 틀렸다
+
+§9.5 는 `import selectors` 가 `RuntimeError: unreachable` 로 죽는 것을 관측하고 거기서 멈췄다.
+§14.6 은 그것을 "CPython wasm 빌드 쪽 문제" 로 넘겼다. **둘 다 틀렸다.** 원인은 `selectors` 도,
+`asyncio` 도, wasm 도, CPython 빌드도 아니다. **우리 쪽 부트 코드다.** 그리고 고쳤다.
+
+### 15.1 관측한 것
+
+`RuntimeError: unreachable` 은 원인이 아니라 3차 증상이었다. 실제 순서는 이렇다:
+
+    select.poll().poll(0)
+      -> SuspendError: trying to suspend without WebAssembly.promising     <- 1차, 진짜 원인
+      -> SuspendError 가 CPython 의 C 프레임을 Py_END_ALLOW_THREADS 없이 되감는다
+      -> 바깥 withGIL{} 의 PyGILState_Release 가
+         Fatal Python error: PyGILState_Release: thread state ... must be current when releasing
+      -> abort()  ->  wasm `unreachable` 오피코드                            <- 3차, 보고된 것
+
+격리된 프로브를 gradle 로 돌려 1차와 2차를 직접 읽었다. `RuntimeError: unreachable` 만 보고
+"파이썬 예외가 아니다" 라고 적었을 때 놓친 것이 그 위의 두 줄이다.
+
+### 15.2 왜 `select` 는 되고 `selectors` 는 안 됐나 — §9.5 가 지목한 그 대비의 답
+
+**모듈을 import 하는 것과 그 모듈의 함수를 호출하는 것의 차이다.** `import select` 는 아무것도
+호출하지 않는다. `selectors.py` 는 import 시점에 호출한다:
+
+    582:  selector_obj.poll(0)          # _can_use(method) 안
+    600:  elif _can_use('poll'):        # DefaultSelector 선택
+
+이 빌드의 `select` 에는 `kqueue`/`epoll`/`devpoll` 이 없으므로(`hasattr` 은 전부 False — 안전하게
+넘어간다) 실제로 **호출까지 가는 첫 후보가 `poll`** 이다. 그래서 `selectors` 가 첫 희생자였고,
+`asyncio` 는 `selectors` 를 거쳐서만 죽었다. §9.5 가 "막는 것은 asyncio 가 아니라 그 한 모듈" 이라고
+좁힌 것은 맞았지만, 한 칸 더 들어가면 **모듈이 아니라 그 한 syscall** 이다.
+
+### 15.3 원인 — Emscripten 은 JSPI 를 빌드 타임이 아니라 **런타임에** 결정한다
+
+CPython 의 링크 라인에 `-sJSPI` 는 **없다.** 그런데도 JSPI 를 쓴다. 글루가 이렇게 되어 있다:
+
+    function __block_for_int(p) { return p }
+    if (WebAssembly.Suspending) { __block_for_int = new WebAssembly.Suspending(__block_for_int) }
+    function __maybe_poll_async(...) { if (!WebAssembly.promising) { return null } ... }
+
+그리고 짝이 되는 `WebAssembly.promising` 래퍼를 **`main` 하나에만** 씌운다.
+
+    if (name === "main") { const main = WebAssembly.promising(orig.sym); ... }
+
+**우리는 `main` 을 부르지 않는다.** 이 파일 맨 위에 적혀 있는 그대로, 부트업은 `Python3.initialize()`
+가 `Py_Initialize` 를 다른 C API 와 똑같이 직접 wasm 호출로 발행하는 것이다. 그러므로 JSPI 가 있는
+런타임에서는 블로킹 syscall 이 suspending import 가 되는데 **스택 어디에도 promising 프레임이 없다.**
+첫 번째 블로킹 syscall 이 프로세스를 가져간다.
+
+즉 이것은 "wasm 에서 asyncio 가 안 된다" 가 아니라 **`main` 을 쓰지 않는 임베딩이 Emscripten 의
+JSPI 경로와 맞지 않는다** 는 문제였다. 우리가 `main` 을 쓰지 않는 것은 의도한 설계다.
+
+### 15.4 노드 버전이 갈랐다 — 같은 wasm 바이너리, 반대 결과
+
+런타임 감지이므로 **바이너리가 아니라 실행 환경이 결정한다.** 같은 `python.wasm` 으로 측정했다:
+
+| | `select.poll().poll(0)` | `import selectors` |
+|---|---|---|
+| Node 22 (JSPI 없음) | `[]` 반환 | OK — `PollSelector` |
+| Node 26 (JSPI 기본 켜짐) | `SuspendError` | 프로세스 사망 |
+
+gradle 의 wasm 테스트 러너는 Node **26** 에서 돈다. §9.5 를 측정한 것도 그 러너다. Node 26 에는
+JSPI 를 끄는 V8 플래그가 없다 — 실험 기능이 아니라 출시된 기능이라 `--experimental-wasm-jspi` 가
+아예 없다.
+
+### 15.5 고친 것 — `cpython.mjs` 에서 두 줄
+
+    delete WebAssembly.promising;
+    delete WebAssembly.Suspending;
+
+Emscripten 팩토리를 부르기 **전에** 지운다. 그러면 Node 26 이 Node 22 의 동기 경로로 돌아간다.
+이 라이브러리가 원하는 것이 정확히 그쪽이다: 모든 호출이 Kotlin 에서 **동기 wasm 호출**로 도착하므로,
+블로킹 syscall 은 실제로 **블로킹해야** 한다. 비동기 경로는 쓸 데가 없다.
+
+ES import 는 호이스팅되므로 이 시점에 `python.mjs` 는 이미 평가되어 있다. 상관없다 — JSPI 래핑은
+모듈 평가가 아니라 **팩토리 호출 안에서** 일어난다. 측정으로 확인했다.
+
+**stdlib 을 건드리지 않는다는 것이 이 선택의 핵심이다.** `sys.modules['selectors']` 에 shim 을
+넣는 방안도 후보였지만 채택하지 않았다:
+
+- shim 은 import 만 통과시킨다. selector 루프는 **매 이터레이션마다** `poll`/`select` 를 부르므로
+  첫 이터레이션에서 똑같이 죽는다. 증상을 한 칸 뒤로 미룰 뿐이다.
+- 사용자가 진짜 `selectors` 를 원할 때 조용히 가짜를 준다. 명시적 opt-in 을 붙여야 하는 것은 이 쪽이다.
+- 고칠 지점이 아니다. 문제는 stdlib 이 아니라 **우리 부트 코드**였다.
+
+지금 `selectors` 는 **진짜 모듈**이고 `DefaultSelector` 도 진짜 `PollSelector` 로 해결된다.
+그러므로 opt-in 도 필요 없다 — 끄고 켤 동작 차이가 없고, 되던 것이 늘어날 뿐이다.
+
+### 15.6 측정 — 어디까지 가나
+
+`WasmSelectorsImportTest`(wasmJsTest, 4개) 가 고정한다. 고치기 전에 빨간 것을 봤다: 프로브를
+gradle 로 돌려 §15.1 의 fatal error 를 직접 읽었고, 그 실행은 테스트 실패가 아니라
+`Test running process exited unexpectedly` 였다.
+
+| | 결과 |
+|---|---|
+| `select.poll().poll(0)`, `select.select(...)` | **통과** — suspend 하지 않고 반환한다 |
+| `import selectors` → `DefaultSelector is PollSelector` | **통과** — 진짜 모듈, 진짜 디스패치 |
+| `import asyncio`, `asyncio.events`, `asyncio.base_events` | **통과** |
+| selector 를 안 쓰는 루프로 코루틴 1개 완주 (`await Future`, `asyncio.sleep(0)`) | **통과** — 84 |
+
+즉 **async 업콜이 필요로 하는 표면은 이 타깃에서 성립한다**: 도는 루프, 진짜 `asyncio.Future`,
+`create_future`, `call_soon`.
+
+### 15.7 남은 것 — 기본 루프는 여전히 못 만든다 (다른 원인)
+
+`asyncio.run()` 은 아직 안 된다. **JSPI 와 무관한 별개의 벽이다:**
+
+    BaseSelectorEventLoop.__init__ -> _make_self_pipe -> socket.socketpair()
+      -> Emscripten ___syscall_listen -> require('ws')     ->  MODULE_NOT_FOUND
+
+Emscripten 은 소켓을 Node 의 `ws` 패키지로 흉내내는데 그것이 설치되어 있지 않다. 이것은 §15.5
+이전에도 있었고 지금도 있다 — Node 22 에서 측정했을 때도 똑같이 났다. 그래서 §15.6 의 마지막 줄이
+**커스텀 루프**다: Pyodide 가 같은 문제를 푸는 방식이고, selector 도 self-pipe 도 열지 않으므로
+두 벽을 모두 비켜간다.
+
+`proxyBootstrapSupportsAsyncio` 는 **`false` 로 둔다.** `import asyncio` 는 이제 되지만 그 상수가
+게이트하는 테스트는 *기본* 이벤트 루프를 만들고 `create_future` 를 세므로, 그 경로는 아직 없다.
+상수를 뒤집으려면 라이브러리가 커스텀 루프를 제공할지부터 정해야 하고 — 그것은 §7 의 프록시 설계가
+아니라 새 결정이다. 여기서 하지 않는다. **§9.5 의 "wasm 에서 (C) 는 첫 걸음에서 없다" 는 이제
+틀렸다. 첫 걸음은 있다. 없는 것은 기본 루프다.**

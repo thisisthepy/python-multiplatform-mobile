@@ -15,6 +15,49 @@ import EmscriptenModule from "./python.mjs";
 import { PYTHON_DIR } from "./cpython-config.mjs";
 import fs from "node:fs";
 
+// -------------------------------------------------------------------------------------------------
+// Suppress JSPI before the Emscripten factory runs. This is what makes `import selectors` -- and
+// therefore `import asyncio` -- possible on this target.
+//
+// Emscripten decides whether to use JavaScript Promise Integration by *runtime* feature detection,
+// not at build time (CPython's link line has no -sJSPI). Its glue does, verbatim:
+//
+//     function __block_for_int(p) { return p }
+//     if (WebAssembly.Suspending) { __block_for_int = new WebAssembly.Suspending(__block_for_int) }
+//     function __maybe_poll_async(...) { if (!WebAssembly.promising) { return null } ... }
+//
+// and it installs the matching `WebAssembly.promising` wrapper on exactly one export: `main`.
+//
+// We never call `main` -- deliberately, see the note on Py_InitializeEx below; bring-up is
+// `Python3.initialize()` issuing `Py_Initialize` as a direct wasm call. So on a runtime where JSPI
+// exists (Node >= 24; the Gradle runner is on 26) the blocking syscalls become suspending imports
+// with no promising frame anywhere on the stack, and the first one to run tears the process down:
+//
+//     select.poll().poll(0)   ->  SuspendError: trying to suspend without WebAssembly.promising
+//
+// `selectors.py` calls exactly that at import time -- `_can_use('poll')` (line 582) from the
+// DefaultSelector choice (line 600) -- which is why `import select` was fine but `import selectors`
+// was not, and why `asyncio` died only by way of `selectors`. The SuspendError unwinds CPython's C
+// frames without running Py_END_ALLOW_THREADS, so the outer withGIL{}'s PyGILState_Release then
+// hits `Py_FatalError: thread state ... must be current when releasing` -> abort() -> the wasm
+// `unreachable` opcode. That last hop is the `RuntimeError: unreachable` this was reported as; it
+// is the third-order symptom, not the cause.
+//
+// Measured, same wasm binary, `select.poll().poll(0)`: Node 22 (no JSPI) returns []; Node 26 (JSPI)
+// raises SuspendError. Hiding the two properties here puts Node 26 back on Node 22's synchronous
+// path. Nothing in this library wants the async one: it needs blocking syscalls to *block*, because
+// every call arrives from Kotlin as a plain synchronous wasm call.
+//
+// Deleting rather than shimming the stdlib is the point. `selectors` stays the real module and
+// still resolves DefaultSelector to the real `PollSelector`; what changes is our own Emscripten
+// boot, which is this file's job.
+//
+// This must run before the factory call, not merely before this module's body -- ES imports hoist,
+// so `python.mjs` has already been evaluated by now. That is fine: the JSPI wrapping happens inside
+// the factory, when it is invoked.
+delete WebAssembly.promising;
+delete WebAssembly.Suspending;
+
 const M = await EmscriptenModule({
     noInitialRun: true,
     thisProgram: PYTHON_DIR + "/python.sh",
