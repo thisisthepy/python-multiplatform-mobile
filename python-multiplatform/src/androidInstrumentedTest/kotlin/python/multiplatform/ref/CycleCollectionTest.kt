@@ -113,6 +113,83 @@ class CycleCollectionTest {
         HandleTable.releaseAll()
     }
 
+    /**
+     * Drops the last reference to a proxy *now*, instead of leaving it to ART's collector.
+     *
+     * Every test here that closes a cycle ends with the proxy held by an [AndroidCycleNode] and by
+     * nothing else. Once [tearDown] drops the handle table's root, that node is JVM garbage, and
+     * the `Py_DecRef` its [PyObject] owes is scheduled by ART's collector and run on a cleaner --
+     * `java.lang.ref.Cleaner`'s thread on API 33+, the `PyAutoCloseable-Cleaner` daemon draining a
+     * `ReferenceQueue` below it (see `PyAutoCloseable.android.kt`). Either way that release goes
+     * through `withGIL`, so it can only land once the cleaner thread is given the GIL.
+     *
+     * That is a live grenade for any later test that reads a reference count across a window in
+     * which it releases the GIL, and [testDeallocOnAThreadCPythonCreated] is exactly such a test.
+     * Observed on this platform once, as `expected:<5> but was:<2>` -- three references off the
+     * proxy type between its two readings, and three is exactly how many tests here leave a proxy
+     * behind ([testCycleCollectionByGC], [testHandleSurvivesWhenTraverseReportsNothing] and
+     * [testCycleCollectedOnAThreadCPythonCreated]).
+     *
+     * The failure itself is rare -- it needs an ART collection to fire *inside*
+     * [testDeallocOnAThreadCPythonCreated]'s `withGIL`, after its first reading, so that the
+     * cleaner is still blocked when the worker thread hands the GIL over. Twenty full-suite runs
+     * (ten per emulator, API 26 and API 36) produced none. The debt behind it is not rare at all
+     * and is what this fixes: with these calls removed, [settleJvmFinalisation] reports 3 owed on
+     * both API levels, every run.
+     *
+     * Calling this is not cleanup for tidiness. It is what makes the deallocation happen at a point
+     * the test controls, under the GIL it is already holding. Ported from `nativeTest`'s copy,
+     * which got it thirteen hours earlier (`643eaed9`) while this file was left behind.
+     */
+    private fun disposeProxy(node: AndroidCycleNode) {
+        node.ref?.close()
+        node.ref = null
+        node.rawPtr = 0L
+    }
+
+    /**
+     * Blocks until an ART collection stops changing the reference count at [typeAddr].
+     *
+     * The backstop for [disposeProxy]: it makes this test's opening reading independent of whatever
+     * any earlier test happened to leave owing, rather than merely correct while they all remember
+     * to tidy up.
+     *
+     * Two platform details, both already paid for elsewhere in this source set:
+     *
+     *  - **`Runtime.getRuntime().gc()`, not `System.gc()`.** On Android `System.gc()` only records
+     *    a request and defers it, so a loop of bare `System.gc()` calls runs no collection at all.
+     *    `runFinalization()` follows it so the reference queues are drained. `forceGC()` in
+     *    `GCLeakTest.androidInstrumented.kt` carries the measurement behind that claim.
+     *  - **Not called while this thread holds the GIL.** The cleaner is blocked in
+     *    `PyGILState_Ensure`; settling means letting it through, which cannot happen while this
+     *    thread is inside `withGIL`. (`kotlin.native.runtime.GC.collect()` deadlocks outright in
+     *    that position on Kotlin/Native; on ART it would merely never settle, which is worse to
+     *    diagnose.)
+     *
+     * [bindings.obRefCnt] is a plain 8-byte load, so reading it without the GIL is the same racy
+     * poll the `nativeTest` copy does with a `LongVar` load -- which is all this needs, since it is
+     * watching for the value to stop moving rather than trusting any single reading.
+     *
+     * @return how far the count moved while settling -- 0 once every test disposes of its own
+     *   proxy, and the number of proxies that were still owed if one stops doing so.
+     */
+    private fun settleJvmFinalisation(typeAddr: Long): Long {
+        if (typeAddr == 0L) return 0L
+        val started = bindings.obRefCnt(typeAddr)
+        var last = started
+        var quiet = 0
+        var turns = 0
+        while (quiet < 4 && turns < 60) {
+            Runtime.getRuntime().gc()
+            System.runFinalization()
+            Thread.sleep(30)
+            val now = bindings.obRefCnt(typeAddr)
+            if (now == last) quiet++ else { quiet = 0; last = now }
+            turns++
+        }
+        return started - last
+    }
+
     @Test
     fun testCycleCollectionByGC() {
         withGIL {
@@ -168,6 +245,11 @@ class CycleCollectionTest {
                 HandleTable.resolveRaw(handle),
                 "the cycle was not collected: the handle is still live after gc.collect()",
             )
+
+            // tp_clear broke the loop but did not free the proxy -- `node` still holds the last
+            // reference. See disposeProxy for why that reference is given back here rather than
+            // left to ART's collector.
+            disposeProxy(node)
         }
     }
 
@@ -215,6 +297,11 @@ class CycleCollectionTest {
             // Keeps `node` (and with it the Python object) alive across the collection, so the
             // assertion above is about the collector's decision and not about ART's GC.
             assertEquals(pyObjPtr, node.rawPtr)
+
+            // The proxy survived on purpose, so this test is the one that owes its release. Not
+            // [disposeProxy], which takes an AndroidCycleNode -- this node deliberately is not one.
+            node.ref?.close()
+            node.ref = null
         }
     }
 
@@ -363,6 +450,31 @@ class CycleCollectionTest {
      */
     @Test
     fun testDeallocOnAThreadCPythonCreated() {
+        // Sampled below: the proxy type's reference count, before and after a window in which this
+        // thread *gives up the GIL* -- `_t.start()` and `_t.join()` both release it, which is the
+        // whole point of the test. That makes this the one test here whose measurement a pending
+        // JVM finalisation can walk into: the cleaner thread wants the GIL, this is the only place
+        // it is offered, and a leftover proxy deallocated there takes one reference off the type
+        // between the two readings. The failure reads as "tp_dealloc did not balance the
+        // instance's reference to its heap type" while tp_dealloc has balanced it exactly.
+        //
+        // So nothing may still be owed when the first reading is taken. Called outside withGIL --
+        // see settleJvmFinalisation for why it cannot settle anything from inside one.
+        //
+        // The assertion on the result is the guard on disposeProxy: measured at 3 on API 26 and on
+        // API 36 with the disposals removed, and 3 is precisely how many tests above leave a proxy
+        // behind. Unlike the failure it prevents, that reading is deterministic -- which is the
+        // point of having it, since the failure is not. createProxyType() is idempotent and takes
+        // the GIL itself, so calling it here costs nothing and holds nothing.
+        val stillOwed = settleJvmFinalisation(ProxyTypeFactory.createProxyType())
+        assertEquals(
+            0L, stillOwed,
+            "$stillOwed proxy deallocation(s) were still owed to ART's collector when this test " +
+                "began, which means some test above stopped releasing its own proxy. Left alone " +
+                "they land during the GIL-release window below and this test fails claiming " +
+                "tp_dealloc did not balance the heap type -- see disposeProxy",
+        )
+
         withGIL {
             val proxyTypeAddr = ProxyTypeFactory.createProxyType()
             assertTrue(proxyTypeAddr != 0L, "Proxy type creation failed")
@@ -499,6 +611,10 @@ class CycleCollectionTest {
                     "though it is on the instrumentation thread -- tp_traverse or tp_clear did " +
                     "not reach Kotlin through pmp_attach's AttachCurrentThreadAsDaemon branch",
             )
+
+            // As in testCycleCollectionByGC: tp_clear broke the loop, `node` still holds the
+            // proxy's last reference, and this test gives it back rather than owing it.
+            disposeProxy(node)
         }
     }
 }
