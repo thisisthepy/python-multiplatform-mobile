@@ -2613,11 +2613,11 @@ Bundles, and 100 ms once per install did not justify that surface.
 3. `python-multiplatform-gradle-plugin` publishes fine but is invisible to `./gradlew tasks` from
    the repo root because it's a separate included build — needs a documented publish step, not a
    code change.
-4. No distribution channel exists for the CPython stdlib prefix a consumer's `PYTHONHOME` needs —
-   confirmed to be the *only* remaining blocker for a plain-JVM consumer once 1–2 are fixed.
-   Packaging/documenting one is real follow-up work, not done here. **Android is not affected**:
-   §15d ships the stdlib inside the AAR, and an external Android consumer now runs. This item is
-   desktop-only.
+4. ~~No distribution channel exists for the CPython stdlib prefix a consumer's `PYTHONHOME` needs~~
+   — **fixed, §15g.** It was confirmed to be the *only* remaining blocker for a plain-JVM consumer
+   once 1–2 were fixed, and it is now a `stagePythonHome` task on the bindings plugin: §15c's own
+   external consumer runs, printing the same `56`, with no `PYTHONHOME` set by hand and nothing
+   added to `desktopJar`. **Android was never affected** — §15d ships the stdlib inside the AAR.
 5. ~~`androidTarget` has no Maven publication at all~~ **fixed, §15d** — `publishLibraryVariants
    ("release")`, the AAR trimmed 40.10 MB → 23.42 MB on measurement rather than taste, and verified
    end to end by an external Android app that resolves by coordinates and runs CPython on both
@@ -2706,3 +2706,172 @@ external Android consumer, resolving by coordinates, generating and invoking a r
 `FunctionTable`, with the override knobs (`role`, `moduleName`, `excludePackages`) all confirmed
 working — not just the defaults. What remains open from item 7 is unchanged: the host app must
 still hand-write asset unpacking and `PYTHONHOME` setup.
+
+### 15g. Desktop's stdlib distribution — §15e item 4, closed
+
+§15c found a plain JVM consumer that compiled, loaded `libpython` off the classpath with no wiring
+at all, and then died in `Py_Initialize()` — `Failed to import encodings module` — because nothing
+anywhere gives it a standard library. §15e recorded that as the last blocker for a desktop
+consumer. This closes it.
+
+#### First: what is actually in `desktopJar`, because the plan depended on it
+
+The task this started from assumed the stdlib might already be in the jar, leaving only "how does
+a consumer get it out". **It is not.** The published
+`python-multiplatform-desktop-3.14.7-alpha01.jar` is 87.7 MB and its `lib/` tree is **14 entries,
+every one a shared library**:
+
+    lib/linux-x86_64/libpython3.14.so.1.0     251,884,016 raw   <- 64 MB of the jar on its own
+    lib/macos-aarch64/libpython3.14.dylib      19,394,064
+    lib/macos-x86_64/libpython3.14.dylib       20,172,552
+    lib/windows-x86_64/python314.dll            6,589,440   (+ python3.dll, 2x vcruntime)
+
+So the jar carries four platforms' *interpreters* and zero platforms' *standard library*. Any
+option that "unpacks it from the jar" first has to put it there.
+
+#### What putting it there would cost, measured
+
+Compressed, per platform, from the trees `downloadAllPythonBuilds` already extracts:
+
+| platform | full stdlib, zipped | per-platform native part |
+|---|---|---|
+| macos-aarch64 | 8.12 MB | `lib-dynload` + `config-*` + `_sysconfigdata*`: 0.12 MB |
+| macos-x86_64 | 7.12 MB | — |
+| linux-x86_64 | 8.23 MB | 1.22 MB |
+| windows-x86_64 | 20.11 MB (`Lib` + `DLLs`, `.pdb` excluded) | `DLLs` alone 8.36 MB |
+| **all four** | **43.5 MB** | |
+
+Two facts fell out of measuring rather than reading:
+
+- **The pure-Python stdlib is platform-independent on desktop.** `diff -rq` of macOS-aarch64's
+  `lib/python3.14` against Linux-x86_64's reports **28 differences across a 1286-file tree**, and
+  all of them are accounted for: `__pycache__`, `_sysconfigdata__*`/`_sysconfig_vars__*`,
+  `config-3.14-*`, `build-details.json`, two `lib-dynload` modules, and pip's own `RECORD` and
+  `direct_url.json`. De-duplicating on that basis would cut 43.5 MB to roughly 15 MB.
+- **The `install_only` distributions already omit CPython's test suite**, so the 38%-of-the-AAR
+  saving §15d found on Android does not exist here — there is nothing equivalent left to strip.
+
+Even de-duplicated, that is 15 MB added to an artifact **every desktop consumer resolves, to carry
+payload of which each one uses a quarter**. That is precisely the shape of the defect §15d
+diagnosed when `allMetadataJar` reached 87.4 MB, and the fix there was to narrow the scope, not to
+accept the size.
+
+#### The deciding constraint is not size, though: a JVM cannot set its own environment
+
+This is what actually rules out a desktop `PythonBootstrap`, and it is not a preference.
+
+CPython reads `PYTHONHOME` with `getenv(3)`, from the native process environment. Android's
+`PythonBootstrap` (§15f) sets it with `Os.setenv` and that is why the runtime shape works there.
+**The JVM has no equivalent.** `System.getenv` is an immutable snapshot taken at start-up;
+mutating it by reflection changes the JVM's cached map and does *not* touch the environment CPython
+reads. A desktop helper would therefore have to call libc `setenv` through Panama — a different
+symbol on Windows (`_putenv_s`) — and would then have set a value that `PythonHomeCheck` (`7bf08ca6`,
+which reads `System.getenv`) could no longer see, on exactly the check that exists to catch a bad
+`PYTHONHOME` before `Py_Initialize()` aborts the process uncatchably.
+
+Setting the variable **as the child process is launched** has neither problem: CPython and
+`PythonHomeCheck` read the same value from the same place. That is already how this repository's
+own `desktopTest` works.
+
+The C API offers no way round it either: `Py_SetPythonHome` was removed in 3.13, and
+`PyConfig.home` needs the struct layout the Stable ABI deliberately does not promise — the reason
+`Python3.initialize` uses `Py_Initialize()` rather than `Py_InitializeFromConfig` in the first
+place.
+
+#### The options, and why (B) won
+
+- **(A) ship the stdlib in `desktopJar` and unpack it at runtime.** Rejected on both counts above:
+  +15 MB (de-duplicated) or +43.5 MB (not) on a shared artifact, *and* it cannot set `PYTHONHOME`
+  without the `setenv` route and the `PythonHomeCheck` divergence that comes with it.
+- **(B) the Gradle plugin stages a prefix.** Taken. §15d rejected this for Android on the grounds
+  that the stdlib has to end up inside the APK regardless, so a consumer-side download moves the
+  size rather than removing it. **Neither half transfers to desktop**: a desktop `PYTHONHOME` may
+  name any path on the machine, so the prefix is fetched once *per machine* and shared by every
+  project on it, and nothing is added to any artifact.
+- **(C) document the python-build-standalone URL and let the consumer unpack it by hand.** This is
+  the status quo §15c called a blocker. It also asks the consumer to keep a version, an upstream
+  release tag and a target triple in step with the `libpython` inside `desktopJar` by hand; a
+  mismatch pairs a stdlib and an interpreter that disagree about ABI while both calling themselves
+  3.14.7.
+
+#### What it does
+
+`stagePythonHome` (`python-multiplatform-gradle-plugin`) downloads the same asset
+`downloadPython_*` does, verifies it against the release's `SHA256SUMS`, extracts it into a shared
+cache under the Gradle user home, and sets `PYTHONHOME` on every `JavaExec` and `Test` task. The
+consumer's whole diff is one `plugins { }` line.
+
+Three details are inherited from §15f rather than rediscovered:
+
+- **A stamp written after the last byte, deleted before a rewrite.** The root build's own
+  extraction step skips when `extractDir.list()` is non-empty — the same "probe the result" defect
+  §15f found in three hand-written Android copies. Verified by observation, not by reading: the
+  task restages when the stamp is removed, when the stamp is stale, and when the stamp is intact
+  but `lib/python3.14/os.py` has been deleted underneath it.
+- **The staged tree is validated against `PythonHomeCheck`'s own marker**, not a second notion of
+  "usable prefix". `stdlibMarkerRelativePath` returns the file `PythonHomeCheck.diagnose` probes.
+- **The archive is downloaded to `.part` and renamed on completion**, and a cached archive is
+  re-verified rather than trusted, so an interrupted download cannot present as an intact one.
+
+Two things it deliberately does **not** do. It never overrides a `PYTHONHOME` the consumer already
+set — the task is not even registered in that case — because §15c's entire finding is that setting
+it by hand is what consumers have had to do, and silently replacing a working conda or system
+prefix on a library upgrade would be worse than the gap. And it reads that variable through
+`providers.environmentVariable` rather than `System.getenv`: the latter reads the *daemon's*
+environment, so `PYTHONHOME=/their/prefix ./gradlew run` against a daemon started without it would
+have been told the user had set nothing, and would have overridden them on the very task they were
+configuring.
+
+#### Verified against §15c's own external consumer
+
+`/Volumes/macMini/consumer-test`, unchanged except for deleting its hand-set `PYTHONHOME` and
+adding the plugin line:
+
+    before  Fatal Python error: Failed to import encodings module   (the §15c gap, reproduced)
+    after   Result from Python: 56                                  (no PYTHONHOME set anywhere)
+
+`56` is `sum([2,3,5,7,11]) * 2` — the same value §15c got only after pointing `PYTHONHOME` at this
+repository's own build directory. The staged prefix is 1698 files, 69 MB, from a 26 MB archive.
+
+A second run with `PYTHONHOME` exported was confirmed to stage nothing, register no task, and
+still print `56`.
+
+#### Cost
+
+Task time from Gradle's own `--profile`, over two independent cold/warm pairs with the cache
+deleted between them:
+
+| | `stagePythonHome` |
+|---|---|
+| first build on a machine (download 26 MB, SHA-256 verify, extract 1698 files) | **1.507 s** / **1.939 s** |
+| archive cached, prefix rebuilt (verify + extract only) | 0.770 s |
+| every later build (stamp + marker check) | **0.014 s** / **0.037 s** |
+
+Between 40x and 107x depending which pair is read; nothing here rests on the margin. What holds is
+the order of magnitude, and that the first build is paid **once per machine, not once per
+project** — the cache is keyed by version + upstream release + platform under the Gradle user
+home, and the next in-repo consumer to ask for it (`:ksp-fixtures:app:desktopTest`, which applies
+this plugin) staged nothing at all. The download half of the cold number is this machine's link to
+GitHub and should not be read as portable; the 0.770 s local half is the one that generalises.
+
+#### What could not be checked from this machine
+
+Worth stating plainly, because a *distribution* problem is by definition about the hosts you are
+not sitting at.
+
+- **Only `macos-aarch64` was executed.** `linux-x86_64`, `macos-x86_64` and `windows-x86_64` have
+  their URL, asset name, triple and prefix layout pinned as string assertions in
+  `PythonHomeStagingTest` — a wrong triple for Windows is a 404 at a consumer's first build, and
+  asserting the string is the only way to catch it here.
+- **Windows is the least covered of the four.** Its prefix has a different shape (`Lib/` and
+  `DLLs/`, not `lib/python3.14/`), which is handled in `stdlibMarkerRelativePath` and matches the
+  second layout `PythonHomeCheck` already probes — but no Windows host ran it.
+- **`linux-aarch64` is staged but has never been run.** `desktopJar` carries no `libpython` for it;
+  it can only work because `manager.loadFromSidecar` falls back to loading the interpreter out of
+  `PYTHONHOME` when the classpath has none for the running platform. That path is real and
+  deliberate (it is what the GraalVM native image already relies on), but the combination is
+  untested.
+- **Packaged distribution is still open.** This puts a prefix on a *developer's* machine and points
+  `run`/`test` at it. An application shipped to an end user still needs its packaging step
+  (`jpackage`, Conveyor, an installer) to carry a prefix and set `PYTHONHOME`; the staged directory
+  is a reasonable thing for such a step to copy, but nothing here does it.
