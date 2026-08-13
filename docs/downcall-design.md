@@ -722,6 +722,94 @@ different runs of the same machine, which is exactly the kind of thing this docu
 is not comparable. Neither is ruled out here; this is reported as an open discrepancy, not resolved
 into either explanation.
 
+### Closed: repository drift, not run-to-run noise (2026-08-14)
+
+The discrepancy above was tested directly rather than argued from a second reading. `537c1a0b`
+(the commit the 861 ns floor was recorded on) and the current tip were each built in their own
+freshly created `git worktree` — not reused, not incrementally recompiled — and
+`:python-multiplatform:desktopTest` (the full suite, not a filtered subset — see the pitfall below)
+was run three times against each, clearing `build/test-results` before every run:
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| `537c1a0b`, fresh worktree | 870.48 ns | 808.72 ns | 869.12 ns |
+| current tip, fresh worktree | 697.73 ns | 680.46 ns | 686.21 ns |
+
+Same machine, same JDK (Temurin 21.0.12), same day. The two bands (809–870 ns vs. 680–698 ns) do
+not overlap across six runs split into two isolated builds, which rules out ordinary run-to-run
+variance as the explanation. Something in the repository between those two points changed the
+measured number. `537c1a0b`'s figure also reproduces its own historical record (861–1313 ns) almost
+exactly, which rules out a stale or miscalibrated re-measurement on this end.
+
+**A methodology pitfall found along the way:** an initial attempt to bisect the ~75 commits in
+between used `--tests UpcallBoundaryCostTest` to skip the other ~359 tests and go faster. That
+filter alone moved the number into the 1300–1400 ns range at *every* commit tried, old and new
+alike — it does not merely add noise, it changes which regime the measurement lands in. Re-running
+the same checkouts with the unfiltered full suite reproduced the fast band again. The cause is
+below; the practical lesson is that this benchmark's absolute number is not a property of the
+timed code alone, so a comparison across two runs is only valid if both used the same suite scope
+this document already required (Validation runs the full suite) — a filtered re-run of one
+benchmark test is not equivalent to the run it is being compared against, even on the same commit.
+
+**Bisection was attempted and did not converge to one commit; it converged to a window, and to a
+mechanism.** Git bisect (full-suite grading, threshold at 750 ns) was run between `537c1a0b` and
+the fast tip. Partway through, machine load reached 10–12 on this 8-core host — two Android
+emulators and other concurrent agent activity were running, unrelated to this task and outside its
+control (`ps aux` at the time confirmed it; this document's own environment notes elsewhere warn
+that this machine hosts several worktrees' worth of parallel agent work). Under that load, repeated
+measurements of the *same* checkout spanned both regimes (one commit read 672, 771, and 1076 ns
+across three consecutive runs), which made single-commit attribution unreliable. What did hold up
+under repetition was the window: commits at or before `4722cfe9` measured consistently in the slow
+band (854–855 ns), and commits at or after `ec8ff389` measured consistently in the fast band (672,
+700 ns, each confirmed in its own fresh clean worktree). That window —
+`4722cfe9..ec8ff389` (~15 commits) — contains both commits this task flagged as candidates:
+`6776329d` ("Perf: Price the layer users actually call, and stop a module read raising an exception
+per access") and `d45071e7` (proxy handle lifetime). `975d3900` sits well outside this window and is
+ruled out.
+
+**Neither candidate touches the code this benchmark measures, which points at an indirect cause.**
+`git diff <parent>..<commit>` for both `6776329d` and `d45071e7` shows changes confined to
+`PythonProxySource` (the generated-proxy source emitter, its tests) and, for `d45071e7`, a doc-only
+comment added to `HandleTable.kt`. Neither touches `UpcallTable.resolve`, `HandleTable.resolve`/
+`release`, the non-suspend branch of `UpcallTrampoline.invoke`, or desktop's `UpcallStub` — the
+actual call chain `UpcallBoundaryCostTest` times through `TrampolineFragment`. A commit that does
+not touch the timed path cannot have made the timed path itself cheaper.
+
+What it can do is change what runs *before* the timed path in the same process. `desktopTest` sets
+no `forkEvery`, so Gradle's default applies: all ~360 tests in the suite run in one forked JVM, one
+JIT compiler, one heap (confirmed by reading the `tasks.named<Test>("desktopTest")` block in
+`build.gradle.kts` — no fork-per-test config exists). `6776329d`'s own commit title is "stop a
+module read raising an exception per access" — replacing an exception-driven control-flow path
+(expensive on the JVM: every throw captures a stack trace) with a direct one.
+`GeneratedProxyCostTest`, touched by the same commit, drives `N = 10_000` iterations times 3 kept
+times multiple rows of generated-proxy calls that exercise exactly that module-attribute path, and
+it runs earlier in the same shared JVM process as `UpcallBoundaryCostTest`. Removing tens of
+thousands of exception throws from an earlier test changes the shared process's GC pressure and
+JIT tiering history by the time a later, unrelated benchmark in the same run gets timed — without
+the later benchmark's own code path changing at all. That is a plausible, mechanism-level
+explanation for why only desktop moved: iOS runs through XCTest's own process model and wasmJs
+through a Node process with a different (V8) JIT, neither sharing HotSpot's C2 warm-up state the
+way every desktop test in one Gradle-forked JVM does.
+
+**This is not proven to the level of a single blamed commit** — machine contention prevented that —
+but it is proven to the level that matters for the table: the number moved for a real, reproducible,
+repository-located reason, not for noise, and the most likely mechanism is a same-process
+warm-up artifact of the benchmark's own methodology rather than a genuine drop in the upcall
+boundary's per-call cost. The open discrepancy above is closed on that basis, not left open.
+
+**wasmJs has since drifted further, past even its own "consistent" reading above.** A fresh check
+on the current tip (same machine, same session, two runs: 321.32 ns and 315.89 ns, tight) puts
+wasmJs's upcall figure well below the 687–741 ns-equivalent range implied by this table's own
+"this pass" ratio (2.36–2.63x against a ~192–205 ns downcall figure that still matches today's
+run) — today's ratio is 1.26–1.67x. So the "yes, mostly consistent" verdict recorded for wasmJs
+above was accurate for the commit it was measured on (`65e1bf5d`) and has since gone stale in the
+same direction as desktop's did. This pass's own `git merge` at its start pulled in wasm
+browser-runtime staging changes from `develop`, which is a plausible independent cause specific to
+wasmJs and has not been investigated here — flagged for a follow-up pass rather than resolved, since
+this task's scope was the desktop discrepancy specifically. iOS was not re-checked this pass: this
+task's constraints rule out using the iOS simulator, so its "yes, nested inside the old range"
+verdict above stands unverified rather than reconfirmed.
+
 ### What is deliberately not in the shared table
 
 Each platform-only file above measures something the others cannot, and none of it collapses into
