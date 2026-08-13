@@ -704,24 +704,47 @@ now is too: `toKotlin`, `toKotlinOrNull` and `toPython` are implemented, no TODO
 `PyProxy.kt`, and `ConversionTest` passes on desktop (in the 118-test run) and on the iOS
 simulator (111 tests).
 
-The lazy path is deliberately still out. **§1 and §4 — the release-timing sections this used to
-cite as the blocker — are both closed now**, so that is no longer what is in the way; what remains
-is purely the per-type lifetime rule described two paragraphs up (safe to cache a converted native
-value while releasing its source, unsafe to cache one that still points into Python-owned memory),
-which nobody has written yet. See §14b.
+**Closed for the lazy path too.** The per-type lifetime rule this section named as the last
+missing piece is written — `docs/object-lifetime.md`, "Conversion caching, and where it stops",
+one row per source type, derived from what each conversion actually returns rather than from what
+the type looks like — and the cache is implemented against it:
+
+- scalars and the decoded `String` copy themselves out of CPython and are cached; a converted
+  container is cached as a **snapshot**, independent of Python memory precisely because it is a
+  copy, with `invalidateNativeCache()` as the stated way to re-read a container that has since
+  been mutated;
+- `bytes`/`bytearray`/`memoryview` are **refused**, because their native form is a pointer into
+  the object's own buffer;
+- a bare `NativePointer` — what `ConversionStrategy.RAW` returns — is rejected by `PyValue`'s
+  constructor: it is an address, not a reference, and storing it would fail only once the address
+  had been reused;
+- `isIndependentOfPythonMemory` is the rule as code, and every store to `cachedNativeValue` on
+  the conversion path goes through it.
+
+`PyValueLazyConversionTest` (13 tests, commonTest) is the coverage `ConversionTest` never had:
+lazy conversion of an *untyped* source for all nine builtins the walk understands, a cached value
+outliving the release of its source with the heap churned underneath it, the snapshot going stale
+and then being invalidated, and the refusals — buffers, user-defined classes, builtin subclasses,
+`complex`, `None` — each asserted to leave the cache empty rather than throw an NPE.
+
+**The lazy path also caught a borrowed reference.** `PyContext.proxyConvert` handed the `PyValue`
+the *caller's* wrapper whenever `typedWrap` had no dedicated wrapper to build, so the `PyValue`
+owned nothing of its own and dangled as soon as the caller closed that wrapper. Measured as a
+missing `+1` on `sys.getrefcount` (3 where 4 was required) and fixed by taking an independent
+reference on that path.
 
 **Was:** `PyValue`/`PyProxy` incomplete — `toKotlin()` and `toPython()` were TODO stubs ending in
-`cachedNativeValue!!`, so a cache miss was an NPE.
+`cachedNativeValue!!`, so a cache miss was an NPE. It was said to work only because the basic
+types bypassed it — `PyInt`, `PyFloat` and the rest convert inside their own `cachedNativeValue`
+accessors and never reach the stub, so `TYPED` conversion of a builtin succeeded while anything
+without a dedicated wrapper would fail. Both halves are gone: no `!!` on that field remains in the
+library sources, and an untyped source now converts through the generic walk (observed, per
+builtin).
 
-It works today only because the basic types bypass it. `PyInt`, `PyFloat` and the rest convert
-inside their own `cachedNativeValue` accessors and never reach the stub, so `TYPED` conversion
-of a builtin succeeds while anything without a dedicated wrapper would fail. `ConversionTest`
-covers strategy switching and the `RAW`/`NATIVE` shape difference, and does not exercise the
-lazy path at all.
-
-Filling it in also needs a lifetime rule stated per type: caching a converted native value
-while releasing its source is fine, caching one that still points into Python-owned memory is
-not. See `docs/object-lifetime.md`.
+**What is still not converted**, refused rather than guessed at: `bytes` (a `ByteArray` copy would
+also be correct under the rule and is not implemented), subclasses of builtins and `complex` (the
+dispatch is by exact type, mirroring `PyLong_Check` rather than `isinstance`), and any
+user-defined class — `TYPED` stops at the `PyObject` for those by design.
 
 ## 8. `jvmMain` unification
 
@@ -1994,12 +2017,12 @@ what is blocking it and what the next concrete step is.
    breaks a cross-boundary cycle; `docs/object-lifetime.md` has the mechanism and names the three
    hard parts.
 
-6. **`PyValue`'s lazy conversion path.** (§7b) Not blocked on §1/§4 any more — see the correction
-   made to §7b during this audit; both of those closed since the dependency was written. **(a)
-   blocking it:** a lifetime rule has to be written per type before the lazy cache can be filled in
-   safely (caching a converted value while releasing its Python source is fine; caching one that
-   still points into Python-owned memory is not). **(b) next step:** write that rule per type in
-   `docs/object-lifetime.md`, then implement the cache against it.
+6. **`PyValue`'s lazy conversion path.** (§7b) **Closed.** The per-type lifetime rule this item
+   asked for is written (`docs/object-lifetime.md`, "Conversion caching, and where it stops"), the
+   cache is implemented against it and enforced by `isIndependentOfPythonMemory`, and
+   `PyValueLazyConversionTest` covers the path `ConversionTest` never touched. Refusing `bytes`
+   outright rather than converting it to a `ByteArray` copy is the one piece of the type table
+   left unimplemented, and it is recorded as such in §7b rather than as a gap here.
 
 7. **`ksp-fixtures/android`'s `jvmTest` is 8 tests, not exercised on a real device**, and more
    generally, the Android `Cleaner`/`PhantomReference` split (§4) below API 33 "is not covered

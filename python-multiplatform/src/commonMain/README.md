@@ -116,6 +116,20 @@ applies:
 `RefCountTest` checks the balance in both directions. One too few leaks; one too many frees an
 object still in use, and that crash surfaces somewhere unrelated.
 
+### A converted value has a different lifetime from the object it came from
+
+`PyValue`/`PyProxy` cache the Kotlin projection of a Python object, and the two do not die
+together. The rule is per type, not per shape: cache what copied itself out of CPython (`Long`,
+`Double`, `Boolean`, a decoded `String`, a container recursively built out of those), refuse what
+would still point into Python-owned memory (`bytes`/`bytearray`/`memoryview`, whose native form is
+a pointer into the object's own buffer), and never store a bare `NativePointer` — what
+`ConversionStrategy.RAW` hands back is an address, not a reference.
+
+`isIndependentOfPythonMemory` in `conversion/PyProxy.kt` is that rule as code, and every store to
+`cachedNativeValue` on the conversion path goes through it. The full per-type table, the snapshot
+semantics of a cached container, and the borrowed-reference bug this caught in `PyContext` are in
+`docs/object-lifetime.md`, "Conversion caching, and where it stops".
+
 ## `expect` declarations cannot be `inline` in an intermediate source set
 
 Combining `expect inline fun` with an intermediate source set's `expect`/`actual` crashes Kotlin

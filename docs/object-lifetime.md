@@ -129,25 +129,95 @@ the same discussion walked it back a few messages later.
 ## Conversion caching, and where it stops
 
 `PyContext` chooses how far a Python value is converted toward Kotlin, per
-`ConversionStrategy`. That part is complete: `withContext` swaps and restores the strategy even
-on throw, and all five variants dispatch.
+`ConversionStrategy`; `withContext` swaps and restores the strategy even on throw, and all five
+variants dispatch. `PyValue`'s lazy path is filled in too: the stub that used to end in
+`cachedNativeValue!!` — an NPE on any genuine cache miss — is gone. No `!!` on that field remains
+anywhere in the library sources; the only occurrence of the expression left in the tree is a
+comment in `ConversionTest` recording that it used to be there.
 
-`PyValue` is not. The lazy conversion it exists for is a stub:
+What makes the cache safe is a **per-type rule**, because a cached native value and the
+`PyObject` it came from have different lifetimes. Caching a value that copied itself out of
+CPython is fine; caching one that still points into Python-owned memory is a use-after-free
+waiting for the address to be reused. The rule below is derived from what each conversion
+actually returns, not from what the type looks like.
 
-    fun toKotlin(): T {
-        if (cachedNativeValue == null) {
-            // TODO: Implement the conversion logic to Kotlin type T
-        }
-        return cachedNativeValue!!      // NPE if the cache is empty
-    }
+### The rule, per source type
 
-It works today only because the basic types bypass it — `PyInt`, `PyFloat` and friends convert
-inside their own `cachedNativeValue` accessors and never reach the stub. Anything without a
-dedicated wrapper, and any genuine cache miss, would fail. `ConversionTest` covers strategy
-switching and the shape difference between `RAW` and `NATIVE`, and does not cover this path at
-all.
+`PyProxy.toKotlinOrNull` converts through `pyObjectToNative`, whose dispatch compares the source's
+**exact** type object against `PyTypeChecks`' cached builtin types — `PyLong_Check` semantics, not
+`isinstance`. So the table is by exact type; a subclass falls through to the last row.
 
-This matters for lifetime because a cached native value and the `PyObject` it came from have
-different lifetimes: caching a converted value while releasing the source is fine, caching a
-value that still points at Python-owned memory is not. Finishing `PyValue` needs that rule
-stated per type, not just the conversion filled in.
+| Python type | Conversion | Kotlin result | Points into Python memory? | Cached? |
+|---|---|---|---|---|
+| `None` | `PyNone.isNone`, a pointer comparison | `null` | no | re-derived; `null` cannot be told apart from "not computed", and the comparison costs no FFI call |
+| `bool` | `PyLong_AsLongLong(...) != 0` | `Boolean` | no — a scalar copy | yes |
+| `int` | `PyLong_AsLongLong` | `Long` | no — a scalar copy (64-bit range only; wider ints do not round-trip) | yes |
+| `float` | `PyFloat_AsDouble` | `Double` | no — a scalar copy | yes |
+| `str` | `PyUnicode_AsUTF8` | `String` | **the C call returns a `const char*` owned by CPython**, but that pointer never leaves the binding: `EmbedAPI`'s `expect` returns `String?`, and each platform decodes at the boundary (`toKString()` on Kotlin/Native, `Panama.readUtf8String` on desktop, `Wasm.readUtf8String` on wasmJs). The `String` is a copy. | yes — the `String`, never the pointer |
+| `list`, `tuple` | `toNativeList()`, recursive | `List<Any?>` | no — every element is itself one of the rows above | yes, as a **snapshot** |
+| `dict` | `toNativeMap()`, recursive over a snapshot of the entries | `Map<Any?, Any?>` | no | yes, as a **snapshot** |
+| `set`, `frozenset` | `toNativeSet()`, recursive over `PySequence_Tuple` | `Set<Any?>` | no | yes, as a **snapshot** |
+| anything else *inside a container* | `pyObjectToNative`'s `else`: `str(obj)` | `String` | no — a copy, but lossy and one-way | yes |
+| `bytes`, `bytearray`, `memoryview` | **none — refused** | `null` / `PyTypeError` | would be: `PyBytes_AsStringAndSize` and the buffer protocol hand out a pointer *into* the object, and a `bytearray`'s buffer moves when it is resized | never |
+| user-defined classes, subclasses of builtins, `complex`, ... | **none — refused** | `null` / `PyTypeError` | — | never |
+
+The container rows are the answer to "what happens when the elements are themselves `PyObject`s":
+they are not. `pyObjectToNative` recurses, so a converted container bottoms out in `Long`,
+`Double`, `Boolean`, `String` and `null`, and holds no `PyObject`, no `NativePointer` and no
+borrowed C pointer. `PyValueLazyConversionTest` walks a converted nested container and fails on
+anything else, so this is checked rather than asserted in prose.
+
+Being a copy is also what makes a container **stale** rather than dangling: mutating the Python
+container afterwards does not update it. `PyProxy.invalidateNativeCache()` is the way out, and the
+staleness and the recovery are both pinned by tests.
+
+### The rule, per strategy
+
+| `ConversionStrategy` | Hands back | Cacheable |
+|---|---|---|
+| `RAW` | a bare `NativePointer` — no wrapper, no incref, nothing that releases it | **never.** It is an address, not a reference. `PyValue`'s constructor rejects one as `initialNativeValue`, because storing it would fail only once the address had been reused, far from the cause |
+| `UNMANAGED` | the `PyObject` unchanged, under Python's own refcounting | no native value exists to cache |
+| `TYPED` / `DEFAULT` | a `PyValue` over a wrapper it owns a reference to | per the type table above |
+| `NATIVE` | the fully-converted value, eagerly | nothing holds it; there is no cache in this path |
+
+### How the rule is enforced
+
+`isIndependentOfPythonMemory` in `PyProxy.kt` is the rule as code: `true` for `null`, the Kotlin
+scalars, `String`, `ByteArray` and containers built recursively out of those; `false` for a
+`NativePointer` (an unowned address) and for a `PyObject` (a reference, but not a native value),
+and false for anything unrecognised. Every store to `cachedNativeValue` on the conversion path
+passes through it, and a value it rejects is still returned to the caller — it is simply
+re-converted next time instead of kept. Today every branch the walk can reach passes; the guard
+exists so a branch added later cannot acquire a cache without someone deciding that it should.
+
+### The mirror-image rule, and the bug it caught
+
+The Python side has the opposite rule: `cachedPyObjectValue` must hold an **owned** reference,
+never a borrowed one, because the proxy can outlive whatever handed the object over.
+
+`PyContext.proxyConvert` did not honour it. `typedWrap` returns a fresh wrapper — built
+`borrowed = true`, i.e. with its own incref — for the nine builtins it knows, and returns *the
+caller's wrapper unchanged* for everything else. On that second path the `PyValue` held no
+reference of its own, so a caller closing its wrapper (which callers do; `hasNativeCounterpart`
+does it to its own scratch wrapper) left the `PyValue` pointing at a released object. Measured as
+a missing `+1` on `sys.getrefcount` — 3 where 4 was required — by
+`PyValueLazyConversionTest.pyContextGivesEveryPyValueItsOwnReference`, and fixed by taking an
+independent reference on the fallback path. Both branches now hand the `PyValue` a wrapper nobody
+else holds.
+
+### What this does not cover
+
+- **`bytes` has no conversion at all.** Refusing it is correct under the rule, but a `ByteArray`
+  copy would also be correct and is not implemented. The existing bindings do not get there:
+  `PyBytes_AsString`/`PyByteArray_AsString` are declared to return `String?`, i.e. each platform
+  decodes the buffer as a NUL-terminated UTF-8 string, which truncates binary data at the first
+  zero byte. A real conversion needs `PyBytes_AsStringAndSize` plus a per-platform copy of `n`
+  bytes out of the buffer — and, per the rule, must copy rather than keep the pointer.
+- **Subclasses of builtins are refused** because the dispatch is by exact type. That is
+  deliberate and consistent with `pyObjectToNative`, but it means `class MyInt(int)` gets no
+  conversion even though `PyLong_AsLongLong` would work on it.
+- **The cache is not synchronised.** Two threads converting the same proxy can both convert; the
+  result is idempotent, so this costs work rather than correctness.
+- **A self-referential container recurses.** `pyObjectToNative` has no visited set, so a `list`
+  that contains itself has no defined behaviour here. Not measured; not reached by any current
+  caller.
