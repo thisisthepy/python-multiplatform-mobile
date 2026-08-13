@@ -2610,9 +2610,10 @@ Bundles, and 100 ms once per install did not justify that surface.
 2. ~~`generateCoordinates` bakes `"null"` as the processor's group~~ **fixed this pass** — was
    silently broken for every external consumer of the default coordinates since the day this task
    was written; the in-repo build can never exercise this path.
-3. `python-multiplatform-gradle-plugin` publishes fine but is invisible to `./gradlew tasks` from
+3. ~~`python-multiplatform-gradle-plugin` publishes fine but is invisible to `./gradlew tasks` from
    the repo root because it's a separate included build — needs a documented publish step, not a
-   code change.
+   code change.~~ **fixed, §15g** — one root task (`publishAllToMavenLocal`) now reaches all
+   three; found while doing it that the three publish under two different versions, not one.
 4. No distribution channel exists for the CPython stdlib prefix a consumer's `PYTHONHOME` needs —
    confirmed to be the *only* remaining blocker for a plain-JVM consumer once 1–2 are fixed.
    Packaging/documenting one is real follow-up work, not done here. **Android is not affected**:
@@ -2706,3 +2707,145 @@ external Android consumer, resolving by coordinates, generating and invoking a r
 `FunctionTable`, with the override knobs (`role`, `moduleName`, `excludePackages`) all confirmed
 working — not just the defaults. What remains open from item 7 is unchanged: the host app must
 still hand-write asset unpacking and `PYTHONHOME` setup.
+
+### 15g. Publishing all three components took three different commands — now it takes one
+
+§15a already named the shape of the problem: `python-multiplatform-gradle-plugin` is a separate
+included build (`pluginManagement { includeBuild(...) }` in the root `settings.gradle.kts`), so its
+tasks never join the root task graph and `./gradlew tasks --all` from the repo root shows none of
+them. This section closes item 3 of §15e's punch list and records what publishing all three
+actually required, before and after.
+
+#### What three commands were needed, before this pass
+
+| Component | Command | Where it has to run |
+|---|---|---|
+| `python-multiplatform` | `./gradlew :python-multiplatform:publishToMavenLocal` | repo root |
+| `python-multiplatform-ksp` | `./gradlew :python-multiplatform-ksp:publishToMavenLocal` | repo root |
+| `python-multiplatform-gradle-plugin` | `../gradlew publishToMavenLocal` | **inside** `python-multiplatform-gradle-plugin/` — it is a separate Gradle build, not a subproject; running it from the root resolves nothing |
+
+Confirmed directly, not inferred from the build scripts: `./gradlew :python-multiplatform:tasks
+--all` and `:python-multiplatform-ksp:tasks --all` each list their own `publishToMavenLocal`, and
+`cd python-multiplatform-gradle-plugin && ../gradlew tasks --all` lists a third, separate
+`publishToMavenLocal` that owns two publications (`pluginMaven`, the implementation jar, and
+`pythonMultiplatformBindingsPluginMarkerMaven`, the artifact `id(...)` actually resolves against).
+`./gradlew tasks --all` from the repo root shows the plugin build compiling
+(`:python-multiplatform-gradle-plugin:compileKotlin`, pulled in because `includeBuild` makes the
+plugin's classes available to resolve the plugin id) but exactly one `publish*` line total across
+the whole root output — the plugin's publishing tasks are not among it.
+
+#### Why the three versions aren't the two the earlier record implied
+
+§15f's setup table reads as if `python-multiplatform-ksp:3.13.0` and
+`python-multiplatform-gradle-plugin:3.13.0` were a one-off, `-PpythonVersion=3.14.7` having been
+passed for the library alone in that session. Re-run from a clean checkout with **no** version
+flags at all (`git status` clean, no `-P` arguments), the same split reproduces:
+
+```
+python-multiplatform*        3.14.7-alpha01   (7 artifacts: root + 6 targets)
+python-multiplatform-ksp     3.13.0
+python-multiplatform-gradle-plugin (+ marker)  3.13.0
+```
+
+The cause is in the repo, not the invocation — `gradle.properties` commits `pythonVersion=3.14.7`
+at the root:
+
+- `python-multiplatform/build.gradle.kts` reads it: `val configuredPythonVersion =
+  project.findProperty("pythonVersion")?.toString() ?: project.rootProject.version.toString()`,
+  then sets its own `version = "$pythonVersion-alpha01"` — i.e. `3.14.7-alpha01`. This is the only
+  one of the three that consults `pythonVersion` at all.
+- `python-multiplatform-ksp/build.gradle.kts` sets no `version` of its own, so it falls through to
+  the root `build.gradle.kts`'s `allprojects { version = "3.13.0" }` — a literal, commented
+  "Official Python release version", that nothing keeps in step with `gradle.properties`.
+- `python-multiplatform-gradle-plugin/build.gradle.kts` is a separate build that `allprojects`
+  never reaches. It hardcodes its own literal, `version = "3.13.0"`, next to a comment claiming
+  it's "kept in step with the root build's version" — true only because both were last edited by
+  hand at the same time. Nothing checks that they still agree.
+
+**Judgment: not intended, in the sense that matters.** It's defensible that
+`python-multiplatform-ksp` and `python-multiplatform-gradle-plugin` — pure Kotlin/Gradle tooling,
+neither one embeds CPython — shouldn't move every time `pythonVersion` changes the way the library
+does. But that's not what's actually happening: they're not deliberately decoupled from
+`pythonVersion`, they're just two hand-copied literals that happen to still match each other and
+happen to still match `pythonVersion`'s old default (3.13.0 was this repo's original embedded
+version before `gradle.properties` moved to 3.14.7). The next `pythonVersion` bump moves the
+library's published version and silently leaves the other two exactly where they are, with no
+comment or check pointing that out at the moment it happens. Worse, the plugin and the ksp
+processor are only synchronized with *each other* by the same hand-copy discipline — §15b's fix
+depends on `DEFAULT_PROCESSOR_COORDINATES` (generated from the plugin build's own `project.version`)
+naming a coordinate that actually exists at `python-multiplatform-ksp`'s published version; if
+either literal is edited without the other, that silently reproduces §15a's original "could never
+exist anywhere" failure, and nothing at configuration time would catch it — only a consumer's
+`:kspKotlin` resolution would, exactly as it did before the original fix. Not fixed here (no
+version was bumped, per this task's constraint) — recorded as the sharp edge in the checklist
+below.
+
+#### The fix: one root task, no change to what or how anything publishes
+
+`build.gradle.kts` (repo root) now registers:
+
+```kotlin
+tasks.register("publishAllToMavenLocal") {
+    group = "publishing"
+    dependsOn(":python-multiplatform:publishToMavenLocal")
+    dependsOn(":python-multiplatform-ksp:publishToMavenLocal")
+    dependsOn(gradle.includedBuild("python-multiplatform-gradle-plugin").task(":publishToMavenLocal"))
+}
+```
+
+`gradle.includedBuild(name).task(path)` is the documented way to depend on a task in an included
+build from the including build; nothing about `pluginManagement { includeBuild(...) }` or any
+publication's own configuration changed. Each component still owns its existing `maven-publish`
+setup exactly as before.
+
+#### Verified: cleared `~/.m2/repository/io/github/thisisthepy` entirely, ran the one task
+
+`rm -rf ~/.m2/repository/io/github/thisisthepy` (this also removed the plugin marker, which lives
+under the nested `io/github/thisisthepy/python/multiplatform/bindings` group, not under the
+component artifact IDs), then `./gradlew publishAllToMavenLocal` from the repo root —
+`BUILD SUCCESSFUL`, confirmed by exit code from a non-piped foreground run. Afterward, all of it was
+back:
+
+- `python-multiplatform` root + 6 target artifacts (`-android`, `-androidnativearm64`,
+  `-androidnativex64`, `-desktop`, `-iosarm64`, `-iossimulatorarm64`, `-iosx64`, `-wasm-js`) at
+  `3.14.7-alpha01`.
+- `python-multiplatform-ksp` at `3.13.0`.
+- `python-multiplatform-gradle-plugin` (`pluginMaven`) at `3.13.0`.
+- The plugin marker, `io.github.thisisthepy.python.multiplatform.bindings:io.github.thisisthepy.
+  python.multiplatform.bindings.gradle.plugin`, at `3.13.0` — the artifact `id(...)` actually
+  resolves against, and the one that's easiest to forget because it lives under a different group
+  path than every other artifact here.
+
+No regression: `build/test-results` cleared first, then `:python-multiplatform:desktopTest` +
+`:ksp-fixtures:app:desktopTest` — 360/0 (1 skipped) and 64/0, unchanged from baseline. Only
+`build.gradle.kts` (repo root) was touched; nothing under `python-multiplatform/`,
+`python-multiplatform-ksp/`, or `python-multiplatform-gradle-plugin/` changed.
+
+#### Release checklist
+
+1. **Decide what actually moved:**
+   - Embedded CPython changed → bump `pythonVersion` in `gradle.properties`. This alone
+     re-versions `python-multiplatform`'s publications (`<pythonVersion>-alphaNN`). It does
+     **not** touch `python-multiplatform-ksp` or `python-multiplatform-gradle-plugin` — they have
+     no code path that reads `pythonVersion` at all.
+   - The KSP processor's own code changed → `python-multiplatform-ksp` has no `version` of its
+     own today; it inherits the root's `allprojects { version = "3.13.0" }` literal. Giving it an
+     independent version means adding a `version = ...` line to
+     `python-multiplatform-ksp/build.gradle.kts` — it doesn't have one to edit yet.
+   - The plugin's own code changed → hand-edit `version` in
+     `python-multiplatform-gradle-plugin/build.gradle.kts`. Nothing derives it.
+2. **If the ksp processor's version moves independently of the plugin build's version**, update
+   both by hand and verify they still agree: `generateCoordinates`
+   (`python-multiplatform-gradle-plugin/build.gradle.kts`) bakes
+   `${project.group}:python-multiplatform-ksp:${project.version}` where `project.version` is the
+   *plugin build's own* version — not the ksp project's. They're equal today only because both
+   literals say `"3.13.0"`. Letting them drift silently reproduces §15a's original defect: no
+   error at configuration time, only at a consumer's `:kspKotlin` resolution.
+3. **Publish with `./gradlew publishAllToMavenLocal`** (this pass), not three separate commands.
+4. **Verify against a real external consumer**, per §15a/§15d/§15f's method — the in-repo build
+   resolves everything by project substitution and cannot catch a coordinate or version mismatch
+   between components.
+5. **Before a non-local release**, clear `~/.m2/repository/io/github/thisisthepy`, run
+   `publishAllToMavenLocal`, and check the produced version directories against what
+   `DEFAULT_PROCESSOR_COORDINATES` and the plugin marker's POM declare — the check this section
+   just ran, repeated.
