@@ -70,24 +70,16 @@ Platform-only source sets, and why each file actually has to be there (not "happ
 API directly, reads a JVM-specific measurement (process memory, `MethodHandle`, `Unsafe`), or is
 the `actual` half of an `expect` declared elsewhere. Nothing was moved.
 
-### `iosSimulatorArm64Test` (2 files) and a promotion that was tried and reverted
+### `iosSimulatorArm64Test` (1 file) after a promotion that was tried, reverted, then redone
 
 - `AsyncioAvailabilityProbeTest` -- deliberately scoped to this one target by its own KDoc: it
   measures whether the iOS stdlib archive actually ships `_asyncio.so` (it does, despite the
   xcframework itself shipping no `lib-dynload`), and is kept out of `nativeTest` on purpose so a
   trap here (wasm's `import asyncio` kills the process rather than raising, per
   `AsyncUpcallPortabilityTest`) stays isolated to one file.
-- `CycleCollectionTest` -- **this one was promoted to `nativeTest` and reverted.** Its own KDoc used
-  to say it couldn't move because `nativeTest` wasn't wired into the hierarchy and every native
-  target carried its own `forceGC()` actual, which would collide. That reasoning is stale as of
-  `9040a8ce`: `nativeTest` is now wired (`iosX64Test`, `iosArm64Test`, `iosSimulatorArm64Test`,
-  `androidNativeX64Test`, `androidNativeArm64Test` all `dependsOn(nativeTest)`), and
-  `GCLeakTest.native.kt` already supplies a single shared `forceGC()` actual there. Everything else
-  the file touches (`ProxyTypeFactory`, `HandleTable`, `ClassLookup`,
-  `python.native.ffi.bindings.*`) is `nativeMain`-level and already shared between iOS and
-  androidNative by other `nativeTest` files (`AsyncUpcallNative*Test`, `UpcallRawEntryPointTest`).
-
-  Moved it, ran `compileTestKotlinAndroidNativeArm64`: **failed.**
+- `CycleCollectionTest` moved out of this source set entirely -- it now lives in `nativeTest` (see
+  below). The first attempt (recorded here previously) moved it, ran
+  `compileTestKotlinAndroidNativeArm64`, and got:
 
   ```
   e: .../nativeTest/kotlin/python/multiplatform/ref/CycleCollectionTest.kt:79:48 Candidate 'val CPointer<*>?.rawValue: NativePtr' is inapplicable because of a receiver type mismatch.
@@ -95,22 +87,26 @@ the `actual` half of an `expect` declared elsewhere. Nothing was moved.
   e: .../nativeTest/kotlin/python/multiplatform/ref/CycleCollectionTest.kt:548:55 ...
   ```
 
-  All three sites call `platform.posix.pthread_self()?.rawValue?.toLong()`. On Darwin,
+  All three sites called `platform.posix.pthread_self()?.rawValue?.toLong()`. On Darwin,
   `pthread_self()` returns `CPointer<pthread_t>?` (`pthread_t` is `struct _opaque_pthread_t *`), so
   `.rawValue` resolves. On Linux/Bionic (androidNative's libc), `pthread_t` is a plain unsigned
   integral typedef, not a pointer, so the same cinterop declaration has no `.rawValue` to call. This
   is a genuine POSIX ABI difference surfaced through Kotlin/Native's `platform.posix` bindings, not
   a copy-paste mistake -- desktop and iOS never had to confront it before because neither had an
-  androidNative sibling sharing this file. iOS and desktop/wasmJs still built and passed (341/303/316,
-  0 failures, matching baseline) with the file in `nativeTest`, which is why only androidNative
-  caught it.
+  androidNative sibling sharing this file. That attempt was reverted, with a note on what it would
+  take to retry: a `currentThreadId(): Long` `expect`/`actual` seam in `nativeMain` hiding the
+  pointer-vs-integer difference behind one signature.
 
-  **Reverted**: the file is back in `iosSimulatorArm64Test`, byte-for-byte except its header KDoc,
-  which now records this attempt and what it would take to retry (a `currentThreadId(): Long`
-  `expect`/`actual` seam in `nativeMain` hiding the pointer-vs-integer difference behind one
-  signature, used in place of the three raw `pthread_self()?.rawValue` calls). Fixing that is a
-  distinct piece of work from test placement and was left for later, per the instruction to stop
-  and report rather than repair.
+  That seam now exists (`python.multiplatform.currentThreadId`, `nativeMain/.../ThreadId.kt`) with
+  a Darwin `actual` in `iosMain` (`pthread_self()?.rawValue?.toLong() ?: 0L`) and a Bionic `actual`
+  in `artMain` (`pthread_self().convert()`) -- `internal`, since it exists for this test's benefit
+  and not as library API. The file now uses it at all three sites instead of the raw
+  `pthread_self()?.rawValue` calls, moved cleanly into `nativeTest`, and both
+  `compileTestKotlinAndroidNativeArm64` and `compileTestKotlinAndroidNativeX64` succeeded.
+  `iosSimulatorArm64Test`, `desktopTest` and `wasmJsNodeTest` still pass at the same 342/318/328
+  counts as before the move (desktop unaffected since the file was never there; iOS and wasmJs
+  identical because nothing in the file's assertions changed, only where the thread ID comes from).
+  androidNative itself was not run -- no emulator in this pass, compile-only per instruction.
 
 - `androidInstrumentedTest` (ART) separately carries its own `CycleCollectionTest.kt` and
   `StringMarshallingTest.kt` -- a third platform-specific mirror of the same two concepts, using

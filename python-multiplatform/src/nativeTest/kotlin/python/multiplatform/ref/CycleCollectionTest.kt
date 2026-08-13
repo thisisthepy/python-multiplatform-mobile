@@ -3,6 +3,7 @@
 package python.multiplatform.ref
 
 import kotlinx.cinterop.*
+import python.multiplatform.currentThreadId
 import python.multiplatform.ffi.ProxyTypeFactory
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PythonTestFixture
@@ -76,7 +77,7 @@ object TraverseThreadProbe {
     var foreignTraverses: Int = 0
 
     fun record() {
-        val t = platform.posix.pthread_self()?.rawValue?.toLong() ?: 0L
+        val t = currentThreadId()
         lastThread = t
         if (t == homeThread) homeTraverses++ else foreignTraverses++
     }
@@ -95,18 +96,16 @@ object TraverseThreadProbe {
  * only breakable by CPython's cycle collector reaching across the boundary through the proxy
  * type's `tp_traverse`/`tp_clear`.
  *
- * Lives in `iosSimulatorArm64Test`, not `nativeTest`, even though `nativeTest` is wired into the
- * hierarchy now and everything else this file touches (`ProxyTypeFactory`, `HandleTable`,
- * `ClassLookup`, `python.native.ffi.bindings`) is `nativeMain`-level and shared with androidNative.
- * The blocker is `platform.posix.pthread_self()`: on Darwin it returns `CPointer<pthread_t>?` (an
- * opaque pointer, `.rawValue` and all), but on Linux/Bionic (androidNative) `pthread_t` is a plain
- * unsigned integral type with no `.rawValue` -- moving this file to `nativeTest` was tried and
- * failed `compileTestKotlinAndroidNativeArm64` with "receiver type mismatch" at every
- * `pthread_self()?.rawValue` call site (three of them, in [TraverseThreadProbe.record] and both
- * "on a thread CPython created" tests). Fixing that needs a `currentThreadId(): Long` `expect`/
- * `actual` seam in `nativeMain` that hides the pointer-vs-integer difference behind one signature
- * -- worthwhile, but its own piece of work, not a test-placement change. See
- * `commonTest/README.md`.
+ * Lives in `nativeTest`, so it runs on iOS and androidNative both. It was blocked here before:
+ * three call sites (in [TraverseThreadProbe.record] and both "on a thread CPython created" tests)
+ * read the calling thread's identity via `platform.posix.pthread_self()?.rawValue`, which resolves
+ * only on Darwin -- `pthread_t` there is `struct _opaque_pthread_t *`, an opaque pointer with a
+ * `.rawValue`, but on Linux/Bionic (androidNative) it is a plain unsigned integral typedef with no
+ * `.rawValue` to call. That failed `compileTestKotlinAndroidNativeArm64` with "receiver type
+ * mismatch" at all three sites. Fixed by reading the thread identity through
+ * `python.multiplatform.currentThreadId()`, an `expect fun` in `nativeMain` with a Darwin `actual`
+ * (`iosMain`, the pointer's bit pattern) and a Bionic `actual` (`artMain`, the integer as-is) --
+ * one signature hiding the ABI split, used at all three sites. See `commonTest/README.md`.
  */
 class CycleCollectionTest {
 
@@ -476,7 +475,7 @@ class CycleCollectionTest {
             // would not.
             //
             // t.join() releases the GIL, so the worker really does run both statements.
-            val here = platform.posix.pthread_self()?.rawValue?.toLong() ?: 0L
+            val here = currentThreadId()
             TraverseThreadProbe.reset(here)
             val rc = PyRun_SimpleString(
                 """
@@ -550,7 +549,7 @@ class CycleCollectionTest {
 
             assertNotNull(HandleTable.resolveRaw(handle), "handle did not resolve before collection")
 
-            val here = platform.posix.pthread_self()?.rawValue?.toLong() ?: 0L
+            val here = currentThreadId()
             TraverseThreadProbe.reset(here)
             val rc = PyRun_SimpleString(
                 """
