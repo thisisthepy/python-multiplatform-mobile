@@ -23,8 +23,34 @@ class Node(var ref: PyObject? = null) {
     }
 }
 
+/**
+ * Desktop's copy of the cycle-collection suite. The mechanism differs from the other two -- the
+ * slots are Panama upcall stubs here, `staticCFunction` on Kotlin/Native, JNI in
+ * `artMain/cinterop/jni_onload.def` on ART -- so the three files are independent implementations
+ * of the same claim rather than copies. See `commonTest/README.md`.
+ *
+ * ### Why there is no `settleJvmFinalisation` here
+ *
+ * The other two copies carry one, because they also carry `testDeallocOnAThreadCPythonCreated` and
+ * `testCycleCollectedOnAThreadCPythonCreated`, which run CPython's collector on a
+ * `threading.Thread`. `_t.start()`/`_t.join()` release the GIL, and that is the one window a
+ * pending cleaner -- blocked in `PyGILState_Ensure` with a `Py_DecRef` owed for some earlier test's
+ * leftover proxy -- can land in. Landing there removes a reference from the proxy type between the
+ * two readings, and the test then reports a `tp_dealloc` imbalance that does not exist. It is a
+ * real failure on ART (`expected:<5> but was:<2>`, three leftovers) and was diagnosed by probing on
+ * iOS.
+ *
+ * Neither of those two tests exists in this file, and no test that remains gives the GIL up between
+ * its readings: [testHandleReleasedWhenProxyDiesWithoutCycle] holds one `withGIL` across the whole
+ * measurement and never enters the eval loop. So there is no window here for a leftover to land in,
+ * and a settle step would have nothing to guard.
+ *
+ * The debt itself is still worth not creating, which is why [testCycleCollectionByGC] now closes
+ * its own proxy below. If a GIL-releasing test is ever added to this file, the settle-and-assert
+ * step from the other two copies has to come with it.
+ */
 class CycleCollectionTest {
-    
+
     @BeforeTest
     fun setUp() {
         if (!Python3.isInitialized) Python3.initialize()
@@ -101,6 +127,16 @@ class CycleCollectionTest {
             // If tp_clear was called, node.ref should be null, and HandleTable should not have the handle.
             val collectedObj = HandleTable.resolveRaw(handle)
             assertTrue(collectedObj == null, "Node was not collected by Python GC!")
+
+            // tp_clear broke the loop but did not free the proxy -- `node` still holds the last
+            // reference, and `Node.close()` existed for this and was never called. Left alone, that
+            // reference is given back by the JVM cleaner at a moment no test chooses, and only once
+            // that thread can take the GIL. Nothing in this file measures across a GIL release, so
+            // it lands harmlessly here today (see the class KDoc); the other two copies have a test
+            // that does, and on ART that leftover is a reproducible failure. Give it back under the
+            // GIL this test is already holding instead.
+            node.close()
+            node.rawPtr = 0L
         }
     }
 
