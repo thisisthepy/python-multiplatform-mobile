@@ -733,3 +733,84 @@ _pmp_result = asyncio.new_event_loop().run_until_complete(_pmp_probe())
 - **Android(JVM/ART), iOS 실기기.** §8.5 가 이미 적어 둔 공백 그대로다 — 이 워크스페이스에 Android
   SDK 가 없고, 실기기를 쓰지 않았다.
 - **루프가 죽은 채로 남은 핸들.** §10.6 이 남긴 그대로.
+
+## 12. 생성된 프록시가 desktop 밖에서 설치조차 안 됐다 — 측정 (iOS 시뮬레이터)
+
+§9.4 가 `PythonProxySource` 를 만들고 §11 이 async 경로를 iOS 에서 측정했지만, **`install()` 자체는
+`desktopTest` 밖에서 한 번도 불린 적이 없었다.** 그래서 생성기와 부트스트랩이 서로 다른 것을 가정한
+채로 계속 갔다. 이번에 `PythonProxyInstallTest` 를 `commonTest` 로 올려 iOS 시뮬레이터에서 돌리자
+14개가 전부 빨갛게 나왔다.
+
+### 12.1 관측한 것 — 두 가지가 독립적으로 어긋나 있었다
+
+| # | iOS 에서 실제로 본 것 | 원인 |
+|---|---|---|
+| 1 | `PyException: the raw upcall entry points are not bound: define _pm_resolve(name_bytes) -> handle and _pm_invoke(handle, args_tuple) -> result` — 14/14 | `UpcallEntry.publish` 가 `_pm_invoke` 를 **일부러** 안 깔았다. 생성기의 가드는 그것 없이는 설치를 거부하고, 생성된 모든 호출이 `_pm_invoke(handle, args)` 다 |
+| 2 | `PyException: bad argument type for built-in operation` — (1)을 고친 뒤 11/11 | 생성기의 지원 코드가 `_pm_resolve(name.encode('utf-8'))` 로 **bytes** 를 넘기는데, `pmResolveMethod` 가 `PyUnicode_AsUTF8` 로 읽어 `PyErr_BadArgument` 를 세우고 NULL 을 돌려줬다 |
+
+(2)는 (1)의 뒤에 가려져 있어서, (1)을 고친 다음 `PyBytes_AsString` 폴백을 잠깐 되돌려 **따로
+확인했다.** 커밋 메시지의 서술이 아니라 두 번 다 시뮬레이터에서 본 문자열이다.
+
+세 번째로, 생성기의 지원 코드가 `_pm_bind` 를 **name → handle 로 재정의**하고 있었다. 세 부트스트랩이
+같은 이름을 handle → callable 로 깔기 때문에, `exec` 가 지나가면서 네이티브 쪽을 파괴한다. desktop 은
+`_pm_bind` 를 아예 안 깔아서 덮어쓸 것이 없었고, 그래서 조용했다.
+
+### 12.2 어느 쪽을 맞췄나, 그리고 왜
+
+**부트스트랩 쪽을 생성기에 맞췄다.** `UpcallEntry.publish` 가 이제 `_pm_invoke` 도 깐다
+(`METH_VARARGS`, self 없이 `args = (handle, args_tuple)`).
+
+원래 안 깔던 이유는 주석에 적혀 있었다 — "handle 을 별도 인자로 파이썬 손에 쥐여주지 않기 위해".
+**그 이유는 옆 파일과 대조하면 성립하지 않는다:**
+
+- 아무것도 그것을 강제하지 않았다. `_pm_bind` 가 **파이썬에서 온 생 정수**를 받아 그 handle 위의
+  callable 을 돌려준다. `_pm_release`/`_pm_cancel` 도 생 handle 을 받는다. `_pm_bind(h)(*a)` 와
+  `_pm_invoke(h, a)` 는 같은 트램폴린, 같은 인자, 같은 거절 경로다. 새로 열리는 권한이 없다.
+- 유일한 소비자가 그것을 필요로 한다. 생성기가 만드는 모든 호출이 `_pm_invoke` 이고, 가드가 그
+  이름 없이는 설치를 거부한다. 안 깔아서 지켜진 것은 handle 이 아니라, **desktop 을 뺀 모든 타깃에서
+  프록시가 아예 안 도는 상태**였다.
+- 반대 방향(생성기가 `_pm_bind` 로 `_pm_invoke` 를 합성)은 **호출 1건당 `PyCMethod_New` 할당**이고,
+  런타임에 갈라지는 부트스트랩 규약을 둘로 유지하게 된다.
+
+인자 타입은 **`str` 과 `bytes` 를 둘 다 받게** 했다(`PyUnicode_AsUTF8` 실패 → `PyErr_Clear` →
+`PyBytes_AsString`). 생성기는 계속 bytes 를 보낸다 — desktop 의 `ctypes.CFUNCTYPE(c_long, c_char_p)`
+가 `str` 을 **거절**하므로, 한 번 적어서 전부에서 도는 철자는 bytes 뿐이다. 비용은 이름 1건당 실패한
+`PyUnicode_AsUTF8` 하나이고, 이름은 설치 때 한 번만 푼다.
+
+생성기의 name → handle 헬퍼는 `_pm_lookup` 으로 이름을 바꿨다. `PythonProxySourceTest` 에
+`support` 가 `_pm_bind`/`_pm_resolve`/`_pm_invoke`/`_pm_release`/`_pm_cancel` 중 어느 것도
+`def` 하지 않는다는 회귀 가드를 넣었다.
+
+### 12.3 테스트를 어디로 옮겼나
+
+| 위치 | 내용 | 도는 곳 |
+|---|---|---|
+| `commonTest/PythonProxyInstallTest` | 프록시 계약 11개 + fixture(`ProxyFragment`, `ProxyCounter`, `ProxyLoopHarness`) | desktop · iOS · wasmJs · androidNative(컴파일) · Android(계측) |
+| `desktopTest/PythonProxyDeliveryTest` | 스레드가 필요한 전달 3개 (`java.lang.Thread`) | desktop |
+| `nativeTest/PythonProxyNativeDeliveryTest` | 같은 3개를 `pthread_create` 로 (**새로 추가**) | iOS · androidNative |
+
+부트스트랩이 없는 타깃은 **건너뛰지 않는다.** `publishesProxyEntryPoints`(`expect val`, 타깃별
+상수)가 false 인 곳에서는 생성 모듈 자신의 가드가 뜨는 것을 단언한다. 런타임에 `globals()` 를
+들여다보지 않는 이유가 이것이다 — 그러면 발행을 그만둔 타깃이 조용히 반대 분기로 넘어가 초록으로
+남고, 그게 바로 이번에 고친 실패 양식이다.
+
+측정: iOS 시뮬레이터 318개 0 실패(이전 303), desktop 342개 0 실패(스킵 1), wasmJs 328개 0 실패,
+`compileTestKotlinAndroidNativeArm64` 와 `:sample:compileKotlinIosSimulatorArm64` 통과.
+
+### 12.4 못 맞춘 두 타깃과, 각각 무엇이 필요한가
+
+- **wasmJs — 안 된다.** 파이썬으로 건너가는 것이 *바인딩된 callable* 하나뿐이다(`UpcallEntry.bind`
+  가 유일한 `@WasmExport` `pmp_invoke` 위에 만든다). 이름 해석은 Kotlin 안에서 끝난다.
+  `_pm_resolve`/`_pm_invoke` 를 깔려면 `@WasmExport` 가 더 필요하고, `@WasmExport` 는 `.wasm` 을
+  만드는 컴파일에서만 유효하므로 **라이브러리가 아니라 임베딩하는 애플리케이션이**
+  (`wasmJsTest/UpcallExports.kt` 모양으로) 선언해야 한다. 게다가 이 빌드는 `import asyncio` 가
+  trap 되므로 suspend 프록시는 그다음에도 첫 `await` 에서 죽는다. 억지로 맞추지 않았다.
+- **Android(ART) — C 한 조각이 빠졌다.** §11.4 이후로도 "경계 shim 이 없다"고 적혀 있었지만 그것은
+  틀렸다. `androidMain` 의 `UpcallEntry.publish` 가 `jni_onload.def` 의 C shim 을 통해
+  `_pm_resolve`/`_pm_bind`/`_pm_release`/`_pm_cancel` 을 실제로 깐다(그래서
+  `UpcallThreadAttachTest` 가 `threading.Thread` 에서 업콜을 돌린다). 빠진 것은 `_pm_invoke` 하나뿐:
+  기존 `pmp_upcall_invoke_meth` 옆에 `args[0]` 에서 handle, `args[1]` 에서 인자 튜플을 읽는
+  `pmp_upcall_invoke_free_meth` 를 두고 `pmp_upcall_publish` 에 항목 하나를 더하면 된다. Kotlin 은
+  빠진 것이 없다 — `UpcallCallbacks.invoke(long, long)` 이 이미 그 모양이고 method ID 도 있다.
+  **에뮬레이터 없이 돌릴 수 없어서 넣지 않았다**; 테스트 쪽 `publishesProxyEntryPoints` 가 false 로
+  같은 메모를 들고 있으므로, 구현되는 날 "이 타깃은 거절한다"는 단언이 실패해서 알려준다.

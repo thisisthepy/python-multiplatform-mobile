@@ -79,7 +79,7 @@ class PythonProxySourceTest {
     fun anEntryIsPublishedUnderItsKotlinPackageSoTheDottedNameIsImportable() {
         val source = PythonProxySource.render(listOf(entry("fixture.library.greet")))
 
-        assertContains(source, "_pm_h_0 = _pm_bind('fixture.library.greet')")
+        assertContains(source, "_pm_h_0 = _pm_lookup('fixture.library.greet')")
         assertContains(source, "setattr(_pm_module('fixture.library'), 'greet', _pm_f_0)")
         assertContains(source, "_pm_f_0.__name__ = 'greet'")
     }
@@ -110,8 +110,8 @@ class PythonProxySourceTest {
             ),
         )
 
-        assertEquals(1, Regex("^_pm_h_\\d+ = _pm_bind", RegexOption.MULTILINE).findAll(source).count())
-        assertContains(source, "_pm_bind('p.plain')")
+        assertEquals(1, Regex("^_pm_h_\\d+ = _pm_lookup", RegexOption.MULTILINE).findAll(source).count())
+        assertContains(source, "_pm_lookup('p.plain')")
         assertFalse(source.contains("p.Thing.method"), "a method must not be rendered as a module function")
         // Not `contains("class ")`: the support half now carries the `_PmModule` ModuleType
         // subclass, so the question is whether a *proxy* class was rendered, not whether the
@@ -134,8 +134,8 @@ class PythonProxySourceTest {
             ),
         )
 
-        assertContains(source, "_pm_h_0 = _pm_bind('fixture.library.mutableCounter')")
-        assertContains(source, "_pm_h_1 = _pm_bind('fixture.library.mutableCounter=')")
+        assertContains(source, "_pm_h_0 = _pm_lookup('fixture.library.mutableCounter')")
+        assertContains(source, "_pm_h_1 = _pm_lookup('fixture.library.mutableCounter=')")
         assertContains(
             source,
             "_pm_static_property(_pm_module('fixture.library'), 'mutableCounter', _pm_h_0, _pm_h_1)",
@@ -153,7 +153,7 @@ class PythonProxySourceTest {
             source,
             "_pm_static_property(_pm_module('fixture.library'), 'libraryVersion', _pm_h_0, None)",
         )
-        assertEquals(1, Regex("^_pm_h_\\d+ = _pm_bind", RegexOption.MULTILINE).findAll(source).count())
+        assertEquals(1, Regex("^_pm_h_\\d+ = _pm_lookup", RegexOption.MULTILINE).findAll(source).count())
     }
 
     @Test
@@ -288,7 +288,7 @@ class PythonProxySourceTest {
         assertContains(source, "    def count(cls):")
         assertContains(source, "    @count.setter")
 
-        val handleNames = Regex("^(_pm_h_\\d+) = _pm_bind", RegexOption.MULTILINE)
+        val handleNames = Regex("^(_pm_h_\\d+) = _pm_lookup", RegexOption.MULTILINE)
             .findAll(source).map { it.groupValues[1] }.toList()
         assertEquals(handleNames.distinct(), handleNames, "every bound handle name must be unique")
         assertEquals(4, handleNames.size, "one handle per entry, and every entry is reachable")
@@ -334,7 +334,7 @@ class PythonProxySourceTest {
         // now a wrong answer rather than an honest one.
         val source = PythonProxySource.render(listOf(entry("p.version", kind = CallableKind.STATIC_GETTER)))
         assertFalse(source.contains("# no CallableKind.FUNCTION entries"))
-        assertContains(source, "_pm_bind('p.version')")
+        assertContains(source, "_pm_lookup('p.version')")
     }
 
     @Test
@@ -345,6 +345,22 @@ class PythonProxySourceTest {
         assertContains(PythonProxySource.support, "def __getattr__(self, _n):")
         assertContains(PythonProxySource.support, "def __setattr__(self, _n, _v):")
         assertContains(PythonProxySource.support, "def _pm_static_property(_mod, _name, _get, _set):")
+    }
+
+    @Test
+    fun theSupportHalfDefinesNoNameThatAPerPlatformBootstrapAlreadyOwns() {
+        // The defect this pins out: the name -> handle helper below used to be called `_pm_bind`,
+        // which is what every `PyMethodDef` bootstrap calls its *handle -> callable* entry point.
+        // `exec`ing this source therefore destroyed the host's `_pm_bind` on the way past. It was
+        // silent because desktop -- the only target that ever ran this file -- publishes no
+        // `_pm_bind` at all, so there was nothing there to overwrite.
+        assertContains(PythonProxySource.support, "def _pm_lookup(_name):")
+        for (owned in listOf("_pm_bind", "_pm_resolve", "_pm_invoke", "_pm_release", "_pm_cancel")) {
+            assertFalse(
+                PythonProxySource.support.contains("def $owned("),
+                "'$owned' belongs to the per-platform bootstrap; the generated module may call it, never define it",
+            )
+        }
     }
 
     @Test
@@ -365,7 +381,7 @@ class PythonProxySourceTest {
             listOf(cls),
         )
 
-        val handleNames = Regex("^(_pm_h_\\d+) = _pm_bind", RegexOption.MULTILINE)
+        val handleNames = Regex("^(_pm_h_\\d+) = _pm_lookup", RegexOption.MULTILINE)
             .findAll(source).map { it.groupValues[1] }.toList()
         assertEquals(handleNames.distinct(), handleNames, "every bound handle name must be unique")
         assertEquals(6, handleNames.size, "one handle per entry, and every entry is reachable")
@@ -455,7 +471,7 @@ class PythonProxySourceTest {
 
         val source = PythonProxySource.render(listOf(fn, ctor), listOf(cls))
 
-        val handleNames = Regex("^(_pm_h_\\d+) = _pm_bind", RegexOption.MULTILINE)
+        val handleNames = Regex("^(_pm_h_\\d+) = _pm_lookup", RegexOption.MULTILINE)
             .findAll(source).map { it.groupValues[1] }.toList()
         assertEquals(handleNames.distinct(), handleNames, "every bound handle name must be unique")
         assertEquals(2, handleNames.size)
@@ -466,7 +482,7 @@ class PythonProxySourceTest {
         val source = PythonProxySource.render(emptyList())
         assertContains(source, "def _pm_settle(")
         assertContains(source, "# no CallableKind.FUNCTION entries or proxy classes to render")
-        assertFalse(source.contains("_pm_bind('"), "there is nothing to bind")
+        assertFalse(source.contains("_pm_lookup('"), "there is nothing to bind")
     }
 
     @Test
@@ -491,7 +507,7 @@ class PythonProxySourceTest {
         val source = PythonProxySource.render(listOf(entry("p.plain")))
         assertContains(source, "if '_pm_resolve' not in globals() or '_pm_invoke' not in globals():")
         assertTrue(
-            source.indexOf("not in globals()") < source.indexOf("_pm_bind('p.plain')"),
+            source.indexOf("not in globals()") < source.indexOf("_pm_lookup('p.plain')"),
             "the guard has to run before the first bind",
         )
     }

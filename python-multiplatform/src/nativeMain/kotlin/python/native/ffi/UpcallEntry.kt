@@ -109,6 +109,59 @@ fun pmUpcallCancelCall(callHandle: Long): Int =
 // -------------------------------------------------------------------------------------------
 
 /**
+ * `PyCFunction`, `METH_VARARGS`, **unbound**: `args` is `(handle, args_tuple)`.
+ *
+ * This is the shape [python.multiplatform.ffi.upcall.PythonProxySource]'s generated module calls,
+ * and the same one desktop's `ctypes.CFUNCTYPE(py_object, c_long, py_object)` shim presents. It
+ * grants nothing [pmBindMethod] did not already grant -- `_pm_bind` takes a raw handle straight
+ * from Python and hands back a callable over it, so `_pm_bind(h)(*a)` and `_pm_invoke(h, a)` are
+ * the same capability with the same failure mode. See [UpcallEntry.publish] for why the earlier
+ * decision to withhold this one did not survive being looked at.
+ *
+ * A handle that is not an integer, or names nothing, is rejected by [UpcallTrampoline] with
+ * Python's error indicator set -- not a crash, and not a call to whatever entry 0 happens to be.
+ */
+private fun pmInvokeFreeMethod(self: CPointer<CPyObject>?, args: CPointer<CPyObject>?): CPointer<CPyObject>? =
+    try {
+        entered {
+            val tuple = args?.let { NativePointer(it) }
+            if (tuple == null || PyTuple_Size(tuple) != 2L) {
+                if (PyErr_Occurred() == null) {
+                    raiseTypeError("_pm_invoke(handle, args_tuple) takes exactly two arguments")
+                }
+                null
+            } else {
+                // Both items are borrowed; nothing here releases either.
+                val handleItem = PyTuple_GetItem(tuple, 0)
+                val raw = if (handleItem == null) CallableHandle.NONE.raw else PyLong_AsLongLong(handleItem)
+                if (PyErr_Occurred() != null) {
+                    null
+                } else {
+                    // `PyTuple_GetItem` cannot fail for index 1 of a size-2 tuple; the elvis is
+                    // for the type checker, and 0 is the trampoline's own "no arguments".
+                    val callArgs = PyTuple_GetItem(tuple, 1)?.toRawValue() ?: UpcallTrampoline.NULL
+                    UpcallTrampoline.invoke(raw, callArgs).toCPointer()
+                }
+            }
+        }
+    } catch (t: Throwable) {
+        null
+    }
+
+/**
+ * Sets a `TypeError` without a raw `PyExc_TypeError` symbol.
+ *
+ * Reached through `builtins` for the same reason [UpcallTrampoline]'s own `raiseInPython` does it
+ * that way: the exception type objects are data symbols rather than functions, and pulling them
+ * out of the builtins dict costs one lookup on a path that is already failing.
+ */
+private fun raiseTypeError(message: String) {
+    val builtins = PyEval_GetBuiltins() ?: return
+    val typeError = PyDict_GetItemString(builtins, "TypeError") ?: return
+    PyErr_SetString(typeError, message)
+}
+
+/**
  * `PyCFunction` for a handle already bound: `self` carries it, `args` is the argument tuple.
  *
  * This is the shape [pmUpcallInvoke] was written to converge on, reached the way CPython reaches
@@ -129,14 +182,36 @@ private fun pmInvokeMethod(self: CPointer<CPyObject>?, args: CPointer<CPyObject>
         null
     }
 
-/** `PyCFunction`, `METH_O`: `str` -> handle, or -1. The Python face of [pmUpcallResolve]. */
+/**
+ * `PyCFunction`, `METH_O`: `str` **or** `bytes` -> handle, or -1. The Python face of
+ * [pmUpcallResolve].
+ *
+ * Both spellings are accepted because both are forced on real callers, and neither can be made to
+ * yield. A `PyMethodDef` host writes `_pm_resolve('pkg.fn')`, which is what `str` is for. Desktop
+ * reaches its resolver through `ctypes.CFUNCTYPE(c_long, c_char_p)`, and `c_char_p` **refuses a
+ * `str`** -- so the one piece of Python that has to work against every host,
+ * [python.multiplatform.ffi.upcall.PythonProxySource]'s `_pm_lookup`, has no choice but to send
+ * `bytes`. Before this accepted them, that call reached `PyUnicode_AsUTF8`, left a `TypeError`
+ * pending and returned NULL: the generated module could not resolve a single name on this target.
+ *
+ * Costs one failed `PyUnicode_AsUTF8` and a `PyErr_Clear` on the `bytes` path, at install time
+ * only -- a name is resolved once and is an integer from then on.
+ */
 private fun pmResolveMethod(self: CPointer<CPyObject>?, name: CPointer<CPyObject>?): CPointer<CPyObject>? =
     try {
         entered {
-            val text = name?.let { PyUnicode_AsUTF8(NativePointer(it)) }
+            val text = name?.let { raw ->
+                val pointer = NativePointer(raw)
+                PyUnicode_AsUTF8(pointer) ?: run {
+                    // The failed str read left a TypeError pending; it is not the answer yet.
+                    PyErr_Clear()
+                    PyBytes_AsString(pointer)
+                }
+            }
             val handle = if (text == null) CallableHandle.NONE.raw else UpcallTable.resolve(text).raw
-            // A non-str argument left a TypeError pending, which is a better answer than -1;
-            // returning NULL hands it to Python untouched.
+            // Neither spelling matched, so `PyBytes_AsString`'s TypeError is the honest answer --
+            // better than -1, which would read as "no such name". Returning NULL hands it to
+            // Python untouched.
             if (text == null && PyErr_Occurred() != null) null
             else PyLong_FromLongLong(handle)?.toPlatformPointer()
         }
@@ -272,7 +347,7 @@ private fun bindHandle(raw: Long): CPointer<CPyObject>? {
  *
  * The `PyMethodDef`s and their names are allocated on [nativeHeap] and never freed: a
  * `PyCFunction` object stores the `PyMethodDef *` it was built from rather than copying it, so
- * freeing one would leave every callable built from it pointing at released memory. Five structs
+ * freeing one would leave every callable built from it pointing at released memory. Six structs
  * for the life of the process.
  */
 object UpcallEntry {
@@ -291,6 +366,10 @@ object UpcallEntry {
 
     internal val invokeDef: CPointer<PyMethodDef> by lazy {
         methodDef("pm_invoke", METH_VARARGS, staticCFunction(::pmInvokeMethod))
+    }
+
+    private val invokeFreeDef: CPointer<PyMethodDef> by lazy {
+        methodDef("pm_invoke", METH_VARARGS, staticCFunction(::pmInvokeFreeMethod))
     }
 
     private val resolveDef: CPointer<PyMethodDef> by lazy {
@@ -317,22 +396,46 @@ object UpcallEntry {
     fun bind(handle: Long): NativePointer? = entered { bindHandle(handle)?.let { NativePointer(it) } }
 
     /**
-     * Installs `_pm_resolve`, `_pm_bind`, `_pm_release` and `_pm_cancel` into [namespace] (a
-     * Python dict).
+     * Installs `_pm_resolve`, `_pm_invoke`, `_pm_bind`, `_pm_release` and `_pm_cancel` into
+     * [namespace] (a Python dict).
      *
      * That set is the whole bootstrap: everything after it is Python calling Python objects.
-     * `_pm_invoke` is deliberately *not* published -- it is only ever reached through the
-     * callable `_pm_bind` returns, which is what keeps the handle out of Python's hands as a
-     * separate argument.
+     *
+     * ### Why `_pm_invoke` is here now
+     *
+     * It was deliberately withheld, on the grounds that a handle should only ever be reached
+     * through the callable `_pm_bind` returns -- "which is what keeps the handle out of Python's
+     * hands as a separate argument". That reason does not survive being checked against the file
+     * next to it:
+     *
+     * - **Nothing enforced it.** [pmBindMethod] takes a raw integer *from Python* and hands back a
+     *   callable over it, and `_pm_release`/`_pm_cancel` take raw handles too. `_pm_bind(h)(*a)`
+     *   is `_pm_invoke(h, a)` with the same arguments, the same trampoline and the same rejection
+     *   of a bad handle. Publishing it grants no capability that was not already published.
+     * - **The one consumer needs it.** Every call
+     *   [python.multiplatform.ffi.upcall.PythonProxySource] generates is `_pm_invoke(handle,
+     *   args)`, and its guard refuses to install the module without the name. Withholding it did
+     *   not keep handles out of Python's hands; it kept the generated proxies out of every target
+     *   but desktop, whose `ctypes` shim publishes `_pm_invoke` and never had the argument. That
+     *   was invisible until `PythonProxyInstallTest` moved to `commonTest`, where the iOS
+     *   simulator answered `RuntimeError: the raw upcall entry points are not bound`.
+     * - **The alternative costs more.** Teaching the generator to synthesise `_pm_invoke` from
+     *   `_pm_bind` means a `PyCMethod_New` allocation *per call* rather than one `PyMethodDef` per
+     *   process, and leaves two bootstrap conventions in the tree for the generated Python to
+     *   arbitrate between at run time.
+     *
+     * `_pm_bind` stays: it is what `UpcallEntryTest`'s per-platform binding step uses, and a
+     * callable bound once is still the cheaper shape for a caller that has one.
      *
      * `_pm_cancel` is what `PythonProxySource`'s `_pm_watch` needs to exist before it will arm a
      * cancellation notice at all; without it the async boundary still works, but a `Future.cancel()`
      * only reaches Kotlin when the coroutine finishes.
      *
-     * @return true if all four landed.
+     * @return true if all five landed.
      */
     fun publish(namespace: NativePointer): Boolean = entered {
         install(namespace, "_pm_resolve", resolveDef) &&
+            install(namespace, "_pm_invoke", invokeFreeDef) &&
             install(namespace, "_pm_bind", bindDef) &&
             install(namespace, "_pm_release", releaseDef) &&
             install(namespace, "_pm_cancel", cancelDef)
