@@ -112,7 +112,9 @@ object PythonDemo {
  * Every member is a one-line delegation on every platform. It was not always: Android's actual
  * used to answer "unavailable" to all of them, because the bindings plugin could not be applied to
  * a module carrying an Android plugin below AGP 8.10 (ROADMAP §13). What still differs by platform
- * is *who makes the call* -- only desktop reaches Kotlin from inside the interpreter.
+ * is *who makes the call*: desktop and Android resolve and invoke from Python, through a boundary
+ * shim (`ctypes` on desktop, a `PyMethodDef` on Android and iOS); iOS's [callFromPython] makes the
+ * same call from Kotlin instead, even though the shim exists here too -- see `bindings/UpcallDemo.ios.kt`.
  */
 expect object UpcallDemo {
 
