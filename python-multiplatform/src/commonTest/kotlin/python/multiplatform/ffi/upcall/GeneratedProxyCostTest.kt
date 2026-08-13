@@ -90,19 +90,21 @@ import kotlin.test.assertTrue
  *
  * ### wasm
  *
- * There are **no generated proxies on wasmJs** and there structurally cannot be -- see
- * [publishesProxyEntryPoints]'s wasmJs row and `docs/upcall-async-design.md` §12.4. Nothing crosses
- * into Python there but an already-bound callable, so `_pm_resolve`/`_pm_invoke` do not exist and
- * `PythonProxySource.install()` refuses. This test therefore asserts that documented refusal on that
- * target and measures nothing, which is the same branch [PythonProxyInstallTest] takes. Reporting a
- * proxy figure for wasm would mean reporting something that cannot be executed there.
+ * This section used to read "there are **no generated proxies on wasmJs** and there structurally
+ * cannot be", and the sync rows above now print real figures for that target. What changed is not
+ * the export constraint -- `@WasmExport` is still honoured only in the application's own
+ * compilation -- but the observation that one export was already enough: a `PyCFunction` carries a
+ * `self` as well as a function pointer, so the single `pmp_invoke` backs all five entry points, told
+ * apart by an op code where a handle would otherwise sit. See [publishesProxyEntryPoints] and
+ * `wasmJsMain`'s `UpcallEntry`.
  *
  * ### `import asyncio` and the wasm precedent
  *
  * `AsyncUpcallPortabilityTest` records that `import asyncio` does not raise on this wasm build --
- * it **traps the instance**, killing the process. The async row below therefore sits behind the same
- * [publishesProxyEntryPoints] guard as everything else, which returns before any Python runs on wasm,
- * exactly as `PythonProxyInstallTest`'s own asyncio-using test already does.
+ * it **traps the instance**, killing the process. That did not change with the bootstrap, so the
+ * await row below sits behind [proxyBootstrapSupportsAsyncio] instead: the sync rows run on wasm,
+ * and the one row that needs an event loop returns before any `import` happens, exactly as
+ * `PythonProxyInstallTest`'s own asyncio-using test does.
  */
 class GeneratedProxyCostTest {
 
@@ -286,7 +288,8 @@ class GeneratedProxyCostTest {
     // ----------------------------------------------------------------------------- the await path
 
     @Test
-    fun theAwaitFastPathIsPricedAgainstTheRawBoundaryAndAPurePythonCoroutine() = withProxies {
+    fun theAwaitFastPathIsPricedAgainstTheRawBoundaryAndAPurePythonCoroutine() =
+        withProxies(needsAsyncio = true) {
         Python3.exec(HARNESS)
         Python3.exec(ASYNC_HARNESS)
 
@@ -370,28 +373,41 @@ class GeneratedProxyCostTest {
      * skip and it is not a measurement of zero: there is nothing on that target to measure, and
      * saying so is the honest row. If such a target ever grows a shim, or one that has one loses it,
      * one of the two branches fails.
+     *
+     * @param needsAsyncio for the await row. On a target where [proxyBootstrapSupportsAsyncio] is
+     *   false the import does not raise, it **traps**, so there is no refusal to assert and not
+     *   running it is the only available answer.
      */
-    private inline fun withProxies(block: () -> Unit) = PythonTestFixture.withInterpreter {
-        assertTrue(bindUpcallOrNull("demo.calc.ping"), "the fixture table is not installed")
+    private inline fun withProxies(needsAsyncio: Boolean = false, block: () -> Unit) =
+        PythonTestFixture.withInterpreter {
+            assertTrue(bindUpcallOrNull("demo.calc.ping"), "the fixture table is not installed")
 
-        if (!publishesProxyEntryPoints) {
-            val refusal = assertFails { PythonProxySource.install() }
-            assertTrue(
-                refusal.message?.contains("raw upcall entry points are not bound") == true,
-                "a target with no proxy bootstrap must fail the generated module's own guard, " +
-                    "not something else: $refusal",
-            )
-            println(
-                "\n--- Generated proxy cost: ${currentPlatform.name} --- " +
-                    "no proxies are installable on this target, so there is nothing to measure; " +
-                    "see docs/upcall-async-design.md 12.4\n",
-            )
-            return@withInterpreter
+            if (!publishesProxyEntryPoints) {
+                val refusal = assertFails { PythonProxySource.install() }
+                assertTrue(
+                    refusal.message?.contains("raw upcall entry points are not bound") == true,
+                    "a target with no proxy bootstrap must fail the generated module's own guard, " +
+                        "not something else: $refusal",
+                )
+                println(
+                    "\n--- Generated proxy cost: ${currentPlatform.name} --- " +
+                        "no proxies are installable on this target, so there is nothing to measure; " +
+                        "see docs/upcall-async-design.md 12.4\n",
+                )
+                return@withInterpreter
+            }
+
+            PythonProxySource.install()
+            if (needsAsyncio && !proxyBootstrapSupportsAsyncio) {
+                println(
+                    "\n--- Generated proxy cost, await fast path: ${currentPlatform.name} --- " +
+                        "`import asyncio` traps this instance, so there is no await path to price; " +
+                        "see proxyBootstrapSupportsAsyncio\n",
+                )
+                return@withInterpreter
+            }
+            block()
         }
-
-        PythonProxySource.install()
-        block()
-    }
 
     /** Times each named zero-arg Python callable with one shared loop, warming every one first. */
     private fun timeAll(vararg rows: Pair<String, String>): List<Pair<String, Double>> {

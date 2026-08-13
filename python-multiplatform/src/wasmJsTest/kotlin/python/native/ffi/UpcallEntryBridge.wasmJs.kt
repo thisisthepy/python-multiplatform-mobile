@@ -7,16 +7,26 @@ import python.multiplatform.reflection.UpcallTable
 /**
  * wasmJs's half of `UpcallEntryTest`'s (`commonTest`) contract.
  *
- * Unlike the other three targets, wasmJs has no separate published *resolver* -- only
- * `pmp_invoke` crosses through `call_indirect` (`@WasmExport` plus `Table.set`, 3.1 ns/call, per
- * ROADMAP §11). So resolution happens in Kotlin, the same [UpcallTable.resolve] every platform's
- * bootstrap ultimately calls, and only the resulting callable -- built by [UpcallEntry.bind] over
- * the real `@WasmExport`ed entry point -- crosses into Python, installed as `_pm_bound`. Every raw
- * C API call here goes through [withGIL], not as a style preference: `UpcallEntry`'s own
+ * Everything crosses through the one `@WasmExport` `pmp_invoke` reaches by `call_indirect`
+ * (`Table.set`, 3.1 ns/call, per ROADMAP §11) -- both the five entry points [UpcallEntry.publish]
+ * installs and the bound callable below, which differ only in what is boxed in the `PyCFunction`'s
+ * `self`. See [UpcallEntry]'s "One export is enough for the whole bootstrap".
+ *
+ * Resolution is still done in Kotlin here rather than through the published `_pm_resolve`, because
+ * that is what this bridge is *for*: `UpcallEntryTest` asks whether [UpcallEntry.bind] produces a
+ * working callable, and routing the name through Python first would turn it into a test of
+ * `_pm_resolve` instead. `PythonProxyInstallTest` exercises the published pair, which is the other
+ * contract.
+ *
+ * Every raw C API call here goes through [withGIL], not as a style preference: `UpcallEntry`'s own
  * `PyGILState_Ensure`/`Release` pair genuinely detaches this thread once its nesting count returns
  * to zero, unlike a build where the main thread stays implicitly attached forever.
  */
 actual fun bindUpcallOrNull(name: String): Boolean {
+    withGIL {
+        val globals = PythonTestFixture.mainGlobals()
+        check(UpcallEntry.publish(globals.pointer)) { "the upcall bootstrap could not be published" }
+    }
     val handle = UpcallTable.resolve(name)
     if (!handle.isValid) {
         withGIL { python.multiplatform.ffi.Python3.exec("_pm_bound = None") }
@@ -39,9 +49,12 @@ actual fun bindUpcallOrNull(name: String): Boolean {
 }
 
 /**
- * Drops the [python.multiplatform.reflection.HandleTable] root behind [handle], reusing the
- * marshaller's own release -- there being no separate published release entry point on this
- * target either.
+ * Drops the [python.multiplatform.reflection.HandleTable] root behind [handle] through the
+ * published `_pm_release` -- the same `PyCFunction` a generated proxy's `__del__` calls.
+ *
+ * Routed through Python rather than straight to the marshaller so that this target checks the
+ * *published* release the way `nativeTest`'s counterpart does. It called
+ * `UpcallTrampoline.releaseObject` directly for as long as there was no published one to call.
  */
 actual fun releaseUpcallHandle(handle: Long): Int =
-    python.multiplatform.ffi.upcall.UpcallTrampoline.releaseObject(handle)
+    withGIL { PythonTestFixture.eval("_pm_release($handle)").toString().toInt() }
