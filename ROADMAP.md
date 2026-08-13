@@ -1148,11 +1148,22 @@ What a bump would still hit, none of it iOS-specific and none of it large:
    the ftp directory; the Android download uses the configured version verbatim
    (`ftp/python/3.15.0rc1/…`). A checksum is pinned for the Android archive, so that URL evidently
    resolves today — but only one of the two can be right in general.
-4. **The iOS *app* packaging path has no producer.** `sample/build.gradle.kts` and the Xcode project
-   both reference `sample/build/xcode-frameworks/Python.xcframework`, and no Gradle task anywhere
-   creates it. Only the simulator *test* path is connected to the download pipeline. This predates
-   3.15 and is not a version problem, but it is the reason "iOS works" should not be read as
-   covering the device app.
+4. ~~**The iOS *app* packaging path has no producer.**~~ — **half of this was wrong, and the other
+   half is worse than stated.** The *framework* half has a producer and did when this was written:
+   `sample/build.gradle.kts`'s `prepareIosFrameworks` is a `Sync` from
+   `:python-multiplatform:downloadPython_ios`'s extraction into `sample/build/xcode-frameworks`, and
+   every `link*Ios*` task depends on it. Running it populates `Python.xcframework` exactly as both
+   the Gradle `linkerOpts` and the Xcode project expect.
+
+   What has no producer is the **standard library** half, and that is what actually stops the app —
+   see §13's "The sample runs on iOS" below. The Xcode project's "Install Target Specific Python
+   Standard Library" phase rsyncs from
+   `Python.xcframework/ios-arm64_x86_64-simulator/lib/`, which in this distribution holds
+   `libpython3.14.dylib` **and nothing else**; the stdlib lives in `Python.xcframework/lib/python3.14`
+   plus `ios-arm64_x86_64-simulator/lib-arm64/python3.14`, which is precisely the union
+   `extractIosSimulatorStdlib` builds for the *test* path. So the app bundle has never carried a
+   stdlib, and nothing in the app path sets `PYTHONHOME` either. "iOS works" still should not be read
+   as covering the app — but the missing piece is the stdlib, not the framework.
 
 Also stale, and cheap to correct when touched: `iosMain/README.md` still says the stdlib comes from
 BeeWare unqualified, and `extractIosSimulatorStdlib`'s KDoc still says `lib/python3.13`. Neither
@@ -1652,6 +1663,111 @@ round-tripped through a `Double`. It compiled. Nothing in it touched the object 
 `PyRun_SimpleString` is the call `Python3.exec` exists to avoid (it calls `PyErr_Print`, which
 clears the error indicator before anything can read it).
 
+### The sample runs on iOS — first time, and it took two fixes that are not in the repo
+
+**Status: verified on the simulator (iPhone 17, iOS 26.2, `iosSimulatorArm64`), 2026-08-13.** All
+seven sections produce output and the Compose UI renders. Before this the iOS sample had only ever
+been *compiled*; two earlier attempts stopped before launch, and the stale
+`iosApp/build/Debug-iphonesimulator/PythonDemo.app` they left behind had no executable in it.
+
+Neither fix is committed, because both are packaging work rather than one-line corrections, and
+guessing at them is how the last two attempts produced a bundle that looked built and was not.
+Reproduction, in full:
+
+```bash
+./gradlew :sample:prepareIosFrameworks :python-multiplatform:extractIosSimulatorStdlib
+
+# (1) actool cannot compile the app icon -- see below
+cd iosApp && xcodebuild -project iosApp.xcodeproj -target iosApp -configuration Debug \
+    -sdk iphonesimulator ARCHS=arm64 SYMROOT="$PWD/build" \
+    ASSETCATALOG_COMPILER_APPICON_NAME="" \
+    CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="" build
+
+# (2) the bundle carries no stdlib -- see §9 item 4
+rsync -a ../python-multiplatform/build/python-stdlib/ios-simulator/lib/python3.14 \
+    build/Debug-iphonesimulator/PythonDemo.app/lib/
+
+xcrun simctl install "$UDID" build/Debug-iphonesimulator/PythonDemo.app
+SIMCTL_CHILD_PYTHONHOME=$(xcrun simctl get_app_container "$UDID" \
+    org.thisisthepy.python.multiplatform.demo) \
+  xcrun simctl launch --console-pty "$UDID" org.thisisthepy.python.multiplatform.demo
+```
+
+**`PYTHONHOME` on an external volume hangs the app instead of failing it.** This is the finding
+worth carrying forward. `iosMain/README.md` and `extractIosSimulatorStdlib` both point
+`SIMCTL_CHILD_PYTHONHOME` at `python-multiplatform/build/python-stdlib/ios-simulator`, and for the
+*test* binary that works — 328 tests, 0 failures, on the same simulator, in the same session. Handed
+to the *app* it does not fail, it **blocks forever**: 0.0% CPU, a blank white window, an empty
+`--console-pty` capture, and no sandbox denial or Python error anywhere in `simctl spawn … log show`
+(only ordinary UIKit chatter). `sample`(1) on the process — all 1554 samples on one stack:
+
+```
+kfun:...PythonDemo#start()               PythonDemo.kt:45
+kfun:python.multiplatform.ffi.Python3#initialize(kotlin.Boolean)   Python3.kt:45
+Py_InitializeEx -> Py_InitializeFromConfig -> init_interp_main
+  -> _PyUnicode_InitEncodings -> _PyCodec_InitRegistry
+  -> PyImport_ImportModule -> ... -> import_find_and_load
+  -> os_listdir -> __opendir2 -> open$NOCANCEL   <- parked here
+```
+
+That is the `encodings` import, parked in `open()` on a directory under `/Volumes/`. This repo's
+workspace is on an external SSD (see CLAUDE.md), so the documented recipe reaches a path a
+sandboxed simulator *app* cannot open, while a simctl-spawned *test* binary can. Note what the
+symptom is not: the failure this section and `iosMain/README.md` both warn about is
+`Fatal Python error: Failed to import encodings module`, an abort. A hang looks like "the app
+launched and Compose is slow", which is why it is worth writing down. Staging the stdlib inside the
+app bundle and pointing `PYTHONHOME` at the installed container clears it.
+
+**`actool` refuses to compile the app icon on this machine.** The installed simulator runtimes stop
+at iOS 26.2 (`23C54`) and the only simulator SDK is 26.5 (`23F81a`), so:
+
+```
+error: No simulator runtime version from ["21A328", ..., "23C54"] available to use with
+       iphonesimulator SDK version 23F81a
+```
+
+Bisected: the trigger is `--output-partial-info-plist` *together with* `--app-icon`; either alone
+compiles. `ASSETCATALOG_COMPILER_APPICON_NAME=""` skips it and costs only the springboard icon.
+Environment, not this project — but it is the wall the build hits first, and
+`xcodebuild -showdestinations` also intermittently reports *no* eligible simulators for the scheme
+because of the same missing platform, which makes `-destination` unusable and `-target` the way in.
+
+**The seven sections, observed.** `MainViewController.kt` gained a `dumpDemoSections()` that prints
+what each card would show: `simctl` can install and launch but cannot tap, and sections 2 and 5-7
+are behind buttons. Without it a run can only be said to have exercised the four cards that render
+eagerly — which is most of how "iOS compiles" and "iOS runs" stayed indistinguishable.
+
+| | iOS simulator (observed) | desktop JVM, same day (`:sample:runNativeImageUpcallDemo`) |
+|---|---|---|
+| 1 | `3.14.6 · sys.platform=ios · iOS 26.2 (SDK 260200, arm64) / Native` | `3.14.7 · sys.platform=darwin · MacOS … / JVM 21` |
+| 2 | `int: 56` | same expression, not printed by that entry point |
+| 3 | `table hit: handle 4294967325 -> 1` (Kotlin-side call) | `resolved handle 4294967324`, `invoke result = 7`, `presses x3 = 21` (Python-side) |
+| 4 | `42 entries, 4 classes, from io_github_thisisthepy_sample`; `@PythonInternal held` | `41 entries, 4 classes`; `@PythonInternal entry resolves to -1` |
+| 5 | `installed over PyMethodDef: 519 lines, 1 proxy classes`; `Greeter('Kotlin').greet(2) -> hello Kotlin! hello Kotlin!`; `g.greetings = 99 -> AttributeError (private set held)` | `509 lines, 1 proxy classes`; same three lines |
+| 6 | `Greeter.forget() -> 100, then built=0`; `Greeter('x').built -> AttributeError` | identical |
+| 7 fast | `await g.greetNow(1) -> hello fast path!`, `Futures created -> 0` | identical |
+| 7 slow | **`not wired on iOS`** | `hello slow path! hello slow path!`, `Futures created -> 1` |
+
+**Nothing diverged that was not already known to diverge.** Sections 5 and 6 are character-for-character
+what desktop prints, which is the result worth having: the generated proxy module, the metaclass
+companion and the private-setter refusal all behave the same over a `PyMethodDef` shim as over
+`ctypes`. The only gap is section 7's slow path, and `ProxyDemo.ios.kt` already says why — resuming a
+parked continuation needs a Kotlin/Native worker the sample does not start. The library's own
+`PythonProxyNativeDeliveryTest` does it with a bare `pthread_create` and passes here, so this is a
+sample limitation, not a platform one.
+
+The two count differences are both benign and neither is a defect: 42 vs 41 table entries and 519 vs
+509 generated lines follow from the per-target source sets KSP scans (`iosMain` has
+`MainViewController.kt`, `desktopMain` has `main.kt` and `NativeImageMain.kt`) — the *proxy class*
+count, which is what the generated module is actually judged on, is 1 on both. `docs/upcall-async-design.md`
+§13.5 records `466 lines, 2 proxy classes` for Android; that measurement is older than these two and
+was not re-taken here, so the difference is not evidence of anything yet.
+
+**Unlike every previous run of this sample, no library defect fell out of it.** Both blockers were
+in packaging and in the toolchain. That is itself the report: the iOS half of the object model,
+the upcall table, the generated proxy module and the fast-path `await` all work in an app, not only
+under the test runner.
+
 ### The convenience plugin could not be applied to an Android module — closed
 
 This was the finding, and it was a property of the repo rather than of the sample.
@@ -1940,11 +2056,17 @@ not run here — this audit was instructed not to use devices):
 | path | tests | failures | skipped |
 |---|---|---|---|
 | desktop | 327 | 0 | 1 |
-| iOS simulator | 289 | 0 | 0 |
+| iOS simulator | 289 → **328** | 0 | 0 |
 | wasmJs | 302 | 0 | 0 |
 | fixtures: `ksp-fixtures:app` | 64 | 0 | 0 |
 | fixtures: `ksp-fixtures:library` | 0 | 0 | 0 (no test sources — exercised through `app`, not standalone) |
 | fixtures: `ksp-fixtures:android` | 8 | 0 | 0 |
+
+The iOS row carries two figures because it was counted twice on 2026-08-13 from two branches: 289 by
+the audit above, and **328, 0 failures, 0 skipped** re-counted from a cleaned results directory on
+`work/gil` after merging `develop`, alongside the iOS sample run in §13. Both are real; the second
+is the one that includes `develop`'s `ProxyHandleLifetimeTest`. This is exactly the rot §14a exists
+to prevent, so: count it yourself, and say which tree you counted.
 
 Android (ART) and androidNative were **not** re-run for this audit — both need a connected device
 or emulator, which this pass was told not to use. Numbers for those two paths appear at several
@@ -2066,12 +2188,22 @@ what is blocking it and what the next concrete step is.
     against. **(b) next step:** decide that shape, then fix both; §12 has the itemised defects in
     each.
 
-11. **The iOS *app* packaging path has no producer** — only the simulator *test* path pulls the
-    XCframework in automatically; `sample/build.gradle.kts` and the Xcode project both reference
-    `sample/build/xcode-frameworks/Python.xcframework`, and no Gradle task creates it. (§9) **(a)
-    blocking it:** nobody has written the packaging task yet; nothing structural is in the way.
-    **(b) next step:** add the Gradle task that stages the XCframework where the Xcode project
-    expects it, following the pattern the simulator test path already uses.
+11. **The iOS app bundle carries no Python standard library** — restated, because the previous
+    wording ("the iOS *app* packaging path has no producer … no Gradle task creates it") was wrong
+    about which piece is missing. `prepareIosFrameworks` *does* stage
+    `sample/build/xcode-frameworks/Python.xcframework`, and the Xcode `link*Ios*` tasks depend on it.
+    What is missing is the stdlib: the Xcode "Install Target Specific Python Standard Library" phase
+    rsyncs from a directory that in this distribution holds only `libpython3.14.dylib`, and nothing
+    in the app path sets `PYTHONHOME`. The app therefore cannot start from its own bundle. (§9 item
+    4, §13 "The sample runs on iOS") **(a) blocking it:** two open questions rather than missing
+    work — whether the stdlib should be staged by Gradle or by the existing Xcode phase with
+    corrected source paths, and whether `PYTHONHOME` should come from the environment (as the tests
+    do) or be derived on iOS from `NSBundle.mainBundle.bundlePath`, which would touch `iosMain` and
+    has to not break the test task that sets the variable explicitly. Note also that the
+    "Prepare Python Binary Modules" phase rewrites `lib-dynload/*.so` into `.fwork` placeholders, so
+    a bundle-hosted stdlib needs BeeWare's `.fwork` importer or that phase disabled. **(b) next
+    step:** decide the `PYTHONHOME` question first; the staging is mechanical once it is answered,
+    and §13 records the exact `rsync` + `simctl` sequence that is known to work by hand.
 
 ### 14c. What this audit checked and could not confirm
 
