@@ -93,7 +93,7 @@ CPython and `PythonHomeCheck` reading the same value from the same place.
 
 The staged prefix is shared per machine (under the Gradle user home), keyed by version + upstream
 release + platform, and stamped after the last extracted byte — so an interrupted extraction is
-never mistaken for a finished one. See ROADMAP §15g.
+never mistaken for a finished one. See ROADMAP §15h.
 
 ## CPython is loaded from disk, not from the image
 
