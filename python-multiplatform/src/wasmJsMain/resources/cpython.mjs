@@ -11,9 +11,30 @@
 // with a missing named export fails the whole import, which would take out every call rather than
 // the one that is actually absent.
 
-import EmscriptenModule from "./python.mjs";
-import { PYTHON_DIR } from "./cpython-config.mjs";
-import fs from "node:fs";
+import { PYTHON_DIR, STDLIB_ZIP_URL } from "./cpython-config.mjs";
+
+// Two hosts, and the difference is the *filesystem*, not the call path. Under Node the stdlib is
+// reached through NODEFS against the real build directory; in a browser there is no such thing, so
+// the stdlib arrives as `python3<minor>.zip` fetched into MEMFS -- which is what CPython's own
+// `Tools/wasm/emscripten/web_example/python.worker.mjs` does, and the only route that does not
+// need a second CPython build.
+const IS_NODE = typeof process !== "undefined" && process.versions != null && process.versions.node != null;
+
+// `import(/* webpackIgnore: true */ ...)` rather than a static import, and both halves of that
+// matter for the browser:
+//
+//   - **webpackIgnore.** `python.mjs` is 567 KB of Emscripten glue that branches on `require`,
+//     `node:fs`, `node:path` and `import.meta.url` at *runtime*. Letting webpack bundle it means
+//     webpack resolving those statically, which it cannot do for a web target. Left alone, the
+//     browser loads it as a plain ES module next to the page and Emscripten's own environment
+//     detection does the branching it was written to do.
+//   - **dynamic.** `node:fs` must not be imported at all in a browser bundle -- a static import is
+//     a resolution failure at build time, not a branch that is never taken.
+//
+// Under Node both specifiers resolve relative to this module, exactly as the static imports they
+// replace did. In the browser, `demo.js` is a classic script, so `"./python.mjs"` resolves against
+// the document base URL -- i.e. next to `index.html`, which is where the staging puts it.
+const EmscriptenModule = (await import(/* webpackIgnore: true */ "./python.mjs")).default;
 
 // -------------------------------------------------------------------------------------------------
 // Suppress JSPI before the Emscripten factory runs. This is what makes `import selectors` -- and
@@ -58,23 +79,70 @@ import fs from "node:fs";
 delete WebAssembly.promising;
 delete WebAssembly.Suspending;
 
-const M = await EmscriptenModule({
-    noInitialRun: true,
-    thisProgram: PYTHON_DIR + "/python.sh",
-    arguments: [],
-    preRun(Module) {
-        globalThis.Module = Module;
-        for (const dir of fs.readdirSync("/")
-                            .filter((d) => !["dev", "lib", "proc"].includes(d))
-                            .map((d) => "/" + d)) {
-            Module.FS.mkdirTree(dir);
-            Module.FS.mount(Module.FS.filesystems.NODEFS, { root: dir }, dir);
-        }
-        Module.FS.chdir(PYTHON_DIR);
-        Object.assign(Module.ENV, process.env);
-        delete Module.ENV.PATH;
-    },
-});
+// The Node settings, unchanged from when this file only had these. `thisProgram` is what Emscripten
+// derives `sys.prefix` from, and NODEFS then reaches the real stdlib under that prefix -- so the
+// path must be the interpreter's own build directory and not the staging copy next to this file.
+async function nodeSettings() {
+    const fs = (await import(/* webpackIgnore: true */ "node:fs")).default;
+    return {
+        noInitialRun: true,
+        thisProgram: PYTHON_DIR + "/python.sh",
+        arguments: [],
+        preRun(Module) {
+            globalThis.Module = Module;
+            for (const dir of fs.readdirSync("/")
+                                .filter((d) => !["dev", "lib", "proc"].includes(d))
+                                .map((d) => "/" + d)) {
+                Module.FS.mkdirTree(dir);
+                Module.FS.mount(Module.FS.filesystems.NODEFS, { root: dir }, dir);
+            }
+            Module.FS.chdir(PYTHON_DIR);
+            Object.assign(Module.ENV, process.env);
+            delete Module.ENV.PATH;
+        },
+    };
+}
+
+// The browser settings. **No `thisProgram`**: it would make `sys.prefix` a host path that does not
+// exist in MEMFS, and getpath would then find no stdlib at all. Left unset, the prefix is `/` and
+// CPython looks for `/lib/python3<minor>.zip` -- which is exactly the artefact the build ships next
+// to `python.wasm`.
+//
+// `addRunDependency` is what makes the fetch part of start-up rather than a race: the factory's
+// promise does not resolve until the matching `removeRunDependency`, so by the time Kotlin issues
+// `Py_Initialize` the zip is already in the filesystem.
+function browserSettings() {
+    return {
+        noInitialRun: true,
+        arguments: [],
+        async preRun(Module) {
+            globalThis.Module = Module;
+            // Read out of the interpreter rather than hardcoded, so a version bump cannot leave the
+            // zip under a name getpath does not look for. Same expression CPython's own web example
+            // uses.
+            const versionInt = Module.HEAPU32[Module._Py_Version >>> 2];
+            const major = (versionInt >>> 24) & 0xff;
+            const minor = (versionInt >>> 16) & 0xff;
+            // Without this, getpath complains that it cannot find exec-prefix. It is a marker
+            // directory only; this build has no dynamically loaded stdlib extensions.
+            Module.FS.mkdirTree(`/lib/python${major}.${minor}/lib-dynload/`);
+            Module.addRunDependency("install-stdlib");
+            const response = await fetch(STDLIB_ZIP_URL);
+            if (!response.ok) {
+                throw new Error(
+                    `could not fetch the Python standard library from ${STDLIB_ZIP_URL} ` +
+                    `(HTTP ${response.status}). It is staged next to python.wasm by ` +
+                    `python-multiplatform's stageWasmBrowserRuntime task.`
+                );
+            }
+            const stdlib = await response.arrayBuffer();
+            Module.FS.writeFile(`/lib/python${major}${minor}.zip`, new Uint8Array(stdlib), { canOwn: true });
+            Module.removeRunDependency("install-stdlib");
+        },
+    };
+}
+
+const M = await EmscriptenModule(IS_NODE ? await nodeSettings() : browserSettings());
 
 // Deliberately NOT calling Py_InitializeEx here. `wasm-experiment/` brought the interpreter up
 // from JS because it was testing the call and memory path rather than who types the first call;

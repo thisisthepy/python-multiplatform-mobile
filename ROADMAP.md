@@ -1432,6 +1432,135 @@ here would turn it into 4294967295; `Long.toPySsize()` range-checks rather than 
 `PyList_New(0x1_0000_0000)` fails instead of quietly becoming `PyList_New(0)`.
 `WasmPySsizeTBoundaryTest` covers both directions and the whole `Int` range.
 
+### The sample runs in a real browser, and the gap that stopped it was the library's
+
+`c327bb54` turned on `:sample`'s wasmJs target. It compiled, and the library's own wasm suite covers
+the mechanism, but **the app had never come up in a browser** — and the report that closed that
+round said only that in-browser confirmation was blocked on "a Gradle staging gap that is identified
+and is not a library defect". Neither half of that sentence survived being checked. The gap was
+recorded nowhere in the repository, and it *is* a library defect.
+
+It is running now. Chromium 150 (headless, software WebGL), served over HTTP from
+`sample/build/dist/wasmJs/developmentExecutable`, console verbatim:
+
+```
+INFO: Python initialized successfully!
+runtime : 3.14.2  ·  sys.platform=emscripten  ·  Web emscripten (wasm32) / Wasm Kotlin/Wasm
+eval    : sum(kotlin_numbers) * 2 -> int: 56
+table   : 42 entries, 4 classes, from io_github_thisisthepy_sample
+upcall  : handle 4294967325 -> 0  ·  with args -> presses x3 = 0
+proxies : installed over PyCFunction (self as dispatcher): 519 lines, 1 proxy classes
+Greeter('Kotlin').greet(2)  ->  hello Kotlin! hello Kotlin!
+Greeter.PUNCTUATION         ->  !
+await   : skipped on wasmJs -- import asyncio traps this target, see ProxyDemo.wasmJs.kt
+```
+
+Sections 1-6, all of them, in the browser. Section 7 stays gated, untouched: `asyncio.run` still
+wants `socketpair` → `ws`. The DOM after the run holds one `<canvas width="714" height="431">` and
+skiko logs `GPU stall due to ReadPixels`, so **Compose rendered as well** — CPython, Kotlin/Wasm and
+skiko are three wasm modules on one page.
+
+**Four things were missing, and the first is what the failure looked like:**
+
+```
+Module not found: Error: Can't resolve './cpython.mjs' in
+  '<root>/build/wasm/packages/PythonMultiplatformMobile-sample/kotlin'
+```
+
+1. **`cpython.mjs` does not reach a consumer's webpack context.** It is a resource of
+   `python-multiplatform`'s `wasmJsMain`, and the *generated import object* of anything that links
+   the library carries `import * as ... from './cpython.mjs'` — because `bindings.kt` declares
+   `@WasmImport(MODULE, ...)` against it. Nothing propagates it. Checked rather than assumed: the
+   library's wasmJs klib (`build/classes/kotlin/wasmJs/main/default/resources`) carries no
+   `cpython.mjs`, so there is no artefact a consumer could unpack it from either.
+2. **`python.mjs`/`python.wasm` are staged only next to the *library's own* test bundle**, by a
+   `doFirst` on `KotlinJsTest`.
+3. **The stdlib had no browser route at all.** `cpython.mjs` reached it through NODEFS mounted over
+   the real build directory, plus `import fs from "node:fs"` — which in a browser bundle is not a
+   branch that is never taken but a webpack resolution failure.
+4. **The `@WasmExport` handoff was inserted in the wrong place for an executable.** See below; that
+   one is a genuine bug, not a missing copy step.
+
+**This is the library's, on the measure that decides it: an external consumer meets all four
+identically.** None is specific to the sample, and none is fixable from the consumer side without
+knowing three library internals — the glue file's existence, the `intrinsics.memory` placeholder,
+and the `wasmInstance.exports` handoff. The split as implemented:
+
+| | where |
+|---|---|
+| browser-capable `cpython.mjs` (env branch, webpackIgnore imports, stdlib zip into MEMFS) | library source |
+| staging `cpython.mjs` + `python.mjs` + `python.wasm` + `python3.14.zip` + generated config | library, `stageWasmBrowserRuntime` |
+| adding that directory to `wasmJsMain.resources`, patching the compile-sync output | `:sample` |
+
+The browser stdlib route is CPython's own: `Tools/wasm/emscripten/web_example/python.worker.mjs`
+fetches `python3.<minor>.zip` into MEMFS at `/lib/python3<minor>.zip` under `addRunDependency`, and
+sets **no `thisProgram`**, so `sys.prefix` stays `/`. `cpython.mjs` does the same, reading the
+version out of the running interpreter rather than from a string that would then need keeping in
+step.
+
+### Appending the upcall handoff works only for a test bundle
+
+The one real bug in that list, and the browser is what surfaced it. The entry-module patch appended
+
+```js
+import { pmpSetKotlinExports } from './cpython.mjs';
+pmpSetKotlinExports(exports);
+```
+
+to the end of the generated entry module. That is correct for the library's own test bundle, whose
+entry module ends at `setWasmExports(wasmExports)` — its runner calls `startUnitTests` later, from
+outside. An **executable** bundle does not end there. `binaries.executable()` makes the entry module
+finish with `exports._start()`, which *is* Kotlin `main()`, so the handoff ran after the whole
+application had already executed:
+
+```
+upcall  : PyException: name '_pm_resolve' is not defined
+proxies : IllegalStateException: could not register wasm export 'pmp_invoke' as an upcall entry
+          point (pmpRegisterUpcall returned -1)
+PyException: No module named 'org'
+```
+
+`-1` is `kotlinExports === null`. Sections 1-4 passed in that same run, which is why nothing about
+the diagnosis was visible from the code: the memory substitution, the interpreter, the C API and the
+generated table were all fine. The fix inserts the call *before* `exports._start()`; the `import`
+stays at the top of the file, where hoisting already put it.
+
+Worth stating as a pattern rather than as one fix: **a test bundle and an executable bundle differ in
+the generated entry module, and every wasm verification this repo had was of the first kind.**
+
+### The JSPI warning: the premise holds, the consequence did not fire here
+
+`wasmJsMain/README.md` warns that deleting `WebAssembly.promising` and `WebAssembly.Suspending`
+mutates a host intrinsic globally, and that on a browser page shared with another wasm module using
+JSPI this would break that module. The browser run is the first chance to check it. Measured on both
+sides, same browser:
+
+| | `typeof WebAssembly.promising` |
+|---|---|
+| a page that does not load the app | `function` |
+| the app's page, 20 s after load | `undefined` |
+
+So the delete is **not** a no-op here — Chromium 150 ships JSPI, and the property really is gone
+page-wide. What did *not* happen is the breakage: Compose came up on the same page (`canvases=1`),
+skiko rendered, and Kotlin/Wasm ran, because none of those three uses JSPI. The warning stands as
+written — it is about a page that loads a JSPI consumer, and this page does not — but its cost is now
+bounded by observation rather than by argument.
+
+### What is still open
+
+- **The wiring is not in `python-multiplatform-gradle-plugin`, so an external consumer still meets
+  the hole.** `:sample` carries ~50 lines that are a copy of `patchKotlinWasmOutputForCPython`,
+  because one Gradle build script's functions are not visible to another project's build script.
+  Moving it into the plugin needs the staged runtime to be a *published artefact* first, and the
+  wasm CPython build is published nowhere — it is a local directory named by `-PwasmPythonDir`. That
+  is the same shape as §15e item 4 (`StagePythonHomeTask`), which solved the desktop version of
+  exactly this problem, and it is the obvious next step.
+- **`wasmJsBrowserTest` (karma) is not wired.** The browser evidence above is a headless run driven
+  by hand against a served distribution, not a Gradle task anyone else can re-run. Nothing fails
+  visibly if the browser bundle breaks again.
+- The upcall line reads `presses x3 = 0`, which is what that code prints for a freshly constructed
+  counter; it was not cross-checked against a desktop run in this pass.
+
 ## 11. Build wiring
 
 **Closed.** The dependencies are declared now, and the graph was read rather than assumed:

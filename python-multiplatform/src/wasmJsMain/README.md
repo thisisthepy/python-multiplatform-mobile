@@ -65,9 +65,23 @@ Kotlin as a plain synchronous wasm call, so a blocking syscall has to actually b
 **The known cost, recorded rather than hidden: this mutates a host intrinsic globally.** Under the
 Node test runner that is contained — nothing else in the process wants JSPI, and the 344-test wasm
 suite is the evidence. On a browser page shared with *another* wasm module that uses JSPI, deleting
-these would break that module. If `sample` ever grows a browser wasm target this needs revisiting;
-the honest fix there is an Emscripten build that does not feature-detect, not a narrower delete,
-because `__maybe_poll_async` re-reads `WebAssembly.promising` on every call.
+these would break that module. The honest fix for such a page is an Emscripten build that does not
+feature-detect, not a narrower delete, because `__maybe_poll_async` re-reads
+`WebAssembly.promising` on every call.
+
+**Measured in a browser now, and both halves of that paragraph are worth separating.** `:sample` has
+a browser wasm target and it runs (ROADMAP §10). Same browser, Chromium 150:
+
+| | `typeof WebAssembly.promising` |
+|---|---|
+| a page that does not load the app | `function` |
+| the app's page, 20 s after load | `undefined` |
+
+So the delete is real rather than a no-op — this browser ships JSPI and the property is gone
+page-wide. Nothing on that page broke: Compose came up (`canvases=1`), skiko rendered, Kotlin/Wasm
+ran. CPython, Kotlin/Wasm and skiko are three wasm modules on one page and **none of the other two
+uses JSPI**, which is the whole reason it is survivable. The warning is unchanged in force; what has
+changed is that its scope is now observed — it costs nothing until a page loads a JSPI consumer.
 
 ## The memory is shared because Kotlin *imports* it
 
@@ -368,6 +382,31 @@ because both are outside PEP 783's ABI-sensitive set. Reaching for any other Ems
 helper from the glue fails as `undefined is not a function` inside a wasm import, which arrives in
 Kotlin as a bare `JsException` with nothing in it. `cpython.mjs` reads C strings off
 `M.wasmMemory.buffer` itself.
+
+## A browser bundle needs four things this library must hand it
+
+Node and a browser differ in exactly one place — the **filesystem** — and in three build steps. All
+four are the library's to supply; ROADMAP §10 has the reasoning for why none of them is the
+consumer's problem to discover. `stageWasmBrowserRuntime` in `build.gradle.kts` is the task.
+
+1. **`cpython.mjs` must be in the consumer's webpack context.** The *generated import object* of any
+   module that links this library carries `import * as ... from './cpython.mjs'`, and nothing
+   propagates the file — it is not in the wasmJs klib's resources either. Missing, webpack fails with
+   `Module not found: Error: Can't resolve './cpython.mjs'` and that is the whole error.
+2. **`python.mjs` and `python.wasm` must sit next to the page.** `cpython.mjs` loads the glue with
+   `import(/* webpackIgnore: true */ "./python.mjs")` — dynamic so that `node:fs` is never resolved
+   in a web bundle, and webpack-ignored because Emscripten's 567 KB of glue branches on `require`,
+   `node:fs` and `import.meta.url` at runtime and must not be bundled.
+3. **The standard library travels as `python3.<minor>.zip`.** There is no NODEFS in a browser.
+   `cpython.mjs` fetches the zip into MEMFS at `/lib/python3<minor>.zip` during `preRun`, under
+   `addRunDependency`, and sets **no `thisProgram`** so that `sys.prefix` stays `/`. That is what
+   CPython's own `Tools/wasm/emscripten/web_example/python.worker.mjs` does.
+4. **Two substitutions on the compile-sync output**, between the sync and webpack:
+   `intrinsics.memory` → Emscripten's `wasmMemory`, and `pmpSetKotlinExports(exports)` into the
+   generated entry module. **The second goes *before* `exports._start()`, not appended after it** —
+   `_start()` is Kotlin `main()`, and an appended handoff runs after the application has finished.
+   Appending was correct for this module's own test bundle, whose entry module has no `_start()`
+   call, which is why it survived until an executable existed.
 
 ## Running the tests
 

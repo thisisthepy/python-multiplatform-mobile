@@ -131,6 +131,116 @@ kotlin {
             // this artifact, and without it `main.kt`'s `document.body` does not resolve.
             implementation(libs.kotlinx.browser)
         }
+        // The interpreter, its glue and the standard library, staged by the library and served
+        // alongside this app's own `index.html`. Written out rather than referring to the `val`
+        // below because a `.kts` script initialises its top-level properties in source order.
+        wasmJsMain.resources.srcDir(
+            project(":python-multiplatform").layout.buildDirectory.dir("wasm-browser-runtime")
+        )
+    }
+}
+
+// =================================================================================================
+// Making the wasmJs sample reach CPython in a *browser* -- ROADMAP §10.
+//
+// `c327bb54` turned this target on and it compiled, but the app had never come up in a browser and
+// `:sample:wasmJsBrowserDevelopmentExecutableDistribution` said why in one line:
+//
+//     Module not found: Error: Can't resolve './cpython.mjs' in
+//       '<root>/build/wasm/packages/PythonMultiplatformMobile-sample/kotlin'
+//
+// That import is in the *generated* import object, emitted because `python-multiplatform`'s
+// `bindings.kt` declares `@WasmImport(MODULE, ...)` against it -- so it is there for any consumer,
+// and nothing puts the file into a consumer's webpack context. The library side of the fix is
+// `stageWasmBrowserRuntime`; what stays here is only the two things a *consumer* must do, because
+// both act on files the consumer's own compilation produces.
+// =================================================================================================
+
+/** Produced by `:python-multiplatform:stageWasmBrowserRuntime`; see that task for the contents. */
+val stageWasmBrowserRuntime = project(":python-multiplatform").tasks.named("stageWasmBrowserRuntime")
+val wasmBrowserRuntimeDir: Provider<Directory> =
+    project(":python-multiplatform").layout.buildDirectory.dir("wasm-browser-runtime")
+
+tasks.named("wasmJsProcessResources") { dependsOn(stageWasmBrowserRuntime) }
+
+/**
+ * The two substitutions on generated Kotlin/Wasm output that no consumer can avoid.
+ *
+ * This is `patchKotlinWasmOutputForCPython` in `python-multiplatform/build.gradle.kts`, repeated.
+ * The duplication is deliberate and is itself the finding: a Gradle build script's functions are
+ * not visible to another project's build script, so until this wiring moves into
+ * `python-multiplatform-gradle-plugin` -- which needs the staged runtime to be a *published*
+ * artifact first, and the wasm CPython build is not published anywhere yet -- every consumer that
+ * wants a browser bundle has to carry these lines. Recorded in ROADMAP §10.
+ *
+ * Neither substitution can be done from inside Kotlin. The first replaces the compiler's
+ * `intrinsics.memory` placeholder with Emscripten's memory, which is the whole data-path
+ * integration. The second hands `wasmInstance.exports` to the glue so that `@WasmExport`
+ * trampolines can be placed in CPython's `__indirect_function_table`; that value exists only in the
+ * generated entry module's scope.
+ */
+fun patchWasmOutputForCPython(dir: File, modulePrefix: String) {
+    val importObject = dir.listFiles()?.firstOrNull { it.name.endsWith(".import-object.mjs") }
+        ?: throw GradleException("No *.import-object.mjs in $dir -- the Kotlin/Wasm output layout changed.")
+    val text = importObject.readText()
+    val ns = Regex("""import \* as (\w+) from ['"]\./cpython\.mjs['"];""").find(text)?.groupValues?.get(1)
+        ?: throw GradleException(
+            "${importObject.name} does not import ./cpython.mjs, so this module no longer reaches " +
+                "python-multiplatform's @WasmImport bindings at all."
+        )
+    val placeholder = Regex("""memory:\s*new WebAssembly\.Memory\(\{[^}]*}\)""")
+    if (placeholder.containsMatchIn(text)) {
+        importObject.writeText(placeholder.replace(text, "memory: $ns.wasmMemory"))
+        logger.lifecycle("Pointed ${importObject.name}'s intrinsics.memory at Emscripten's wasmMemory")
+    } else if (!text.contains("memory: $ns.wasmMemory")) {
+        throw GradleException(
+            "${importObject.name} has no `intrinsics.memory` placeholder to replace and is not " +
+                "already patched. See docs/wasm-design.md's integration step."
+        )
+    }
+
+    val entry = dir.listFiles()
+        ?.firstOrNull {
+            it.name.endsWith(".mjs") && !it.name.contains("import-object") &&
+                !it.name.contains("js-builtins") && it.name.startsWith(modulePrefix)
+        }
+        ?: throw GradleException("No Kotlin/Wasm entry module in $dir -- the output layout changed.")
+    val handoff = "pmpSetKotlinExports"
+    val entryText = entry.readText()
+    if (!entryText.contains(handoff)) {
+        if (!entryText.contains("const exports = wasmInstance.exports")) {
+            throw GradleException(
+                "${entry.name} has no `const exports = wasmInstance.exports` to hand to cpython.mjs."
+            )
+        }
+        // **Before `exports._start()`, not appended after it**, and that distinction is what the
+        // first browser run found. `_start()` is Kotlin `main()`; the library's own test bundle has
+        // no such call (its runner starts the tests from outside), so appending had always been
+        // enough and every executable bundle would have registered its upcall entry point one line
+        // too late. The symptom is `pmpRegisterUpcall returned -1` — `kotlinExports` still null —
+        // for an application whose sections 1-4 all worked.
+        val startCall = "exports._start();"
+        val note = "// Added by :sample's build: upcall registration needs the raw wasm exports,\n" +
+            "// and this is the only scope that has them. See ROADMAP §7/§10.\n"
+        val body = if (entryText.contains(startCall)) {
+            entryText.replace(startCall, "$handoff(exports);\n\n$startCall")
+        } else {
+            entryText.trimEnd() + "\n\n$handoff(exports);\n"
+        }
+        entry.writeText(note + "import { $handoff } from './cpython.mjs';\n\n" + body)
+        logger.lifecycle("Handed ${entry.name}'s wasm exports to cpython.mjs for upcall registration")
+    }
+}
+
+// Every webpack task reads the compile-sync output, so the patch has to land between that sync and
+// webpack's own run -- `doFirst` on the webpack task is the only point that is after one and before
+// the other. Applies to the dev server (`wasmJsBrowserDevelopmentRun`) as well as to the bundles.
+tasks.withType<org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpack>().configureEach {
+    dependsOn(stageWasmBrowserRuntime)
+    val syncedDir = rootProject.layout.buildDirectory
+        .dir("wasm/packages/${rootProject.name}-${project.name}/kotlin")
+    doFirst {
+        patchWasmOutputForCPython(syncedDir.get().asFile, modulePrefix = "${rootProject.name}-${project.name}")
     }
 }
 
