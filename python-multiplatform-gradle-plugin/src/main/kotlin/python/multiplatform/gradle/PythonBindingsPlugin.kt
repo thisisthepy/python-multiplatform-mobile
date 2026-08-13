@@ -125,6 +125,25 @@ interface PythonBindingsExtension {
  *
  * A module that produces the final binary adds `pythonBindings { role.set("app") }` unless it
  * applies `application` or `com.android.application`, which are inferred.
+ *
+ * The consumer's own `org.jetbrains.kotlin.multiplatform` (or `.jvm`/`.android`) plugin version
+ * has to satisfy two independent floors, verified against a real external consumer outside this
+ * repository (ROADMAP §15f):
+ *
+ * - **API-compatible with the pinned KSP Gradle plugin** (`libs.versions.ksp` in this build --
+ *   currently 2.3.11). Too old a Kotlin Gradle Plugin and `kspKotlin<Target>` fails at
+ *   configuration time with a raw `NoSuchMethodError`-shaped message
+ *   (`KotlinJvmCompilerOptions.getJvmDefault()` on Kotlin 2.1.0) -- KSP's plugin calls an API the
+ *   older Kotlin Gradle Plugin does not have.
+ * - **New enough to read the published library's metadata version.** `python-multiplatform` is
+ *   built with this repo's own Kotlin version (currently 2.4.20-Beta2, `libs.versions.kotlin`).
+ *   A consumer's Kotlin *compiler* one or more feature releases behind that fails
+ *   `compileKotlin<Target>` with "was compiled with an incompatible version of Kotlin ... can
+ *   read versions up to X.Y" once it reaches classes from the dependency -- this happens even
+ *   when the KSP-vs-KGP floor above is already satisfied (observed with Kotlin 2.2.20).
+ *
+ * The version this repo itself uses is the only combination exercised; there is no published
+ * compatibility matrix beyond it.
  */
 class PythonBindingsPlugin : Plugin<Project> {
 
