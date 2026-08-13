@@ -435,6 +435,39 @@ class PythonProxySourceTest {
     }
 
     @Test
+    fun aClassThatTakesAHandleInItsConstructorAlsoRendersTheReleaseThatGivesItBack() {
+        val ctor = entry("fixture.library.Counter.<init>", arity = 1, kind = CallableKind.CONSTRUCTOR)
+        val cls = ReflectedClass(name = "fixture.library.Counter", memberNames = listOf(ctor.name))
+
+        val source = PythonProxySource.render(listOf(ctor), listOf(cls))
+
+        // The half that was missing for as long as the generator has existed: `__init__` took a
+        // HandleTable root and nothing anywhere gave it back, so every object Python constructed
+        // stayed rooted in Kotlin for the life of the process. `ProxyHandleLifetimeTest` is the
+        // behavioural half; this is the same claim made about the text, where it is readable.
+        assertContains(source, "def __del__(self, _pm_r=_pm_releaser()):")
+        assertContains(source, "_pm_h = getattr(self, '_pm_handle', None)")
+        assertContains(source, "_pm_r(_pm_h)")
+        // Resolved once at class-definition time rather than read out of globals per call: during
+        // interpreter finalisation a module's globals are None and `__del__` still runs.
+        assertContains(PythonProxySource.support, "def _pm_releaser():")
+        assertContains(PythonProxySource.support, "return globals().get('_pm_release', _pm_no_release)")
+    }
+
+    @Test
+    fun aClassWithNoConstructorHoldsNoHandleAndThereforeRendersNoRelease() {
+        // Nothing gives such a class a `_pm_handle`, so a `__del__` on it would release something
+        // it never took -- and on a class whose body is otherwise empty it would also displace the
+        // `pass` that makes the rendered class legal Python at all.
+        val getter = entry("fixture.library.Counter.value", kind = CallableKind.GETTER)
+        val cls = ReflectedClass(name = "fixture.library.Counter", memberNames = listOf(getter.name))
+
+        val source = PythonProxySource.render(listOf(getter), listOf(cls))
+
+        assertFalse(source.contains("def __del__"), "no constructor means no handle to release")
+    }
+
+    @Test
     fun aPropertyBecomesAPythonPropertyRatherThanAMethod() {
         val getter = entry("fixture.library.Counter.value", kind = CallableKind.GETTER)
         val setter = entry("fixture.library.Counter.value=", arity = 1, kind = CallableKind.SETTER)

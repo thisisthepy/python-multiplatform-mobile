@@ -77,6 +77,17 @@ import kotlin.test.assertTrue
  * `PythonProxyInstallTest` unchanged, and reading the generated source tells you nothing about the
  * cost of either.
  *
+ * It has also found something that is not a cost at all. The constructor row was **unmeasurable on
+ * desktop** -- its delta swung either side of zero between runs while no other row's did -- because
+ * both halves of the pair rooted a Kotlin object in [HandleTable] per call and neither gave it
+ * back. The run ended with **78 002 live handles**, and every row in the report had been timed
+ * against a table that grew by tens of thousands of entries while it ran. Two different defects
+ * wore that one number: the generated proxy class had no `__del__` at all, which is a library bug
+ * ([PythonProxySource], `ProxyHandleLifetimeTest`); and this file's *raw* constructor row never
+ * released the bare handle the boundary had handed it, which is the caller's to release and is a
+ * bug in the harness. The `assertEquals(handlesBefore, handlesAfter)` below is what keeps either
+ * from coming back silently.
+ *
  * ### wasm
  *
  * There are **no generated proxies on wasmJs** and there structurally cannot be -- see
@@ -117,7 +128,14 @@ class GeneratedProxyCostTest {
         // Sync rows: each raw row is the boundary call the proxy row above/below it wraps.
         const val RAW_FUNCTION = "_pm_invoke(h, ())                        raw boundary, arity 0"
         const val PROXY_FUNCTION = "demo.calc.ping()                          module function proxy"
-        const val RAW_CTOR = "_pm_invoke(h, (10,))                     raw boundary"
+        /**
+         * The only raw row that does two boundary crossings, and it has to. A CONSTRUCTOR entry
+         * answers with a bare `HandleTable` integer whose root the caller owns, so "build a Kotlin
+         * object and be done with it" is an invoke *and* a release here -- which is exactly what
+         * the proxy row beside it does, the release happening in the `__del__` that runs when the
+         * discarded `Counter` dies inside the same loop iteration.
+         */
+        const val RAW_CTOR = "_pm_release(_pm_invoke(h, (10,)))        raw boundary + release"
         const val PROXY_CTOR = "Counter(10)                               constructor proxy"
         const val RAW_METHOD = "_pm_invoke(h, (self, 5))                 raw boundary"
         const val PROXY_METHOD = "c.increment(5)                            instance method proxy"
@@ -206,6 +224,15 @@ class GeneratedProxyCostTest {
         assertEquals("0", py("_pc_check['static']"), "the metaclass descriptor does not reach Kotlin")
         assertEquals("0", py("_pc_check['module']"), "the module descriptor does not reach Kotlin")
 
+        // Read before the loops and again after them. The constructor pair is the only row whose
+        // fixture can move under it -- both halves root a Kotlin object per call -- and until each
+        // half gave its root back, 30 000 iterations left 78 002 entries behind and every figure in
+        // this report was measured against a table that grew while it was being timed. Asserting
+        // the two counts are equal is what stops that returning, and it is why both are printed
+        // rather than only the total: a run that had stopped rooting anything at all would also end
+        // with a flat count, and the first number is what tells the two apart.
+        val handlesBefore = HandleTable.liveCount
+
         val rows = timeAll(
             NOOP to "_pc_noop",
             PY_ATTR to "_pc_py_attr",
@@ -236,12 +263,21 @@ class GeneratedProxyCostTest {
             rows.size, rows.map { it.first }.toSet().size,
             "two rows share a name, so at least one figure below is another row's measurement",
         )
-        reportSync(rows)
+        val handlesAfter = HandleTable.liveCount
+        reportSync(rows, handlesBefore, handlesAfter)
 
         for ((name, ns) in rows) {
             assertTrue(ns > 0.0, "$name measured ${ns}ns/call; nothing can be compared against a zero")
         }
         assertEquals(19, rows.size, "every comparison basis must come from this run, not a remembered one")
+        // The row above was already rooting an object per iteration before this assertion existed;
+        // what it could not do was notice. A drift here means the figures above were timed against
+        // a moving fixture and are not comparable with each other.
+        assertEquals(
+            handlesBefore, handlesAfter,
+            "the timed loops leaked ${handlesAfter - handlesBefore} HandleTable roots, so every " +
+                "row after the first was measured against a table that was still growing",
+        )
         // Nothing became a no-op somewhere in 18 loops of 10 000.
         assertEquals("7", py("_pc_ping()"))
         assertEquals("counter-class", py("_pc_Counter.KIND"))
@@ -368,7 +404,7 @@ class GeneratedProxyCostTest {
         }
     }
 
-    private fun reportSync(rows: List<Pair<String, Double>>) {
+    private fun reportSync(rows: List<Pair<String, Double>>, handlesBefore: Int, handlesAfter: Int) {
         val by = rows.toMap()
         val floor = by[NOOP] ?: 0.0
         fun net(name: String): Double = (by[name] ?: 0.0) - floor
@@ -410,13 +446,16 @@ class GeneratedProxyCostTest {
             add("Resolution: two identical raw rows differ by ${(net(RAW_STATIC) - net(RAW_FUNCTION)).ns()}")
             add("  -- a proxy delta below that is not separable from the boundary's own variation")
             add("")
-            // The constructor pair is the one row whose *fixture* moves under it: both halves root
-            // a Kotlin object in `HandleTable` per call and nothing releases it, so each of them is
-            // measured against a table that grew by tens of thousands of entries while it ran. That
-            // is a property of this test, not of the constructor proxy, and it is why desktop's
-            // constructor delta swings either side of zero between runs while every other row's
-            // does not. Printed so the reader can see the size of what moved.
-            add("Handles rooted by the constructor rows and never released: ${HandleTable.liveCount}")
+            // The constructor pair is the one row whose *fixture* could move under it: both halves
+            // root a Kotlin object in `HandleTable` per call, and until both halves also released
+            // one, 30 000 iterations of them left 78 002 entries behind -- so every row here was
+            // timed against a table that grew by tens of thousands of entries while it ran, and
+            // desktop's constructor delta swung either side of zero between runs while no other
+            // row's did. The proxy half now releases in the `__del__` `PythonProxySource` renders;
+            // the raw half releases explicitly, because a bare handle integer is the caller's.
+            // Both counts are printed because only the pair distinguishes "released everything it
+            // took" from "took nothing to begin with".
+            add("HandleTable roots before the timed loops: $handlesBefore, after: $handlesAfter")
             add("-".repeat(78))
             add("")
         }
@@ -577,7 +616,18 @@ private val SYNC_BODIES = """
 
 
     def _pc_raw_ctor():
-        return _pm_invoke(_pc_h_ctor, (10,))
+        # The release is *inside* the row, and it is the only row that has one. A CONSTRUCTOR entry
+        # answers with a bare HandleTable integer, and an integer has nothing to hang a `__del__`
+        # off, so the caller owns that root and nothing else can give it back
+        # (`ProxyHandleLifetimeTest.testRawHandleIsTheCallersToRelease`). Leaving it out is what
+        # made this row leak one handle per iteration -- 78 002 by the end of the file -- and
+        # measure itself against a table that grew by tens of thousands of entries while it ran.
+        #
+        # It also makes the pair comparable for the first time: the proxy row's `Counter(10)` now
+        # builds a Kotlin object *and* releases it, in `__del__`, when the discarded proxy dies
+        # inside this same loop. Timing that against an invoke with no release would price the
+        # release as if it were part of the proxy layer.
+        return _pm_release(_pm_invoke(_pc_h_ctor, (10,)))
 
 
     def _pc_pxy_ctor():

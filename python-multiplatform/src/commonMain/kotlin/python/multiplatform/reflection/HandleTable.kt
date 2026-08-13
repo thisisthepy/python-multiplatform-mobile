@@ -28,6 +28,17 @@ package python.multiplatform.reflection
  * reports whether it actually did anything -- a double release must not free a slot that has
  * since been handed to someone else.
  *
+ * That contract is kept in exactly two places, and a handle that reaches Python by any other
+ * route is a leak:
+ *
+ * - a **proxy instance**, through the `__del__` `python.multiplatform.ffi.upcall.PythonProxySource`
+ *   renders beside every `__init__` that takes a handle. It went unwritten for as long as the
+ *   generator existed, and `GeneratedProxyCostTest` ended a run with 78 002 live entries because
+ *   of it; `ProxyHandleLifetimeTest` now pins both ends of the count.
+ * - a **bare handle** handed to a caller that asked for one over the raw boundary, through
+ *   `_pm_release`. Nothing else can give that one back: it is an integer, and an integer has
+ *   nothing to hang a finaliser off.
+ *
  * Cycles are a separate problem this table cannot solve on its own: a strong entry here is a
  * root, so a Python object reachable only through a Kotlin object reachable only from this
  * table never collects. That needs `tp_traverse` to reach through the handle
