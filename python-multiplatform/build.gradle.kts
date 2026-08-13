@@ -1885,6 +1885,37 @@ val stageWasmBrowserRuntime by tasks.registering {
     }
 }
 
+// -------------------------------------------------------------------------------------------------
+// ROADMAP §10 -- the other half of "the wiring is not in python-multiplatform-gradle-plugin". The
+// plugin cannot hand a consumer a directory that only exists on this machine; it can only resolve a
+// Maven coordinate. So `stageWasmBrowserRuntime`'s output is zipped and published under its own
+// artifact ID, at this library's own version, so `implementation("io.github.thisisthepy:
+// python-multiplatform:$version")` and the runtime it needs stay paired by construction -- there is
+// no second version string for a consumer to get out of step.
+//
+// This does not need `-PwasmPythonDir` to be published anywhere itself: the zip is built from
+// whatever this machine already staged, exactly the same bytes `wasmJsNodeTest` already runs
+// against. Publishing is `./gradlew :python-multiplatform:publishWasmRuntimePublicationToMavenLocal`
+// (or the aggregate `publishToMavenLocal`), same as every other target this module publishes.
+// -------------------------------------------------------------------------------------------------
+
+val wasmBrowserRuntimeZip by tasks.registering(Zip::class) {
+    group = "python"
+    description = "Zips stageWasmBrowserRuntime's output for the wasmRuntime Maven publication"
+    dependsOn(stageWasmBrowserRuntime)
+    from(layout.buildDirectory.dir("wasm-browser-runtime"))
+    archiveBaseName.set("python-multiplatform-wasm-runtime")
+    destinationDirectory.set(layout.buildDirectory.dir("wasm-runtime-artifact"))
+
+    // Same skip as the task it zips: a checkout without a local Emscripten CPython build has
+    // nothing to zip, and must still be able to run every other publishing task.
+    onlyIf {
+        val present = file(wasmPythonDir).resolve("python.wasm").isFile
+        if (!present) logger.lifecycle("SKIPPING $name -- stageWasmBrowserRuntime had nothing to zip")
+        present
+    }
+}
+
 /**
  * Rewrites a consumer's generated Kotlin/Wasm output so that it can reach the interpreter.
  *
@@ -2294,6 +2325,19 @@ android {
 }
 
 publishing {
+    publications {
+        // ROADMAP §10 -- a separate artifact ID, not a classifier on the wasmJs publication: a
+        // plugin resolving it needs a Maven coordinate it can name without first knowing what
+        // classifiers the Kotlin Multiplatform plugin happens to attach to a KMP publication this
+        // version, and a consumer who never builds a browser bundle should not need to resolve it
+        // as a side effect of resolving the library at all.
+        create<MavenPublication>("wasmRuntime") {
+            groupId = "io.github.thisisthepy"
+            artifactId = "python-multiplatform-wasm-runtime"
+            version = libraryVersion
+            artifact(wasmBrowserRuntimeZip)
+        }
+    }
     publications.withType<MavenPublication>().configureEach {
         //artifact(javadocJar)
         groupId = groupId

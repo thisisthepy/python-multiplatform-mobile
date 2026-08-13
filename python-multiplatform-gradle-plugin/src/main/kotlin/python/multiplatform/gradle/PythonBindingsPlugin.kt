@@ -133,6 +133,17 @@ interface PythonBindingsExtension {
 
     /** Whether to stage a free-threaded build. Defaults to what this library was built against. */
     val pythonFreeThreaded: Property<Boolean>
+
+    /**
+     * Whether to unpack `python-multiplatform`'s published wasm browser runtime for any `wasmJs*`
+     * task this consumer's build declares. Defaults to true, and is a no-op unless a `wasmJs()`
+     * target actually exists -- see [StageWasmBrowserRuntimeTask]'s kdoc for why registering it is
+     * always safe. See ROADMAP §10.
+     */
+    val stageWasmBrowserRuntime: Property<Boolean>
+
+    /** Maven coordinates of the runtime zip. Defaults to the one this library published. */
+    val wasmRuntimeCoordinates: Property<String>
 }
 
 /**
@@ -189,6 +200,7 @@ class PythonBindingsPlugin : Plugin<Project> {
         }
 
         configurePythonHomeStaging(project, extension)
+        configureWasmBrowserRuntimeStaging(project, extension)
 
         project.afterEvaluate {
             setKspArg(
@@ -275,6 +287,73 @@ class PythonBindingsPlugin : Plugin<Project> {
         project.tasks.withType(org.gradle.api.tasks.testing.Test::class.java).configureEach {
             dependsOn(stage)
             environment("PYTHONHOME", home)
+        }
+    }
+
+    /**
+     * Registers unpacking of the wasm browser runtime, and wires it into whichever `wasmJs*` tasks
+     * this consumer's build happens to declare -- ROADMAP §10.
+     *
+     * `stage` is always registered; [StageWasmBrowserRuntimeTask]'s detached configuration is not
+     * resolved until the task executes, and nothing makes it execute unless a `wasmJsProcessResources`
+     * or `wasmJs*Webpack` task exists to depend on it. So a consumer with no `wasmJs()` target pays
+     * nothing -- no network access, no `mavenLocal`/repository lookup -- for this being registered.
+     *
+     * `tasks.matching` is a live view: it fires for tasks declared *after* this runs too, which is
+     * the normal case since `kotlin { wasmJs() }` is declared after `plugins { ... }`. Matched by
+     * name rather than by Kotlin Gradle Plugin task type for the same reason `TEST_WORD` is -- this
+     * plugin's `kotlin-dsl` classpath does not carry the Kotlin Multiplatform Gradle plugin, so it
+     * has no compile-time reference to `KotlinWebpack` or `ProcessResources`'s Kotlin/JS subclass to
+     * match against. `org.gradle.language.jvm.tasks.ProcessResources` is Gradle's own class, not the
+     * Kotlin Gradle Plugin's, so casting `wasmJsProcessResources` to it does not add that dependency.
+     */
+    private fun configureWasmBrowserRuntimeStaging(project: Project, extension: PythonBindingsExtension) {
+        if (!extension.stageWasmBrowserRuntime.getOrElse(true)) return
+
+        val coordinates = extension.wasmRuntimeCoordinates.getOrElse(DEFAULT_WASM_RUNTIME_COORDINATES)
+        val configuration = project.configurations.detachedConfiguration(
+            project.dependencies.create(coordinates),
+        ).apply { isTransitive = false }
+
+        val destination = project.layout.buildDirectory.dir("wasm-browser-runtime")
+        val stage = project.tasks.register("stageWasmBrowserRuntime", StageWasmBrowserRuntimeTask::class.java) {
+            group = "python"
+            description = "Unpacks python-multiplatform's published CPython wasm browser runtime."
+            runtimeArtifact.from(configuration)
+            destinationDir.set(destination)
+        }
+
+        // The *main* resources task, not `wasmJsTestProcessResources` -- test runs go through the
+        // node runner, which this plugin does not wire (ROADMAP §10 scopes this to browser bundles).
+        project.tasks.matching { it.name == "wasmJsProcessResources" }.configureEach {
+            dependsOn(stage)
+            (this as org.gradle.language.jvm.tasks.ProcessResources).from(destination)
+        }
+
+        // Every webpack task reads the compile-sync output, so the patch has to land between that
+        // sync and webpack's own run -- `doFirst` on the webpack task is the only point that is
+        // after one and before the other, exactly as `:sample`'s own copy of this does.
+        //
+        // The generated module name is `"${rootProject.name}-${project.name}"` only for a
+        // *subproject* -- `:sample` is one, which is why its own copy of this patch could use that
+        // formula unconditionally. A single-module build (`consumer-plugin-android`, ROADMAP §10's
+        // verification) has the `wasmJs()` target on the *root* project, and there Kotlin does not
+        // double the name: the generated files are `consumer-plugin-android.*`, not
+        // `consumer-plugin-android-consumer-plugin-android.*`. Checked against the actual compile
+        // -sync output rather than assumed -- the first version of this patch named a directory
+        // that never existed and failed with "No *.import-object.mjs in ...".
+        val modulePrefix = if (project == project.rootProject) {
+            project.name
+        } else {
+            "${project.rootProject.name}-${project.path.removePrefix(":").replace(":", "-")}"
+        }
+        project.tasks.matching { it.name.startsWith("wasmJs") && it.name.endsWith("Webpack") }.configureEach {
+            dependsOn(stage)
+            val syncedDir = project.rootProject.layout.buildDirectory.dir("wasm/packages/$modulePrefix/kotlin")
+            val log = project.logger
+            doFirst {
+                patchWasmOutputForCPython(syncedDir.get().asFile, modulePrefix, log)
+            }
         }
     }
 

@@ -65,10 +65,19 @@ val generateCoordinates = tasks.register("generateCoordinates") {
     val pbsReleaseValue = rootProperties.getProperty("pythonBuildStandaloneRelease") ?: "20260807"
     val freeThreadedValue = rootProperties.getProperty("pythonFreeThreaded")?.toBoolean() ?: false
 
+    // `python-multiplatform` itself is versioned "$pythonVersion-alpha01" -- see that build's own
+    // `val libraryVersion` -- which is *not* this plugin build's `project.version` (kept in step by
+    // hand, see the top of this file). The wasm-runtime zip is published under the library's
+    // version, alongside the library artifact it has to pair with, so the coordinate has to be
+    // built the same way rather than reusing this plugin's own version.
+    val libraryVersionValue = "$pythonVersionValue-alpha01"
+    val wasmRuntimeCoordinatesValue = "${project.group}:python-multiplatform-wasm-runtime:$libraryVersionValue"
+
     inputs.property("coordinates", coordinates)
     inputs.property("pythonVersion", pythonVersionValue)
     inputs.property("pbsRelease", pbsReleaseValue)
     inputs.property("pythonFreeThreaded", freeThreadedValue)
+    inputs.property("wasmRuntimeCoordinates", wasmRuntimeCoordinatesValue)
     outputs.dir(outputDir)
     doLast {
         val file = outputDir.get().file("python/multiplatform/gradle/ProcessorCoordinates.kt").asFile
@@ -87,6 +96,13 @@ val generateCoordinates = tasks.register("generateCoordinates") {
             internal const val DEFAULT_PBS_RELEASE: String = "$pbsReleaseValue"
 
             internal const val DEFAULT_PYTHON_FREE_THREADED: Boolean = $freeThreadedValue
+
+            /**
+             * `python-multiplatform`'s `wasmRuntime` publication -- see ROADMAP §10. Versioned
+             * with the library, not with this plugin, because that is the artifact it has to
+             * agree with about which CPython build is inside.
+             */
+            internal const val DEFAULT_WASM_RUNTIME_COORDINATES: String = "$wasmRuntimeCoordinatesValue"
             """.trimIndent() + "\n",
         )
     }

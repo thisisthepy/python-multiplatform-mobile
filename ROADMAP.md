@@ -1548,18 +1548,102 @@ bounded by observation rather than by argument.
 
 ### What is still open
 
-- **The wiring is not in `python-multiplatform-gradle-plugin`, so an external consumer still meets
-  the hole.** `:sample` carries ~50 lines that are a copy of `patchKotlinWasmOutputForCPython`,
-  because one Gradle build script's functions are not visible to another project's build script.
-  Moving it into the plugin needs the staged runtime to be a *published artefact* first, and the
-  wasm CPython build is published nowhere — it is a local directory named by `-PwasmPythonDir`. That
-  is the same shape as §15e item 4 (`StagePythonHomeTask`), which solved the desktop version of
-  exactly this problem, and it is the obvious next step.
 - **`wasmJsBrowserTest` (karma) is not wired.** The browser evidence above is a headless run driven
   by hand against a served distribution, not a Gradle task anyone else can re-run. Nothing fails
   visibly if the browser bundle breaks again.
 - The upcall line reads `presses x3 = 0`, which is what that code prints for a freshly constructed
   counter; it was not cross-checked against a desktop run in this pass.
+
+### The plugin wiring is closed, and it needed the runtime to become a Maven artefact first
+
+The item above used to read "the wiring is not in `python-multiplatform-gradle-plugin`, so an
+external consumer still meets the hole," gated on the runtime becoming a *published artefact* —
+the same shape as §15e item 4 (`StagePythonHomeTask`), which solved the desktop version of exactly
+this problem. Both halves are done now.
+
+**(b) — is the wasm CPython build publishable?** Checked rather than assumed. `build-cpython-abi.sh`
+hand-patches CPython 3.14.2's own source (`Lib/sysconfig/__init__.py`, the generated `Makefile`) to
+carry `-fwasm-exceptions -sSUPPORT_LONGJMP=wasm` and a `PYEMSCRIPTEN_PLATFORM_VERSION` that does not
+exist upstream, plus `wasmExports`/`wasmMemory` in `EXPORTED_RUNTIME_METHODS` — the one addition
+that exists *only* so this library's `@WasmImport` declarations have something to bind to. PEP 783's
+`pyemscripten_2026_0` tag is real, accepted, and PyPI-validated (confirmed via web search), and
+Pyodide's own build tooling knows how to produce wheels for it — but nothing distributes a
+`python.wasm` with the JS-reachable exports this library needs, and no distributor has a reason to.
+So there is no URL for a `StagePythonHomeTask`-style download to point at; the desktop pattern does
+not transfer as-is.
+
+The candidate the earlier pass named — bundle it in a library artefact — does transfer, and the
+size argument favours it more cleanly than it did for desktop. Desktop's `PythonHomeStaging` chose
+*not* to embed specifically because one artefact would carry all four platforms' payload for every
+consumer (87.7 MB of `libpython`, of which any one consumer uses a quarter) — the defect §15d had
+already found and fixed once. wasm has exactly one platform, so there is no multiplication: a
+wasmJs consumer needs precisely this payload, once. Measured rather than guessed:
+`stageWasmBrowserRuntime`'s output directory is 13 MB (`python.wasm` 9.2 MB, `python3.14.zip`
+3.6 MB, `python.mjs` 0.56 MB, the two `cpython*.mjs` glue files); zipped, 7.0 MB — smaller than
+§15d's post-fix 23 MB Android AAR.
+
+`python-multiplatform/build.gradle.kts` now zips that directory (`wasmBrowserRuntimeZip`) and
+publishes it as its own artefact ID, `io.github.thisisthepy:python-multiplatform-wasm-runtime`, at
+the *library's* version (not the plugin's — see the coordinate-derivation comment in
+`generateCoordinates`, `python-multiplatform-gradle-plugin/build.gradle.kts`), so resolving the
+library and resolving the runtime it needs can never drift into two hand-copied version literals.
+`./gradlew :python-multiplatform:publishWasmRuntimePublicationToMavenLocal` (folded into the
+existing `publishAllToMavenLocal`) lands it at
+`~/.m2/repository/io/github/thisisthepy/python-multiplatform-wasm-runtime/`.
+
+**(a) — the plugin.** `python-multiplatform-gradle-plugin` gained
+`WasmBrowserRuntimeStaging.kt`: `StageWasmBrowserRuntimeTask` resolves the runtime coordinate from
+a *detached* configuration and unzips it, and `PythonBindingsPlugin` registers it unconditionally
+but only resolves it — no network access, no `mavenLocal` lookup — when a `wasmJsProcessResources`
+or `wasmJs*Webpack` task actually exists to depend on it (`tasks.matching`, a live view, the same
+trick `isBindingKspConfiguration` already relies on). The three substitutions `:sample` used to
+hand-copy — `wasmJsMain.resources.srcDir`, the `intrinsics.memory` placeholder, the upcall
+handoff — are all here now, matched by task *name* rather than by Kotlin Gradle Plugin task type
+(`org.gradle.language.jvm.tasks.ProcessResources` is Gradle's own class, not the KGP's, so casting
+`wasmJsProcessResources` to it does not add that dependency) — consistent with why `TEST_WORD`
+matches KSP configurations by name in the first place: this plugin's `kotlin-dsl` classpath does
+not carry the Kotlin Multiplatform Gradle plugin at all.
+
+One correction made against real friction rather than assumed up front: the patch's `modulePrefix`
+(`"${rootProject.name}-${project.name}"`, copied from `:sample`, which is a subproject) is wrong for
+a **single-module** consumer, where the `wasmJs()` target sits on the root project itself — Kotlin
+does not double the name there (`consumer-plugin-android.mjs`, not
+`consumer-plugin-android-consumer-plugin-android.mjs`). First attempt failed with "No
+*.import-object.mjs in .../consumer-plugin-android-consumer-plugin-android/kotlin"; fixed by
+deriving the name from `project == project.rootProject` instead of assuming the subproject shape.
+
+A second correction, found the same way: a consumer whose reachable wasmJs code never calls into
+`python-multiplatform` at all has its `@WasmImport` declarations dead-code-eliminated along with the
+`./cpython.mjs` import that names them — `consumer-plugin-android`'s KSP-generated `FunctionTable`
+wraps plain Kotlin functions with no path into `bindings.kt`, and hit exactly this. The prior copies
+of this patch (library, `:sample`) throw when that import is missing, because both always reach the
+FFI. The plugin's copy logs and returns instead — nothing to patch is a legitimate outcome for a
+generic external consumer, not a broken one.
+
+**Verified against `/Volumes/macMini/consumer-plugin-android`, an external consumer that resolves
+everything by Maven coordinates** (`io.github.thisisthepy:python-multiplatform:3.14.7-alpha01`, the
+plugin `3.13.0`) **with no `-PwasmPythonDir` of its own**:
+
+- With no reachable Python call (the baseline fixture), `wasmJsBrowserDevelopmentWebpack` succeeds,
+  patch skipped, logged as such.
+- With one added (`fun main() { ... Python3::initialize ... }`, forcing DCE to retain the FFI
+  surface), the same task's log reads:
+  ```
+  Pointed consumer-plugin-android.import-object.mjs's intrinsics.memory at Emscripten's wasmMemory
+  Handed consumer-plugin-android.mjs's wasm exports to cpython.mjs for upcall registration
+  ```
+  — both substitutions the library's own build performs on itself, now performed by the plugin on a
+  project three artefact resolutions away from this repository.
+- `wasmJsBrowserDistribution` carries the full runtime — `python.wasm`, `python.mjs`,
+  `python3.14.zip`, `cpython.mjs`, `cpython-config.mjs` — next to the consumer's own bundle, staged
+  there by nothing the consumer wrote.
+
+Not verified: actually running the resulting bundle in a browser. In scope for this pass was
+compilation only (desktop and wasmJs; no device, no simulator); §10's own browser run above is still
+the only execution evidence this repository has.
+
+Repository baselines unchanged by this — desktop 360/0/1, `ksp-fixtures` 64/0, wasmJs 344/0/0, all
+re-measured after the change rather than assumed carried over.
 
 ## 11. Build wiring
 
