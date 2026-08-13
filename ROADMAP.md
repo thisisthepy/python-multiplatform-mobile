@@ -1613,12 +1613,12 @@ So that item is closed by a postcondition instead: both `patchKotlinWasmOutputFo
 Checked the same way — reverting `:sample`'s placement fails
 `:sample:wasmJsBrowserDevelopmentWebpack` with the ordering message, on the real executable bundle.
 
-**Not added to `.github/workflows/wasm.yml`, and the reason applies to the job already there.** The
-runner has no CPython Emscripten build — it is an unpublished local directory named by
-`-PwasmPythonDir` — so every wasm test task's `onlyIf` skips. `wasmJsNodeTest` in CI today therefore
-runs zero tests and reports green; adding a browser job would add a second task that can only skip,
-while advertising coverage that does not exist. This becomes worth revisiting the moment the wasm
-CPython build is published (the same blocker as the first bullet above).
+~~**Not added to `.github/workflows/wasm.yml`, and the reason applies to the job already there.**~~
+**Superseded — see §10d.** The diagnosis was right (the runner has no CPython Emscripten build, so
+every wasm test task's `onlyIf` skipped and `wasmJsNodeTest` reported green having run zero tests)
+but its conclusion — wait for the build to be published — turned out to be one measurement away from
+unnecessary. The five staged files are enough; NODEFS was never carrying the standard library on
+purpose.
 
 ### The plugin wiring is closed, and it needed the runtime to become a Maven artefact first
 
@@ -1710,6 +1710,85 @@ the only execution evidence this repository has.
 
 Repository baselines unchanged by this — desktop 360/0/1, `ksp-fixtures` 64/0, wasmJs 344/0/0, all
 re-measured after the change rather than assumed carried over.
+
+### 10d. The wasm CI job ran zero tests and reported green, and the fix was one measurement away
+
+**The job did nothing, and said nothing about doing nothing.** `.github/workflows/wasm.yml` asked a
+runner for `wasmJsNodeTest`; the runner has no CPython Emscripten build; the task's `onlyIf` skipped
+it; the job went green. Reproduced before changing anything —
+`./gradlew :python-multiplatform:wasmJsNodeTest -PwasmPythonDir=/nonexistent/cpython-emscripten` →
+`BUILD SUCCESSFUL`, exit 0, `build/test-results` not even created. (On this machine the *default*
+path exists, so reproducing the runner needs the property pointed somewhere absent; running "without
+`-PwasmPythonDir`" reproduces the developer, not the runner.)
+
+**What the guard was actually reading, and whether the published zip could satisfy it.** Three
+guards, three markers, all under `wasmPythonDir`: the `KotlinJsTest` tasks want `python.mjs`,
+`verifyWasmAbiSignatures` and `stageWasmBrowserRuntime` want `python.wasm`. The file *list* in
+`python-multiplatform-wasm-runtime` matches what the test staging copies exactly — `python.mjs`,
+`python.wasm`, `python3.14.zip`, plus the two glue modules. So the zip looked sufficient. It was not,
+and the reason is the finding:
+
+    ./gradlew :python-multiplatform:wasmJsNodeTest -PwasmPythonDir=<unpacked zip>
+    → 344 tests, 344 failed: "CPython could not be initialized in this environment"
+    → node, directly: Fatal Python error: Failed to import encodings module
+
+**Node was never getting the standard library from anything an artefact could carry.** Printed from
+a run against the real build directory:
+
+    sys.path = ['/lib/python314.zip',
+                '/Volumes/macMini/wasm-build/cpython314-abi/Lib',           <-- the source checkout
+                '.../cross-build/wasm32-emscripten/build/python/build/lib.emscripten-...']
+
+Entry 0 is a file **nothing had ever created** — the browser branch writes it into MEMFS, the Node
+branch did not — and the interpreter was silently falling through to entry 1, the CPython *source
+checkout*, which is neither in the build directory, nor in the zip, nor anywhere a consumer could
+get it. Every wasm test in this repository had been depending on it.
+
+So `cpython.mjs` now installs the staged zip on both hosts (`installStdlibZip`, read with `fs` under
+Node and `fetch` in a browser), and sets `PYTHONHOME=/` — which both answers getpath (no more
+`Could not find platform independent libraries <prefix>` when `PYTHON_DIR` is an unpacked artefact
+with no `python.sh`) and stops a host shell's `PYTHONHOME`, plausibly pointing at a *desktop* CPython,
+from aiming the wasm interpreter at the wrong ABI. Node and browser now resolve the stdlib
+identically: `sys.prefix == '/'`, `json.__file__` inside `/lib/python314.zip`.
+
+**Result: the published artefact alone runs the suite.** Unpack
+`python-multiplatform-wasm-runtime-3.14.7-alpha01.zip` (7.0 MB, mavenLocal) into an empty directory,
+point `-PwasmPythonDir` at it, and `wasmJsNodeTest` + `wasmJsBrowserTest` are **344/0/0 and 10/0/0** —
+the recorded baselines, from five files and no CPython checkout. Desktop re-measured at 360/0/1.
+
+**And a skip can no longer be reported as success.** `-PrequireWasmRuntime=true` (`wasmRuntimePresent` in
+`python-multiplatform/build.gradle.kts`) turns every one of those `onlyIf` skips into a failure
+naming the path it looked for — including `wasmJsBrowserTest`'s *other* skip, a missing
+Chromium-family browser, which is the same defect by a different route. The message is logged before
+it is thrown because Gradle wraps an exception raised from an `onlyIf` predicate and reports only
+`Could not evaluate spec for 'Task satisfies onlyIf spec'` — checked, not assumed: the first version
+of this printed exactly that and nothing else, which would have traded a green tick that says nothing
+for a red one that says nothing.
+
+**What is still open: the runner has nowhere to download the zip from.** It has never been pushed to
+a remote repository — `publishWasmRuntimePublicationToMavenLocal` is the only publish that has ever
+run — and the two obvious candidates are both circular: a runner cannot `publishToMavenLocal` the
+zip, nor depend on `wasmBrowserRuntimeZip`, because building it needs the very CPython Emscripten
+directory the runner lacks. Nor can the runner build one: `build-cpython-abi.sh` needs emsdk 5.0.3, a
+CPython 3.14.2 checkout and two hand-patches, and no upstream ships a `python.wasm` with
+`wasmExports`/`wasmMemory` exported.
+
+The workflow is therefore split, and the split is the honest part:
+
+| job | runs | claims |
+|---|---|---|
+| `compile` | always | `compileKotlinWasmJs` + `wasmJsTestClasses`. Real coverage a runner can deliver, and it is *named* "no interpreter" |
+| `test` | only when the repository variable `WASM_RUNTIME_URL` is set | the real suite, with `-PrequireWasmRuntime=true` and a floor assertion on the result XML counts (344 / 10) |
+
+When the variable is unset the `test` job does not run at all — grey in the checks list, which is a
+different claim from green — and `compile` writes a step summary plus a `::warning` saying which
+coverage is absent and what to set. **One upload of the 7.0 MB zip to a release asset closes it**;
+until then nothing in this workflow reports success over an empty run.
+
+Not verified: the workflow on a real runner (no CI run is possible from here) and the
+missing-browser branch of `-PrequireWasmRuntime=true` (this machine has Whale, and the probe list finds
+it). Everything else above was reproduced locally against a pristine unpacked zip, including the
+fetch-and-unpack step run verbatim out of the YAML.
 
 ## 11. Build wiring
 
