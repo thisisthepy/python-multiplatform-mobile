@@ -27,6 +27,8 @@ import androidx.compose.ui.unit.dp
 import org.jetbrains.compose.ui.tooling.preview.Preview
 import org.thisisthepy.python.multiplatform.demo.PythonDemo
 import org.thisisthepy.python.multiplatform.demo.UpcallDemo
+import python.multiplatform.PlatformType
+import python.multiplatform.currentPlatform
 
 /**
  * One section per thing the library can do that it could not do when this sample was last touched.
@@ -171,6 +173,16 @@ private fun StaticSurfaceSection() {
 @Composable
 private fun AwaitSection() {
     DemoCard("7 — await over a suspend fun") {
+        // Neither button below may run on wasmJs: PythonDemo.awaitFastPath() and
+        // PythonDemo.awaitSuspending() both reach `import asyncio`, which traps this wasm
+        // instance rather than raising (docs/upcall-async-design.md §9.5) -- there would be no
+        // process left to show an error in. Gated here, before either is ever called, rather than
+        // inside them: this is the one section the boundary itself cannot recover from.
+        if (currentPlatform.platformType == PlatformType.Wasm) {
+            Mono("unavailable on wasmJs: `import asyncio` traps this target instead of raising")
+            return@DemoCard
+        }
+
         var fast by remember { mutableStateOf("") }
         var slow by remember { mutableStateOf("") }
 

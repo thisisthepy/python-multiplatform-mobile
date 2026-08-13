@@ -40,10 +40,14 @@ plugins {
 }
 
 kotlin {
-    /** Uncomment this block to enable WebAssembly support (currently not supported by Python Multiplatform)
+    // Re-enabled: the comment above this used to say "currently not supported by Python
+    // Multiplatform", which was true when it was written (the library had no wasmJs target at
+    // all) and has not been true since ROADMAP §10 -- `:python-multiplatform:wasmJsNodeTest` has
+    // run green for a while. Sections 5-6 (proxies) became reachable specifically after
+    // `4472f83a` taught the library to install the generated proxy module on wasm using `self` as
+    // the dispatcher, with no new `@WasmExport` needed per callable.
     @OptIn(ExperimentalWasmDsl::class)
     wasmJs {
-        moduleName = "sample"
         browser {
             val rootDirPath = project.rootDir.path
             val projectDirPath = project.projectDir.path
@@ -60,8 +64,7 @@ kotlin {
         }
         binaries.executable()
     }
-    */
-    
+
     androidTarget {
         @OptIn(ExperimentalKotlinGradlePluginApi::class)
         compilerOptions {
@@ -121,6 +124,12 @@ kotlin {
         desktopMain.dependencies {
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutines.swing)
+        }
+        val wasmJsMain by getting
+        wasmJsMain.dependencies {
+            // `kotlinx.browser.document` used to be bundled into the wasm stdlib; it moved to
+            // this artifact, and without it `main.kt`'s `document.body` does not resolve.
+            implementation(libs.kotlinx.browser)
         }
     }
 }
