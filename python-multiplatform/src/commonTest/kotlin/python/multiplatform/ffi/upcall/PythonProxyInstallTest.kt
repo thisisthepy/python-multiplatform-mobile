@@ -1,5 +1,6 @@
 package python.multiplatform.ffi.upcall
 
+import python.multiplatform.currentPlatform
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.PythonTestFixture
 import python.multiplatform.reflection.CallableKind
@@ -297,7 +298,7 @@ class PythonProxyInstallTest {
 
     @Test
     fun theSameGeneratedProxyBuildsNoFutureWhenTheKotlinBodyNeverSuspends() =
-        withProxies {
+        withProxies(needsAsyncio = true) {
             ProxyLoopHarness.install()
 
             // Identical call site, identical `await`, and the difference is invisible from Python --
@@ -321,26 +322,42 @@ class PythonProxyInstallTest {
      * the *documented refusal* is asserted instead. That is not a skip: the generated module's own
      * guard is what has to fire, and if such a target ever grows a shim -- or if a target that has
      * one loses it -- one of the two branches fails.
+     *
+     * @param needsAsyncio for the one test that builds an event loop. There is no refusal to assert
+     *   for that one on a target where [proxyBootstrapSupportsAsyncio] is false: `import asyncio`
+     *   **traps the wasm instance** rather than raising, so reaching it at all takes the suite with
+     *   it. Not running it is the only available answer, and the constant is where that is written
+     *   down.
      */
-    private inline fun withProxies(block: () -> Unit) = PythonTestFixture.withInterpreter {
-        // Binds this platform's raw entry points into `__main__`. The generated module needs them
-        // and refuses to install without them; which name is bound is irrelevant, only the
-        // bootstrap is.
-        assertTrue(bindUpcallOrNull("demo.calc.ping"), "the fixture table is not installed")
+    private inline fun withProxies(needsAsyncio: Boolean = false, block: () -> Unit) =
+        PythonTestFixture.withInterpreter {
+            // Binds this platform's raw entry points into `__main__`. The generated module needs
+            // them and refuses to install without them; which name is bound is irrelevant, only
+            // the bootstrap is.
+            assertTrue(bindUpcallOrNull("demo.calc.ping"), "the fixture table is not installed")
 
-        if (!publishesProxyEntryPoints) {
-            val refusal = assertFails { PythonProxySource.install() }
-            assertTrue(
-                refusal.message?.contains("raw upcall entry points are not bound") == true,
-                "a target with no proxy bootstrap must fail the generated module's own guard, " +
-                    "not something else: $refusal",
-            )
-            return@withInterpreter
+            if (!publishesProxyEntryPoints) {
+                val refusal = assertFails { PythonProxySource.install() }
+                assertTrue(
+                    refusal.message?.contains("raw upcall entry points are not bound") == true,
+                    "a target with no proxy bootstrap must fail the generated module's own guard, " +
+                        "not something else: $refusal",
+                )
+                return@withInterpreter
+            }
+
+            PythonProxySource.install()
+            if (needsAsyncio && !proxyBootstrapSupportsAsyncio) {
+                // Everything up to here ran: the proxies really are installed on this target, and
+                // that much is asserted rather than skipped. What cannot follow is the event loop.
+                println(
+                    "\n--- ${currentPlatform.name}: `import asyncio` traps this instance, so the " +
+                        "await fast path is not exercised here; see proxyBootstrapSupportsAsyncio\n",
+                )
+                return@withInterpreter
+            }
+            block()
         }
-
-        PythonProxySource.install()
-        block()
-    }
 }
 
 /**

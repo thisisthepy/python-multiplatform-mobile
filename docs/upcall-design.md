@@ -630,21 +630,27 @@ fixture, not of the constructor proxy.
 a +20 ns proxy layer is genuinely unmeasurable there. Desktop resolves to ±10 ns and is where the
 small deltas can be read.
 
-#### wasmJs is absent from these tables on purpose
+#### wasmJs was absent from these tables, and that judgement did not survive being tested
 
-**There are no generated proxies on wasmJs, and there structurally cannot be.** Nothing crosses into
-Python on that target but an already-*bound* callable — `UpcallEntry.bind` builds one over the single
-`@WasmExport`ed `pmp_invoke`, and resolution happens in Kotlin — so `_pm_resolve`/`_pm_invoke` do not
-exist in `__main__` and `PythonProxySource.install()` refuses at its own entry-point guard. See
-`publishesProxyEntryPoints`' wasmJs row and `docs/upcall-async-design.md` §12.4. The async half could
-not follow even if the sync half were published: `import asyncio` **traps the instance** on this wasm
-build rather than raising.
+This section read: "**There are no generated proxies on wasmJs, and there structurally cannot be.**
+Nothing crosses into Python on that target but an already-*bound* callable — `UpcallEntry.bind`
+builds one over the single `@WasmExport`ed `pmp_invoke`, and resolution happens in Kotlin — so
+`_pm_resolve`/`_pm_invoke` do not exist in `__main__` and `PythonProxySource.install()` refuses at
+its own entry-point guard."
 
-`GeneratedProxyCostTest` therefore asserts that documented refusal on wasmJs and measures nothing,
-which is the same branch `PythonProxyInstallTest` takes. A number here would be a number for
-something that cannot be executed. This also keeps the asyncio measurement behind the same guard, so
-the wasm suite never reaches an `import asyncio` — the precedent `AsyncUpcallPortabilityTest` exists
-to record.
+Every clause of that was true except the one it turned on. The `@WasmExport` constraint is real and
+unchanged; what was wrong is the assumption that a second entry point needs a second export. A
+`PyCFunction` carries a **`self`** as well as a function pointer, and `PyCFunction_NewEx` mints a
+fresh object per call, so one exported pointer already backs arbitrarily many distinct Python
+callables — which is exactly what `UpcallEntry.bind` had been doing with a `CallableHandle` all
+along. Putting an op code where the handle would sit turns the same pointer into a dispatcher, and
+all five names land with no new export. `docs/upcall-async-design.md` §14 has the measurement.
+
+wasmJs now fills the sync rows of this table for real: module function +17 ns (1.05x), instance
+method +18 ns (1.05x), property read +17 ns (1.06x), constructor +351 ns (1.48x), against a boundary
+of ~300 ns. The one half that did not follow is async: `import asyncio` **traps the instance** on
+this wasm build rather than raising, so the await row alone stays behind
+`proxyBootstrapSupportsAsyncio` — the precedent `AsyncUpcallPortabilityTest` exists to record.
 
 Android and androidNative are absent for a different and weaker reason: both run this file (it is
 `commonTest`), but doing so needs an emulator, and this pass had none available. Their rows are

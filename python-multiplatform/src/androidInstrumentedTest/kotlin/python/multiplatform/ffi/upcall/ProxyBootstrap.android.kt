@@ -9,3 +9,6 @@ package python.multiplatform.ffi.upcall
  * the one that was recorded here -- see [publishesProxyEntryPoints]'s ART row.
  */
 actual val publishesProxyEntryPoints: Boolean = true
+
+/** §13.4's emulator run drives the `asyncio` fast path on `pmp_api26` and `pmp_api36` alike. */
+actual val proxyBootstrapSupportsAsyncio: Boolean = true

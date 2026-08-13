@@ -799,8 +799,9 @@ _pmp_result = asyncio.new_event_loop().run_until_complete(_pmp_probe())
 
 ### 12.4 못 맞춘 두 타깃과, 각각 무엇이 필요한가
 
-> §12.5 에서 **Android(ART) 는 맞췄다.** 아래 Android 항목은 그때의 진단이고, **절반만 맞았다.**
-> 남은 미구현 타깃은 wasmJs 하나다.
+> §13 에서 **Android(ART) 는 맞췄다.** 아래 Android 항목은 그때의 진단이고, **절반만 맞았다.**
+> §14 에서 **wasmJs 도 맞췄다.** 아래 wasmJs 항목의 결론은 **틀렸다** — 새 `@WasmExport` 는
+> 필요하지 않았고, 이미 있는 하나로 다섯 개를 전부 깔 수 있었다.
 
 - **wasmJs — 안 된다.** 파이썬으로 건너가는 것이 *바인딩된 callable* 하나뿐이다(`UpcallEntry.bind`
   가 유일한 `@WasmExport` `pmp_invoke` 위에 만든다). 이름 해석은 Kotlin 안에서 끝난다.
@@ -808,6 +809,8 @@ _pmp_result = asyncio.new_event_loop().run_until_complete(_pmp_probe())
   만드는 컴파일에서만 유효하므로 **라이브러리가 아니라 임베딩하는 애플리케이션이**
   (`wasmJsTest/UpcallExports.kt` 모양으로) 선언해야 한다. 게다가 이 빌드는 `import asyncio` 가
   trap 되므로 suspend 프록시는 그다음에도 첫 `await` 에서 죽는다. 억지로 맞추지 않았다.
+  → **§14 가 가운데 문장을 뒤집었다.** `@WasmExport` 제약 자체는 맞고, asyncio trap 도 맞다.
+  틀린 것은 "그러므로 새 export 가 필요하다" 는 결론 하나다.
 - **Android(ART) — C 한 조각이 빠졌다.** §11.4 이후로도 "경계 shim 이 없다"고 적혀 있었지만 그것은
   틀렸다. `androidMain` 의 `UpcallEntry.publish` 가 `jni_onload.def` 의 C shim 을 통해
   `_pm_resolve`/`_pm_bind`/`_pm_release`/`_pm_cancel` 을 실제로 깐다(그래서
@@ -885,3 +888,135 @@ Kotlin 은 정말로 빠진 것이 없었다 — `UpcallCallbacks.invoke(long, l
 Kotlin 스레드가 필요한데, `androidMain` 은 Kotlin/JVM 이라 `java.lang.Thread` 로 desktop 과 같은
 모양을 쓸 수 있다. 재개는 CPython 도 ART 도 모르는 스레드에서 오므로, 전달뿐 아니라 `pmp_attach`
 까지 함께 돈다.
+
+## 14. wasm 에서도 프록시가 돈다 — §12.4 의 "새 export 가 필요하다" 는 틀렸다
+
+§12.4 는 wasmJs 를 유일한 미구현 타깃으로 남기며 이렇게 적었다: `_pm_resolve`/`_pm_invoke` 를 깔려면
+**각자 새 `@WasmExport`** 가 필요하고, `@WasmExport` 는 `.wasm` 을 만드는 컴파일에서만 유효하므로
+라이브러리가 아니라 임베딩 앱이 선언해야 한다 — 그러므로 라이브러리는 할 수 있는 것이 없다.
+
+**전제는 전부 맞는데 결론이 틀렸다.** 물어보지 않은 질문이 하나 남아 있었다: *이미 하나가
+export 되어 있다면, 그 하나로 다 할 수 없나?*
+
+### 14.1 이미 있던 하나가 누구 것이었나
+
+먼저 확인한 것은 그 하나가 **누구의 컴파일에서 나오는가**다. §12.4 의 진단은 "임베딩 앱이 선언해야
+한다" 인데, 지금 그것을 선언하고 있는 것은:
+
+    python-multiplatform/src/wasmJsTest/kotlin/python/native/ffi/UpcallExports.kt
+
+    @kotlin.wasm.WasmExport("pmp_invoke")
+    fun pmpInvoke(selfPtr: Int, argsPtr: Int): Int = UpcallEntry.invokeMethod(selfPtr, argsPtr)
+
+**테스트 컴파일이다.** 그리고 그 파일의 주석이 이미 정확히 그렇게 적고 있다 — "이것은 테스트
+스캐폴딩이 아니라, 이 라이브러리를 임베딩하는 애플리케이션이 스스로 써야 하는 파일이며, 스위트가
+애플리케이션이 지나가는 경로를 그대로 지나가도록 여기에 재현해 둔 것" 이다. 즉 §12.4 의 진단은
+**이미 충족되어 있었다.** 임베딩 앱이 선언해야 하는 것은 맞고, 이미 선언되어 있었다.
+
+배선은 이렇다. `wasmJsMain/UpcallEntry` 가 `bindings.pmpRegisterUpcall("pmp_invoke")` 로 그 export 를
+CPython 의 `__indirect_function_table` 에 `Table.set` 하고 (반환값이 곧 C 함수 포인터), 그것을
+`ml_meth` 으로 하는 `PyMethodDef` 를 하나 `malloc` 해서, `PyCFunction_NewEx(def, self, NULL)` 로
+callable 을 만든다. 파이썬이 부르는 함수 포인터는 그 하나뿐이다.
+
+### 14.2 디스패처는 성립한다 — 그리고 op 인자조차 필요 없다
+
+과제는 "`pmp_invoke(op, a, b)` 처럼 op 코드로 갈라라" 였는데, 실제로는 **op 인자를 더할 필요가
+없었다.** `PyCFunction` 은 함수 포인터*와* `self` 를 함께 들고 다니고 `PyCFunction_NewEx` 는 호출마다
+새 객체를 만든다. 그러므로 **export 하나가 이미 서로 다른 파이썬 callable 을 얼마든지 뒷받침한다** —
+`UpcallEntry.bind` 가 `CallableHandle` 로 계속 해오던 것이 정확히 그것이다.
+
+핸들이 들어갈 자리에 핸들이 될 수 없는 값을 넣으면 같은 포인터가 디스패처가 된다:
+
+| `self` | 파이썬에 깔리는 이름 | 모양 |
+|---|---|---|
+| `-2` | `_pm_resolve` | `(name: str \| bytes) -> handle`, 없으면 `-1` |
+| `-3` | `_pm_invoke` | `(handle, args_tuple) -> result` |
+| `-4` | `_pm_bind` | `(handle) -> callable` |
+| `-5` | `_pm_release` | `(handle) -> int` |
+| `-6` | `_pm_cancel` | `(handle) -> int` |
+| 그 외 | (바인딩된 callable) | `UpcallTrampoline.invoke(self, args)` |
+
+**왜 음수가 안전한가:** `CallableHandle.isValid` 가 `raw >= 0` 이고, `ObjectReference` 는
+`(generation shl 32) or slot` 이며 generation 은 1 이상이다. 살아 있는 핸들은 어느 쪽이든 음수가 될
+수 없다. `-1` 은 일부러 op 로 쓰지 않았다 — `CallableHandle.NONE` 이고, 트램폴린 자신의 거절 경로에
+계속 도달해야 한다.
+
+그래서 **새 `@WasmExport` 는 0 개**이고, 임베딩 앱이 쓰는 파일은 이전과 글자 하나 다르지 않다.
+`verifyWasmAbiSignatures` 도 그대로다 (`317 @WasmImport` + 글루 3 — 새 바인딩이 없다).
+
+생성기 쪽 얇은 shim 은 필요 없었다. `PythonProxySource` 가 요구하는 두 이름이 그대로 깔리므로
+`support` 절의 `_pm_lookup` 이 이미 있는 그대로 동작한다. 다만 `_pm_resolve` 는 **`str` 과 `bytes` 를
+둘 다** 받게 썼다 — §13.2 에서 ART 가 정확히 그 자리에서 죽었기 때문이다.
+
+### 14.3 순서 — 고치기 전에 빨간 것을 봤다
+
+`publishesProxyEntryPoints` 의 wasmJs 값은 10개가 실제로 통과하는 것을 본 뒤에 true 로 바꿨다.
+그리고 그 통과가 진짜인지 확인하려고 `bindUpcallOrNull` 에서 `UpcallEntry.publish` 호출만 빼고 다시
+돌렸다:
+
+    PythonProxyInstallTest  11/11 FAILED
+    PyException: the raw upcall entry points are not bound: define _pm_resolve(name_bytes)
+    -> handle and _pm_invoke(handle, args_tuple) -> result before installing proxies
+
+생성 모듈 자신의 가드다. 통과가 부트스트랩에 실제로 달려 있다는 뜻이고, 빼면 §12.1 이 iOS 에서 본
+것과 같은 문자열이 wasm 에서 나온다.
+
+### 14.4 asyncio 는 여전히 안 된다 — 그래서 상수가 둘이다
+
+§9.5 는 그대로다: `import asyncio` 가 이 wasm 빌드에서 **인스턴스를 trap** 시킨다. 파이썬 예외가
+아니라 프로세스가 죽는 것이므로 Kotlin 에서도 파이썬에서도 잡을 수 없고, 부트스트랩이 생겼다고
+달라지지 않는다.
+
+그러므로 `publishesProxyEntryPoints` 하나로 두 가지를 말하게 두지 않고 **`proxyBootstrapSupportsAsyncio`
+를 따로 뒀다.** 하나로 뭉치면 "프록시가 아예 없다" 와 "await 할 수 있는 프록시가 없다" 가 같은
+문장이 되고, wasm 에서 실제로 성립하는 10개의 계약을 조용히 단언하지 않게 된다.
+
+이 상수가 거짓인 곳에서는 **거절을 단언하지 않는다.** 다른 미구현 타깃과 다른 점이 이것이다 —
+거기서는 생성 모듈의 가드가 뜨는 것을 볼 수 있지만, 여기서 관측되는 것은 오류가 아니라 프로세스
+사망이라 단언할 대상이 없다. 정직한 모양은 그 한 줄을 돌리지 않는 것이고, 상수가 그 사실을 적는
+자리다.
+
+### 14.5 측정
+
+| | 결과 |
+|---|---|
+| wasmJs (`wasmJsNodeTest`) | **340개 0 실패 0 스킵** — 기준선과 동일. `PythonProxyInstallTest` 11개 중 10개가 이제 진짜 경로, 1개(asyncio)는 §14.4 |
+| desktop (`desktopTest`) | 360개 0 실패, 스킵 1 — 회귀 없음 |
+| `verifyWasmAbiSignatures` | 통과, 317 + 글루 3 (변화 없음) |
+| `compileTestKotlinAndroidNativeArm64`, `compileTestKotlinIosSimulatorArm64` | 통과 |
+
+`GeneratedProxyCostTest` 가 wasm 에서 처음으로 숫자를 낸다 (경계 자체가 ~300 ns 인 타깃이다):
+
+```
+Net of the harness floor (62.48 ns), and what the proxy layer adds
+  module function   raw 301.91 ns   proxy  318.98 ns   1.05x  (+17.06 ns)
+  constructor       raw 719.75 ns   proxy 1070.98 ns   1.48x  (+351.23 ns)
+  instance method   raw 339.22 ns   proxy  357.47 ns   1.05x  (+18.24 ns)
+  property read     raw 290.94 ns   proxy  308.41 ns   1.06x  (+17.47 ns)
+  property write    raw 360.42 ns   proxy  438.77 ns   1.21x  (+78.34 ns)
+  static read       raw 228.82 ns   proxy  300.94 ns   1.31x  (+72.12 ns)
+  module read       raw 228.82 ns   proxy  324.39 ns   1.41x  (+95.57 ns)
+
+Resolution: two identical raw rows differ by -73.09 ns
+HandleTable roots before the timed loops: 1, after: 1
+
+--- Generated proxy install cost ---
+  generated source            338 lines, 14052 chars
+  PythonProxySource.render()  186.63 us
+  PythonProxySource.install() 2342.14 us   (...of which Python3.exec 2155.50 us)
+```
+
+**해상도 주의:** 이 타깃의 동일한 두 raw 행이 73 ns 차이가 난다. 위의 static/module 행들의 +72…+96 ns
+는 그 해상도와 같은 크기이므로 **숫자로 읽으면 안 된다.** 읽을 수 있는 것은 생성자의 +351 ns 뿐이고,
+그것은 desktop·시뮬레이터와 같은 이유다 (`type.__call__` + `__init__` 프레임 + 속성 저장 + `__del__`).
+
+`HandleTable roots before/after: 1 → 1` 이 별도로 말하는 것이 하나 있다: 만 번의 `Counter(10)` 이
+전부 `__del__` → `_pm_release` 로 돌아왔다. 디스패처가 release 를 invoke 경로로 잘못 보냈다면 조용히
+전부 샜을 자리다.
+
+### 14.6 남은 것
+
+- **async 프록시.** §9.5 의 trap 이 풀리지 않는 한 불가능하다. 이 빌드의 `selectors` 가
+  `RuntimeError: unreachable` 로 죽는 것이 원인이고, 그것은 이 문서가 아니라 CPython wasm 빌드
+  쪽 문제다.
+- **`sample` 의 wasm 경로.** §13.5 가 Android 에 대해 한 것을 wasm 에 대해서는 하지 않았다.

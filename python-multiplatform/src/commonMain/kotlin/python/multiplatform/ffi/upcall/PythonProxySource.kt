@@ -509,9 +509,11 @@ object PythonProxySource {
      * `ctypes.CFUNCTYPE(c_long, c_char_p)` and `c_char_p` refuses a `str` outright, so it is the
      * only spelling that can be written once and work everywhere; the `PyMethodDef` bootstraps
      * accept either. How the two names get there is per-platform and is the one part of this path
-     * that is not `commonMain` (desktop through `ctypes` over a Panama upcall stub, iOS and
-     * androidNative through `UpcallEntry.publish`'s `PyMethodDef`s). The generated source checks
-     * for them and raises rather than defining proxies that would fail one by one at call time.
+     * that is not `commonMain` (desktop through `ctypes` over a Panama upcall stub; iOS and
+     * androidNative through `UpcallEntry.publish`'s `PyMethodDef`s; Android/ART through the same
+     * with C shims behind `ml_meth`; wasmJs through five `PyCFunction`s over one `@WasmExport`,
+     * told apart by an op code in `self`). The generated source checks for them and raises rather
+     * than defining proxies that would fail one by one at call time.
      *
      * Everything the generated module defines for its own use is prefixed `_pm_` too, which used
      * to include a `_pm_bind` that meant *name -> handle* -- landing straight on top of the

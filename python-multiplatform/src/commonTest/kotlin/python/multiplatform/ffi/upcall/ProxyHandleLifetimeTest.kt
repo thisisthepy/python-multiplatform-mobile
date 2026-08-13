@@ -56,9 +56,13 @@ import kotlin.test.assertTrue
  *
  * ### wasmJs
  *
- * No proxies are installable there at all ([publishesProxyEntryPoints]), so there is no proxy whose
- * lifetime could be asserted. The documented refusal is asserted instead, exactly as
- * [PythonProxyInstallTest] and [GeneratedProxyCostTest] do.
+ * This said "no proxies are installable there at all, so there is no proxy whose lifetime could be
+ * asserted", and it is now the fifth target that runs every assertion below -- see
+ * [publishesProxyEntryPoints]. That matters more here than the sync contracts do: `__del__` reaches
+ * Kotlin through the published `_pm_release`, which on wasm is a `PyCFunction` over the *same*
+ * exported pointer as `_pm_invoke` with a different op code in its `self`. A dispatcher that routed
+ * a release to the invoke path would leak every handle silently, and this file is what says it does
+ * not.
  */
 class ProxyHandleLifetimeTest {
 
