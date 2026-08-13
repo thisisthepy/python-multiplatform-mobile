@@ -12,10 +12,19 @@ package python.multiplatform.ffi.upcall
 actual val publishesProxyEntryPoints: Boolean = true
 
 /**
- * **`import asyncio` traps this wasm instance**, taking the Node process with it rather than
- * raising something a test could assert on. `docs/upcall-async-design.md` §9.5 has the
- * import-by-import measurement: `selectors` is where it goes, and `asyncio` reaches it through it.
+ * Still `false`, but **no longer for the reason §9.5 gave**. `import asyncio` does not trap any
+ * more: `docs/upcall-async-design.md` §15 found the trap was Emscripten's *runtime* JSPI detection
+ * meeting a boot that never calls `main`, fixed it in `cpython.mjs`, and `WasmSelectorsImportTest`
+ * now watches `selectors` and `asyncio` import cleanly on this target.
  *
- * This is the one half of the proxy surface the dispatcher above did not buy back.
+ * What is missing is narrower, and it is not a trap. The test this constant gates builds the
+ * *default* event loop and counts its `create_future`; `BaseSelectorEventLoop.__init__` calls
+ * `_make_self_pipe` -> `socket.socketpair()`, which Emscripten routes through a Node `require('ws')`
+ * that is not installed. That blocker is independent of JSPI -- it reproduces on a Node without it.
+ *
+ * A selector-free loop clears it, and `WasmSelectorsImportTest` runs a coroutine to completion over
+ * one, so the surface an async upcall needs does exist here. Whether the library should *ship* such
+ * a loop is an open decision (§15.7), not a measurement. The constant stays `false` until that is
+ * made, rather than being flipped on a loop the tests supply for themselves.
  */
 actual val proxyBootstrapSupportsAsyncio: Boolean = false

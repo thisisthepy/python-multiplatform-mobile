@@ -28,6 +28,47 @@ preference.
 compile to plain `i32.load`/`i32.store` with no allocator involved, so reading an address CPython
 returned is free.
 
+## Never let JSPI reach this embedding
+
+`cpython.mjs` deletes `WebAssembly.promising` and `WebAssembly.Suspending` before it calls the
+Emscripten factory. **Do not remove those two lines**, and do not restore the properties for the
+lifetime of the process.
+
+Emscripten decides whether to use JavaScript Promise Integration by **runtime feature detection**,
+not at build time — CPython's link line has no `-sJSPI`. When it detects JSPI it turns the blocking
+syscalls into suspending imports, and it installs the matching `WebAssembly.promising` wrapper on
+exactly one export: `main`.
+
+**This library never calls `main`.** Bring-up is `Python3.initialize()` issuing `Py_Initialize` as a
+direct wasm call, like every other C API call. So with JSPI live there is no promising frame anywhere
+on the stack and the first blocking syscall tears the process down:
+
+    select.poll().poll(0)   ->  SuspendError: trying to suspend without WebAssembly.promising
+
+That is not survivable and it does not look like what it is. The SuspendError unwinds CPython's C
+frames without running `Py_END_ALLOW_THREADS`, so the outer `withGIL{}`'s `PyGILState_Release` then
+hits `Py_FatalError: thread state ... must be current when releasing` → `abort()` → the wasm
+`unreachable` opcode. What you see reported is `RuntimeError: unreachable`, three hops from the
+cause, and the wasm suite dies as *"process exited unexpectedly"* rather than as a red test.
+
+It cost this repo two sections of `docs/upcall-async-design.md` (§9.5, §14.4) to misdiagnose as
+"wasm cannot do `asyncio`". It could not do `asyncio` because `selectors.py` calls
+`select.poll().poll(0)` at import time to pick its `DefaultSelector` — which is also why `import
+select` was fine and `import selectors` was not. §15 has the measurement.
+
+Measured, same `python.wasm`, `select.poll().poll(0)`: Node 22 (no JSPI) returns `[]`; Node 26 (JSPI
+on by default, and the Gradle runner's version) raises `SuspendError`. There is no V8 flag to turn
+JSPI off on Node 26 — it is shipped, not experimental — so suppressing the feature detection is the
+only lever. The synchronous path is the one this library wants anyway: every call arrives from
+Kotlin as a plain synchronous wasm call, so a blocking syscall has to actually block.
+
+**The known cost, recorded rather than hidden: this mutates a host intrinsic globally.** Under the
+Node test runner that is contained — nothing else in the process wants JSPI, and the 344-test wasm
+suite is the evidence. On a browser page shared with *another* wasm module that uses JSPI, deleting
+these would break that module. If `sample` ever grows a browser wasm target this needs revisiting;
+the honest fix there is an Emscripten build that does not feature-detect, not a narrower delete,
+because `__maybe_poll_async` re-reads `WebAssembly.promising` on every call.
+
 ## The memory is shared because Kotlin *imports* it
 
 Kotlin 2.4.20-Beta2 declares `intrinsics.memory` as an **import** (`min=0, max=none`) rather than
