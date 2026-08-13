@@ -2547,3 +2547,74 @@ outside for an Android consumer — §15b verified it against a plain JVM projec
 None of §1–7 were guessed at: each was reproduced against a real external Gradle project outside
 this repository (`/Volumes/macMini/consumer-test`, `/Volumes/macMini/consumer-plugin-test`,
 `/Volumes/macMini/consumer-android-test`) rather than inferred from reading the build scripts alone.
+
+### 15f. The bindings plugin, exercised from an external *Android* consumer — item 7 above, closed
+
+§15b verified the plugin against a plain JVM consumer only. §15d's Android consumer used the
+*library* by coordinates but applied no plugin at all — it hand-wrote its own KSP wiring, so it
+never exercised `id("io.github.thisisthepy.python.multiplatform.bindings")`'s Android path: the
+`Test`-word configuration-name matching (this doc's own `PythonBindingsPlugin.kt` comment calls
+out `kspAndroidTestDebug` as the configuration that broke before that regex existed), the
+`com.android.library`/`com.android.application` role inference, and the reflective `ksp {
+arg(...) }` call against whatever KSP extension shape a consumer's KSP version actually exposes.
+None of that is reachable through `ksp-fixtures/android`, which is an in-repo project-substitution
+consumer, not one resolving the plugin by coordinates.
+
+**Setup**: all three components published to `mavenLocal()` from this worktree —
+
+| Component | Coordinates | Published from |
+|---|---|---|
+| library (root, desktop, android) | `io.github.thisisthepy:python-multiplatform:3.14.7-alpha01`, `...-desktop:...`, `...-android:...` | repo root (`-PpythonVersion=3.14.7`, matching what was already extracted) |
+| KSP processor | `io.github.thisisthepy:python-multiplatform-ksp:3.13.0` | repo root |
+| plugin implementation | `io.github.thisisthepy:python-multiplatform-gradle-plugin:3.13.0` | `python-multiplatform-gradle-plugin/` (its own build — §15a already noted this has to be done from inside that directory) |
+| plugin marker (what `id(...)` actually resolves) | `io.github.thisisthepy.python.multiplatform.bindings:io.github.thisisthepy.python.multiplatform.bindings.gradle.plugin:3.13.0` | same |
+
+Confirmed the marker's POM depends on exactly `io.github.thisisthepy:python-multiplatform-gradle-plugin:3.13.0`, and the KSP processor's own POM group/artifact/version match `DEFAULT_PROCESSOR_COORDINATES` verbatim — §15b's fix holds under a real Android consumer, not just the plain-JVM one it was verified against.
+
+**Consumer**: `/Volumes/macMini/consumer-plugin-android`, outside this repository, `pluginManagement { repositories { mavenLocal(); ... } }`, a single Kotlin Multiplatform module (`jvm("desktop")` + `androidTarget()`, `com.android.library`) applying the plugin by id and version, with `pythonBindings { role.set("app"); moduleName.set("consumer_override"); excludePackages.set(listOf("com.example.consumer.internal")) }` — deliberately exercising the override knobs item 3 of the task asked about, not just the defaults §15b already covered.
+
+**What ran, in the order a consumer would hit it:**
+
+1. `./gradlew tasks` — plugin applies and configures cleanly against `mavenLocal()`, no coordinate-resolution error at configuration time (the `dependencies.addLater` wiring is lazy, so this step doesn't yet prove the processor dependency resolves — that's step 2).
+2. `./gradlew desktopTest` — `kspKotlinDesktop` ran, generated `python.multiplatform.generated.FunctionTable` and `Fragment_consumer_override.kt` into `build/generated/ksp/desktop/desktopMain/`, compiled, and a hand-written test installed the table and **invoked `add(3, 4)` through it, getting `7L` back** — the full round trip, not just generation. `@PythonInternal` on one function and `excludePackages` on a whole package both worked: neither's function resolved in the table.
+3. `./gradlew assembleRelease assembleDebug` — `kspReleaseKotlinAndroid` and `kspDebugKotlinAndroid` ran (the `Test`-word regex correctly left `kspDebugUnitTestKotlinAndroid` at `NO-SOURCE`, i.e. unconfigured, exactly as the plugin's doc comment says it should), both AARs built, and the Android leaf's own `FunctionTable`/`Fragment_consumer_override.kt` generated at `build/generated/ksp/android/androidRelease/`.
+4. `desktopTest`'s 3 assertions passed: module aggregation, the override name, the invocation, and the package-level exclusion. No emulator was used — compile and assemble only, per this task's constraint.
+
+**Nothing in this path needed a code fix.** §15a/§15b's earlier fixes (KSP publishing, the `null:` group bug) were what made step 2 possible at all; from an Android angle specifically, the plugin's `Test`-word matching and role inference — the two things §13 had already hardened against `ksp-fixtures/android` — held against a real external Android module too.
+
+**What *did* turn up, and is not a code bug but was undocumented until now**: the consumer's own Kotlin Gradle Plugin version has to clear two independent floors, found by deliberately trying versions other than this repo's own pinned one (`libs.versions.kotlin` = `2.4.20-Beta2`):
+
+- **Kotlin 2.1.0**: `kspKotlinDesktop` fails at configuration time with a bare
+  `'org.gradle.api.provider.Property ... .getJvmDefault()'` error — no stack trace pointing at
+  KSP, no mention of a version mismatch. KSP 2.3.11's Gradle plugin calls a Kotlin Gradle Plugin
+  API that Kotlin 2.1.0's KGP does not have.
+- **Kotlin 2.2.20** (past the floor above): `kspKotlinDesktop` now succeeds, but
+  `compileKotlinDesktop` fails compiling the *generated* fragment — `Class
+  'python.multiplatform.reflection.TypeTag' was compiled with an incompatible version of Kotlin.
+  The actual metadata version is 2.4.0, but the compiler version 2.2.0 can read versions up to
+  2.3.0.` This is unrelated to KSP: the published library itself was compiled with this repo's
+  Kotlin version, and a consumer's compiler has to be new enough to *read* that metadata,
+  independent of whatever KSP requires.
+- **Kotlin 2.4.20-Beta2** (this repo's own version): clears both, confirmed above.
+
+Neither failure names a required version or points at the other component — a consumer hits a
+compiler internals error, not a diagnostic. **Fixed**: documented as a KDoc block on
+`PythonBindingsPlugin` (`python-multiplatform-gradle-plugin/src/main/kotlin/python/multiplatform/gradle/PythonBindingsPlugin.kt`)
+naming both floors and the exact errors each produces, so the next person reading the plugin's own
+source finds this before hitting either error blind. A runtime version check was deliberately not
+added: the two floors are two different projects' compatibility windows (KSP's plugin API surface,
+and this library's own build's Kotlin version), neither owned by this plugin, and asserting a
+specific range here would drift out of sync with `libs.versions.toml` the first time either
+changes. No compatibility matrix beyond "match this repo's own pinned version" exists or was
+produced by this pass.
+
+**Verified not to have regressed anything in-repo**: `:python-multiplatform:desktopTest` stayed at
+360/0 (1 skipped) and `:ksp-fixtures:app:desktopTest` at 64/0 after publishing and after the KDoc
+change, and `:sample:compileKotlinDesktop` still compiles — the only file this pass changed inside
+the repository is the doc comment above.
+
+Updated item 7 of §15e's punch list: the bindings plugin **has** now been exercised from an
+external Android consumer, resolving by coordinates, generating and invoking a real
+`FunctionTable`, with the override knobs (`role`, `moduleName`, `excludePackages`) all confirmed
+working — not just the defaults. What remains open from item 7 is unchanged: the host app must
+still hand-write asset unpacking and `PYTHONHOME` setup.
