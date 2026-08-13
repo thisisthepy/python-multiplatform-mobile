@@ -92,10 +92,22 @@ import python.multiplatform.reflection.UpcallTable
  * - **Everything else static** -- a top-level property, and the members of a `ReflectedClassKind`
  *   this stage does not render as a class ([ReflectedClassKind.OBJECT], [ReflectedClassKind.ENUM])
  *   -- becomes a live attribute of the module its name points at. That is not a second design so
- *   much as the same one applied to the module: the module object is reclassed to `_PmModule`, a
- *   `ModuleType` subclass whose `__getattr__`/`__setattr__` route registered names through the
- *   table. It has to be a subclass rather than PEP 562's module-level `__getattr__` because PEP 562
- *   covers the read half only and there is no `__setattr__` counterpart.
+ *   much as the same one applied to the module: the module object is reclassed onto a `ModuleType`
+ *   subclass generated **for that module alone**, and the descriptor goes on it, exactly as a
+ *   class's static goes on that class's metaclass. Per module rather than one shared subclass
+ *   because the descriptor is named after the Kotlin declaration, and a shared type would answer
+ *   `demo.calc.tally` on every other proxy module too.
+ *
+ *   This was a `__getattr__`/`__setattr__` pair on one shared `_PmModule` subclass first, which is
+ *   correct and is roughly fifty times more expensive per read. `__getattr__` is the *fallback*
+ *   hook: it runs only once normal lookup has failed, and on a module "failed" means
+ *   `module_getattro` has already built and raised the formatted "module has no attribute"
+ *   `AttributeError` for the hook to catch and discard. `GeneratedProxyCostTest` priced that at
+ *   551-587 ns per read on desktop, net of the boundary call underneath it -- against 6-14 ns for
+ *   the descriptor, and against 8-28 ns for the metaclass path doing the same job for a class.
+ *   A data descriptor is consulted ahead of the instance dict in both directions, so it also
+ *   removes the need for a `__setattr__` hook: a `property` with no usable `fset` refuses the
+ *   assignment on its own.
  *
  * Putting an `object`'s properties on the module rather than on a class of its own is what keeps
  * `Registry.ping()` and `Registry.size` resolving against the same Python object: `ping` is a
@@ -141,9 +153,9 @@ import python.multiplatform.reflection.UpcallTable
  *
  * The setter half follows `docs/binding-policy.md` rather than restating it: a `val`, or a `var`
  * whose setter is `private`/`protected`/`internal`, simply has no `STATIC_SETTER` entry, so this
- * renders a `property` with no `fset` (and, on a module, a `__setattr__` branch that raises). The
- * assignment fails with `AttributeError` instead of silently binding a plain attribute that would
- * shadow the Kotlin declaration for every later read.
+ * renders a `property` with no `fset` on a class, and on a module one whose `fset` raises with the
+ * Kotlin declaration's name in the message. The assignment fails with `AttributeError` instead of
+ * silently binding a plain attribute that would shadow the Kotlin declaration for every later read.
  *
  * ### What is still not rendered
  *
@@ -260,53 +272,84 @@ object PythonProxySource {
             return _h
 
 
-        class _PmModule(_pm_types.ModuleType):
+        def _pm_module_type(_mod):
+            # The type a module's Kotlin-backed attributes hang off, created once per module.
+            #
             # A Kotlin top-level `val`/`var` is a module *attribute* in Python, and it has to stay
             # live in both directions: a read has to call Kotlin's getter (a plain assignment at
             # install time would freeze a `var` at whatever it held then), and an assignment has to
-            # reach Kotlin's setter rather than rebinding the name in the module dict. PEP 562's
-            # module-level `__getattr__` covers the read half only -- there is no `__setattr__`
-            # counterpart -- so the module object itself is an instance of this subclass.
+            # reach Kotlin's setter rather than rebinding the name in the module dict. Attribute
+            # hooks are looked up on the type and never on the instance, so whatever answers has to
+            # live on a type and the module object has to be reclassed onto it. Assigning
+            # `__class__` is the documented way to do that to a module and is what PEP 562's own
+            # rationale describes.
             #
-            # Only names registered through `_pm_static_property` are intercepted; everything else
-            # on the module (the rendered functions and classes) stays an ordinary attribute, which
-            # is why `__getattr__` (consulted only after normal lookup fails) is enough on the read
-            # side and `__setattr__` has to fall through to `object.__setattr__` on the write side.
-
-            def __getattr__(self, _n):
-                _p = self.__dict__.get('_pm_props')
-                if _p is not None and _n in _p:
-                    return _pm_invoke(_p[_n][0], ())
-                raise AttributeError(_n)
-
-            def __setattr__(self, _n, _v):
-                _p = self.__dict__.get('_pm_props')
-                if _p is not None and _n in _p:
-                    _s = _p[_n][1]
-                    if _s is None:
-                        # `docs/binding-policy.md`: a `val`, or a `var` whose setter is not public
-                        # API, has no setter entry. Letting the assignment through would bind a
-                        # plain module attribute that shadows the Kotlin declaration for every
-                        # later read -- silently, and only in Python.
-                        raise AttributeError(
-                            'the Kotlin declaration behind ' + self.__name__ + '.' + _n +
-                            ' has no exposed setter'
-                        )
-                    _pm_invoke(_s, (_v,))
-                    return
-                object.__setattr__(self, _n, _v)
+            # Per module, not one shared subclass, because what gets put on it below is a
+            # descriptor *named after the Kotlin declaration* -- on a shared type, `demo.calc.tally`
+            # would answer on every other proxy module too. This is the same price the metaclass
+            # already pays for a class's static members (one extra type object, and only where
+            # there is something to put on it), and it buys the same thing.
+            _t = type(_mod)
+            if getattr(_t, '_pm_owned', False):
+                return _t
+            _t = type(
+                '_PmModule_' + _mod.__name__.replace('.', '_'),
+                (_pm_types.ModuleType,),
+                {'_pm_owned': True},
+            )
+            _mod.__class__ = _t
+            return _t
 
 
         def _pm_static_property(_mod, _name, _get, _set):
-            # `__getattr__`/`__setattr__` are looked up on the type, never on the instance, so the
-            # module object has to be reclassed rather than decorated. Assigning `__class__` is the
-            # documented way to do that to a module and is what PEP 562's own rationale describes.
-            _mod.__class__ = _PmModule
-            _p = _mod.__dict__.get('_pm_props')
-            if _p is None:
-                _p = {}
-                object.__setattr__(_mod, '_pm_props', _p)
-            _p[_name] = (_get, _set)
+            # A `property` -- a *data* descriptor -- rather than a `__getattr__`/`__setattr__` pair
+            # on a shared subclass, which is what this used to be. Both are correct; they are not
+            # close on cost, because of where CPython looks first.
+            #
+            # `__getattr__` is the *fallback* hook: it is consulted only after normal attribute
+            # lookup has already failed, and on a module "already failed" means `module_getattro`
+            # has run to completion and raised -- building the fully formatted "module 'x' has no
+            # attribute 'y'" AttributeError, `__spec__` inspection and all -- for the hook to catch
+            # and discard. Every single read pays for one raised-and-thrown-away exception. A data
+            # descriptor is consulted *first* instead, ahead of the instance dict, in both
+            # directions, so nothing is ever raised and no hook is ever entered.
+            #
+            # Measured, on this repository's `GeneratedProxyCostTest` (desktop, net of the raw
+            # boundary the read wraps): 551-587 ns per read through the `__getattr__` hook against
+            # 6-14 ns through the descriptor. PEP 562's module-dict `__getattr__` was measured too
+            # and is a middle answer, not this one -- it skips the exception but still runs the
+            # generic-lookup miss and a Python-level dispatch (214 ns against 569 ns and 53 ns in a
+            # standalone probe of the three shapes).
+            #
+            # Everything that is *not* a Kotlin declaration -- the rendered functions and classes,
+            # and anything the application assigns later -- is untouched by this: it has no
+            # descriptor of its own, so it goes through the ordinary instance-dict path exactly as
+            # it did on a plain module.
+            _t = _pm_module_type(_mod)
+
+            def _pm_fget(_self, _h=_get):
+                return _pm_invoke(_h, ())
+
+            if _set is None:
+                # `docs/binding-policy.md`: a `val`, or a `var` whose setter is not public API, has
+                # no setter entry. The assignment has to fail -- letting it through would bind a
+                # plain module attribute that shadows the Kotlin declaration for every later read,
+                # silently and only in Python. A `property` with no `fset` already raises
+                # AttributeError, but with a message about a Python property; this says which
+                # Kotlin declaration it is, which is the whole of what the reader needs.
+                def _pm_no_setter(_self, _v, _n=_name):
+                    raise AttributeError(
+                        'the Kotlin declaration behind ' + _self.__name__ + '.' + _n +
+                        ' has no exposed setter'
+                    )
+
+                setattr(_t, _name, property(_pm_fget, _pm_no_setter))
+                return
+
+            def _pm_fset(_self, _v, _h=_set):
+                _pm_invoke(_h, (_v,))
+
+            setattr(_t, _name, property(_pm_fget, _pm_fset))
     """.trimIndent()
 
     /**

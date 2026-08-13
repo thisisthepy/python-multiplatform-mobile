@@ -481,6 +481,175 @@ asserted is structural — the name bound, the loop demonstrably reached Kotlin,
 back positive rather than zero from a clock with no resolution, which is the failure mode that would
 otherwise report the upcall as free.
 
+### What a user actually calls: the generated proxy, priced against that boundary
+
+Everything above measures `_pm_invoke(handle, args)` called straight from Python. **Nobody writes
+that.** What a user writes is `demo.calc.ping()`, `Counter(10)`, `c.increment(5)`, `c.value`,
+`Counter.created`, `demo.calc.tally`, `await g.fetch()` — and each of those goes through a layer of
+generated Python (`PythonProxySource`) that the boundary figure says nothing about: a global lookup,
+a bound-method dispatch, an argument tuple built one element longer to carry the receiver, a
+`property` descriptor, a metaclass descriptor, or an `async def` wrapper with a `hasattr` in it. That
+layer had never been measured.
+
+`GeneratedProxyCostTest` (`commonTest`) is `UpcallBoundaryCostTest`'s design applied one level up:
+every baseline in the same run, identical warmup in identical shape, nothing asserting a duration.
+Every row is a zero-argument Python function called by one shared loop, so each pays exactly one
+identical call frame; the row **net of that floor** is the body. **Each proxy row is priced against
+the raw `_pm_invoke` call it wraps**, measured through the same object the proxy calls through, so
+the difference is the generated layer and nothing else.
+
+One departure from `UpcallBoundaryCostTest`: each row is the **minimum of three timed loops**, not
+one. The quantity here is a *difference* of tens of nanoseconds sitting on a boundary of hundreds,
+and wall-clock noise is one-sided — it lands entirely in that difference. With a single loop per
+row, four consecutive runs put the instance-method delta at −17, −31, −60 and −71 ns, i.e. the proxy
+came out cheaper than the boundary it wraps, every time.
+
+Ranges are min–max over three runs. **The last row of each table is this report's own resolution**,
+and it is measured rather than assumed: two of the raw rows are the *same call* (`_pm_invoke(h, ())`,
+arity zero, different handle), so whatever they differ by is what cannot be resolved. A delta below
+it is not a number.
+
+| Surface a user writes | raw boundary | through the proxy | ratio | the proxy layer adds |
+|---|---|---|---|---|
+| **desktop** (JVM 21.0.12, macOS arm64) | | | | |
+| `demo.calc.ping()` module function | 452–475 ns | 468–485 ns | 1.00–1.03x | +5…+17 ns |
+| `c.increment(5)` instance method | 514–558 ns | 537–573 ns | 1.02–1.05x | +14…+27 ns |
+| `c.value` property read | 495–527 ns | 509–542 ns | 1.02–1.03x | +14…+19 ns |
+| `c.label = 'x'` property write | 522–548 ns | 569–609 ns | 1.09–1.11x | +47…+62 ns |
+| `Counter.created` static read (metaclass) | 449–485 ns | 480–510 ns | 1.01–1.07x | +6…+34 ns |
+| `Counter.created = 12` static write | 466–507 ns | 511–573 ns | 1.07–1.13x | +34…+66 ns |
+| `demo.calc.tally` top-level read | 449–485 ns | 484–521 ns | 1.03–1.07x | +14…+36 ns |
+| `demo.calc.tally = 9` top-level write | 466–507 ns | 520–553 ns | 1.08–1.11x | +44…+54 ns |
+| `Counter(10)` constructor | 682–761 ns | 588–627 ns | — | *not separable, see below* |
+| *resolution of this table* | | | | *−3…+9 ns* |
+| **iOS simulator** (arm64) | | | | |
+| `demo.calc.ping()` module function | 1801–1890 ns | 1829–1895 ns | 1.00–1.01x | +6…+28 ns |
+| `c.increment(5)` instance method | 2901–2987 ns | 2895–3029 ns | 0.98–1.01x | −44…+42 ns |
+| `c.value` property read | 2504–2601 ns | 2510–2620 ns | 0.99–1.00x | −3…+19 ns |
+| `c.label = 'x'` property write | 2832–2940 ns | 2925–3092 ns | 1.03–1.05x | +92…+153 ns |
+| `Counter.created` static read (metaclass) | 1838–1931 ns | 1906–1982 ns | 1.01–1.03x | +28…+68 ns |
+| `Counter.created = 12` static write | 2180–2315 ns | 2277–2365 ns | 1.02–1.04x | +50…+103 ns |
+| `demo.calc.tally` top-level read | 1838–1931 ns | 1927–1981 ns | 1.02–1.05x | +48…+99 ns |
+| `demo.calc.tally = 9` top-level write | 2180–2315 ns | 2286–2363 ns | 1.02–1.04x | +48…+105 ns |
+| `Counter(10)` constructor | 2591–2724 ns | 2769–2864 ns | 1.05–1.06x | +140…+177 ns |
+| *resolution of this table* | | | | *+15…+79 ns* |
+
+**The headline is that the boundary is the whole cost.** Read against the section above: the
+boundary is 861–1313 ns on desktop and 2263–2502 ns on the simulator, and the generated layer on top
+of it is tens of nanoseconds — 1.00x to 1.13x, and on the simulator half the rows are inside the
+table's own resolution. The sugar is not where the money goes, and a user who bypassed the proxies to
+call `_pm_invoke` by hand would recover almost nothing.
+
+**The await fast path is the same story**, which is the whole claim §8.6 makes for it:
+
+| | desktop | iOS simulator |
+|---|---|---|
+| `_pm_invoke(h, (21,))` in the same coroutine loop, no await | 561–617 ns | 3025–3055 ns |
+| `await` a **pure-Python** coroutine that never suspends | 67–70 ns | 84.5–84.8 ns |
+| `await demo.calc.doubleNow(21)` through the generated `async def` | 618–647 ns | 3186–3239 ns |
+| ratio, and what the `async def` wrapper adds | 1.03–1.10x, +24…+57 ns | 1.04–1.06x, +152…+185 ns |
+| `asyncio.Future`s constructed during the timed loops | **0** | **0** |
+
+The zero is asserted, not observed in passing: it is the only way to tell from Python which path was
+taken, because the generated `async def` deliberately makes the two indistinguishable to its caller,
+and a slow-path figure would be a different measurement wearing the same label. The pure-Python row
+is the ceiling on what the wrapper can cost — an `async def` that never suspends is one coroutine
+frame — and both targets land under it.
+
+**`install()` is a startup cost, not a per-call one**, and it is small enough not to need managing.
+For this repository's 11-entry, 2-class fixture table it renders 306 lines / 12.4 kB:
+
+| | desktop | iOS simulator |
+|---|---|---|
+| `PythonProxySource.render()` — Kotlin string building | 226–271 µs | 606–664 µs |
+| `Python3.exec` of the result | 816–927 µs | 2481–2532 µs |
+| `install()` end to end | 1.06–1.20 ms | 3.09–3.20 ms |
+
+Roughly a millisecond on desktop and three on the simulator, once per process. Compiling and
+executing the Python is 75–80% of it on both; rendering the text is the cheap half. It scales with
+the size of the table rather than with anything else, so an application exposing ten times this
+surface should expect ten times this — still tens of milliseconds, against a `Py_Initialize` that
+already costs more.
+
+#### The one row that was expensive, and why
+
+A **top-level `val`/`var` read cost 551–587 ns more than the boundary call underneath it** on
+desktop — 2.16–2.29x, against +6…+34 ns for the metaclass descriptor doing the identical job for a
+class static. That is fifty times its sibling for the same work, and it was reproducible to within
+±20 ns across every run.
+
+The cause is where CPython looks first. `PythonProxySource` answered a module attribute with a
+`__getattr__` hook on a `ModuleType` subclass, and `__getattr__` is the **fallback** hook: it is
+consulted only after normal attribute lookup has already failed, and on a module "already failed"
+means `module_getattro` has run to completion and *raised* — building the fully formatted
+`module 'demo.calc' has no attribute 'tally'` `AttributeError`, `__spec__` inspection and all — for
+the hook to catch and throw away. One raised-and-discarded exception on every read of every exposed
+top-level property.
+
+A standalone probe of the three available shapes, net of an empty call:
+
+| | ns per read |
+|---|---|
+| plain module attribute (the floor) | 14 ns |
+| PEP 562 module-dict `__getattr__` | 214 ns |
+| type-level `__getattr__` hook (what was there) | 569 ns |
+
+The fix is not PEP 562's middle answer but the shape the class statics already used: a `property` —
+a **data** descriptor, consulted *ahead* of the instance dict and in both directions — on a
+`ModuleType` subclass generated **per module**. Per module because the descriptor is named after the
+Kotlin declaration, and one shared type would answer `demo.calc.tally` on every other proxy module
+too; that is the same price the metaclass already pays for a class's statics, and it buys the same
+thing. It also removes the `__setattr__` hook outright, because a data descriptor answers the write
+half as well.
+
+| desktop, net of the boundary | before | after |
+|---|---|---|
+| `demo.calc.tally` read | +551…+587 ns (2.16–2.29x) | +14…+36 ns (1.03–1.07x) |
+| `demo.calc.tally = 9` write | +109…+136 ns (1.21–1.29x) | +44…+54 ns (1.08–1.11x) |
+
+`PythonProxyInstallTest` passes unchanged across the change — including the assertion that a
+read-only top-level property *refuses* assignment, which the setter-less descriptor answers with a
+message naming the Kotlin declaration exactly as the old `__setattr__` branch did. **Nothing about
+the two shapes differs in behaviour**, both read as correct, and no amount of reading the generated
+source says which one costs fifty times the other. The measurement is what found it, which is the
+argument for having it.
+
+#### Two things this table cannot say
+
+**The constructor row is not reportable on desktop.** `Counter(10)` and its raw counterpart both
+root a Kotlin object in `HandleTable` per call and nothing releases it, so each is measured against a
+table that grows underneath it — the test prints the count, and it ends the run at **78 002 live
+handles** from those two rows alone. On desktop the raw baseline moved
+between 511 and 775 ns across runs — larger than the effect — and the delta swings either side of
+zero; on the simulator it is stable at +140…+177 ns, which is what a `type.__call__` plus an
+`__init__` frame plus one attribute store should cost. The desktop figure is a property of the
+fixture, not of the constructor proxy.
+
+**Half the simulator's rows are inside its own resolution** (+15…+79 ns), which is why the
+`resolution` row exists. The simulator's boundary is 2.5–3 µs and its per-row variation is ~80 ns, so
+a +20 ns proxy layer is genuinely unmeasurable there. Desktop resolves to ±10 ns and is where the
+small deltas can be read.
+
+#### wasmJs is absent from these tables on purpose
+
+**There are no generated proxies on wasmJs, and there structurally cannot be.** Nothing crosses into
+Python on that target but an already-*bound* callable — `UpcallEntry.bind` builds one over the single
+`@WasmExport`ed `pmp_invoke`, and resolution happens in Kotlin — so `_pm_resolve`/`_pm_invoke` do not
+exist in `__main__` and `PythonProxySource.install()` refuses at its own entry-point guard. See
+`publishesProxyEntryPoints`' wasmJs row and `docs/upcall-async-design.md` §12.4. The async half could
+not follow even if the sync half were published: `import asyncio` **traps the instance** on this wasm
+build rather than raising.
+
+`GeneratedProxyCostTest` therefore asserts that documented refusal on wasmJs and measures nothing,
+which is the same branch `PythonProxyInstallTest` takes. A number here would be a number for
+something that cannot be executed. This also keeps the asyncio measurement behind the same guard, so
+the wasm suite never reaches an `import asyncio` — the precedent `AsyncUpcallPortabilityTest` exists
+to record.
+
+Android and androidNative are absent for a different and weaker reason: both run this file (it is
+`commonTest`), but doing so needs an emulator, and this pass had none available. Their rows are
+missing, not zero.
+
 ### The `@CName` + `ctypes.CDLL(None)` route, measured
 
 The row above used to read "`@CName` symbol, reached from Python via `ctypes.CDLL(None)`; one

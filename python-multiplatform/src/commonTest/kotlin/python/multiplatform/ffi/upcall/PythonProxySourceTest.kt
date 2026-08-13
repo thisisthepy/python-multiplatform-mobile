@@ -113,9 +113,9 @@ class PythonProxySourceTest {
         assertEquals(1, Regex("^_pm_h_\\d+ = _pm_lookup", RegexOption.MULTILINE).findAll(source).count())
         assertContains(source, "_pm_lookup('p.plain')")
         assertFalse(source.contains("p.Thing.method"), "a method must not be rendered as a module function")
-        // Not `contains("class ")`: the support half now carries the `_PmModule` ModuleType
-        // subclass, so the question is whether a *proxy* class was rendered, not whether the
-        // keyword appears at all.
+        // Not `contains("class ")`: the support half builds a `ModuleType` subclass of its own,
+        // so the question is whether a *proxy* class was rendered, not whether the keyword appears
+        // at all.
         assertFalse(source.contains("class Thing"), "no ReflectedClass was passed, so no class can be rendered")
         assertFalse(source.contains("_pm_module('p.Thing')"), "and nothing may be published under its name either")
     }
@@ -338,13 +338,33 @@ class PythonProxySourceTest {
     }
 
     @Test
-    fun theSupportHalfCarriesTheModuleSubclassThatMakesAModuleAttributeWritable() {
-        // PEP 562's module `__getattr__` covers the read half only; there is no module-level
-        // `__setattr__` hook, so the module object itself has to be a ModuleType subclass.
-        assertContains(PythonProxySource.support, "class _PmModule(_pm_types.ModuleType):")
-        assertContains(PythonProxySource.support, "def __getattr__(self, _n):")
-        assertContains(PythonProxySource.support, "def __setattr__(self, _n, _v):")
+    fun theSupportHalfCarriesThePerModuleTypeThatMakesAModuleAttributeLiveInBothDirections() {
+        // Attribute hooks are looked up on the type and never on the instance, so a module whose
+        // attributes reach Kotlin has to be reclassed. The type is built **per module** because
+        // what goes on it is a descriptor named after the Kotlin declaration, and one shared type
+        // would answer that name on every other proxy module too.
+        assertContains(PythonProxySource.support, "def _pm_module_type(_mod):")
+        assertContains(PythonProxySource.support, "(_pm_types.ModuleType,),")
         assertContains(PythonProxySource.support, "def _pm_static_property(_mod, _name, _get, _set):")
+        assertContains(PythonProxySource.support, "setattr(_t, _name, property(_pm_fget, _pm_fset))")
+    }
+
+    @Test
+    fun aModuleAttributeIsADataDescriptorRatherThanAFallbackHook() {
+        // Not a style preference, and the reason it is not is measured: `__getattr__` runs only
+        // after `module_getattro` has built and raised the formatted "module has no attribute"
+        // AttributeError for it to catch and discard, which `GeneratedProxyCostTest` priced at
+        // 551-587 ns per read on desktop against 6-14 ns for the descriptor that replaced it. A
+        // hook reintroduced here would be a fifty-fold regression on every top-level `val` read,
+        // and it would be invisible -- both shapes are correct.
+        assertFalse(
+            PythonProxySource.support.contains("def __getattr__("),
+            "a module attribute must be answered by a data descriptor, not by the fallback hook",
+        )
+        assertFalse(
+            PythonProxySource.support.contains("def __setattr__("),
+            "a data descriptor answers the write half too; a __setattr__ hook means one is missing",
+        )
     }
 
     @Test
