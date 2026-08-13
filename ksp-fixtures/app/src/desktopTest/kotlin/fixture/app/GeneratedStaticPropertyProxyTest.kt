@@ -76,8 +76,8 @@ class GeneratedStaticPropertyProxyTest {
     fun aTopLevelPropertyBecomesALiveAttributeOfItsPackageModule() {
         val source = render()
 
-        assertContains(source, "_pm_bind('fixture.library.mutableCounter')")
-        assertContains(source, "_pm_bind('fixture.library.mutableCounter=')")
+        assertContains(source, "_pm_lookup('fixture.library.mutableCounter')")
+        assertContains(source, "_pm_lookup('fixture.library.mutableCounter=')")
         assertRegisters(source, "fixture.library", "mutableCounter", writable = true)
         assertRegisters(source, "fixture.library", "libraryVersion", writable = false)
     }

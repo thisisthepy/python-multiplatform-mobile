@@ -245,7 +245,15 @@ object PythonProxySource {
             return _m
 
 
-        def _pm_bind(_name):
+        def _pm_lookup(_name):
+            # NOT `_pm_bind`, which is what this used to be called. Three of the five bootstraps
+            # publish a `_pm_bind` of their own meaning handle -> callable, and defining this over
+            # the top of it destroyed the host's on the way past -- silently, because desktop is
+            # the only target that had ever run this file and desktop publishes no `_pm_bind`.
+            #
+            # `bytes`, not `str`: desktop reaches its resolver through
+            # `ctypes.CFUNCTYPE(c_long, c_char_p)` and `c_char_p` refuses a `str` outright, so this
+            # is the only spelling that can work everywhere. Every other bootstrap accepts both.
             _h = _pm_resolve(_name.encode('utf-8'))
             if _h == -1:
                 raise AttributeError('no exposed Kotlin declaration named ' + _name)
@@ -381,11 +389,27 @@ object PythonProxySource {
      * Renders the proxies for whatever [UpcallTable] and [ClassLookup] currently hold and `exec`s
      * them.
      *
-     * The caller has to have bound the two raw entry points (`_pm_resolve` and `_pm_invoke`) into
-     * `__main__` first; how that is done is per-platform and is the one part of this path that is
-     * not `commonMain` (desktop reaches them through `ctypes` over a Panama upcall stub, native
-     * through the `PyMethodDef` surface in `UpcallEntry.kt`). The generated source checks for them
-     * and raises rather than defining proxies that would fail one by one at call time.
+     * ### What the caller owes, exactly
+     *
+     * Two names in `__main__`, and nothing else:
+     *
+     * | name | shape |
+     * |---|---|
+     * | `_pm_resolve` | `(name: bytes) -> handle`, `-1` for a name nothing claims |
+     * | `_pm_invoke` | `(handle, args: tuple) -> result` |
+     *
+     * `bytes` rather than `str` because desktop reaches its resolver through
+     * `ctypes.CFUNCTYPE(c_long, c_char_p)` and `c_char_p` refuses a `str` outright, so it is the
+     * only spelling that can be written once and work everywhere; the `PyMethodDef` bootstraps
+     * accept either. How the two names get there is per-platform and is the one part of this path
+     * that is not `commonMain` (desktop through `ctypes` over a Panama upcall stub, iOS and
+     * androidNative through `UpcallEntry.publish`'s `PyMethodDef`s). The generated source checks
+     * for them and raises rather than defining proxies that would fail one by one at call time.
+     *
+     * Everything the generated module defines for its own use is prefixed `_pm_` too, which used
+     * to include a `_pm_bind` that meant *name -> handle* -- landing straight on top of the
+     * host's `_pm_bind`, which means *handle -> callable*. It is `_pm_lookup` now; nothing this
+     * renders writes to a name a bootstrap owns.
      *
      * @return the source that was executed, so a caller can log or inspect exactly what ran.
      */
@@ -489,7 +513,7 @@ object PythonProxySource {
         }
 
         return """
-            |$handle = _pm_bind(${entry.name.quoted()})
+            |$handle = _pm_lookup(${entry.name.quoted()})
             |
             |
             |$body
@@ -535,10 +559,10 @@ object PythonProxySource {
         val leaf = if (dot < 0) getter.name else getter.name.substring(dot + 1)
 
         val source = buildString {
-            appendLine("$getterHandle = _pm_bind(${getter.name.quoted()})")
+            appendLine("$getterHandle = _pm_lookup(${getter.name.quoted()})")
             val setter = setterFor(getter, byName, CallableKind.STATIC_SETTER)
             val setterHandle = if (setter == null) "None" else "_pm_h_${index++}"
-            if (setter != null) appendLine("$setterHandle = _pm_bind(${setter.name.quoted()})")
+            if (setter != null) appendLine("$setterHandle = _pm_lookup(${setter.name.quoted()})")
             append(
                 "_pm_static_property(_pm_module(${module.quoted()}), ${leaf.quoted()}, " +
                     "$getterHandle, $setterHandle)",
@@ -548,7 +572,7 @@ object PythonProxySource {
     }
 
     /**
-     * Renders one Python class for [cls], plus the `_pm_bind` calls its members need.
+     * Renders one Python class for [cls], plus the `_pm_lookup` calls its members need.
      *
      * @param startIndex the first unused `_pm_h_N` / `_pm_f_N` suffix; shared with [render]'s
      *   function loop so a class's handles never collide with a module function's.
@@ -574,7 +598,7 @@ object PythonProxySource {
         val ctor = byName["${cls.name}.<init>"]
         if (ctor != null) {
             val handle = bindHandle()
-            binds.appendLine("$handle = _pm_bind(${ctor.name.quoted()})")
+            binds.appendLine("$handle = _pm_lookup(${ctor.name.quoted()})")
             val paramList = params(ctor.arity).joinToString(", ")
             val callParams = if (paramList.isEmpty()) "self" else "self, $paramList"
             val argsTuple = tupleOf(params(ctor.arity))
@@ -596,7 +620,7 @@ object PythonProxySource {
             when (entry.kind) {
                 CallableKind.METHOD -> {
                     val handle = bindHandle()
-                    binds.appendLine("$handle = _pm_bind(${entry.name.quoted()})")
+                    binds.appendLine("$handle = _pm_lookup(${entry.name.quoted()})")
                     body.append(renderMethodBody(entry.name.substringAfterLast('.'), handle, entry))
                     body.appendLine()
                 }
@@ -615,7 +639,7 @@ object PythonProxySource {
         for (propName in propertyNames) {
             val getter = byName["${cls.name}.$propName"] ?: continue
             val getterHandle = bindHandle()
-            binds.appendLine("$getterHandle = _pm_bind(${getter.name.quoted()})")
+            binds.appendLine("$getterHandle = _pm_lookup(${getter.name.quoted()})")
             body.appendLine("    @property")
             body.appendLine("    def $propName(self):")
             body.appendLine("        return _pm_invoke($getterHandle, (self._pm_handle,))")
@@ -624,7 +648,7 @@ object PythonProxySource {
             val setter = setterFor(getter, byName, CallableKind.SETTER)
             if (setter != null) {
                 val setterHandle = bindHandle()
-                binds.appendLine("$setterHandle = _pm_bind(${setter.name.quoted()})")
+                binds.appendLine("$setterHandle = _pm_lookup(${setter.name.quoted()})")
                 body.appendLine("    @$propName.setter")
                 body.appendLine("    def $propName(self, a0):")
                 body.appendLine("        _pm_invoke($setterHandle, (self._pm_handle, a0))")
@@ -647,7 +671,7 @@ object PythonProxySource {
         for (staticFunctionName in staticFunctionNames) {
             val entry = byName["${cls.name}.$staticFunctionName"] ?: continue
             val handle = bindHandle()
-            binds.appendLine("$handle = _pm_bind(${entry.name.quoted()})")
+            binds.appendLine("$handle = _pm_lookup(${entry.name.quoted()})")
             metaBody.append(renderStaticFunctionBody(staticFunctionName, handle, entry))
             metaBody.appendLine()
             metaBody.appendLine()
@@ -655,7 +679,7 @@ object PythonProxySource {
         for (staticName in staticNames) {
             val getter = byName["${cls.name}.$staticName"] ?: continue
             val getterHandle = bindHandle()
-            binds.appendLine("$getterHandle = _pm_bind(${getter.name.quoted()})")
+            binds.appendLine("$getterHandle = _pm_lookup(${getter.name.quoted()})")
             metaBody.appendLine("    @property")
             metaBody.appendLine("    def $staticName(cls):")
             // No receiver: a STATIC_GETTER's args are empty and a STATIC_SETTER's args[0] is the
@@ -666,7 +690,7 @@ object PythonProxySource {
             val setter = setterFor(getter, byName, CallableKind.STATIC_SETTER)
             if (setter != null) {
                 val setterHandle = bindHandle()
-                binds.appendLine("$setterHandle = _pm_bind(${setter.name.quoted()})")
+                binds.appendLine("$setterHandle = _pm_lookup(${setter.name.quoted()})")
                 metaBody.appendLine("    @$staticName.setter")
                 metaBody.appendLine("    def $staticName(cls, a0):")
                 metaBody.appendLine("        _pm_invoke($setterHandle, (a0,))")
