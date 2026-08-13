@@ -6,15 +6,13 @@ not by size.
 Items are written so the reason survives without the conversation that produced it. Where a
 claim came from a measurement, the number is here; where it is a judgement, it says so.
 
-Current test state, for reference:
-
-| target | tests | passing |
-|---|---|---|
-| `desktopTest` | 107 | 106 |
-| `iosSimulatorArm64Test` | 104 | 103 |
-| `connectedDebugAndroidTest` (API 26 / 36 emu / 36 hw) | 8 | 8 |
-
-The one failure on each JVM/native suite is `GCLeakTest`, red on purpose — see §1.
+**Current test state — see §14a for the six run paths, how each is counted, and the numbers as
+last verified (2026-08-13).** The table that used to be here (`desktopTest` 107/106,
+`iosSimulatorArm64Test` 104/103, `GCLeakTest` "red on purpose") was stale on every figure: §1 is
+closed and `GCLeakTest` passes now, and re-running the two JVM/native suites today gives
+`desktopTest` 327/0 (1 skipped) and `iosSimulatorArm64Test` 289/0. A frozen number rots the moment
+someone adds a test, which is exactly what happened here — §14a gives the counting recipe instead
+of a number to carry forward uncorrected.
 
 ---
 
@@ -34,7 +32,14 @@ reverted.
 **It unblocked §4, multithreaded use, and made three latent bugs visible** (a GIL-less
 `PyType_FromSpec` call among them). Expect more of that shape: anything that only worked because
 the main thread never let go.
-**State:** disabled in `Python3.initialize()`, with the reason in a comment there.
+
+**State, checked against the code rather than carried forward: enabled, unconditionally.**
+`Python3.kt`'s `initialize()` calls `PyEval_SaveThread()` on every call with no flag guarding it,
+and the comment at that call site points here for the history. An earlier draft of this section
+said "disabled ... with the reason in a comment there" directly under the "Closed" declaration
+above — that line described an intermediate state from partway through the debugging history
+below and was never updated when the section was actually closed. Anyone reading only the opening
+paragraph and that one line together would have concluded the opposite of what the code does.
 
 `Py_Initialize()` leaves its calling thread holding the GIL. Until that thread parks its state
 with `PyEval_SaveThread()`, no other thread can attach, and any thread that tries blocks
@@ -699,7 +704,11 @@ now is too: `toKotlin`, `toKotlinOrNull` and `toPython` are implemented, no TODO
 `PyProxy.kt`, and `ConversionTest` passes on desktop (in the 118-test run) and on the iOS
 simulator (111 tests).
 
-The lazy path is deliberately still out, because it depends on release timing and so on §1/§4.
+The lazy path is deliberately still out. **§1 and §4 — the release-timing sections this used to
+cite as the blocker — are both closed now**, so that is no longer what is in the way; what remains
+is purely the per-type lifetime rule described two paragraphs up (safe to cache a converted native
+value while releasing its source, unsafe to cache one that still points into Python-owned memory),
+which nobody has written yet. See §14b.
 
 **Was:** `PyValue`/`PyProxy` incomplete — `toKotlin()` and `toPython()` were TODO stubs ending in
 `cachedNativeValue!!`, so a cache miss was an NPE.
@@ -1567,7 +1576,13 @@ is the actual state of the Android object model, and that is the point of doing 
   `UpcallTableTest` carry red-phase *notes* that explicitly distinguish "failed to compile before
   the implementation existed" from a regression, which is still the right thing to tell a reader.
   Comment-only throughout: desktop stayed at 236 tests, 0 failures, 1 skipped.
-- **No CI.** The README badges point at a different repository.
+- ~~**No CI.** The README badges point at a different repository.~~ **Partly stale.** Four
+  workflow files now exist (`.github/workflows/{desktop,ios,android-native,wasm}.yml`) and
+  README's badges no longer point at a different repository — it carries an explicit note instead
+  of a badge, with the reason (see §14b). What has not changed: `gh api
+  repos/thisisthepy/python-multiplatform/actions/workflows/<file>.yml` 404s for all four, i.e.
+  **none of them has ever run on GitHub Actions**, because none of the commits that added or
+  touched them has been pushed to a branch GitHub runs workflows from. See §14b.
 - ~~**Sample app** has not been revisited since the object model landed.~~ **Done — see §13.**
 
 ## 13. The sample, and the AGP version that shapes it
@@ -1853,3 +1868,227 @@ each, 0 failed; `docs/upcall-design.md`'s "Android's boundary runs the other way
 Per-platform detail is in `docs/upcall-design.md`'s "What each platform still owes". The generated
 proxy type that would let Python write `obj.method(x)` instead of going through `_pm_bind` is §7's
 remaining half.
+
+## 14. Current state, gathered
+
+This document accumulates section by section, in the order work happened, so the same fact ends
+up recorded in two or three places over time and a reader has to piece the current picture back
+together. This section is that picture, as of a documentation audit on 2026-08-13. It adds no new
+finding of its own — every number and every item below is sourced from a section above, or from
+running the code — it exists so the state doesn't have to be reassembled by reading the whole file.
+
+### 14a. Test counts across the six run paths, and how to reproduce them
+
+Numbers rot the moment someone adds a test, so what matters here is the *recipe*: clean the
+target's `build/test-results/` directory first (a crashed run leaves the previous run's XML behind
+and a naive count reports the old, larger number as if it were current — see CLAUDE.md), run the
+task with output redirected to a file so the exit code is real, then sum the `tests`/`failures`/
+`skipped` attributes off every `<testsuite>` root under the result directory. All of the JVM and
+Native targets share that shape; Android's instrumented target does not (below).
+
+| # | path | task | results land in | needs a device/emulator? |
+|---|---|---|---|---|
+| 1 | desktop | `:python-multiplatform:desktopTest` | `python-multiplatform/build/test-results/desktopTest/*.xml` | no |
+| 2 | iOS simulator | `:python-multiplatform:iosSimulatorArm64Test` | `python-multiplatform/build/test-results/iosSimulatorArm64Test/*.xml` | boots the simulator (needs Xcode licence acceptance), not a physical device |
+| 3 | Android (ART) | `:python-multiplatform:connectedDebugAndroidTest` | AGP's own convention, **not** `build/test-results`: `python-multiplatform/build/outputs/androidTest-results/connected/debug/<deviceName>/TEST-*.xml`, one folder per attached device | **yes** |
+| 4 | androidNative | `:python-multiplatform:androidNativeArm64Test` / `androidNativeX64Test` | `python-multiplatform/build/test-results/androidNative<Abi>Test/*.xml` — the task pushes the compiled test binary to `/data/local/tmp` and translates the Kotlin/Native runner's TeamCity output into this JUnit XML itself (`build.gradle.kts`, the `androidNative${targetSuffix}Test` task registration) | **yes** |
+| 5 | wasmJs | `:python-multiplatform:wasmJsNodeTest` | `python-multiplatform/build/test-results/wasmJsNodeTest/*.xml` | no (runs under Node) |
+| 6 | fixtures | `:ksp-fixtures:app:desktopTest`, `:ksp-fixtures:library:desktopTest`, `:ksp-fixtures:android:testDebugUnitTest` | `ksp-fixtures/<module>/build/test-results/<task>/*.xml` | no — `android`'s is a plain JVM unit test (`testDebugUnitTest`), not the instrumented one |
+
+A one-line counter, given a directory of result XML:
+
+```python
+import glob, xml.etree.ElementTree as ET
+files = glob.glob("<results-dir>/*.xml")
+tests = sum(int(ET.parse(f).getroot().attrib.get("tests", 0)) for f in files)
+failures = sum(int(ET.parse(f).getroot().attrib.get("failures", 0)) for f in files)
+skipped = sum(int(ET.parse(f).getroot().attrib.get("skipped", 0)) for f in files)
+```
+
+**As last verified, 2026-08-13**, immediately after merging `develop` into this branch, from a
+cleaned results directory, for the five paths that need no device (§14b explains why 3 and 4 were
+not run here — this audit was instructed not to use devices):
+
+| path | tests | failures | skipped |
+|---|---|---|---|
+| desktop | 327 | 0 | 1 |
+| iOS simulator | 289 | 0 | 0 |
+| wasmJs | 302 | 0 | 0 |
+| fixtures: `ksp-fixtures:app` | 64 | 0 | 0 |
+| fixtures: `ksp-fixtures:library` | 0 | 0 | 0 (no test sources — exercised through `app`, not standalone) |
+| fixtures: `ksp-fixtures:android` | 8 | 0 | 0 |
+
+Android (ART) and androidNative were **not** re-run for this audit — both need a connected device
+or emulator, which this pass was told not to use. Numbers for those two paths appear at several
+points earlier in this document, taken at different times for different subsets of the suite, and
+none of them should be read as "the current total": §2's own closing measurement (213 tests, 0
+failed, the measure §2 itself set), §11b's `commonTest`-on-Android wiring (176 tests per device,
+8 failures tracked in §2), the upcall suite specifically (`UpcallEntryTest`, 251 tests per device,
+0 failed, §13), and androidNative's equivalent (252 tests, 0 failed, over five runs, §13). These
+are different checkpoints in the same section's history, not five inconsistent measurements of one
+number. Whoever next has a device or emulator available should run
+`connectedDebugAndroidTest` and the two `androidNative*Test` tasks and replace this paragraph with
+one number each, dated.
+
+### 14b. Remaining open items
+
+Gathered from across this document rather than newly found, except where noted. Each item names
+what is blocking it and what the next concrete step is.
+
+1. **`autoDrainInterval`'s default on the GIL build.** *(Requested explicitly for this audit.)*
+   Not actually blocked on anything technical — the evidence is in §9 and
+   `docs/gc-scheduling-investigation.md` §6-§7, and a decision has already been implemented in code
+   (`Python3.kt`: `if (BuildConfig.pythonFreeThreaded) 32 else 0`). What is open is whether "off"
+   is the right *default* to ship, not whether the mechanism works. The case for leaving it off:
+   turning it on lets a `__del__`/weakref callback/pending call run inside a `withGIL` scope exit
+   the caller never asked to yield from — a behavioural change, not a free one. The case for
+   turning it on: measured, a GIL-build embedder that only calls the C API directly never runs the
+   cyclic collector either (§9, "This is not only a free-threading problem"; the accumulation
+   experiment in §9 reports 20,000+ cyclic objects with the automatic path off, against ~1,970
+   left over with it on), so "off by default" is not free of consequences — it is a silent leak of
+   a different kind, traded for not surprising the caller.
+   **(a) blocking it:** nothing technical; a product judgement between "surprise a caller with a
+   side effect" and "leak cycles silently by default" is what remains.
+   **(b) next step:** decide, and if the answer changes, it is a one-line change at
+   `Python3.kt`'s `autoDrainInterval` declaration — the reasoning to cite either way is already
+   written on that property's KDoc and in `docs/gc-scheduling-investigation.md` §6.
+
+2. **CI has never run.** *(Requested explicitly for this audit.)* Four workflow files exist
+   (`.github/workflows/{desktop,ios,android-native,wasm}.yml`) but `gh api
+   repos/thisisthepy/python-multiplatform/actions/workflows/<file>.yml` returns 404 for all four —
+   confirmed during this audit. **(a) blocking it:** none of the commits that added these files has
+   reached a branch or pull request GitHub Actions runs against; they exist only on local branches
+   (this one included) so far. **(b) next step:** push and open a PR, or merge to `main`, and watch
+   the first run. README's badge section already anticipates this correctly (see §14c) — no README
+   change is needed once CI goes green, only adding the badge it already describes how to add.
+
+3. **The suite has never been run on Linux or Windows.** *(Requested explicitly for this audit;
+   newly documented — this document did not previously record it as an open item anywhere.)* The
+   `desktop` target is a `jvm("desktop")` target, not separate Kotlin/Native targets per OS, and
+   README/§9's platform table both claim macOS, Linux and Windows support through
+   `python-build-standalone` archives. Nothing found in this repository — no CI run, no log, no
+   note elsewhere in this document — shows the desktop suite having actually executed on anything
+   but macOS. **(a) blocking it:** access to a Linux and a Windows machine (or CI runners for
+   both) — this audit had neither and did not attempt it. **(b) next step:** the cheapest path is
+   item 2 above: if `.github/workflows/desktop.yml` already includes Linux/Windows runners (not
+   checked in this pass), getting CI running once resolves both items together; if it only runs
+   macOS runners today, it needs those OSes added before this item closes.
+
+4. **BeeWare's iOS (≤3.14) distribution has no signature, so Sigstore verification is impossible
+   for it.** *(Requested explicitly for this audit.)* Already documented in §12: BeeWare's
+   Python-Apple-support publishes five `.tar.gz` assets and nothing else — no checksums, no
+   signatures, no attestations, checked against the live release listing. **(a) blocking it:**
+   nothing this repository controls — the upstream project does not publish signing material of
+   any kind, for any version. **(b) next step:** none available today beyond what already exists,
+   the SHA-256 lockfile pin (`python-checksums.properties`) as the only integrity check for this
+   one source. This stops mattering going forward rather than getting fixed: python.org's iOS
+   XCframework, which *does* publish Sigstore material and *is* already wired up (§12), becomes the
+   only source at 3.15 and later (§9, "3.15: the source has to change with the version"), so this
+   item is scoped to versions ≤3.14 by construction and shrinks as the default version moves.
+
+5. **`tp_traverse` is generated but not wired into CPython's actual `tp_traverse` slot; `tp_clear`
+   and Kotlin-side cycle closing are untouched.** (§7, "What is not done") **(a) blocking it:**
+   nothing recorded as a blocker — it is simply the next slice of §7 that has not been started.
+   **(b) next step:** wire the generated per-class traverse function into `ProxyTypeFactory`'s
+   `PyType_FromSpec` slot table, then write `tp_clear` and the Kotlin-side half that actually
+   breaks a cross-boundary cycle; `docs/object-lifetime.md` has the mechanism and names the three
+   hard parts.
+
+6. **`PyValue`'s lazy conversion path.** (§7b) Not blocked on §1/§4 any more — see the correction
+   made to §7b during this audit; both of those closed since the dependency was written. **(a)
+   blocking it:** a lifetime rule has to be written per type before the lazy cache can be filled in
+   safely (caching a converted value while releasing its Python source is fine; caching one that
+   still points into Python-owned memory is not). **(b) next step:** write that rule per type in
+   `docs/object-lifetime.md`, then implement the cache against it.
+
+7. **`ksp-fixtures/android`'s `jvmTest` is 8 tests, not exercised on a real device**, and more
+   generally, the Android `Cleaner`/`PhantomReference` split (§4) below API 33 "is not covered
+   yet" by any test. **(a) blocking it:** needs a device or emulator below API 33 to exercise the
+   `PhantomReference` fallback path specifically — the emulators available in this environment
+   skew toward API 26/36 (CLAUDE.md), and 26 is itself ≥ the API 33 cutoff only in the wrong
+   direction (26 < 33, so it *should* already exercise the fallback — worth checking whether it
+   actually does before assuming this needs new hardware). **(b) next step:** find or confirm which
+   available emulator is below API 33, then write a test that forces a GC on it and asserts the
+   `PhantomReference` path actually runs (nothing today asserts on which of the two paths executed).
+
+8. **wasm's `ProxyTypeExports.kt`-shaped trampoline generation is manual.** (§10, "Upcalls: closed")
+   The three delegating lines a wasm executable module must declare by hand are currently
+   hand-written in the test fixture; the design doc calls generating them from
+   `python-multiplatform-gradle-plugin` "the obvious next step" and it has not been done. **(a)
+   blocking it:** nothing technical recorded — the mechanism this would generate is proven working,
+   just not templated by the plugin yet. **(b) next step:** add the generation to
+   `python-multiplatform-gradle-plugin`, mirroring how it already generates the `installGeneratedUpcallTable`
+   `actual` per leaf (§13).
+
+9. **`jvmMain` unification (§8) is verified but not applied.** Removing `inline` from the
+   `commonMain` `expect`s and collapsing ~330 duplicated Android/desktop `actual`s into ~14 shape
+   functions in `jvmMain` is no longer a performance question (`invokeExact` already got the
+   speed-up without it) — it is maintenance debt, evidenced by real bugs the duplication has
+   already caused (desktop's `find()` binding `Py_RunMain` to `Py_FinalizeEx`). **(a) blocking it:**
+   nothing — the recipe is written and verified, just not carried out at scale. **(b) next step:**
+   do the mechanical migration; §8 has the exact steps (remove `inline`, delete the two platform
+   `actual`s, add one in `jvmMain`) and the Kotlin 2.0.20 compiler-crash trap to avoid (`inline` on
+   an intermediate-source-set `expect` triggers `Internal error in file lowering`).
+
+10. **`Python3.runMain` and `Python3.runApp` are landmines, not working functionality**, despite
+    both being public API surface. (§12) `runMain` raises an invisible `IndexError` and then
+    finalizes the interpreter out from under `isInitialized`; `runApp`'s body is entirely commented
+    out. **(a) blocking it:** a design decision — what "run a module"/"run an app" should mean for
+    an *embedded* interpreter that has to survive the call, which neither function was written
+    against. **(b) next step:** decide that shape, then fix both; §12 has the itemised defects in
+    each.
+
+11. **The iOS *app* packaging path has no producer** — only the simulator *test* path pulls the
+    XCframework in automatically; `sample/build.gradle.kts` and the Xcode project both reference
+    `sample/build/xcode-frameworks/Python.xcframework`, and no Gradle task creates it. (§9) **(a)
+    blocking it:** nobody has written the packaging task yet; nothing structural is in the way.
+    **(b) next step:** add the Gradle task that stages the XCframework where the Xcode project
+    expects it, following the pattern the simulator test path already uses.
+
+### 14c. What this audit checked and could not confirm
+
+Left as **unconfirmed** rather than guessed:
+
+- Whether `.github/workflows/desktop.yml` includes Linux and Windows runners (relevant to item 3
+  above) — not opened during this pass.
+- The Maven Central / JitPack publication status implied by README's "Use Pre-Built Package"
+  section: `curl` against `repo1.maven.org/maven2/io/github/thisisthepy/` returned 404 (empty
+  directory listing) and JitPack's own build API reports no build record for
+  `com.github.thisisthepy:python-multiplatform-mobile` — both consistent with *nothing having ever
+  been published*, but a negative result from two APIs is not the same as a documented decision
+  not to publish, so README now says what was actually observed rather than asserting either way.
+  See §14d.
+- Whether `PyList.subList`'s live-view behaviour (§12) and every other claim in §12's TODO triage
+  still hold — re-read for internal consistency during this pass, not re-verified against the code
+  a second time; nothing in that section contradicted what this audit found elsewhere.
+- Whether the API-26 emulator this repo already runs against exercises the `PhantomReference`
+  fallback (item 7 above) or something else — not traced through `Cleaner`'s own
+  `Build.VERSION.SDK_INT` gate during this pass.
+
+### 14d. README corrections made in this pass
+
+Documentation only — nothing in `python-multiplatform/`, `sample/`, `ksp-fixtures/` or any test
+was touched. For traceability, since some of these were load-bearing enough to be worth naming:
+
+- **The "Usage" example did not match this library's API at all** — `Python3Library()`, `Pointer`,
+  force-unwrapped `python`/`py`/`mathModule` variables declared nowhere. Replaced with the pattern
+  `sample/src/commonMain/.../PythonDemo.kt` actually runs: `Python3.initialize()`, `PyList.fromList`
+  + `PyInt.from` to publish a Kotlin list into `__main__`, `Python3.eval`/`Python3.exec` to read it
+  back. This was very likely the most misleading single passage in either document — a reader
+  trying it verbatim could not get past the first line.
+- **"Build Manually" cloned the wrong repository** (`python-multiplatform-mobile`, with `@branch`
+  syntax that is not valid `git clone` syntax anyway) and described a `/composeApp` module this
+  repository does not have. Corrected to this repo's actual remote and its actual two relevant
+  modules (`python-multiplatform/`, `sample/`).
+- **"Use Pre-Built Package" asserted a Maven Central / JitPack release that could not be confirmed
+  to exist** (§14c) and quoted a version number (`0.0.1`) that does not match what the build
+  actually produces. Reworded to state what was checked and found, rather than presenting
+  instructions as fact.
+- **The CI badge situation, checked against README's own text: already accurate**, and did not
+  need correcting — README already carries a comment explaining why the badge is omitted rather
+  than a badge pointing somewhere wrong. This is the one place this audit found README *ahead of*
+  ROADMAP rather than behind it (§12's old "badges point at a different repository" line was the
+  stale one, fixed above).
+- Left alone as already accurate: the "Supporting multiplatforms" list's entries for Android, iOS
+  and macOS (only Linux/Windows got the untested caveat added), and the Template ToDo list's first
+  three lines.
