@@ -408,9 +408,25 @@ consumer's problem to discover. `stageWasmBrowserRuntime` in `build.gradle.kts` 
    Appending was correct for this module's own test bundle, whose entry module has no `_start()`
    call, which is why it survived until an executable existed.
 
+   **That last sentence is also why no test guards it.** `wasmJsBrowserTest` runs the *test* bundle,
+   and reverting the placement produces a byte-identical file there — checked, and all ten browser
+   tests stayed green. `patchKotlinWasmOutputForCPython` therefore asserts the ordering as a
+   postcondition and refuses to write the file; `:sample`'s copy does the same, and that is the only
+   build in the repository whose bundle can trip it.
+
 ## Running the tests
 
-    ./gradlew :python-multiplatform:wasmJsNodeTest
+    ./gradlew :python-multiplatform:wasmJsNodeTest      # the suite
+    ./gradlew :python-multiplatform:wasmJsBrowserTest   # what only a browser decides
+
+The browser task is **not** a second run of the suite: it filters to
+`python.multiplatform.browser.*` and `WasmSelectorsImportTest`, which are the cases whose subject is
+webpack, the absence of a filesystem, or a host intrinsic. 4.5 s warm (16 s if the test bundle also
+has to be recompiled and re-bundled). It needs a Chromium-family browser
+and **skips with a message** when there is none, the same way a missing interpreter does; `CHROME_BIN`
+overrides the probe list in `build.gradle.kts`. `karma.config.d/cpython.js` serves the interpreter to
+karma — `webpackCopy` for the glue (the bundle's directory is a fresh temp path every run) and a
+proxy for the document-relative stdlib zip.
 
 Needs a CPython Emscripten build; `-PwasmPythonDir=` or `PMP_PYTHON_DIR` override the default at
 `/Volumes/macMini/wasm-build/cpython314-abi/...`. The task **skips with a message** rather than

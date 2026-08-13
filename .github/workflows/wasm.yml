@@ -36,5 +36,13 @@ jobs:
             ${{ runner.os }}-konan-
 
       - name: Run WasmJS Node Tests
-        # Test wasmJs which uses Node
+        # This currently proves that the project configures and compiles, and nothing more: every
+        # wasm test task is guarded by `onlyIf { <CPython Emscripten build>.exists() }`, and that
+        # build is an unpublished local directory named by `-PwasmPythonDir`. On a runner it is
+        # absent, so the task SKIPs and reports green having run zero tests.
+        #
+        # `wasmJsBrowserTest` is deliberately *not* added here, for the same reason -- it would be a
+        # second task that can only skip, while advertising browser coverage that does not exist.
+        # Both become worth wiring the moment the wasm CPython build is a published artefact
+        # (ROADMAP §10, first open item). Until then the browser evidence is local; see ROADMAP §10c.
         run: ./gradlew :python-multiplatform:wasmJsNodeTest --console=plain
