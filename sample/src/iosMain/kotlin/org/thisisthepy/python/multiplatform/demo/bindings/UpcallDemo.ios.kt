@@ -36,5 +36,6 @@ actual fun callKotlinFromPython(): String {
     if (!handle.isValid) return "the name was not in the table (handle -1)"
     val value = UpcallTable.invoke(handle, emptyArray())
     return "table hit: handle ${handle.raw} -> $value  (Kotlin-side call; " +
-        "the boundary shim is desktop-only today)"
+        "this target has a PyMethodDef shim too -- ProxyDemo.ios.kt publishes and uses it -- " +
+        "this particular demo just doesn't route through it)"
 }

@@ -8,8 +8,10 @@ import org.thisisthepy.python.multiplatform.demo.bindings.upcallTableSummary
 
 /**
  * The table is generated and installed here exactly as on desktop -- same processor, discovered
- * through a `.klib`. The call itself is made from Kotlin, because the Python-side boundary shim
- * is desktop-only; `bindings/UpcallDemo.ios.kt` next door says what is missing.
+ * through a `.klib`. The call itself is made from Kotlin: this target has its own boundary shim now
+ * (`python.native.ffi.UpcallEntry`, a real `PyMethodDef` -- `ProxyDemo.ios.kt` next door publishes
+ * and uses it), but this particular demo function doesn't route through it; `bindings/UpcallDemo.ios.kt`
+ * says why.
  */
 actual object UpcallDemo {
     actual val available: Boolean = true
