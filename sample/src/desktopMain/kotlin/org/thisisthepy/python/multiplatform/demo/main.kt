@@ -26,6 +26,13 @@ fun main() = application {
     println("eval    : ${PythonDemo.DEFAULT_EXPRESSION} -> ${PythonDemo.evaluate(PythonDemo.DEFAULT_EXPRESSION)}")
     println("table   : ${UpcallDemo.tableSummary()}")
     println("upcall  : ${UpcallDemo.callFromPython()}")
+    // Sections 5-7. The screen runs these on a button press; echoing them here is what makes
+    // `:sample:run` able to say whether they worked, since a window cannot be read by a build log.
+    println("proxies : ${PythonDemo.proxyInstallReport()}")
+    println(PythonDemo.classProxy())
+    println(PythonDemo.staticSurface())
+    println(PythonDemo.awaitFastPath())
+    println(PythonDemo.awaitSuspending())
 
     Window(
         onCloseRequest = { exitApplication() },

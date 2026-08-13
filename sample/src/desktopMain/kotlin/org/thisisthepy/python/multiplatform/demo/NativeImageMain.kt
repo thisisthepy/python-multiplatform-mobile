@@ -4,7 +4,13 @@ import org.thisisthepy.python.multiplatform.demo.bindings.DemoCounter
 import org.thisisthepy.python.multiplatform.demo.bindings.UPCALL_ARGS_ENTRY_NAME
 import org.thisisthepy.python.multiplatform.demo.bindings.UPCALL_ENTRY_NAME
 import org.thisisthepy.python.multiplatform.demo.bindings.UPCALL_EXCLUDED_NAME
+import org.thisisthepy.python.multiplatform.demo.bindings.awaitFastPathDemo
+import org.thisisthepy.python.multiplatform.demo.bindings.awaitSuspendingDemo
+import org.thisisthepy.python.multiplatform.demo.bindings.classProxyDemo
+import org.thisisthepy.python.multiplatform.demo.bindings.installCtypesBridge
 import org.thisisthepy.python.multiplatform.demo.bindings.installGeneratedUpcallTable
+import org.thisisthepy.python.multiplatform.demo.bindings.installPythonProxies
+import org.thisisthepy.python.multiplatform.demo.bindings.staticSurfaceDemo
 import org.thisisthepy.python.multiplatform.demo.bindings.upcallTableSummary
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.withGIL
@@ -101,4 +107,67 @@ fun main() {
         exitProcess(1)
     }
     println("KOTLIN: upcall verification finished")
+
+    verifyGeneratedProxies()
+}
+
+/**
+ * The second half: the *generated Python proxy module* inside the same closed-world binary.
+ *
+ * Everything above reaches the boundary the way a test harness does -- a name to a handle, a handle
+ * to a tuple. What a user writes instead is `Greeter('x').greet(2)`, and that goes through Python
+ * source `PythonProxySource.render` produces at run time and `exec`s. That is the part with a
+ * native-image question attached, and it is not the obvious one: the source is generated from a
+ * table that is already statically emitted, so no reflection is reintroduced. What *is* new here is
+ * `_pm_release` and `_pm_cancel` -- two more Panama upcall stub shapes than the first half binds --
+ * plus `asyncio`, a thread, and `PyMethodDef`-free `ctypes` callbacks fired from the interpreter.
+ * A missing descriptor in `reachability-metadata.json` shows up at the first call as
+ * `MissingForeignRegistrationError` and never at build time, which is why this runs rather than
+ * merely compiling.
+ *
+ * Each check is asserted in Kotlin rather than in the script, because the reports are strings the
+ * demo screen also shows: one place decides what "correct" is.
+ */
+private fun verifyGeneratedProxies() {
+    println("=== generated proxy verification ===")
+
+    installCtypesBridge()
+    val installed = installPythonProxies()
+    println("KOTLIN: $installed")
+    mustBe(installed.startsWith("installed:"), "the proxy module did not install: $installed")
+
+    val classReport = classProxyDemo()
+    println(classReport)
+    mustBe(classReport.contains("hello Kotlin! hello Kotlin!"), "the constructor or the method did not run")
+    mustBe(classReport.contains("hello Python!"), "assigning `subject` from Python did not reach Kotlin")
+    mustBe(classReport.contains("private set held"), "a `private set` was writable from Python")
+
+    val staticReport = staticSurfaceDemo()
+    println(staticReport)
+    mustBe(staticReport.contains("Greeter.built               ->  1\n"), "the companion property did not read 1")
+    mustBe(staticReport.contains("Greeter.built = 100         ->  100"), "the companion setter did not reach Kotlin")
+    mustBe(staticReport.contains("Greeter.forget()            ->  100"), "the companion function did not run")
+    mustBe(staticReport.contains("companion val is read-only"), "a companion `val` was writable from Python")
+    mustBe(staticReport.contains("companion is class-only"), "an instance reached a companion member")
+
+    val fastReport = awaitFastPathDemo()
+    println(fastReport)
+    mustBe(fastReport.contains("hello fast path!"), "the awaited fast-path call did not return")
+    mustBe(fastReport.contains("Futures created     ->  0"), "the fast path built a Future")
+
+    val slowReport = awaitSuspendingDemo()
+    println(slowReport)
+    mustBe(slowReport.contains("hello slow path! hello slow path!"), "the awaited suspending call did not return")
+    mustBe(slowReport.contains("completer thread            ->  clean"), "the Kotlin completer thread failed")
+    mustBe(!slowReport.contains("Futures created     ->  0"), "the suspending call never reached the Future path")
+
+    println("PYTHON: PROXY_OK")
+}
+
+/** Prints and exits non-zero, so a failure here cannot be read as a passing build. */
+private fun mustBe(condition: Boolean, message: String) {
+    if (!condition) {
+        println("KOTLIN: FAILED -- $message")
+        exitProcess(1)
+    }
 }
