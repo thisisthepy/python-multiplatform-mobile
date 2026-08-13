@@ -3,6 +3,32 @@
 The JVM half of Android. Reaches CPython through JNI into the Kotlin/Native library built from
 `artMain` + `nativeMain`.
 
+## The host app's bootstrap belongs here, not in the README
+
+`PythonBootstrap` unpacks the stdlib out of the AAR's assets, sets `PYTHONHOME` and calls
+`Python3.initialize`. It exists because the same ~30–55 lines had been hand-written three times —
+`sample`'s `MainActivity`, the external consumer app of ROADMAP §15d, and this repo's own
+`PythonOnDevice` fixture — from one README paragraph, and **all three got the same thing wrong**:
+each decided "already unpacked" by probing one entry of the result, which a copy interrupted
+partway through satisfies. See ROADMAP §15f.
+
+Two rules follow for anything added here:
+
+- **Do not re-validate `PYTHONHOME`.** `Python3.initialize` runs `PythonHomeCheck` on every call.
+  This source set *produces* the layout; that check verifies it. A second copy of the rule is a
+  second thing that can drift from what `Py_Initialize()` actually wants, and
+  `PythonBootstrapTest.stagedPrefixIsOneThatPythonHomeCheckAccepts` is what keeps the two honest.
+- **Completion markers, not result probes.** The stamp goes in after the last byte and comes out
+  before a rewrite starts, so a partial tree cannot look complete. `encodings/ exists` is a
+  property of a half-finished copy too.
+
+`AssetManager.open()` throwing `FileNotFoundException` is how a directory is detected — it folds
+the classification into the `open()` the file needed anyway and is worth ~2x over a `list()` per
+entry (192→124 ms on API 26, 324→150 ms on API 36, for 804 files / 20.1 MB). It is **not** in
+`AssetManager`'s documented contract, and AssetManager was reimplemented wholesale in API 28, so
+`openBasedDirectoryDetectionAgreesWithListBased` re-derives both classifications on device on
+whatever API level is running rather than trusting it.
+
 ## Bind through `RegisterNatives`, not symbol names
 
 `JNI_OnLoad` (in `artMain`) registers CPython's own C functions directly against the
