@@ -1156,3 +1156,63 @@ Emscripten 은 소켓을 Node 의 `ws` 패키지로 흉내내는데 그것이 �
 상수를 뒤집으려면 라이브러리가 커스텀 루프를 제공할지부터 정해야 하고 — 그것은 §7 의 프록시 설계가
 아니라 새 결정이다. 여기서 하지 않는다. **§9.5 의 "wasm 에서 (C) 는 첫 걸음에서 없다" 는 이제
 틀렸다. 첫 걸음은 있다. 없는 것은 기본 루프다.**
+
+### 15.8 `ws` 를 실제로 넣어 봤다 — (A) 는 패키지 문제가 아니라 구조적으로 막혀 있다
+
+§15.7 이 연 질문("`ws` 를 넣으면 그것만으로 되는가")에 실제로 답했다. `wasmJsTest` 에
+`npm("ws", "8.18.0")` 을 임시로 추가하고, 격리된 프로브 파일(`WasmAsyncioRunProbeTest`, 커밋하지
+않음)에서 `asyncio.run()` 을 호출해 관측했다.
+
+**한 걸음 나아갔다.** `MODULE_NOT_FOUND` 로 프로세스가 죽던 것이, `ws` 를 넣자 진짜 파이썬
+예외로 바뀌었다:
+
+    OSError: [Errno 28] Invalid argument
+      at socket.py:633, _fallback_socketpair -> lsock.accept()
+
+**그리고 거기서 막힌다 — 근본적으로.** CPython 이 임베드하는 Emscripten 글루(`python.mjs`)를
+직접 읽어 원인을 확인했다. `SOCKFS.websocket_sock_ops` 는 소켓을 실제 `ws` 연결로 흉내내는데,
+`listen()` 은 `require("ws").Server` 로 진짜 `WebSocketServer` 를 열고, `connect()` 는 진짜
+`WebSocket` 클라이언트를 연다 — 루프백이라도 실제 TCP 핸드셰이크와 WebSocket 업그레이드가 오간다.
+`accept()` 의 구현은 이렇다:
+
+    accept(listensock){
+        if (!listensock.server || !listensock.pending.length) { throw new FS.ErrnoError(28) }
+        ...
+    }
+
+즉 **핸드셰이크가 끝나 `pending` 에 연결이 들어와 있어야 `accept()` 가 성공한다.** 그런데
+`_fallback_socketpair()` 는 `bind() -> listen() -> connect() -> accept()` 를 전부 한 C 함수
+안에서, 하나의 동기 wasm 호출로 순서대로 부른다. §15.3 이 이미 적어 둔 그대로 이 임베딩은 `main` 을
+부르지 않으므로 이 호출들 사이에 **Node 이벤트 루프가 틱을 돌 기회가 없다** — `connect()` 가 시작한
+WebSocket 핸드셰이크는 다음 매크로태스크가 되어야 진행되는데, 그 다음 매크로태스크가 올 시점에는
+이미 `accept()` 가 (그리고 그 바깥의 동기 wasm 호출 전체가) 끝나 있다. `pending` 은 언제나 비어
+있고, `accept()` 는 언제나 EINVAL 이다.
+
+**이것은 `ws` 가 없어서 나는 에러가 아니다.** `ws` 를 설치하면 1차 장벽(`require` 실패)은 없어지고
+2차 장벽(핸드셰이크와 동기 호출의 경쟁)이 드러날 뿐이며, 2차 장벽은 **어떤 npm 패키지로도 못
+넘는다** — `socketpair()` 를 웹소켓으로 흉내내는 구현 자체가 비동기이고, 이 라이브러리의 부트업
+모델(모든 호출이 Kotlin 에서 동기 wasm 호출로 도착) 은 정확히 §15.3 이 JSPI 를 꺼야 했던 이유와
+같은 이유로 그 비동기성을 담을 곳이 없다. JSPI 를 다시 켜도 소용없다 — 켜져 있었다면 `main` 을
+부르지 않는 한 애초에 `SuspendError` 로 죽었을 자리다(§15.3). 그러므로 (A) 는 "아직 안 해서 안 되는
+것"이 아니라 **이 임베딩 모델과 구조적으로 상충한다.**
+
+**브라우저에서는 더 나쁘다.** 여기서 확인한 것은 Node 전용 경로다 — `require("ws")` 는
+`ENVIRONMENT_IS_NODE` 분기에서만 있고, 브라우저 분기는 전역 `WebSocket` 을 그대로 쓴다. 즉
+브라우저에서 `listen()` 자체가 없다(`if(!ENVIRONMENT_IS_NODE){throw new FS.ErrnoError(138)}`) --
+`_fallback_socketpair` 가 루프백 서버를 열 수조차 없다. 설령 (A) 가 Node 에서 성립했더라도 그것은
+**Node 테스트 환경 전용 해법**이었을 것이고, 브라우저 배포에는 애초에 적용되지 않았다. 이번 측정으로
+그 구분조차 낼 필요가 없어졌다 — Node 에서도 막히기 때문이다.
+
+측정 후 `ws` 의존성과 프로브 파일은 되돌렸다(`kotlinWasmUpgradeYarnLock` 으로 lockfile 도 원복).
+얻는 것 없이 npm 의존성만 늘리는 선택이기 때문이다.
+
+**결론 — (C).** 세 선택지 중 남는 것은 (B) 커스텀 루프를 라이브러리가 제공하는 것과, (C) 아무것도
+하지 않고 임베더에게 맡기는 것 둘뿐이다. (B) 는 §15.6 의 `_PmpMiniLoop` 로 *메커니즘은* 이미
+증명되어 있다 -- selector 도 self-pipe 도 열지 않는 루프는 코루틴을 완주시킨다. 그러나 `asyncio.run()`
+이 기대하는 것은 그 최소 루프가 아니라 `Runner`/`BaseEventLoop` 계약 전체(`call_later`,
+`shutdown_asyncgens`, `shutdown_default_executor`, 예외 처리 프로토콜, `KeyboardInterrupt` 취소 등)이고,
+그것을 CPython 버전에 맞춰 계속 맞는 상태로 유지하는 것은 "라이브러리가 파이썬 런타임을 흉내내는"
+바로 그 비용이다. 이번 조사가 확정한 것은 asyncio.run() 을 막는 벽의 **정체**(비동기 소켓 흉내가
+동기 부트업과 상충)이지, 그 벽을 대신할 만큼 신뢰할 수 있는 대체 루프의 존재가 아니다. 그러므로
+`proxyBootstrapSupportsAsyncio` 는 **여기서는 뒤집지 않는다.** 커스텀 루프를 제공할지는 여전히 별도
+결정이고, §15.6 이 이미 증명한 최소 메커니즘 위에서 언제든 다시 집어들 수 있다.
