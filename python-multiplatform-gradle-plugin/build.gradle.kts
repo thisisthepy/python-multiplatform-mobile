@@ -40,7 +40,12 @@ gradlePlugin {
  */
 val generateCoordinates = tasks.register("generateCoordinates") {
     val outputDir = layout.buildDirectory.dir("generated/coordinates")
-    val coordinates = "$group:python-multiplatform-ksp:$version"
+    // Plain `group`/`version` here resolve against the task itself (`Task.getGroup()` is a task
+    // category label, always null on this task; `Task` has no `version` property so that one
+    // falls through to the project by luck) -- not against the project, even though this lambda
+    // reads as if it were project-scoped. Qualifying both is what makes the generated coordinates
+    // name this build's actual group instead of the literal string "null".
+    val coordinates = "${project.group}:python-multiplatform-ksp:${project.version}"
     inputs.property("coordinates", coordinates)
     outputs.dir(outputDir)
     doLast {
