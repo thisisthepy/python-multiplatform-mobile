@@ -1,6 +1,7 @@
 package python.multiplatform.ffi
 
 import python.multiplatform.BuildConfig
+import python.multiplatform.env.PythonHomeCheck
 import python.multiplatform.ffi.exceptions.PyException
 import python.multiplatform.ffi.types.modules.PyModule
 import python.native.ffi.*
@@ -42,6 +43,11 @@ object Python3 {
      */
     fun initialize(silent: Boolean = false) {
         if (isInitialized) return
+        // Runs once per process, before the call whose own failure mode is either an uncatchable
+        // `Py_FatalError()` abort or -- on a sandboxed `PYTHONHOME` -- a silent hang (see
+        // PythonHomeCheck's doc comment). Cheap even so: one or two filesystem probes against a
+        // handful of candidate paths, not a directory walk.
+        PythonHomeCheck.verifyOrThrow()
         memScoped {
             Py_Initialize()
             // There is nothing richer to report than this. `Py_Initialize()` returns void and,
