@@ -35,6 +35,41 @@ Kotlin side has to act as a GC root:
 Python holds only the integer handle; the map holds the object. This is what JNI's
 `NewGlobalRef` does, made explicit.
 
+### Who calls `release`, and what happened when nobody did
+
+The sketch above has no answer to that, and neither did the implementation. `HandleTable` is
+generational precisely so that a double release is safe, and its class doc named the counterpart
+exactly — *"the proxy's `tp_dealloc` calling `release` is the entire lifetime contract"* — but
+`PythonProxySource` rendered a proxy class whose `__init__` took a handle and which had no path
+back at all. Every Kotlin object Python ever constructed stayed rooted for the life of the process.
+
+It was found by a measurement that was not looking for it. `GeneratedProxyCostTest`'s constructor
+row builds ten thousand proxies and discards every one; the desktop run ended with **78 002 live
+handles**, and the constructor figure was unusable because every row in the report had been timed
+against a table that grew by tens of thousands of entries while it ran.
+
+Two separate defects wore that one number, and it is worth keeping them apart:
+
+| | who owns the root | what was wrong |
+|---|---|---|
+| a proxy instance (`Counter(10)`) | the Python object | the **library**: no `__del__` was rendered. Fixed; `ProxyHandleLifetimeTest` pins it, including for a proxy inside a reference cycle |
+| a bare handle from `_pm_invoke` on a CONSTRUCTOR entry | the **caller** | nothing was wrong with the library. An integer has nothing to hang a finaliser off, so the caller must call `_pm_release`; the measurement harness was not doing it |
+
+The leak was **identical on desktop and on the iOS simulator** — 64 handles registered, 64 still
+live after `gc.collect()`, on both — which is what one would expect of a defect in generated Python
+that `commonMain` renders. The earlier impression that "iOS was stable" was about the *measurement*
+and not about the table: the iOS boundary costs about 3.5 µs against desktop's 0.5 µs, so the same
+drift was proportionally invisible there.
+
+`__del__` was chosen over `weakref.finalize` on price — the alternatives and their measured costs
+are tabulated in `PythonProxySource`'s KDoc. The pre-PEP-442 objection to `__del__` (an object with
+one, inside a cycle, was never finalised at all) has not applied since CPython 3.4, and the cycle
+case is asserted rather than assumed.
+
+Note what this does **not** solve: the table still holds *strongly*, so the `K1 -> P -> K2 -> K1`
+case below is untouched. What changed is only that "Python has finished with it" now reaches Kotlin
+at all, which is the precondition for anything else.
+
 A note for anyone reading older discussion: Panama has no equivalent of `NewGlobalRef`, and it
 does not need one. Panama is an API for *native memory*, not for JVM object lifetime — a
 `MemorySegment` holding an address does not keep a Kotlin object alive. The GC root is an

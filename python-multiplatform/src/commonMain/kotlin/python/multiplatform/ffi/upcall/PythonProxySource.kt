@@ -63,6 +63,46 @@ import python.multiplatform.reflection.UpcallTable
  * handle in `self._pm_handle`, and whose methods and properties pass that handle as `args[0]` --
  * exactly the shape `pm_invoke` already expects for a receiver-carrying entry.
  *
+ * #### Who gives the handle back
+ *
+ * A [python.multiplatform.reflection.HandleTable] entry is a **strong Kotlin reference that the
+ * Python side owns**, and that table's own class doc names the counterpart precisely: *"the proxy's
+ * `tp_dealloc` calling `release` is the entire lifetime contract."* Until [renderClass] emitted a
+ * `__del__`, nothing kept it. `GeneratedProxyCostTest` measured the consequence without looking for
+ * it -- its constructor row builds ten thousand `Counter(10)`s and discards every one, and the run
+ * ended with **78 002 live handles**, i.e. every Kotlin object Python had finished with was still
+ * rooted. `ProxyHandleLifetimeTest` is the direct statement of it, and it fails on desktop *and* on
+ * the iOS simulator identically (64 registered, 64 still live after `gc.collect()`): this was never
+ * a per-platform problem, because the generated Python is `commonMain`'s.
+ *
+ * `__del__` is `tp_finalize`, which `tp_dealloc` runs -- so it is literally the mechanism that doc
+ * names, not a stand-in for it. The objection to it is historical: before PEP 442 (CPython 3.4) an
+ * object with `__del__` in a reference cycle was never finalised at all and went to `gc.garbage`.
+ * That has not been true for a decade, and [ProxyHandleLifetimeTest] pins it rather than trusting
+ * it -- it builds a cycle through the proxy on purpose, drops it, collects, and requires the
+ * handles back.
+ *
+ * The alternatives are all *more* robust in one specific way and cost between two and nine times
+ * as much, measured on CPython 3.13 as construct-plus-destruct, net of a plain object of the same
+ * shape:
+ *
+ * | alternative | net | why not |
+ * |---|---|---|
+ * | `__del__` (**this**) | **+66 ns** | -- |
+ * | a per-instance holder object whose own `__del__` releases | +158 ns | immune to a subclass shadowing `__del__`, at the price of a second allocation per proxy and a second name in the instance dict |
+ * | `weakref.ref(self, cb)` in a module-level registry | +260 ns | the same immunity, plus a registry entry to insert and remove per proxy |
+ * | `weakref.finalize(self, _pm_release, h)` | +555 ns | the same again, and it costs about as much as the entire boundary crossing it is protecting -- the constructor row is ~610 ns net, so this alone would roughly double it |
+ *
+ * The one thing `__del__` does not survive is a **subclass that defines its own `__del__` and does
+ * not call `super().__del__()`** -- measured, not assumed: the handle is silently never released.
+ * That is accepted because a subclass that overrides `__init__` without calling `super().__init__()`
+ * already breaks the same object more thoroughly (there is no `_pm_handle` at all), so the generated
+ * class already depends on a subclass cooperating with it, and paying 2.4x on every construction to
+ * harden one half of that dependency buys little.
+ *
+ * The release is looked up **once, at class-definition time**, and carried as a default argument;
+ * see `_pm_releaser` for why reading it out of globals inside `__del__` is not the same thing.
+ *
  * This deliberately does **not** go through [python.multiplatform.ffi.ProxyTypeFactory]'s
  * `PyType_FromSpec` type. That type exists for one thing: giving a Kotlin-held Python reference a
  * `tp_traverse`/`tp_clear`/`tp_dealloc` slot so CPython's cyclic collector can see through it
@@ -161,7 +201,7 @@ import python.multiplatform.reflection.UpcallTable
  *
  * | kind | why not |
  * |---|---|
- * | a `TypeTag.OBJECT` value returned from an arbitrary [CallableKind.FUNCTION] or [CallableKind.METHOD] | still crosses as the bare handle integer, not wrapped in the class rendered for it. Only a value that came from *this* proxy's own `__init__` -- i.e. something Python itself constructed -- gets the class. A factory function that should hand back a `Counter` today hands back an `int` |
+ * | a `TypeTag.OBJECT` value returned from an arbitrary [CallableKind.FUNCTION] or [CallableKind.METHOD] | still crosses as the bare handle integer, not wrapped in the class rendered for it. Only a value that came from *this* proxy's own `__init__` -- i.e. something Python itself constructed -- gets the class. A factory function that should hand back a `Counter` today hands back an `int`, **and that int is the caller's to release**: an integer has nothing to hang a `__del__` off, so the lifetime contract above does not reach it and the caller must pass it to `_pm_release` by hand. `ProxyHandleLifetimeTest` pins that as the raw boundary's contract rather than as a defect of it |
  *
  * These are skipped silently *here* because the skip is a property of this stage, not a policy
  * decision -- `docs/binding-policy.md` already decided they are exposed, and they remain reachable
@@ -270,6 +310,30 @@ object PythonProxySource {
             if _h == -1:
                 raise AttributeError('no exposed Kotlin declaration named ' + _name)
             return _h
+
+
+        def _pm_no_release(_handle):
+            # What a host that bound no `_pm_release` gets: the behaviour that existed before a
+            # proxy released anything at all -- a leak -- rather than a NameError raised inside
+            # `__del__`, which CPython prints to stderr as "Exception ignored" and which nothing
+            # can act on. Same policy as `_pm_watch`'s: a missing per-platform binding costs the
+            # feature it enables and nothing else.
+            return 0
+
+
+        def _pm_releaser():
+            # The host's `(long) -> int` release, resolved **once**, at class-definition time, and
+            # carried into `__del__` as a default argument. Two reasons, and it is the second that
+            # forces it:
+            #
+            # 1. A default argument is a LOAD_FAST, not a LOAD_GLOBAL, on a path that runs once per
+            #    proxy that dies.
+            # 2. A module's globals are set to None during interpreter finalisation, and `__del__`
+            #    still runs after that for everything still alive. A `_pm_release` read out of
+            #    globals at that moment is None; the call raises TypeError, and CPython prints
+            #    "Exception ignored in: <function __del__>" once per surviving proxy, to stderr,
+            #    where nobody asked for it. A captured reference cannot be unbound underneath it.
+            return globals().get('_pm_release', _pm_no_release)
 
 
         def _pm_module_type(_mod):
@@ -647,6 +711,19 @@ object PythonProxySource {
             val argsTuple = tupleOf(params(ctor.arity))
             body.appendLine("    def __init__($callParams):")
             body.appendLine("        self._pm_handle = _pm_invoke($handle, $argsTuple)")
+            body.appendLine()
+            // The other half of the handle's lifetime. `HandleTable`'s own class doc names this
+            // exact method as the whole of the contract -- "the proxy's tp_dealloc calling release
+            // is the entire lifetime contract" -- and until this line existed nothing called it:
+            // `ProxyHandleLifetimeTest` and `GeneratedProxyCostTest` both measured every handle a
+            // constructor ever issued still rooted at the end of the run.
+            body.appendLine("    def __del__(self, _pm_r=_pm_releaser()):")
+            body.appendLine("        # getattr, not self._pm_handle: __init__ can raise before the")
+            body.appendLine("        # assignment (a Kotlin constructor that threw), and __del__ runs")
+            body.appendLine("        # on the half-built instance regardless.")
+            body.appendLine("        _pm_h = getattr(self, '_pm_handle', None)")
+            body.appendLine("        if _pm_h is not None:")
+            body.appendLine("            _pm_r(_pm_h)")
             body.appendLine()
         }
 
