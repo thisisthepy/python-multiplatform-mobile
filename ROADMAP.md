@@ -1548,11 +1548,77 @@ bounded by observation rather than by argument.
 
 ### What is still open
 
-- **`wasmJsBrowserTest` (karma) is not wired.** The browser evidence above is a headless run driven
-  by hand against a served distribution, not a Gradle task anyone else can re-run. Nothing fails
-  visibly if the browser bundle breaks again.
+- **The wiring is not in `python-multiplatform-gradle-plugin`, so an external consumer still meets
+  the hole.** `:sample` carries ~50 lines that are a copy of `patchKotlinWasmOutputForCPython`,
+  because one Gradle build script's functions are not visible to another project's build script.
+  Moving it into the plugin needs the staged runtime to be a *published artefact* first, and the
+  wasm CPython build is published nowhere — it is a local directory named by `-PwasmPythonDir`. That
+  is the same shape as §15e item 4 (`StagePythonHomeTask`), which solved the desktop version of
+  exactly this problem, and it is the obvious next step.
+- ~~**`wasmJsBrowserTest` (karma) is not wired.**~~ **Wired, and it catches three of the four.**
+  See §10c below for what it does and does not guard, and for the one item that had to be closed a
+  different way.
 - The upcall line reads `presses x3 = 0`, which is what that code prints for a freshly constructed
   counter; it was not cross-checked against a desktop run in this pass.
+
+### 10c. `wasmJsBrowserTest`, and the one defect a browser test cannot express
+
+**Ten tests, 4.5 s, Chromium 150 headless, and a build failure when the browser route breaks.**
+`wasmJs` declares `browser { testTask { useKarma { useChromeHeadless() } } }` alongside `nodejs()`,
+and the task runs a deliberately small filter rather than the suite twice:
+
+| | why it is in the browser run |
+|---|---|
+| `python.multiplatform.browser.WasmBrowserRuntimeTest` (6) | the claims only a browser can make |
+| `python.multiplatform.ffi.WasmSelectorsImportTest` (4) | JSPI deletion is a *host* decision, and its regression mode is `abort()` rather than a red test |
+
+The other ~344 already run under Node against the same Kotlin and the same interpreter; running them
+again would buy nothing but time. What the browser adds is webpack, HTTP and no filesystem, so the
+new class asserts exactly those: that the host is a browser at all (so nothing below can pass
+vacuously), that `cpython.mjs` survives bundling, that `sys.prefix` is `/` and `json.__file__` is
+inside `/lib/python314.zip` (the MEMFS route, which has no Node equivalent), that a `PyObject` round
+trip still reads Emscripten's memory through the *bundled* import object, and that
+`WebAssembly.promising` is gone while `select.poll()` still returns.
+
+Three pieces of plumbing were needed, and each is a browser fact:
+
+- **`webpackCopy`.** `cpython.mjs` loads the glue with `import(/* webpackIgnore */ './python.mjs')`,
+  so the *browser* resolves that specifier — relative to the bundle, which karma-webpack writes to a
+  temp directory with a fresh name every run. A fixed URL cannot work; the files have to be copied
+  next to the bundle, which is what `kotlin-web-helpers`' `webpackCopy` hook does.
+- **A proxy for the stdlib zip.** `STDLIB_ZIP_URL` is document-relative because in a real
+  distribution the zip sits next to `index.html`. karma's document is `/context.html` at the server
+  root, so the proxy is what makes karma's page look like that distribution.
+- **`CHROME_BIN`, resolved in Gradle from one list**, with a skip-and-say-so when nothing is found —
+  the same contract a missing CPython Emscripten build already has. On this machine the browser is
+  Naver Whale, which reports `HeadlessChrome/150.0.0.0`; that is what "Chromium 150" above was.
+
+**Verified by breaking it, not by watching it pass.** Three reverts, three failures:
+
+| reverted | how it failed |
+|---|---|
+| the dynamic `node:fs` import → static, as it was before §10 | `UnhandledSchemeError: Reading from "node:fs" is not handled by plugins` — webpack, before a test runs |
+| the staged stdlib zip | `404: /python3.14.zip`, zero tests reported: bring-up dies inside `addRunDependency` |
+| the `pmpSetKotlinExports` handoff | `IllegalStateException: ... pmpRegisterUpcall returned -1` — §10's own message |
+
+**And one that did not fail, which is the finding.** Reverting the entry-module *ordering* fix — the
+one real bug §10 found — changed nothing: all ten tests stayed green. The reason is structural
+rather than a gap in the filter. A **test** bundle's generated entry module contains no
+`exports._start()` at all (`grep -c _start` → 0), so the fixed and reverted forms of
+`handedOffEntryModule` produce a byte-identical file. The bug is only expressible in an
+**executable** bundle, and the library builds none.
+
+So that item is closed by a postcondition instead: both `patchKotlinWasmOutputForCPython` and
+`:sample`'s copy now refuse to write an entry module in which the handoff follows `_start()`.
+Checked the same way — reverting `:sample`'s placement fails
+`:sample:wasmJsBrowserDevelopmentWebpack` with the ordering message, on the real executable bundle.
+
+**Not added to `.github/workflows/wasm.yml`, and the reason applies to the job already there.** The
+runner has no CPython Emscripten build — it is an unpublished local directory named by
+`-PwasmPythonDir` — so every wasm test task's `onlyIf` skips. `wasmJsNodeTest` in CI today therefore
+runs zero tests and reports green; adding a browser job would add a second task that can only skip,
+while advertising coverage that does not exist. This becomes worth revisiting the moment the wasm
+CPython build is published (the same blocker as the first bullet above).
 
 ### The plugin wiring is closed, and it needed the runtime to become a Maven artefact first
 

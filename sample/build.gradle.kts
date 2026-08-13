@@ -227,7 +227,23 @@ fun patchWasmOutputForCPython(dir: File, modulePrefix: String) {
         } else {
             entryText.trimEnd() + "\n\n$handoff(exports);\n"
         }
-        entry.writeText(note + "import { $handoff } from './cpython.mjs';\n\n" + body)
+        val patched = note + "import { $handoff } from './cpython.mjs';\n\n" + body
+
+        // The postcondition, and **this project is the only place it can fire**.
+        // `:python-multiplatform:wasmJsBrowserTest` was wired up so that the browser route fails a
+        // build when it breaks, and it does -- for the glue, the virtual filesystem and the memory
+        // import. It cannot cover this one: a *test* bundle's entry module has no `_start()`, so
+        // reverting the placement above produces a byte-identical file and every browser test stays
+        // green. Measured rather than argued. An executable bundle is the only artefact where the
+        // ordering is observable at all, and this is the only build in the repository that makes one.
+        if (patched.contains(startCall) && patched.indexOf("$handoff(exports)") > patched.indexOf(startCall)) {
+            throw GradleException(
+                "the upcall handoff was placed after `$startCall` in ${entry.name}. `_start()` is " +
+                    "Kotlin `main()`, so the application runs to completion before its upcall entry " +
+                    "point is registered, and every `pmpRegisterUpcall` returns -1. See ROADMAP §10."
+            )
+        }
+        entry.writeText(patched)
         logger.lifecycle("Handed ${entry.name}'s wasm exports to cpython.mjs for upcall registration")
     }
 }

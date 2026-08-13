@@ -876,8 +876,15 @@ kotlin {
     // intermediate source set, because `EmbedAPI.kt`'s `expect inline fun`s crash the compiler when
     // combined with an intermediate `expect`/`actual` (see docs/architecture.md).
     //
-    // `nodejs()` rather than `browser()`: the tests have to drive a real CPython Emscripten build,
-    // and Node can load `python.wasm` off the filesystem. There is no webpack step to fight.
+    // `nodejs()` carries the suite: the tests have to drive a real CPython Emscripten build, and
+    // Node can load `python.wasm` off the filesystem with no webpack step to fight.
+    //
+    // `browser()` carries a *different* claim, and it is there because three of the four defects
+    // ROADMAP §10 records were invisible to Node -- `cpython.mjs` failing to resolve in a webpack
+    // context, `node:fs`/NODEFS having no browser equivalent, and the generated entry module's
+    // shape. Each was found by hand-driving a served bundle, which is evidence that expires. The
+    // browser test task is a small, deliberately chosen subset (see `wasmJsBrowserTest` below); the
+    // point is not to run the suite twice but to make the browser route fail a build when it breaks.
     //
     // What makes this target able to reach CPython at all is that Kotlin 2.4.20-Beta2 *imports* its
     // linear memory (`intrinsics.memory`) instead of defining one. Emscripten's memory is handed in
@@ -886,6 +893,13 @@ kotlin {
     @OptIn(org.jetbrains.kotlin.gradle.targets.js.dsl.ExperimentalWasmDsl::class)
     wasmJs {
         nodejs()
+        browser {
+            testTask {
+                useKarma {
+                    useChromeHeadless()
+                }
+            }
+        }
     }
 
     androidTarget {
@@ -2002,7 +2016,21 @@ fun handedOffEntryModule(entryText: String, handoff: String): String {
     } else {
         entryText.trimEnd() + "\n\n$handoff(exports);\n"
     }
-    return header + body
+    val patched = header + body
+
+    // The postcondition, and it is here because **no test can stand in for it**. `wasmJsBrowserTest`
+    // runs the library's own test bundle, whose entry module has no `_start()` at all -- checked,
+    // not assumed: reverting this function to the plain append produced a byte-identical file and
+    // all ten browser tests stayed green. The bug is only expressible in an *executable* bundle, so
+    // the only thing that can catch it is a check on the text at the moment it is written.
+    if (patched.contains(startCall) && patched.indexOf("$handoff(exports)") > patched.indexOf(startCall)) {
+        throw GradleException(
+            "the upcall handoff was placed after `$startCall` in the generated entry module. " +
+                "`_start()` is Kotlin `main()`, so every upcall the application makes would run with " +
+                "`kotlinExports` still null and `pmpRegisterUpcall` would return -1. See ROADMAP §10."
+        )
+    }
+    return patched
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -2268,17 +2296,112 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>().co
 
     doFirst {
         val dir = stagingDir.get().asFile
+        // The stdlib zip is staged unconditionally even though only the browser reads it: both
+        // `wasmJsNodeTest` and `wasmJsBrowserTest` run out of *this* directory, so a staging step
+        // that differed between them would be a race the moment Gradle ran them in parallel. It is
+        // 3.7 MB and the Node route ignores it -- `cpython.mjs`'s `IS_NODE` branch never fetches.
+        val stdlibZip = pythonDir.listFiles()?.firstOrNull { it.name.matches(Regex("""python\d+\.\d+\.zip""")) }
         copy {
             from(pythonDir) { include("python.mjs", "python.wasm") }
+            if (stdlibZip != null) from(stdlibZip)
             into(dir)
         }
-        // No stdlib zip for the Node bundle: NODEFS reaches the real one under PYTHON_DIR.
-        dir.resolve("cpython-config.mjs").writeText(cpythonConfigModule(pythonDir, stdlibZipUrl = null))
+        // Both facts, always, for the same reason `cpythonConfigModule` generates both: the module's
+        // import list has to be identical in both bundles, and each host reads only its own. Node
+        // reaches the real stdlib under PYTHON_DIR through NODEFS and never looks at the URL.
+        dir.resolve("cpython-config.mjs").writeText(
+            cpythonConfigModule(pythonDir, stdlibZipUrl = stdlibZip?.let { "./${it.name}" })
+        )
 
         // The same two substitutions a consumer's browser bundle needs, and the reason they are a
         // shared function: see `patchKotlinWasmOutputForCPython`.
         patchKotlinWasmOutputForCPython(dir, modulePrefix = rootProject.name, logger = logger)
     }
+}
+
+// -------------------------------------------------------------------------------------------------
+// ROADMAP §10 -- `wasmJsBrowserTest`, and why it runs ten tests rather than 344.
+//
+// Three of the four defects §10 records were invisible to Node by construction: `cpython.mjs`
+// failing to resolve in a webpack context, `node:fs`/NODEFS having no browser equivalent, and the
+// generated entry module's shape. All three were established by hand-driving a served distribution
+// in Chromium, which is evidence with no expiry date attached -- nothing failed if they came back.
+//
+// So this task exists to make the browser route fail a build, not to run the suite twice. The
+// filter admits `python.multiplatform.browser.*` (WasmBrowserRuntimeTest, which asserts exactly the
+// things a browser decides) and `WasmSelectorsImportTest` (the JSPI intrinsic deletion, whose whole
+// subject is a *host* decision, and whose regression mode is `abort()` rather than a red test).
+// Everything else already runs under Node against the same Kotlin and the same interpreter.
+//
+// **The browser is a machine fact, so a missing one skips rather than fails**, exactly as a missing
+// CPython Emscripten build already does above. `resolveChromiumFamilyBrowser` below makes that one
+// decision and hands the answer to karma-chrome-launcher as `CHROME_BIN`.
+//
+// What the *bundle* needs -- the glue beside it and the stdlib zip where a document-relative fetch
+// will look -- is in `karma.config.d/cpython.js`, because both are facts about how karma serves
+// files rather than about Gradle.
+// -------------------------------------------------------------------------------------------------
+
+// The browser package is compiled into the one test bundle *both* runners load, so Node would run it
+// too. `WasmBrowserRuntimeTest.theHostIsABrowserAndNotNode` exists precisely to make that loud, and
+// it did -- without this line the Node run reports 350 tests, 2 failed. Excluding is the right
+// direction: the alternative, teaching those tests to skip under Node, is how a browser-only
+// assertion quietly stops being one.
+tasks.named<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>("wasmJsNodeTest") {
+    filter.excludeTestsMatching("python.multiplatform.browser.*")
+}
+
+tasks.named<org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest>("wasmJsBrowserTest") {
+    filter.isFailOnNoMatchingTests = true
+    filter.includeTestsMatching("python.multiplatform.browser.*")
+    filter.includeTestsMatching("python.multiplatform.ffi.WasmSelectorsImportTest.*")
+
+    // Resolved once, here, rather than probed again inside `karma.config.d/cpython.js`: the launcher
+    // reads `CHROME_BIN` out of its own process environment, so handing it over is both the skip
+    // decision and the configuration, from one list.
+    val chromeBinary = resolveChromiumFamilyBrowser()
+    if (chromeBinary != null) environment("CHROME_BIN", chromeBinary)
+    onlyIf {
+        if (chromeBinary == null) {
+            logger.lifecycle(
+                "SKIPPING $name -- no Chromium-family browser found. Set CHROME_BIN to one " +
+                    "(karma's ChromeHeadless launcher reads it), or install Chrome/Chromium."
+            )
+        } else {
+            logger.lifecycle("$name drives $chromeBinary")
+        }
+        chromeBinary != null
+    }
+}
+
+/**
+ * The browser karma will launch, or `null`.
+ *
+ * `CHROME_BIN` first, because that is the knob karma-chrome-launcher itself reads and a caller who
+ * sets it means it. The probe list after it is ordered by how close each browser is to the thing
+ * being tested rather than by preference: all of them are Chromium, and what this suite needs from
+ * one is JSPI (Chromium 137+) and Wasm GC. Whale is in the list because it is what this machine
+ * has -- it reports `HeadlessChrome/150` -- and leaving it out would have meant the browser tests
+ * could not run at all here.
+ *
+ * Deliberately not Firefox: `WasmBrowserRuntimeTest` asserts that `WebAssembly.promising` was
+ * deleted, and on an engine that never had it that assertion would pass while proving nothing.
+ */
+fun resolveChromiumFamilyBrowser(): String? {
+    System.getenv("CHROME_BIN")?.takeIf { File(it).canExecute() }?.let { return it }
+    val candidates = listOf(
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "${System.getProperty("user.home")}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        "/Applications/Whale.app/Contents/MacOS/Whale",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+    )
+    return candidates.firstOrNull { File(it).canExecute() }
 }
 
 android {
