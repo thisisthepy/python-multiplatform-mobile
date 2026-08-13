@@ -621,6 +621,126 @@ Windows cannot host a Kotlin/Native assembly library, so a composed desktop path
 macOS and Linux only, with Windows staying on direct Panama calls. At 2.65ns per crossing
 that is a much smaller loss on desktop than the same gap would be on Android.
 
+## One downcall, across all platforms
+
+The upcall side has "One upcall, across all five platforms" in `upcall-design.md` — one shared
+test, run on every target, min–max over several runs, quoted rows marked as quotes. The downcall
+side had no equivalent: the benchmarks that exist are real and each one answers a question, but
+they are scattered across five files with no shared shape, so "how expensive is a downcall on
+platform X" had no single table to read.
+
+### What exists today
+
+| File | Source set | What it measures | Runs where |
+|---|---|---|---|
+| `commonTest/.../overhead/Benchmark.kt` | `commonTest` | Warmup-then-time harness (`run`/`measure`), not a benchmark itself | wherever the tests below run |
+| `commonTest/.../overhead/BenchmarkTest.kt` | `commonTest` | Pointer boxing, raw refcount churn, string marshalling (`PyUnicode_FromString`/`AsUTF8`, three lengths), integer marshalling, `PyObject` wrapper cost, `PyObject_GetAttrString` | compiles for all six run paths below; **confirmed green** on desktop / iosSimulatorArm64 / wasmJsNode this run; reaches androidInstrumented and androidNativeArm64/X64 through the same `commonTest` dependency edge but neither ran here (no emulator this session) |
+| `desktopTest/.../DesktopOverheadBenchmark.kt` | `desktopTest` | Panama transition cost (`PyList_Size` net of a pure-Kotlin floor); the string-marshalling-share-of-`exec` test is `@Ignore`d (destabilises the interpreter, see the file's own comment) | desktop only |
+| `wasmJsTest/.../WasmMarshallingOverheadTest.kt` | `wasmJsTest` | `internedUtf8` vs `scratchUtf8` vs the old malloc/copy/free route, at two string lengths, both standalone and through a real `PyObject_GetAttrString` | wasmJs only |
+| `androidInstrumentedTest/.../JniOverheadBenchmark.kt` | `androidInstrumentedTest` | JNI calling-convention transition cost: ordinary / `@FastNative` / `@CriticalNative`, on a trivial echo and on `PyList_Size` | Android/ART only, needs a device or emulator |
+| `androidInstrumentedTest/.../CompositionBenchmark.kt` | `androidInstrumentedTest` | Per-call crossings vs one composed `artMain` call, for `getAttr` and `list → array`, plus a direct-buffer marshalling variant | Android/ART only, needs a device or emulator |
+
+Two more files live next to these and share the word "overhead" or "Upcall" in their name but are
+**not** downcall benchmarks — noted here only so a future reader does not double-count them:
+`commonTest/.../reflection/UpcallOverheadTest.kt` prices the upcall dispatch table
+(`UpcallTable.resolve` vs a cached handle), and `androidInstrumentedTest/.../UpcallOverheadTest.kt`
+prices the Android upcall attach. Both are upcall-side and already covered by `upcall-design.md`.
+
+`BenchmarkTest` reaches every one of the six execution paths KGP registers for this module
+(`desktopTest`, `iosSimulatorArm64Test`, `iosX64Test`, `wasmJsNodeTest`, `androidInstrumentedTest`/
+`connectedAndroidTest`, `androidNativeArm64Test`+`androidNativeX64Test`) because it sits in
+`commonTest`, which every one of those depends on transitively. It is confirmed to run — not just
+compile — on three of the six this pass: desktop, the iOS simulator, and wasmJs (see Validation
+below). `iosX64Test` has no practical run path on Apple Silicon and nobody targets it; the
+Android/ART and androidNative rows need a connected device or emulator, which this pass did not
+have available (CLAUDE.md's "에뮬레이터는 쓰지 마라" for this task).
+
+### A shared table, picked to match the upcall table's columns
+
+The upcall table's denominator column is `PyObject_CallObject` on a Python `def` — "a downcall of
+the same shape" — plus `Py_IncRef`/`Py_DecRef` and an empty `withPython` scope as the two
+boundary-cost brackets. Those three, plus one string-marshalling call, are exactly what
+`UpcallBoundaryCostTest`'s `measureDowncalls()` (`commonTest`) already records **in the same run as
+the upcall it prices** — so pulling them out as their own table is not a new measurement, it is the
+existing "comparison basis" rows read on their own. The fourth column, string marshalling, comes
+from `BenchmarkTest.testStringMarshalling`'s 8-character row, run in the same suite execution.
+
+Desktop, iOS simulator and wasmJs are measured fresh here — three full-suite runs
+(`:desktopTest :iosSimulatorArm64Test :wasmJsNodeTest`), same command as Validation below, each
+with `build/test-results` cleared first so a task cannot report a stale XML. All three runs matched
+the baseline exactly (360/0/1, 330/0/0, 340/0/0). Ranges are min–max over three runs for the first
+three columns; the string-marshalling column is min–max over two of those three runs (the first
+run's `BenchmarkTest` XML was not preserved before the second run overwrote it — its
+`UpcallBoundaryCostTest` numbers were captured from console output before that happened, which is
+why that row has three runs and this one has two).
+
+androidNative and Android/ART rows are **quoted from `upcall-design.md`**, not re-measured — marked
+† below, same convention that document uses for its own quoted rows. Cells with no prior
+measurement of this exact quantity are left blank rather than approximated from a different one
+(e.g. `CompositionBenchmark`'s composed `getAttr` is a different quantity — four crossings folded
+into one — not a bare `PyUnicode_FromString`).
+
+| Platform | empty `withPython` scope | `Py_IncRef` + `Py_DecRef` | `PyObject_CallObject` (downcall, same shape as the upcall table's numerator) | `PyUnicode_FromString`, 8 chars |
+|---|---|---|---|---|
+| **desktop** (JVM 21.0.12, macOS arm64) | 123.88–135.99 ns | 321.69–334.10 ns | 315.69–335.32 ns | 1129.95–1270.76 ns |
+| **iOS simulator** (arm64) | 729.20–736.62 ns | 1510.82–1542.73 ns | 1605.95–1688.30 ns | 3431.75–3432.50 ns |
+| **wasmJs** (Node) | 55.93–60.77 ns | 126.79–131.42 ns | 191.87–203.50 ns | 278.30–279.84 ns |
+| *androidNative* `pmp_api36`† | *937–1010 ns* | *~2010–2132 ns* | *2170–2222 ns* | *(no prior measurement)* |
+| *androidNative* `pmp_api26`† | *1193–1298 ns* | *(no prior measurement)* | *2636–5554 ns* | *(no prior measurement)* |
+| *Android API 26* (ART)† | *(no prior measurement)* | *(no prior measurement)* | *(no prior measurement)* | *(no prior measurement)* |
+| *Android API 36* (ART)† | *(no prior measurement)* | *(no prior measurement)* | *(no prior measurement)* | *(no prior measurement)* |
+
+† Quoted from `upcall-design.md`'s "One upcall, across all five platforms" table and its
+"Where the differences actually come from" prose (the `Py_IncRef`/`Py_DecRef` figure for
+androidNative is stated there as "against 165–326 ns" for desktop and is attributed to `pmp_api36`
+by elimination — it is not broken out by API level the way the other rows are, hence "~"). The
+Android/ART rows there record only the upcall side ("not recorded" for downcall), which is why
+every cell in those two rows is blank here: there is nothing to quote, not an oversight.
+
+### Ratio consistency: mostly holds, desktop is the exception
+
+`upcall-design.md`'s own upcall/downcall ratios, from the same `UpcallBoundaryCostTest`, are
+reproduced by these three fresh runs (the test computes and prints its own ratio each time, so this
+is a direct comparison, not a re-derivation):
+
+| Platform | ratio recorded in `upcall-design.md` | ratio, this pass (3 runs) | consistent? |
+|---|---|---|---|
+| desktop | 2.49–2.89x | 2.13–2.34x | **no — see below** |
+| iOS simulator | 1.33–1.43x | 1.38–1.42x | yes, nested inside the old range |
+| wasmJs | 2.56–3.36x | 2.36–2.63x | mostly — top of the new range overlaps the bottom of the old one |
+
+**Desktop's ratio moved outside the previously recorded range, and it is the upcall side that
+moved, not the downcall side.** This pass's downcall-same-shape figure (315.69–335.32 ns) sits at
+the bottom of the old 315–527 ns range — consistent, just at its floor. This pass's upcall figure
+(687.83–741.26 ns, read from the same `UpcallBoundaryCostTest` runs) sits *below* the old range's
+floor of 861 ns entirely. So on this machine, at this commit (`65e1bf5d`), a desktop upcall through
+`ctypes` measures cheaper than what `upcall-design.md`'s table recorded, while the downcall side did
+not move. Two things separate the two tables and either could be the cause: `develop` has moved a
+great deal since that table was captured (this session's own `git merge` pulled in 87 changed files,
+including upcall-adjacent ones — see the merge log above), and the two tables were also captured on
+different runs of the same machine, which is exactly the kind of thing this document elsewhere warns
+is not comparable. Neither is ruled out here; this is reported as an open discrepancy, not resolved
+into either explanation.
+
+### What is deliberately not in the shared table
+
+Each platform-only file above measures something the others cannot, and none of it collapses into
+the four shared columns:
+
+- **Desktop**: the Panama `invoke` → `invokeExact` migration (`DesktopOverheadBenchmark`,
+  1015.95 ns → 2.65 ns for `PyList_Size`) is a desktop-only story — no other platform has an
+  equivalent adaptation-vs-exact distinction.
+- **Android/ART**: `JniOverheadBenchmark`'s ordinary/`@FastNative`/`@CriticalNative` comparison and
+  `CompositionBenchmark`'s per-call-vs-composed figures are both `artMain`/`androidMain` concepts
+  with no analogue on a target that has no separate calling convention to choose between.
+- **wasmJs**: `WasmMarshallingOverheadTest`'s interned-vs-scratch-vs-malloc string routes are a
+  wasm-linear-memory concept; the other platforms marshal strings through Panama or JNI, not through
+  an explicit intern cache.
+
+These are not merged into the shared table, and the files are not merged or deleted — the request
+for this pass was a table, not a consolidation, and each file's platform-specific framing (its own
+warmup counts, its own comparison baselines) is part of what makes its own number meaningful.
+
 ## A build defect that made all of this harder
 
 Three separate instrumented runs failed with `UnsatisfiedLinkError` on symbols that were
