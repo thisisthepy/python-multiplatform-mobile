@@ -148,6 +148,42 @@ fun main() {
 }
 ```
 
+### Desktop: apply the bindings plugin so `PYTHONHOME` gets a prefix
+
+The desktop artifact bundles `libpython` for every host platform under `lib/<platform>/`, and the
+loader finds it there with no wiring at all — but it does **not** bundle CPython's standard
+library, and `Py_Initialize()` cannot start without one:
+
+    Fatal Python error: Failed to import encodings module
+
+Applying the Gradle plugin is the whole of what supplies it:
+
+```kotlin
+plugins {
+    kotlin("jvm")
+    application
+    id("io.github.thisisthepy.python.multiplatform.bindings") version "<version>"
+}
+```
+
+That registers `stagePythonHome`, which downloads the CPython build this library was compiled
+against, verifies it against the release's published `SHA256SUMS`, unpacks it into a cache shared
+by every project on the machine, and sets `PYTHONHOME` on your `run` and `test` tasks. The first
+build on a machine costs about 1.5 s and a ~26 MB download; every build after that is a stamp
+check, about 0.014 s. Nothing is added to the artifacts you publish.
+
+It never touches a `PYTHONHOME` you set yourself — point it at a system CPython, a conda prefix or
+a build of your own and the plugin stays out of the way entirely. To disable staging outright (an
+air-gapped build, or one whose prefix comes from its own packaging step):
+
+```kotlin
+pythonBindings { stagePythonHome.set(false) }
+```
+
+**This covers running from Gradle.** An application packaged for end users (`jpackage`, Conveyor,
+an installer) still has to carry a prefix and set `PYTHONHOME` itself; the staged directory is a
+reasonable thing for that step to copy.
+
 ### Android: call `PythonBootstrap.initialize` instead of `Python3.initialize`
 
 Android is the one platform where the example above is not the whole story, because CPython reads

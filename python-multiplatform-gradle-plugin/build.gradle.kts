@@ -1,3 +1,7 @@
+// Imported rather than written as `java.util.Properties`: inside a Kotlin DSL build script, `java`
+// resolves to the `JavaPluginExtension` accessor, not to the package root.
+import java.util.Properties
+
 plugins {
     `kotlin-dsl`
     `maven-publish`
@@ -46,7 +50,25 @@ val generateCoordinates = tasks.register("generateCoordinates") {
     // reads as if it were project-scoped. Qualifying both is what makes the generated coordinates
     // name this build's actual group instead of the literal string "null".
     val coordinates = "${project.group}:python-multiplatform-ksp:${project.version}"
+
+    // The CPython distribution the *library* was built against, read from the root build's own
+    // `gradle.properties` rather than restated here. `StagePythonHomeTask` stages this exact
+    // upstream build for a consumer, and `desktopJar` carries the `libpython` taken from it, so a
+    // second copy of these values that drifted would pair a stdlib with an interpreter from a
+    // different build. The fallbacks match `python-multiplatform/build.gradle.kts`'s own, for the
+    // case where this build is checked out without the root's properties beside it.
+    val rootProperties = Properties().apply {
+        val file = rootDir.resolve("../gradle.properties")
+        if (file.isFile) file.inputStream().use { load(it) }
+    }
+    val pythonVersionValue = rootProperties.getProperty("pythonVersion") ?: "3.14.7"
+    val pbsReleaseValue = rootProperties.getProperty("pythonBuildStandaloneRelease") ?: "20260807"
+    val freeThreadedValue = rootProperties.getProperty("pythonFreeThreaded")?.toBoolean() ?: false
+
     inputs.property("coordinates", coordinates)
+    inputs.property("pythonVersion", pythonVersionValue)
+    inputs.property("pbsRelease", pbsReleaseValue)
+    inputs.property("pythonFreeThreaded", freeThreadedValue)
     outputs.dir(outputDir)
     doLast {
         val file = outputDir.get().file("python/multiplatform/gradle/ProcessorCoordinates.kt").asFile
@@ -57,6 +79,14 @@ val generateCoordinates = tasks.register("generateCoordinates") {
             package python.multiplatform.gradle
 
             internal const val DEFAULT_PROCESSOR_COORDINATES: String = "$coordinates"
+
+            /** The CPython release the `libpython` bundled in `desktopJar` was taken from. */
+            internal const val DEFAULT_PYTHON_VERSION: String = "$pythonVersionValue"
+
+            /** The python-build-standalone release tag that published it. */
+            internal const val DEFAULT_PBS_RELEASE: String = "$pbsReleaseValue"
+
+            internal const val DEFAULT_PYTHON_FREE_THREADED: Boolean = $freeThreadedValue
             """.trimIndent() + "\n",
         )
     }
