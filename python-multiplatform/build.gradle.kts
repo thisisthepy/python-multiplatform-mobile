@@ -889,6 +889,17 @@ kotlin {
     }
 
     androidTarget {
+        // ROADMAP §15d: without this line the Android target gets no Maven publication at all --
+        // Kotlin Multiplatform only creates one when a variant is named here -- so an Android app
+        // consumer could not resolve this library by coordinates no matter where it was published.
+        // Every other target had a `publish<Target>PublicationToMavenLocal`; `androidTarget` had
+        // none, and `./gradlew tasks --all` was the only place that showed it.
+        //
+        // Release only. A debug variant would double the artefact for a build type nobody consumes
+        // by coordinates, and the AAR's payload (see `copyAndroidPythonAssets` below) is the
+        // expensive part, not the classes.
+        publishLibraryVariants("release")
+
         @OptIn(ExperimentalKotlinGradlePluginApi::class)
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_17)
@@ -911,16 +922,48 @@ kotlin {
                     }
                 }
             }
+            // Everything staged here lands in the consumer's APK, so what it excludes is a
+            // packaging decision, not a build-tree tidy-up. Measured on the release AAR before any
+            // exclusion (40.1 MB on disk, 137.9 MB of entries):
+            //
+            //   assets/<abi>/lib/**/test          7.11 MB compressed  32.30 MB raw   x2 ABIs
+            //   jni/<abi>                         5.31 / 5.09 MB      15.0 / 15.3 MB
+            //   assets/<abi>/lib/** (rest)        3.16 MB             11.91 MB       x2
+            //   assets/<abi>/lib/**/lib-dynload   2.46 / 2.37 MB       7.6 / 7.3 MB
+            //   assets/<abi>/include              0.45 MB              1.91 MB       x2
+            //   classes/manifest/etc              0.49 MB              0.52 MB
+            //
+            // The library itself is 0.49 MB of that. Two of the entries above are payload nothing
+            // on a device ever reads, and both are dropped here:
+            //
+            // - `include/python$libVersion` is CPython's C headers. cinterop reads them from the
+            //   extraction tree (`targetIncludePath`), never from assets, and no Kotlin source in
+            //   `androidMain`, `artMain`, `androidInstrumentedTest` or `sample` opens an asset
+            //   under `include/`. They were being shipped to every device for nothing.
+            // - `test` is CPython's own regression suite -- 32 MB raw per ABI, 38% of the AAR --
+            //   and nothing in this repository imports it.
+            //
+            // What is deliberately *not* excluded, so the reasoning survives: `lib-dynload` is the
+            // compiled extension modules and is the only genuinely per-ABI part of the tree (the
+            // pure-Python half is byte-identical between arm64-v8a and x86_64 apart from five
+            // sysconfig files, verified with `diff -rq`), and `idlelib`/`ensurepip`/`tkinter` are
+            // dead weight for most embedders but are ordinary stdlib that a consumer may import.
+            // "CPython's own test suite" and "C headers" are provable; "nobody wants tkinter" is
+            // not.
             val copyAndroidPythonAssets by tasks.creating(Copy::class) {
                 dependsOn(downloadAllPythonBuilds)
                 into("$androidBuildDir/assets/")
+                // A `Copy` never removes what it stopped copying, and this directory is an AGP
+                // asset source root -- so a tree staged by an older revision of this task keeps
+                // shipping in the AAR and the APK forever. That is exactly how `include/` and
+                // `test/` would have survived the exclusions above on any machine that had built
+                // once before them.
+                doFirst { delete("$androidBuildDir/assets/") }
                 abiList.forEach { abi ->
                     val arch = if (abi == "arm64-v8a") "aarch64" else "x86_64"
-                    from("$extractedDir/android-$arch/prefix/include/python$libVersion") {
-                        into("$abi/include/python$libVersion")
-                    }
                     from("$extractedDir/android-$arch/prefix/lib/python$libVersion") {
                         exclude("config-$libVersion-$arch-linux-android/")
+                        exclude("test/")
                         into("$abi/lib/python$libVersion")
                     }
                 }
@@ -966,11 +1009,29 @@ kotlin {
                 }
             }
         }
+        // `tasks` here is the *project's* container, not the desktop target's, so this block sees
+        // every `Jar` in the module -- `allMetadataJar` included. That is fine for the licence and
+        // was not fine for the CPython libraries, hence the name guard below.
+        //
+        // `allMetadataJar` is the artifact published at the root coordinate
+        // `io.github.thisisthepy:python-multiplatform`, which is what every Kotlin Multiplatform
+        // consumer resolves in order to compile against `commonMain`. Measured on the mavenLocal
+        // publication while enabling the Android one (§15d): **87.4 MB, of which 83.0 MB was four
+        // host platforms' libpython** (`lib/linux-x86_64` alone 64.7 MB compressed, 240 MB raw)
+        // against 0.3 MB of actual metadata. Nothing reads `lib/` out of a metadata jar --
+        // `manager.loadLibPython` reads it off the desktop *runtime* classpath, which is
+        // `desktopJar` and stays unchanged.
+        //
+        // The sources jars never picked the libraries up in the first place (`desktopSourcesJar`
+        // and `androidReleaseSourcesJar` both measure 212-218 KB with no `lib/` entry), so this
+        // narrowing changes exactly one artifact.
         tasks.withType<Jar> {
             duplicatesStrategy = DuplicatesStrategy.WARN
             from(licensePath) {
                 into("META-INF/LICENSE")
             }
+        }
+        tasks.withType<Jar>().matching { it.name == "desktopJar" }.configureEach {
             if (configuredPythonVersion == "3.13.0" && !pythonFreeThreaded) {
                 from(libPathForDesktop) {
                     include("windows-*/*")

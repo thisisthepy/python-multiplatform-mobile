@@ -2382,24 +2382,140 @@ distribution**, and it is a real one:
   exact python-build-standalone release URL and unpack layout a consumer needs to reproduce by
   hand. (a) is better for anyone who isn't willing to hand-roll it; (b) is the cheaper stopgap.
 
-### 15d. Found in passing, not fixed: `androidTarget` has no Maven publication at all
+### 15d. `androidTarget` has no Maven publication at all
 
-`./gradlew tasks --all` lists `publish<Target>PublicationToMavenLocal` for every one of
+**Closed.** `androidTarget` calls `publishLibraryVariants("release")`,
+`publishAndroidReleasePublicationToMavenLocal` exists, and an Android app project outside this
+repository resolves the library by coordinates, builds an APK, and **runs CPython on both
+emulators** — see the end of this section for the exact line it printed.
+
+**Was:** `./gradlew tasks --all` listed `publish<Target>PublicationToMavenLocal` for every one of
 `python-multiplatform`'s targets (`desktop`, `iosArm64`, `iosSimulatorArm64`, `iosX64`,
 `androidNativeArm64`, `androidNativeX64`, `wasmJs`) **except `androidTarget`.** Kotlin Multiplatform
 only auto-creates a Maven publication for an Android target when the target block calls
-`publishLibraryVariants(...)`; `python-multiplatform/build.gradle.kts`'s `androidTarget { ... }`
-block (it configures `compilerOptions` and the native-binary/asset copy wiring, both unrelated)
-never calls it. Practical effect: **an Android app consumer cannot get this library from Maven at
-all today**, published or not — the gap is orthogonal to §14c's "nothing is published" finding and
-would still block Android specifically even after that one is resolved.
+`publishLibraryVariants(...)`, and that block never did. Practical effect: **an Android app consumer
+could not get this library from Maven at all**, published or not — orthogonal to §14c's "nothing is
+published" finding, and it would have survived the fix for that one.
 
-Not fixed in this pass: enabling `publishLibraryVariants` would try to package a release AAR that,
-per this module's own `Jar` config and `copyAndroidPythonBinaries`/`copyAndroidPythonAssets` tasks,
-bundles per-ABI native `.so`s and a full CPython stdlib into `assets/` — a real packaging design
-question (variant selection, artifact size, whether the stdlib belongs in the AAR at all given
-§15c's finding for desktop) rather than a safe mechanical fix, and out of scope for a pass that was
-asked to fix only what's cheaply and safely fixable.
+It was left open because turning the line on packages a release AAR carrying per-ABI native `.so`s
+and a full CPython stdlib in `assets/`, and the size of that was a design question rather than a
+mechanical fix. So the first thing this pass did was stop guessing at it.
+
+#### The measurement, before anything was decided
+
+`bundleReleaseAar` with `publishLibraryVariants("release")` on and nothing else changed:
+**40.10 MB on disk, 137.91 MB of entries across 5898 files.**
+
+| | compressed | raw | files |
+|---|---|---|---|
+| `assets/<abi>/lib/**/test` | 7.11 MB ×2 ABIs | 32.30 MB ×2 | 1790 ×2 |
+| `jni/x86_64`, `jni/arm64-v8a` | 5.31 + 5.09 MB | 14.97 + 15.29 MB | 7 + 7 |
+| `assets/<abi>/lib/**` (pure Python, rest) | 3.16 MB ×2 | 11.91 MB ×2 | 790 ×2 |
+| `assets/<abi>/lib/**/lib-dynload` | 2.46 + 2.37 MB | 7.59 + 7.30 MB | 68 + 68 |
+| `assets/<abi>/include` | 0.45 MB ×2 | 1.91 MB ×2 | 289 ×2 |
+| **classes, manifest, R.txt** | **0.49 MB** | 0.52 MB | 5 |
+
+The library is 0.49 MB of a 40 MB artifact. Two more facts fell out of measuring rather than
+reading, and both decided the choice below:
+
+- **The two ABIs' stdlibs are the same tree.** `diff -rq` over
+  `assets/arm64-v8a/lib/python3.14` against `assets/x86_64/lib/python3.14` reports differences in
+  exactly five files (`_sysconfigdata__*`, `_sysconfig_vars__*`, `build-details.json`) plus
+  `lib-dynload`. Everything else — 790 files, 11.91 MB — is duplicated byte for byte.
+- **An App Bundle strips `lib/<abi>/` per device and never strips `assets/`.** So the ABI half of
+  the payload is already handled by tooling the consumer has, and the duplicated half is not.
+
+#### The three options, and why (A) won
+
+- **(A) ship everything.** The consumer adds one dependency and it works. Size is the price.
+- **(B) leave the stdlib out and let the consumer fetch it.** Rejected on what the code actually
+  is, not on taste: every path that produces a CPython prefix today
+  (`downloadAllPythonBuilds`, `downloadPython_android_*`) is a task in
+  `python-multiplatform/build.gradle.kts`, reachable only by building this repo, and
+  `python-multiplatform-gradle-plugin` — the one thing a consumer applies — does KSP wiring and
+  nothing else (`PythonBindingsPlugin.kt` is 186 lines, all of it configuration names and a
+  reflective `ksp { arg(...) }`). Giving it a download/verify/stage path is a feature, not a
+  switch. And it would not buy what it appears to: on desktop, `PYTHONHOME` can point anywhere on
+  the machine, which is why §15c's gap is a *distribution* gap; on Android the stdlib has to end
+  up **inside the APK**, so a consumer-side download stages the same ~26 MB of assets. The size
+  moves, it does not shrink. Worth doing for §15c item 4; it does not answer §15d.
+- **(C) split per ABI.** Wrong lever, per the measurement above: `assets/` is 26.3 MB of the 37 MB
+  of entries and is exactly the part no ABI split touches, while `jni/` — the part a split would
+  address — is already stripped from the installed app by AGP. It also forces consumers into
+  flavour/variant matching for a library that has none.
+
+So (A), with the payload that is *provably* never read on a device removed.
+
+#### What was removed, and what deliberately was not
+
+`copyAndroidPythonAssets` no longer stages two things:
+
+- `include/python3.14` — CPython's C headers. cinterop reads them from the extraction tree
+  (`targetIncludePath`), never from assets; no Kotlin source in `androidMain`, `artMain`,
+  `androidInstrumentedTest` or `sample` opens an asset under `include/`.
+- `test` — CPython's own regression suite, 32.30 MB raw per ABI and **38% of the AAR**. Nothing in
+  this repository imports it.
+
+Not removed, and the distinction matters: `lib-dynload` is the compiled extension modules and is
+the only genuinely per-ABI part of the tree; `idlelib`, `ensurepip`, `tkinter` and `turtle` are
+dead weight for most embedders but are ordinary stdlib a consumer may legitimately import. "CPython's
+own test suite" and "C headers" are provable claims. "Nobody wants `tkinter`" is not.
+
+The duplicated 11.91 MB of pure Python is left duplicated too. De-duplicating it would save 3.16 MB
+compressed and change the published asset layout (`<abi>/lib/python<X.Y>`) that `MainActivity`,
+`PythonOnDevice` and now README's own Android section all depend on — a breaking change to the
+consumer contract for 14% of the artifact. Recorded as a measured option, not taken.
+
+**Result: 40.10 MB → 23.42 MB** (22.04 MB of entries, 1740 files). A `Copy` never deletes what it
+stopped copying and this directory is an AGP asset source root, so the task now clears it first —
+without that, both trees would have kept shipping on every machine that had built once before.
+
+#### A second, larger defect the publication exposed: an 87 MB metadata jar
+
+Publishing to `mavenLocal` produced `python-multiplatform-3.14.7-alpha01.jar` — the `allMetadataJar`,
+the artifact at the **root coordinate every Kotlin Multiplatform consumer resolves to compile
+against `commonMain`** — at **87.4 MB, of which 83.0 MB was four host platforms' `libpython`**
+(`lib/linux-x86_64` alone: 64.69 MB compressed, 240.23 MB raw) against 0.3 MB of actual metadata.
+
+The cause is a scope that reads as narrower than it is: `tasks.withType<Jar> { from(extractedDir) {
+... } }` sits *inside* the `jvm("desktop") { ... }` block, but `tasks` is the **project's** task
+container, so it matched `allMetadataJar` too. Only the CPython libraries are now scoped to
+`desktopJar`; the licence stays on every jar. `desktopJar` is unchanged at 87.7 MB, which is what
+§15c verified a desktop consumer loads `libpython` out of. The root artifact is **382 KB**.
+
+The sources jars never picked the libraries up (`desktopSourcesJar` 218 KB, `androidReleaseSourcesJar`
+212 KB, neither containing a `lib/` entry), so the narrowing changes exactly one artifact.
+
+#### Verified against a real external consumer
+
+`/Volumes/macMini/consumer-android-test` — a plain `com.android.application` + `org.jetbrains.
+kotlin.android` project outside this repository, no composite include, `mavenLocal()` first — depends
+on the **root** coordinate `io.github.thisisthepy:python-multiplatform:3.14.7-alpha01` and lets
+Gradle module metadata redirect it:
+
+```
+\--- io.github.thisisthepy:python-multiplatform:3.14.7-alpha01
+     \--- io.github.thisisthepy:python-multiplatform-android:3.14.7-alpha01
+```
+
+Its `MainActivity` unpacks `assets/<abi>/lib/python3.14` to `filesDir`, sets `PYTHONHOME`, calls
+`Python3.initialize()`, hands Python a `PyList` of `PyInt` built in Kotlin, and evaluates
+`sum(kotlin_numbers) * 2`. `assembleDebug` produced a 26.8 MB universal APK, and on **both**
+emulators:
+
+```
+API 36  I PyConsumer: PYCONSUMER_OK abi=arm64-v8a version=3.14.7 platform=android result=int:56
+API 26  I PyConsumer: PYCONSUMER_OK abi=arm64-v8a version=3.14.7 platform=android result=int:56
+```
+
+Compiled, assembled, installed and **ran** — the JNI surface, the object model and the stdlib
+packaging all work from a published artifact, with the app doing nothing the AAR does not document.
+
+**Still open after this**, and neither is a blocker for the above: the Android consumer must write
+the asset-unpacking and `PYTHONHOME` code itself (README's new "Android: two things the host app has
+to do first" section is now the documentation of that contract, but a `PythonBootstrap` helper in
+`androidMain` would be better than a documented recipe), and the bindings plugin is untested from
+outside for an Android consumer — §15b verified it against a plain JVM project only.
 
 ### 15e. Summary — corrected punch list for "can a consumer use this"
 
@@ -2412,10 +2528,22 @@ asked to fix only what's cheaply and safely fixable.
    code change.
 4. No distribution channel exists for the CPython stdlib prefix a consumer's `PYTHONHOME` needs —
    confirmed to be the *only* remaining blocker for a plain-JVM consumer once 1–2 are fixed.
-   Packaging/documenting one is real follow-up work, not done here.
-5. `androidTarget` has no Maven publication at all (found in passing, §15d) — a second, independent
-   blocker specific to Android consumers, also not done here.
+   Packaging/documenting one is real follow-up work, not done here. **Android is not affected**:
+   §15d ships the stdlib inside the AAR, and an external Android consumer now runs. This item is
+   desktop-only.
+5. ~~`androidTarget` has no Maven publication at all~~ **fixed, §15d** — `publishLibraryVariants
+   ("release")`, the AAR trimmed 40.10 MB → 23.42 MB on measurement rather than taste, and verified
+   end to end by an external Android app that resolves by coordinates and runs CPython on both
+   emulators.
+6. New, found while doing 5: the **root** Kotlin Multiplatform artifact was 87.4 MB because a
+   project-wide `tasks.withType<Jar>` in the desktop target block put four host platforms' libpython
+   into `allMetadataJar`. **Fixed, §15d** — 382 KB now. This one hits *every* KMP consumer on every
+   platform, not only Android.
+7. Still open for Android specifically: the host app has to hand-write the asset unpack and
+   `PYTHONHOME` setup (README documents the contract; a helper in `androidMain` would be better),
+   and the bindings plugin has never been exercised from an external *Android* consumer — §15b
+   covered a plain JVM one.
 
-None of §1–5 were guessed at: each was reproduced against a real external Gradle project outside
-this repository (`/Volumes/macMini/consumer-test`, `/Volumes/macMini/consumer-plugin-test`) rather
-than inferred from reading the build scripts alone.
+None of §1–7 were guessed at: each was reproduced against a real external Gradle project outside
+this repository (`/Volumes/macMini/consumer-test`, `/Volumes/macMini/consumer-plugin-test`,
+`/Volumes/macMini/consumer-android-test`) rather than inferred from reading the build scripts alone.

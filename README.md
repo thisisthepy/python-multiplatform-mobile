@@ -148,6 +148,43 @@ fun main() {
 }
 ```
 
+### Android: two things the host app has to do first
+
+Android is the one platform where the example above is not the whole story, and both extra steps
+exist because CPython reads its standard library off the filesystem.
+
+The Android artifact (`io.github.thisisthepy:python-multiplatform-android`, which the root
+coordinate resolves to for an Android consumer) ships the interpreter as `jni/<abi>/*.so` and the
+standard library as `assets/<abi>/lib/python<X.Y>/`. `Py_Initialize()` cannot read a stdlib out of
+the APK's asset archive, so the app unpacks it once and points `PYTHONHOME` at the prefix — **the
+parent of `lib/python<X.Y>`, not that directory**:
+
+```kotlin
+val stdlibPath = "lib/python${Versions.currentVersion.taggedVersionString}"
+val abi = android.os.Build.SUPPORTED_ABIS.first { it == "arm64-v8a" || it == "x86_64" }
+
+val target = File(filesDir, stdlibPath)
+if (!File(target, "encodings").isDirectory) {
+    target.deleteRecursively(); target.mkdirs()
+    copyAssetFolder(assets, "$abi/$stdlibPath", target.absolutePath)  // recursive AssetManager copy
+}
+Os.setenv("PYTHONHOME", filesDir.absolutePath, true)
+
+Python3.initialize()
+```
+
+Derive the version segment from `Versions.currentVersion.taggedVersionString` rather than writing
+`python3.14`: it carries the `t` suffix of a free-threaded build, and a hard-coded line silently
+stops matching the staged assets on a version bump — which is exactly how the sample app once died
+in `onCreate`.
+
+If `Py_Initialize()` is reached without this, it does not fail — it **aborts the process** with
+`Fatal Python error: Failed to import encodings module`.
+
+What the artifact does *not* carry, deliberately: CPython's own `test` package and its C headers.
+See `copyAndroidPythonAssets` in `python-multiplatform/build.gradle.kts` for the measurements
+behind that (it is 38% of the AAR) and ROADMAP §15d for the packaging decision.
+
 `Python3.exec` is deliberately built on `PyRun_String` rather than `PyRun_SimpleString`: the latter
 calls `PyErr_Print()` internally, which prints *and clears* a failure before Kotlin ever gets a
 chance to inspect it — so a Python-level exception would always surface as a generic message
