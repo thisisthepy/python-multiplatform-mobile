@@ -95,10 +95,18 @@ object TraverseThreadProbe {
  * only breakable by CPython's cycle collector reaching across the boundary through the proxy
  * type's `tp_traverse`/`tp_clear`.
  *
- * Lives in `iosSimulatorArm64Test` rather than a shared native test source set because there is
- * no shared one: `src/nativeTest` exists but is not wired into the hierarchy in
- * `build.gradle.kts`, and every native target carries its own copy of the `forceGC()` actual --
- * which would be a duplicate-actual error if `nativeTest` were on the path.
+ * Lives in `iosSimulatorArm64Test`, not `nativeTest`, even though `nativeTest` is wired into the
+ * hierarchy now and everything else this file touches (`ProxyTypeFactory`, `HandleTable`,
+ * `ClassLookup`, `python.native.ffi.bindings`) is `nativeMain`-level and shared with androidNative.
+ * The blocker is `platform.posix.pthread_self()`: on Darwin it returns `CPointer<pthread_t>?` (an
+ * opaque pointer, `.rawValue` and all), but on Linux/Bionic (androidNative) `pthread_t` is a plain
+ * unsigned integral type with no `.rawValue` -- moving this file to `nativeTest` was tried and
+ * failed `compileTestKotlinAndroidNativeArm64` with "receiver type mismatch" at every
+ * `pthread_self()?.rawValue` call site (three of them, in [TraverseThreadProbe.record] and both
+ * "on a thread CPython created" tests). Fixing that needs a `currentThreadId(): Long` `expect`/
+ * `actual` seam in `nativeMain` that hides the pointer-vs-integer difference behind one signature
+ * -- worthwhile, but its own piece of work, not a test-placement change. See
+ * `commonTest/README.md`.
  */
 class CycleCollectionTest {
 
