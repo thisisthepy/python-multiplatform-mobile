@@ -112,6 +112,27 @@ interface PythonBindingsExtension {
      * `pythonBindings { processor.set(projects.pythonMultiplatformKsp) }`.
      */
     val processor: Property<Any>
+
+    /**
+     * Whether to stage a CPython prefix for this machine and point `PYTHONHOME` at it on every
+     * `JavaExec` and `Test` task. Defaults to true — see [PythonHomeStaging] for why the library
+     * cannot supply one at runtime, and ROADMAP §15e item 4 for the gap it closes.
+     *
+     * It is already a no-op whenever `PYTHONHOME` is set in the environment, so setting this to
+     * false is for the case where a build must not reach the network at all: the first build on a
+     * machine downloads ~25 MB from python-build-standalone. Every later build, and every other
+     * project on the same machine, reuses it.
+     */
+    val stagePythonHome: Property<Boolean>
+
+    /** CPython version to stage. Defaults to the one this library was built against. */
+    val pythonVersion: Property<String>
+
+    /** python-build-standalone release tag to stage from. Defaults to the one this library used. */
+    val pythonBuildStandaloneRelease: Property<String>
+
+    /** Whether to stage a free-threaded build. Defaults to what this library was built against. */
+    val pythonFreeThreaded: Property<Boolean>
 }
 
 /**
@@ -167,6 +188,8 @@ class PythonBindingsPlugin : Plugin<Project> {
             )
         }
 
+        configurePythonHomeStaging(project, extension)
+
         project.afterEvaluate {
             setKspArg(
                 OPTION_ROLE,
@@ -183,6 +206,75 @@ class PythonBindingsPlugin : Plugin<Project> {
             )
             val excluded = extension.excludePackages.getOrElse(emptyList())
             if (excluded.isNotEmpty()) setKspArg(OPTION_EXCLUDE_PACKAGES, excluded.joinToString(","))
+        }
+    }
+
+    /**
+     * Registers `stagePythonHome` and hands its result to every task that launches a JVM.
+     *
+     * The prefix path is computed here rather than carried as a `Provider`, and it can be: it is a
+     * pure function of the version, the release, the host and the Gradle user home, none of which
+     * need the task to have run. That keeps `environment(...)` a plain string set at configuration
+     * time — the value is in the child process's environment before its JVM starts, which is the
+     * only way CPython's `getenv(3)` and [python.multiplatform.env.PythonHomeCheck]'s
+     * `System.getenv` can be guaranteed to read the same thing.
+     *
+     * Skipped entirely when `PYTHONHOME` is already set, so a consumer with their own prefix keeps
+     * it, and when the host is not a platform this library ships for — the latter warns rather
+     * than fails, because a project may well be building only its Android or iOS targets there.
+     */
+    private fun configurePythonHomeStaging(project: Project, extension: PythonBindingsExtension) {
+        val enabled = extension.stagePythonHome.getOrElse(true)
+        // `providers.environmentVariable`, not `System.getenv`: the latter reads the *daemon's*
+        // environment, and a daemon is reused across invocations that do not share one. A user
+        // running `PYTHONHOME=/their/prefix ./gradlew run` against a daemon that was started
+        // without it would otherwise be told, silently, that they had set nothing -- and have
+        // their prefix replaced by a staged one on the very task they were configuring.
+        if (!shouldStagePythonHome(project.providers.environmentVariable("PYTHONHOME").orNull, enabled)) return
+
+        val platform = hostDesktopPlatform(
+            System.getProperty("os.name").orEmpty(),
+            System.getProperty("os.arch").orEmpty(),
+        )
+        if (platform == null) {
+            project.logger.info(
+                "python-multiplatform: not staging a CPython prefix -- no python-build-standalone " +
+                    "distribution for ${System.getProperty("os.name")}/${System.getProperty("os.arch")}.",
+            )
+            return
+        }
+
+        val version = extension.pythonVersion.getOrElse(DEFAULT_PYTHON_VERSION)
+        val release = extension.pythonBuildStandaloneRelease.getOrElse(DEFAULT_PBS_RELEASE)
+        val freeThreaded = extension.pythonFreeThreaded.getOrElse(DEFAULT_PYTHON_FREE_THREADED)
+
+        // Shared across every project on the machine: the prefix is 24 MB of files that are
+        // identical for every consumer of a given release, and a per-project copy would pay for it
+        // once per checkout.
+        val cacheRoot = java.io.File(project.gradle.gradleUserHomeDir, PythonHomeStaging.CACHE_DIRECTORY)
+        val flavour = if (freeThreaded) "-freethreaded" else ""
+        val destination = java.io.File(cacheRoot, "$version+$release$flavour/$platform")
+        val prefix = java.io.File(destination, "python")
+
+        val stage = project.tasks.register("stagePythonHome", StagePythonHomeTask::class.java) {
+            group = "python"
+            description = "Downloads and unpacks a CPython prefix for PYTHONHOME to point at."
+            pythonVersion.set(version)
+            pbsRelease.set(release)
+            this.platform.set(platform)
+            this.freeThreaded.set(freeThreaded)
+            destinationDir.set(destination)
+            downloadDir.set(java.io.File(cacheRoot, "archives"))
+        }
+
+        val home = prefix.absolutePath
+        project.tasks.withType(org.gradle.api.tasks.JavaExec::class.java).configureEach {
+            dependsOn(stage)
+            environment("PYTHONHOME", home)
+        }
+        project.tasks.withType(org.gradle.api.tasks.testing.Test::class.java).configureEach {
+            dependsOn(stage)
+            environment("PYTHONHOME", home)
         }
     }
 

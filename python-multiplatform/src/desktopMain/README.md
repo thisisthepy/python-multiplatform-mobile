@@ -73,6 +73,28 @@ has to reach the metadata by construction:
 `MethodHandle.type()`s the loaded classes actually built — so a parser that stops recognising a
 declaration form surfaces as a failing test, not as a binary that dies at a customer.
 
+## The stdlib is staged by the Gradle plugin, and `PYTHONHOME` is set when the JVM starts
+
+`desktopJar` carries `libpython` for four platforms under `lib/<platform>/` and **no standard
+library** — verified, not assumed: the published jar's `lib/` tree is 14 entries, all of them
+shared libraries. `Py_Initialize()` therefore dies with `Failed to import encodings module` until
+`PYTHONHOME` names a prefix that has one.
+
+Supplying that prefix is `python-multiplatform-gradle-plugin`'s `stagePythonHome` task, not a
+runtime helper, and the reason is specific to this platform rather than a preference. **A JVM
+cannot set an environment variable for itself.** CPython reads `PYTHONHOME` with `getenv(3)`;
+`System.getenv` is an immutable snapshot taken at start-up, and mutating it (reflectively or
+otherwise) does not touch the native environment CPython reads. Android's `PythonBootstrap` calls
+`Os.setenv`; there is no such call here. A runtime helper would have to reach libc `setenv`
+through Panama — a different symbol on Windows (`_putenv_s`) — and would then be setting a value
+`PythonHomeCheck` could no longer read. Setting it as the child process is launched, which is what
+Gradle's `environment(...)` does and what this repo's own `desktopTest` already does, leaves
+CPython and `PythonHomeCheck` reading the same value from the same place.
+
+The staged prefix is shared per machine (under the Gradle user home), keyed by version + upstream
+release + platform, and stamped after the last extracted byte — so an interrupted extraction is
+never mistaken for a finished one. See ROADMAP §15h.
+
 ## CPython is loaded from disk, not from the image
 
 `manager.kt` extracts `libpython` from a classpath resource, but a native image bakes registered
