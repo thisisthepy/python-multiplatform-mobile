@@ -433,6 +433,25 @@ Needs a CPython Emscripten build; `-PwasmPythonDir=` or `PMP_PYTHON_DIR` overrid
 failing when it is absent. `build-cpython-abi.sh` in that directory reproduces the build; it matches
 `pyemscripten_2026_0` (PEP 783) closely enough to load a compiled PyPI wheel.
 
+**An unpacked `python-multiplatform-wasm-runtime` zip works just as well, and that is what CI is
+wired to use.** What the tests need is not the CPython build tree but the five files
+`stageWasmBrowserRuntime` stages out of it — `python.wasm`, `python.mjs`, the stdlib zip and the two
+glue modules. That was not true until the standard library stopped arriving through NODEFS: under
+Node, `sys.path[0]` was `/lib/python314.zip`, a file nothing had ever created, and the stdlib was
+really coming from entry 1 — the CPython **source checkout** beside the build directory, which no
+artefact carries. `cpython.mjs` now installs the staged zip into MEMFS on both hosts, so
+
+    unzip python-multiplatform-wasm-runtime-<version>.zip -d /tmp/rt
+    ./gradlew :python-multiplatform:wasmJsNodeTest -PwasmPythonDir=/tmp/rt
+
+runs the whole suite (344/0/0, measured) against nothing but a published artefact.
+
+`-PrequireWasmRuntime=true` turns every one of those skips — the interpreter, and for the browser task
+the absence of a Chromium-family browser — into a failure naming what was missing. Pass it whenever
+a *caller* asked for the suite, so that a skip cannot be reported to them as success over zero
+tests. `.github/workflows/wasm.yml` passes it; without it that workflow reported green having run
+nothing, and did for months.
+
 `verifyWasmAbiSignatures` runs first, automatically, and skips the same way. Run it alone when
 `bindings.kt` changes — it is a second or two and it turns "0 tests ran, `LinkError`" into a line
 naming the function.

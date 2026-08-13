@@ -79,9 +79,48 @@ const EmscriptenModule = (await import(/* webpackIgnore: true */ "./python.mjs")
 delete WebAssembly.promising;
 delete WebAssembly.Suspending;
 
-// The Node settings, unchanged from when this file only had these. `thisProgram` is what Emscripten
-// derives `sys.prefix` from, and NODEFS then reaches the real stdlib under that prefix -- so the
-// path must be the interpreter's own build directory and not the staging copy next to this file.
+/**
+ * Writes the standard library zip into MEMFS at the one path `getpath` looks for.
+ *
+ * `/lib/python<major><minor>.zip` -- no dot -- is where CPython puts the zip on `sys.path` when
+ * `sys.prefix` is `/`, and the build ships it as `python<major>.<minor>.zip`, so the rename is not
+ * cosmetic. The version is read out of the running interpreter rather than hardcoded, so a version
+ * bump cannot leave the zip under a name `getpath` does not look for; same expression CPython's own
+ * `Tools/wasm/emscripten/web_example` uses.
+ *
+ * `/lib` is MEMFS on both hosts. Under Node it is one of the three directories the NODEFS loop below
+ * deliberately does not mount, which is what leaves this path free to write.
+ */
+function installStdlibZip(Module, bytes) {
+    const versionInt = Module.HEAPU32[Module._Py_Version >>> 2];
+    const major = (versionInt >>> 24) & 0xff;
+    const minor = (versionInt >>> 16) & 0xff;
+    // Without this, getpath complains that it cannot find exec-prefix. It is a marker directory
+    // only; this build has no dynamically loaded stdlib extensions.
+    Module.FS.mkdirTree(`/lib/python${major}.${minor}/lib-dynload/`);
+    Module.FS.writeFile(`/lib/python${major}${minor}.zip`, new Uint8Array(bytes), { canOwn: true });
+}
+
+// The Node settings. NODEFS still mounts the real filesystem -- tests reach host paths through it --
+// but the **standard library** arrives the same way it does in a browser: as the zip staged next to
+// `python.wasm`.
+//
+// That last part is the difference between a test run that needs this machine and one that needs
+// only the five staged files. Measured rather than assumed: with the zip absent, `sys.path` under
+// Node reads
+//
+//     ['/lib/python314.zip', '<checkout>/Lib', '<builddir>/build/lib.emscripten-...']
+//
+// -- entry 0 is a file nothing had ever created, and the stdlib was really coming from entry 1, the
+// **CPython source checkout**, which is neither in the build directory nor in the published runtime
+// artefact. Point `PMP_PYTHON_DIR` at an unpacked `python-multiplatform-wasm-runtime` zip and the
+// interpreter dies at `Py_Initialize` with `Fatal Python error: Failed to import encodings module`.
+// Populating entry 0 is what makes the artefact self-sufficient, and it costs a `readFileSync` of
+// 3.7 MB at start-up.
+//
+// Read synchronously, unlike the browser's `fetch`: there is no run dependency to juggle, so the
+// zip is simply in place before `preRun` returns.
+//
 async function nodeSettings() {
     const fs = (await import(/* webpackIgnore: true */ "node:fs")).default;
     return {
@@ -96,9 +135,29 @@ async function nodeSettings() {
                 Module.FS.mkdirTree(dir);
                 Module.FS.mount(Module.FS.filesystems.NODEFS, { root: dir }, dir);
             }
+            if (STDLIB_ZIP_URL !== null) {
+                // Resolved against this module rather than the process working directory: the
+                // runner executes out of a staging directory whose name it chooses, and the zip is
+                // beside this file there. Node's `fs` accepts a `file:` URL directly.
+                installStdlibZip(Module, fs.readFileSync(new URL(STDLIB_ZIP_URL, import.meta.url)));
+            }
             Module.FS.chdir(PYTHON_DIR);
             Object.assign(Module.ENV, process.env);
             delete Module.ENV.PATH;
+            // Set last, and unconditionally, for two separate reasons.
+            //
+            // It is the *answer* to the question getpath asks: with the stdlib installed at
+            // `/lib/python<major><minor>.zip` the prefix really is `/`, and saying so is what stops
+            // `Could not find platform independent libraries <prefix>` being printed to stderr on
+            // every run whose `PYTHON_DIR` is an unpacked runtime artefact rather than a build
+            // directory (there is no `python.sh` there for `thisProgram` to name).
+            //
+            // And it overrides whatever the host shell exported, which is not hypothetical for
+            // this library: a shell set up to run the *desktop* target has `PYTHONHOME` pointing at
+            // a native CPython tree. Inherited here it would aim the wasm interpreter at a tree
+            // with the wrong ABI, and whether the suite passed would depend on which shell launched
+            // it. Same reasoning as `PATH` above.
+            Module.ENV.PYTHONHOME = "/";
         },
     };
 }
@@ -117,15 +176,6 @@ function browserSettings() {
         arguments: [],
         async preRun(Module) {
             globalThis.Module = Module;
-            // Read out of the interpreter rather than hardcoded, so a version bump cannot leave the
-            // zip under a name getpath does not look for. Same expression CPython's own web example
-            // uses.
-            const versionInt = Module.HEAPU32[Module._Py_Version >>> 2];
-            const major = (versionInt >>> 24) & 0xff;
-            const minor = (versionInt >>> 16) & 0xff;
-            // Without this, getpath complains that it cannot find exec-prefix. It is a marker
-            // directory only; this build has no dynamically loaded stdlib extensions.
-            Module.FS.mkdirTree(`/lib/python${major}.${minor}/lib-dynload/`);
             Module.addRunDependency("install-stdlib");
             const response = await fetch(STDLIB_ZIP_URL);
             if (!response.ok) {
@@ -135,8 +185,7 @@ function browserSettings() {
                     `python-multiplatform's stageWasmBrowserRuntime task.`
                 );
             }
-            const stdlib = await response.arrayBuffer();
-            Module.FS.writeFile(`/lib/python${major}${minor}.zip`, new Uint8Array(stdlib), { canOwn: true });
+            installStdlibZip(Module, await response.arrayBuffer());
             Module.removeRunDependency("install-stdlib");
         },
     };
