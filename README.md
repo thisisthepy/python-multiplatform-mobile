@@ -25,11 +25,16 @@ Thanks to many contributors who develop dependent packages for this python-kotli
 #### Supporting multiplatforms:
 
 - Android (arm64, x86_64) with the [official CPython Android builds](https://www.python.org/downloads/)
-- iOS (arm64, simulator) with [Python-Apple-support](https://github.com/beeware/Python-Apple-support)
+- iOS (arm64, simulator) with [Python-Apple-support](https://github.com/beeware/Python-Apple-support) (≤ 3.14) or python.org's official XCframework (≥ 3.15)
 - macOS (arm64, x86_64) with [Python Standalone Builds](https://github.com/astral-sh/python-build-standalone)
-- Linux (x86_64) with [Python Standalone Builds](https://github.com/astral-sh/python-build-standalone)
-- Windows (x86_64) with [Python Standalone Builds](https://github.com/astral-sh/python-build-standalone)
+- Linux (x86_64) with [Python Standalone Builds](https://github.com/astral-sh/python-build-standalone) — the download/build wiring targets it, but the test suite has never actually been run on Linux in this repository (no Linux CI run yet, no local report); see ROADMAP §14b.
+- Windows (x86_64) with [Python Standalone Builds](https://github.com/astral-sh/python-build-standalone) — same caveat as Linux, unverified.
 - wasmJs (browser, Node) with CPython built here for `wasm32-emscripten` — see `docs/wasm-design.md`
+
+The desktop target (macOS/Linux/Windows) is one Kotlin/JVM target reached through Panama at
+runtime, not three separate Kotlin/Native targets — so "Linux/Windows support" above means the
+build downloads and links against the right archive for that OS, not that the suite has been
+observed passing there.
 
 The interpreter is not vendored into this repository. Gradle downloads it per platform,
 verifies it, and extracts it at build time — see `docs/python-version-acquisition.md`. The
@@ -42,7 +47,10 @@ version is set in `gradle.properties`.
 - [x] Bring python embed API for Kotlin/JVM targets (Windows, Linux, macOS, Android).
 - [x] Bring python embed API for Kotlin/Native targets (iOS).
 - [x] Python interop API (Binder) for Kotlin side.
-- [x] Kotlin interop API (Binder) for Python side.
+- [x] Kotlin interop API (Binder) for Python side. (Python calling Kotlin works and is tested down
+      to a GraalVM native image — but cross-boundary reference cycles are not collected yet, and
+      calling still goes through a generated `_pm_bind`-style table rather than plain
+      `obj.method(x)` syntax. See ROADMAP §7 and §14b.)
 
 ___
 
@@ -50,178 +58,98 @@ ___
 
 #### (1) Clone this repo
 
-- RC version
+    git clone https://github.com/thisisthepy/python-multiplatform PythonMultiplatform
 
+Checkout `develop` for the active development line, or a tagged release for a specific version.
+(A previous revision of this section named a different repository,
+`python-multiplatform-mobile`, and `@develop`/`@python3.13`-style refs that are not valid git clone
+syntax — corrected against this repository's actual `origin` remote and layout.)
 
-    git clone https://github.com/thisisthepy/python-multiplatform-mobile PythonMultiplatformMobile
+#### (2) Build the Gradle project
 
-- dev version
+This is a Kotlin Multiplatform project targeting Android, iOS, desktop (macOS/Linux/Windows) and
+wasmJs. The two modules that matter for building and trying it out:
 
+* `python-multiplatform/` — the library itself: the FFI layer (`EmbedAPI`, one `expect`/`actual`
+  per platform), the object model built on top of it (`PyObject` and friends), and the
+  Python → Kotlin upcall machinery. See `python-multiplatform/src/commonMain/README.md` for the
+  layering rules and `docs/architecture.md` for the design.
+* `sample/` — a Compose Multiplatform demo app exercising the real API (not template boilerplate):
+  `Python3.initialize()`, publishing a Kotlin-built `PyList` into Python, evaluating an expression,
+  and a Python → Kotlin upcall through the generated table. Run it with `./gradlew :sample:run`
+  (desktop) — see `sample/src/commonMain/.../PythonDemo.kt` for what it does and ROADMAP §13 for
+  what it demonstrates on each platform.
 
-    git clone https://github.com/thisisthepy/python-multiplatform-mobile@develop PythonMultiplatformMobile
+There is no `composeApp` module in this repository — that name is Compose Multiplatform's default
+project-template layout, and this repository does not use it. `iosApp/` is a real directory here
+(the Xcode project for the sample's iOS entry point).
 
-- specific release version
-
-
-    git clone https://github.com/thisisthepy/python-multiplatform-mobile@python3.13 PythonMultiplatformMobile
-
-
-#### (2) Build gradle project
-
-This is a Kotlin Multiplatform project targeting Android, iOS, Web, Desktop.
-
-* `/composeApp` is for code that will be shared across your Compose Multiplatform applications.
-  It contains several subfolders:
-  - `commonMain` is for code that’s common for all targets.
-  - Other folders are for Kotlin code that will be compiled for only the platform indicated in the folder name.
-    For example, if you want to use Apple’s CoreCrypto for the iOS part of your Kotlin app,
-    `iosMain` would be the right folder for such calls.
-
-* `/iosApp` contains iOS applications. Even if you’re sharing your UI with Compose Multiplatform, 
-  you need this entry point for your iOS app. This is also where you should add SwiftUI code for your project.
-
-
-Learn more about [Kotlin Multiplatform](https://www.jetbrains.com/help/kotlin-multiplatform-dev/get-started.html),
-[Compose Multiplatform](https://github.com/JetBrains/compose-multiplatform/#compose-multiplatform),
-[Kotlin/Wasm](https://kotl.in/wasm/)…
-
-We would appreciate your feedback on Compose/Web and Kotlin/Wasm in the public Slack channel [#compose-web](https://slack-chats.kotlinlang.org/c/compose-web).
-If you face any issues, please report them on [GitHub](https://github.com/JetBrains/compose-multiplatform/issues).
-
-You can open the web application by running the `:composeApp:wasmJsBrowserDevelopmentRun` Gradle task.
-
+Learn more about [Kotlin Multiplatform](https://www.jetbrains.com/help/kotlin-multiplatform-dev/get-started.html)
+and [Compose Multiplatform](https://github.com/JetBrains/compose-multiplatform/#compose-multiplatform).
 
 ---
 
 ## Use Pre-Built Package
 
-#### (1) Maven Repo (Release only)
+**Unverified — likely not published anywhere yet.** This section previously listed Maven Central
+and JitPack coordinates as though the library were already published there. Checked during a
+2026-08-13 documentation audit:
 
-In your project build.gradle.kts
+- Maven Central: `https://repo1.maven.org/maven2/io/github/thisisthepy/` returns `404 Not Found`
+  (no `io.github.thisisthepy` group present at all).
+- JitPack: its build API (`https://jitpack.io/api/builds/com.github.thisisthepy/python-multiplatform-mobile`)
+  reports no build record for that artifact.
+- The version this section quoted (`0.0.1`) does not match what the build actually produces —
+  `python-multiplatform/build.gradle.kts` derives the library version from the configured Python
+  version plus an `-alpha01` suffix (e.g. `3.14.7-alpha01`), not a hand-set `0.0.1`.
 
-    implementation("io.github.thisisthepy:python-multiplatform:0.0.1")
-
-#### (2) Jitpack (for Pre-release)
-
-In your project settings.gradle.kts
-
-    pluginManagement {
-        repositories {
-            google {
-                mavenContent {
-                    includeGroupAndSubgroups("androidx")
-                    includeGroupAndSubgroups("com.android")
-                    includeGroupAndSubgroups("com.google")
-                }
-            }
-            mavenCentral()
-            gradlePluginPortal()
-    
-            maven {
-                setUrl("https://jitpack.io")  // Add this line!
-            }
-        }
-    }
-
-
-In your project build.gradle.kts
-
-    implementation("com.github.thisisthepy:python-multiplatform-mobile:0.0.1")
+Both are negative results, not a documented "we don't publish this" decision — so treat this
+section as aspirational until a release is actually confirmed on one of these, rather than as
+instructions that work today. Until then, build from source per "Build Manually" above.
 
 ---
 
 ## Usage
 
-In your main method,
+**The example previously here did not match any version of this library's API** — it called
+`Python3Library()`, `Pointer`, and raw `Py_*`/`py!!.Py_*` functions with force-unwrapped nullables
+on undeclared `python`/`py`/`mathModule` variables, none of which exist in this codebase. It looks
+like an early sketch of a design this library did not end up taking. Replaced below with the
+object-model API that exists today, matching `sample/src/commonMain/.../PythonDemo.kt` (the
+sample's actual startup code — see it for the fuller version, including the upcall half):
 
 ```kotlin
+import python.multiplatform.ffi.PyObject
+import python.multiplatform.ffi.Python3
+import python.multiplatform.ffi.types.basic.PyInt
+import python.multiplatform.ffi.types.collections.PyList
 
-object PythonIntegration {
-    val python = Python3Library()
-    
-    @JvmStatic
-    fun main(args: Array<String>) {
+fun main() {
+    Python3.initialize()
 
-        python!!.Py_Initialize()  // Run python interprepter
+    // Kotlin -> Python: a real Python list of real Python ints, published as a global in
+    // __main__ rather than assembled by formatting a string of Python source.
+    val numbers = PyList.fromList(listOf(2L, 3L, 5L, 7L, 11L).map { PyInt.from(it) })
+    Python3.import("__main__").setAttr("kotlin_numbers", numbers)
 
-        if (python!!.Py_IsInitialized() == 0) {
-            throw RuntimeException("Failed to initialize Python")
-        }
-        
-        val module = py!!.PyImport_ImportModule(moduleName)  // Module import
-        if (module == null) {
-            throw RuntimeException("Failed to import module: $moduleName")
-        }
+    // Python -> Kotlin: evaluate an expression and read the result back through the object
+    // model. `258` is Py_eval_input, CPython's own compiler-mode token for "a single expression"
+    // (as opposed to Py_file_input's "a sequence of statements", which `Python3.exec` uses).
+    val globals = Python3.import("__main__").dict
+    val result: PyObject = Python3.eval("sum(kotlin_numbers) * 2", 258, globals, globals)
+    println("${result.Type.name}: $result")   // int: 56
 
-        callFunction(mathModule, "pow", 2.0, 3.0)
+    // Statements, for side effects rather than a value:
+    Python3.exec("print('hello from python')")
 
-        val func = py!!.PyObject_GetAttrString(module, funcName)
-
-        if (func == null) {
-            throw java.lang.RuntimeException("Failed to get function: $funcName")
-        }
-
-        val pyArgs = py!!.PyTuple_New(args.size)
-        for (i in args.indices) {
-            val arg = convertJavaToPython(args[i])
-            println("The type of variable is ${arg::class.simpleName}")
-            py!!.PyTuple_SetItem(pyArgs, i, arg)
-        }
-
-        val result = py!!.PyObject_CallObject(func, pyArgs)
-
-        if (result != null) {
-            println(funcName + " result: " + convertPythonToJava(result))
-            py!!.Py_DecRef(result)
-        }
-
-        py!!.Py_DecRef(pyArgs)
-        py!!.Py_DecRef(func)
-
-        python!!.Py_DecRef(mathModule)
-
-        if (python!!.Py_IsInitialized() != 0) {
-            python!!.Py_Finalize()
-        }
-    }
-
-    private fun convertJavaToPython(obj: Any): Pointer {
-        if (obj is Int || obj is Long) {
-            println("obj is converted to PyLong: $obj")
-            return py!!.PyLong_FromLong((obj as Number).toLong())
-        } else if (obj is Float || obj is Double) {
-            println("obj is converted to PyFloat: $obj")
-            return py!!.PyFloat_FromDouble((obj as Number).toDouble())
-        } else if (obj is String) {
-            println("obj is converted to String: $obj")
-            return py!!.PyUnicode_FromString(obj)
-        }
-        throw UnsupportedOperationException("Unsupported type: " + obj.javaClass)
-    }
-
-    private fun convertPythonToJava(pyObj: Pointer): Any {
-        // This is a simplistic conversion. In a real-world scenario, you'd need more type checking.
-        val result1 = py!!.PyLong_AsLong(pyObj)
-        if (py!!.PyErr_Occurred() == null) {
-            return result1
-        }
-        py!!.PyErr_Clear()
-
-        val result2 = py!!.PyFloat_AsDouble(pyObj)
-        if (py!!.PyErr_Occurred() == null) {
-            return result2
-        }
-        py!!.PyErr_Clear()
-
-        val result3 = py!!.PyUnicode_AsUTF8(pyObj)
-        if (py!!.PyErr_Occurred() == null) {
-            return result3
-        }
-        py!!.PyErr_Clear()
-
-        throw UnsupportedOperationException("Unsupported type")
-    }
-
+    // No close()/Py_DecRef anywhere above, and none is missing: every wrapper registers a
+    // cleaner in its own constructor, and the collector releases the underlying CPython
+    // reference once the Kotlin wrapper itself becomes unreachable (ROADMAP §4).
 }
-
 ```
+
+`Python3.exec` is deliberately built on `PyRun_String` rather than `PyRun_SimpleString`: the latter
+calls `PyErr_Print()` internally, which prints *and clears* a failure before Kotlin ever gets a
+chance to inspect it — so a Python-level exception would always surface as a generic message
+instead of the real exception type. A failure from `exec`/`eval` instead throws a `PyException`
+carrying the real Python exception.
