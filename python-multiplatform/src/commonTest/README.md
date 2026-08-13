@@ -118,6 +118,120 @@ the `actual` half of an `expect` declared elsewhere. Nothing was moved.
   and nobody noticed" -- which is what `GCLeakTest`'s pre-`9040a8ce` duplication was, and what this
   pass looked for and did not otherwise find.
 
+## The three `CycleCollectionTest` copies, and the cost of them drifting
+
+The section above argues the three copies are justified. They are -- and they also drifted, in the
+one way that matters, within a day of the third one being written. This records what happened, what
+it would take to merge them, and what to do until then.
+
+### What drifted
+
+`643eaed9` fixed an intermittent failure in the `nativeTest` copy: a test that closes a cycle ends
+holding the proxy's last reference in a Kotlin/JVM object, and once `tearDown()` drops the handle
+table's root that reference is owed to the platform's cleaner thread, which can only pay it once it
+is given the GIL. `testDeallocOnAThreadCPythonCreated` is the only test in the file that gives the
+GIL up mid-measurement (`_t.start()`/`_t.join()`), so a leftover landing there removes a reference
+from the proxy type between its two readings, and the test reports a `tp_dealloc` imbalance that
+never happened. The fix was to release each proxy under the GIL the test already holds
+(`disposeProxy`), settle before the first reading, and **assert that nothing was owed** so that a
+reintroduction fails loudly instead of intermittently.
+
+That fix went into `nativeTest` only. The `androidInstrumentedTest` copy carries the same test and
+the same three cycle-closing tests, and kept the debt for thirteen hours until it produced
+`tp_dealloc ran on a CPython-created thread but did not balance the instance's reference to its
+heap type expected:<5> but was:<2>` -- a drop of exactly three, which is exactly how many tests in
+that file leave a proxy behind. Both copies now carry the fix.
+
+The failure is rare: it needs an ART collection to fire *inside* the measuring test's `withGIL`,
+after the first reading, so that the cleaner is still blocked when the worker hands the GIL over.
+Twenty full-suite instrumented runs (ten each on API 26 and API 36) on the unfixed code produced
+none. **The debt behind it is not rare**: with the disposals removed and the settle step left in,
+the probe reports 3 owed on both API levels on every run. That asymmetry is the argument for
+keeping the settle-and-assert step -- it turns a race that hides for twenty runs into a number that
+is the same every time.
+
+`desktopTest`'s copy also creates the debt (its `Node.close()` existed for this and was never
+called) and now disposes of it too. It has no settle step, because it has nothing that could
+observe one: no test in that file gives the GIL up between two readings. That is recorded in the
+file's KDoc, along with the condition under which it stops being true.
+
+### The copies are not the same test three times
+
+| Test | desktop | native (iOS + androidNative) | ART |
+|---|---|---|---|
+| `testCycleCollectionByGC` | yes | yes | yes |
+| `testHandleReleasedWhenProxyDiesWithoutCycle` | yes | yes | yes |
+| `testHandleSurvivesWhenTraverseReportsNothing` (negative control) | **no** | yes | yes |
+| `testDeallocOnAThreadCPythonCreated` | **no** | yes | yes |
+| `testCycleCollectedOnAThreadCPythonCreated` | **no** | yes | yes |
+| `traverseReportsTheHeldPointerForARegisteredClass` | no | no | yes (JNI-only concern) |
+
+Desktop is missing the negative control and both foreign-thread tests. The foreign-thread pair is a
+genuinely different question there -- a Panama upcall stub entered from a thread the JVM has never
+seen is not the same mechanism as `AttachCurrentThreadAsDaemon` or an unattached Kotlin/Native
+callback -- so that is new test-writing rather than a placement fix, and it is not done. It is,
+however, the reason desktop currently cannot exhibit this flake, and the reason a settle step there
+would be guarding nothing today.
+
+### Can they be merged?
+
+Most of the body could be, and less is missing than the three files suggest. Everything the tests
+call into CPython with -- `PyObject_CallObject`, `PyRun_SimpleString`, `Py_DecRef`,
+`PyImport_ImportModule`, `PyObject_GetAttrString`, `PyDict_SetItemString` -- is already an `expect`
+in `commonMain/python/native/ffi/EmbedAPI.kt`, and `PyObject(addr.toNativePointer()!!, borrowed =
+false)` already works unchanged on all three (the desktop copy reaches the same constructor through
+`Class.forName` reflection, which nothing appears to require -- `Long.toNativePointer()` is a public
+`actual` in `desktopMain` and the constructor is public; the other two call both directly).
+
+Exactly three operations are not common, and they are the ones each copy hand-rolls differently:
+
+1. **storing a handle into a proxy's relative type data** -- `sun.misc.Unsafe.putLong` on desktop, a
+   `CPointer<LongVar>` store on native, `ProxyTypeFactory.setHandle` on ART;
+2. **reading an object header's `ob_refcnt`** -- `Unsafe.getLong` (plus the free-threaded
+   two-header form, which only desktop has to handle), a `LongVar` load, `bindings.obRefCnt`;
+3. **the calling thread's identity** -- `currentThreadId()` (`nativeMain`, `internal`) versus
+   `Thread.currentThread().id`.
+
+(1) and (2) are already implemented inside every platform's `ProxyTypeFactory`/`bindings` --
+`PyObject_GetTypeData` exists in all four `bindings` objects -- so promoting `setHandle`, `handleOf`
+and an `obRefCnt` equivalent onto the `expect object ProxyTypeFactory` (which today declares only
+`createProxyType`) is wiring, not new mechanism. (3) needs the `nativeMain` seam widened to a
+`commonTest` `expect`.
+
+Two things still block a straight move to `commonTest` afterwards, and both have precedent for how
+to handle them:
+
+- **wasmJs has no threads at all.** The two foreign-thread tests cannot exist there in any form, and
+  `AsyncUpcallPortabilityTest` is the standing record of what happens when a wasm-hostile test is
+  placed hopefully. This needs the `expect val` gate `GCLeakTest` already uses for
+  `cleanerReleasesAutomatically`.
+- **`androidUnitTest` is a second compilation of `commonTest` on a host JVM that cannot load the
+  `.so`.** Anything moved has to compile there; it will not run against an interpreter.
+
+The desktop free-threaded build is a third wrinkle: its `typeRefCount()` reads a different object
+header (`ob_tid` at offset 0, count split across `ob_ref_local`/`ob_ref_shared`) and needs a
+`PyGC_Collect()` on either side of the instantiation loop to materialise deferred references. That
+belongs behind the `obRefCnt` seam rather than in the test, which is another argument for (2).
+
+**Assessment: mergeable, worth doing, and not a small change** -- it moves three operations into
+production `expect`/`actual` surface, which is a wider blast radius than the flake that prompted it.
+Not attempted here.
+
+### Until then: how to stop the three drifting again
+
+- The settle-and-assert step is the drift detector, not just the fix. Both copies that can observe
+  the debt now assert it is zero, with the measured non-zero value in the message, so removing a
+  `disposeProxy` call fails deterministically on the next run instead of once every few dozen.
+- **The invariant to carry to any new test in any of the three files:** if a test reads a reference
+  count across a point where it releases the GIL, it must first settle pending finalisation and
+  assert nothing was owed. Every test that closes a cycle must release its own proxy under the GIL
+  it already holds.
+- A fix to one copy is a fix to three. The three files are `desktopTest/`, `nativeTest/` and
+  `androidInstrumentedTest/` under `kotlin/python/multiplatform/ref/CycleCollectionTest.kt`; the
+  method names are deliberately identical across them (see the table above), so
+  `grep -rn "<methodName>" python-multiplatform/src/*/kotlin/python/multiplatform/ref/CycleCollectionTest.kt`
+  answers "did this land everywhere" in one command.
+
 ## Reverse direction: commonTest tests that could be meaningless on some platform
 
 The established gate for this is `commonTest`'s `expect val` / `expect fun` pattern --
