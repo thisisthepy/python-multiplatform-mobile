@@ -2511,11 +2511,98 @@ API 26  I PyConsumer: PYCONSUMER_OK abi=arm64-v8a version=3.14.7 platform=androi
 Compiled, assembled, installed and **ran** — the JNI surface, the object model and the stdlib
 packaging all work from a published artifact, with the app doing nothing the AAR does not document.
 
-**Still open after this**, and neither is a blocker for the above: the Android consumer must write
-the asset-unpacking and `PYTHONHOME` code itself (README's new "Android: two things the host app has
-to do first" section is now the documentation of that contract, but a `PythonBootstrap` helper in
-`androidMain` would be better than a documented recipe), and the bindings plugin is untested from
+**Still open after this**, and not a blocker for the above: the bindings plugin is untested from
 outside for an Android consumer — §15b verified it against a plain JVM project only.
+
+~~The Android consumer must write the asset-unpacking and `PYTHONHOME` code itself~~ —
+**closed, §15f.**
+
+### 15f. The recipe became a helper, and the third copy of it was in this repository
+
+§15d left the host app writing the bootstrap by hand, and named a `PythonBootstrap` helper as the
+better answer. Doing it produced the argument for it that the README paragraph could not make:
+**there were three copies of that recipe, and all three were wrong about the same thing.**
+
+| copy | lines it owned | how it decided "already unpacked" |
+|---|---|---|
+| `sample`'s `MainActivity` | 55 | `target.exists() && target.list()?.isNotEmpty()` |
+| `/Volumes/macMini/consumer-android-test`'s `MainActivity` | 26 | `File(target, "encodings").isDirectory` |
+| `PythonOnDevice`, this repo's own instrumentation fixture | 35 | `File(target, "encodings").isDirectory` |
+
+Every one of them probes the *result* for a single entry. A copy interrupted partway — the app
+killed during a cold start, the device out of space — satisfies all three probes with an incomplete
+stdlib, and the next launch accepts it. The failure then surfaces as an `ImportError` for whichever
+module sorted after the interruption, nowhere near the cause. Three authors writing from the same
+README paragraph produced the same defect three times; that is the case for a helper rather than for
+a better paragraph.
+
+`PythonBootstrap` (`androidMain/kotlin/python/multiplatform/env/PythonBootstrap.kt`) writes a stamp
+— `python-multiplatform <version> <abi> <versionCode> <lastUpdateTime>` — **after** the last byte of
+the last file, and deletes it *before* starting a rewrite. A partial tree therefore has no stamp,
+and a stamp is never valid for a tree that is currently being replaced. The `lastUpdateTime`
+component is what makes an APK upgrade restage: `filesDir` survives the install, so the previous
+build's tree is still sitting there and its Python version may well be identical, which is exactly
+the case a version-only check misses.
+
+It deliberately does **no** `PYTHONHOME` validation of its own. `Python3.initialize` already runs
+`PythonHomeCheck` (landed in `7bf08ca6`) on every call; a second implementation of that rule is a
+second thing that can drift from the layout `Py_Initialize()` actually wants. This produces the
+layout, that verifies it, and `PythonBootstrapTest.stagedPrefixIsOneThatPythonHomeCheckAccepts` runs
+one against the other instead of asserting each separately. A second test asserts the value the
+bootstrap sets is the value the check reads — on Android those are the same environment, because
+libcore's single-argument `System.getenv` delegates to `Os.getenv` rather than to the JVM's cached
+no-arg map.
+
+#### Cost: 804 files, 20,147,280 bytes
+
+Measured twice over, and the two disagree in a way worth keeping. From `onCreate` of the external
+consumer app — fresh install, then relaunch, which is what a host app actually pays:
+
+| | API 26 | API 36 |
+|---|---|---|
+| first launch (unpacks) | 237 ms | 480 ms |
+| every later launch (stamp check) | 4 ms | 28 ms |
+
+From `PythonBootstrapTest`, inside an instrumentation process that is already warm and whose page
+cache is already hot:
+
+| | API 26 | API 36 |
+|---|---|---|
+| first (unpacks) | 71–74 ms | 95–103 ms |
+| subsequent (stamp check) | 1 ms | 1 ms |
+
+The in-process numbers are 2–5x optimistic, so **quote the cold-start ones**. Either way it is a
+factor of 17–60, which is the entire point: the alternative to a skip that can be trusted is 20 MB
+of asset decompression on every cold start.
+
+#### The copy loop was measured, not argued
+
+It departs from the hand-written one in two ways, so
+`PythonBootstrapTest.optimisedCopyIsMeasuredAgainstTheHandWrittenOne` runs both, alternating, two
+samples each:
+
+| | API 26 | API 36 |
+|---|---|---|
+| hand-written (`list()` per entry, `copyTo`'s 8 KB buffer) | 192 / 192 ms | 324 / 324 ms |
+| `PythonBootstrap` (failed `open()` classifies, one 64 KB buffer) | 124 / 113 ms | 150 / 167 ms |
+
+The larger half is the classification. The obvious loop asks `assets.list(child)` of every entry to
+decide whether it is a directory — a native directory lookup per entry, 800-odd of them, *on top of*
+the `open()` each file needs anyway. Opening first and reading `FileNotFoundException` as "directory"
+folds the question into work that had to happen regardless, so only the directories pay anything
+extra.
+
+That behaviour is **not** in `AssetManager`'s documented contract, and AssetManager was
+reimplemented wholesale in API 28, so `openBasedDirectoryDetectionAgreesWithListBased` re-derives
+both classifications on device on whatever API level is running rather than trusting they agree, and
+the benchmark asserts both loops wrote the same 804 files. Nothing is asserted about the *margin*:
+an emulator's disk is the host's SSD behind qemu and is not a stable enough clock to fail a build
+on.
+
+Worth recording for whoever revisits this: reading the APK as a ZIP (`ZipFile(applicationInfo
+.sourceDir)`, prefix-filtered, one pass, no recursion and no per-entry classification at all) is
+very likely faster still. It was not taken because it has to handle `splitSourceDirs` for App
+Bundles, and 100 ms once per install did not justify that surface.
 
 ### 15e. Summary — corrected punch list for "can a consumer use this"
 
@@ -2539,10 +2626,11 @@ outside for an Android consumer — §15b verified it against a plain JVM projec
    project-wide `tasks.withType<Jar>` in the desktop target block put four host platforms' libpython
    into `allMetadataJar`. **Fixed, §15d** — 382 KB now. This one hits *every* KMP consumer on every
    platform, not only Android.
-7. Still open for Android specifically: the host app has to hand-write the asset unpack and
-   `PYTHONHOME` setup (README documents the contract; a helper in `androidMain` would be better),
-   and the bindings plugin has never been exercised from an external *Android* consumer — §15b
-   covered a plain JVM one.
+7. ~~The host app has to hand-write the asset unpack and `PYTHONHOME` setup~~ **fixed, §15f** —
+   `PythonBootstrap` in `androidMain`, one call, and the three hand-written copies (`sample`,
+   `PythonOnDevice`, the external consumer app) all call it now. Still open for Android
+   specifically: the bindings plugin has never been exercised from an external *Android* consumer —
+   §15b covered a plain JVM one.
 
 None of §1–7 were guessed at: each was reproduced against a real external Gradle project outside
 this repository (`/Volumes/macMini/consumer-test`, `/Volumes/macMini/consumer-plugin-test`,

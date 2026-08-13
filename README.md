@@ -148,38 +148,62 @@ fun main() {
 }
 ```
 
-### Android: two things the host app has to do first
+### Android: call `PythonBootstrap.initialize` instead of `Python3.initialize`
 
-Android is the one platform where the example above is not the whole story, and both extra steps
-exist because CPython reads its standard library off the filesystem.
+Android is the one platform where the example above is not the whole story, because CPython reads
+its standard library off the filesystem and the Android artifact
+(`io.github.thisisthepy:python-multiplatform-android`, which the root coordinate resolves to for an
+Android consumer) ships that library inside the APK, as `assets/<abi>/lib/python<X.Y>/`.
+`Py_Initialize()` cannot read a stdlib out of an asset archive, so it has to be unpacked to
+app-private storage once and `PYTHONHOME` has to point at the prefix.
 
-The Android artifact (`io.github.thisisthepy:python-multiplatform-android`, which the root
-coordinate resolves to for an Android consumer) ships the interpreter as `jni/<abi>/*.so` and the
-standard library as `assets/<abi>/lib/python<X.Y>/`. `Py_Initialize()` cannot read a stdlib out of
-the APK's asset archive, so the app unpacks it once and points `PYTHONHOME` at the prefix — **the
-parent of `lib/python<X.Y>`, not that directory**:
+`PythonBootstrap` (in `androidMain`, so it comes with the AAR) does that and then starts the
+interpreter. It is the *only* extra step:
 
 ```kotlin
-val stdlibPath = "lib/python${Versions.currentVersion.taggedVersionString}"
-val abi = android.os.Build.SUPPORTED_ABIS.first { it == "arm64-v8a" || it == "x86_64" }
+import python.multiplatform.env.PythonBootstrap
 
-val target = File(filesDir, stdlibPath)
-if (!File(target, "encodings").isDirectory) {
-    target.deleteRecursively(); target.mkdirs()
-    copyAssetFolder(assets, "$abi/$stdlibPath", target.absolutePath)  // recursive AssetManager copy
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        PythonBootstrap.initialize(this)
+        // CPython is up; everything in the Usage example above works from here.
+    }
 }
-Os.setenv("PYTHONHOME", filesDir.absolutePath, true)
-
-Python3.initialize()
 ```
 
-Derive the version segment from `Versions.currentVersion.taggedVersionString` rather than writing
-`python3.14`: it carries the `t` suffix of a free-threaded build, and a hard-coded line silently
-stops matching the staged assets on a version bump — which is exactly how the sample app once died
-in `onCreate`.
+Idempotent, so it is safe from every entry point an app has — an `Activity`, an `Application`, a
+`WorkManager` worker. It returns a `Staging` describing what it did (`unpacked`, `abi`,
+`fileCount`, `bytes`, `elapsedMillis`, `prefix`, `stdlibDir`) for apps that want to show a
+first-launch progress state; ignore it otherwise.
 
-If `Py_Initialize()` is reached without this, it does not fail — it **aborts the process** with
-`Fatal Python error: Failed to import encodings module`.
+**What it costs.** 804 files, 20,147,280 bytes. Measured from a real app's `onCreate` on both
+emulators — a fresh install, then a relaunch:
+
+| | API 26 | API 36 |
+|---|---|---|
+| first launch (unpacks) | 237 ms | 480 ms |
+| every later launch (stamp check) | 4 ms | 28 ms |
+
+(`PythonBootstrapTest` measures the same two paths inside an already-warm instrumentation process
+and sees 71–103 ms and 1 ms. The cold-start figures above are the ones a host app actually pays.)
+
+The skip is decided by a stamp file naming the library version, the ABI, and the host app's
+`versionCode`/`lastUpdateTime` — written *after* the last file, so a copy interrupted by the app
+being killed cannot be mistaken for a complete one, and an APK upgrade that restages assets over a
+surviving `filesDir` re-unpacks even when the Python version has not moved. Probing the result for
+one entry (`encodings/` exists, the directory is non-empty) gets both of those wrong; that is what
+this replaced.
+
+If you need the pieces separately — staging without starting the interpreter, or a prefix somewhere
+other than `filesDir` — `PythonBootstrap.stageStdlib(context, prefix)` is the first half, and
+`initialize` takes the same `prefix` parameter.
+
+If `Py_Initialize()` is reached without any of this, it does not fail — it **aborts the process**
+with `Fatal Python error: Failed to import encodings module`. `Python3.initialize` runs a
+`PYTHONHOME` pre-flight check that turns most of the ways this goes wrong into a catchable
+`IllegalStateException` first, but the check cannot run before it is reached; `PythonBootstrap` is
+what stops it being reached.
 
 What the artifact does *not* carry, deliberately: CPython's own `test` package and its C headers.
 See `copyAndroidPythonAssets` in `python-multiplatform/build.gradle.kts` for the measurements
