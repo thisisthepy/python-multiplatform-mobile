@@ -2252,3 +2252,170 @@ was touched. For traceability, since some of these were load-bearing enough to b
 - Left alone as already accurate: the "Supporting multiplatforms" list's entries for Android, iOS
   and macOS (only Linux/Windows got the untested caveat added), and the Template ToDo list's first
   three lines.
+
+## 15. Can a consumer outside this repo actually use the library?
+
+§14c/§14d established that nothing is published anywhere yet. This section is the follow-up that
+was still open: given that gap, does *local* publishing even work, or would a real release hit
+more breakage on top of "not published"? Tested by publishing all three components to
+`mavenLocal()` and building a genuine external consumer project outside this repo
+(`/Volumes/macMini/consumer-test` and `/Volumes/macMini/consumer-plugin-test`, both scratch
+directories, not part of this repository) against it.
+
+### 15a. Publishing coverage before this pass: 1 of 3 components
+
+The library ships as three separately-consumed pieces — `python-multiplatform` (the library
+itself), `python-multiplatform-gradle-plugin` (the convenience Gradle plugin, `id("io.github.
+thisisthepy.python.multiplatform.bindings")`), `python-multiplatform-ksp` (the KSP processor the
+plugin wires in by default). A consumer needs all three reachable from *some* Maven repository —
+`in-repo` project substitution (`projects.pythonMultiplatformKsp`, used by `ksp-fixtures` and
+`sample`) hides gaps in this because it never resolves anything by coordinates at all.
+
+- `python-multiplatform`: `maven-publish` applied, `./gradlew tasks --all` lists a full set of
+  `publish<Target>PublicationToMavenLocal` tasks. **Working**, with one target-level gap — see
+  §15d.
+- `python-multiplatform-gradle-plugin`: `maven-publish` + `kotlin-dsl` applied — but this build is
+  a separate Gradle build, brought in only via `pluginManagement { includeBuild(...) }` in the
+  root `settings.gradle.kts`. That wires plugin-id *resolution* inside this repo; it does not add
+  the build's tasks to the root task graph. `./gradlew tasks --all` from the repo root lists no
+  `python-multiplatform-gradle-plugin:*` tasks at all — a coordinator following only the root
+  build's task list would conclude this component has no publishing story. It has to be published
+  from inside its own directory: `cd python-multiplatform-gradle-plugin && ../gradlew
+  publishToMavenLocal`. **Working once you know to look there** — worth a line in a future
+  RELEASING.md, not a code fix (the separate-build shape is deliberate, see the build file's own
+  comment on why the plugin needs KSP on its runtime classpath but not its compile classpath).
+- `python-multiplatform-ksp`: **no publishing plugin applied at all** before this pass — plain
+  `kotlin("jvm")`, nothing else. `./gradlew tasks --all` confirms zero publish tasks. This is the
+  one true gap: `python-multiplatform-gradle-plugin`'s `generateCoordinates` task bakes
+  `DEFAULT_PROCESSOR_COORDINATES = "io.github.thisisthepy:python-multiplatform-ksp:<version>"`
+  into the plugin — the coordinate the plugin hands KSP when a consumer doesn't override
+  `pythonBindings { processor.set(...) }` — and until now that coordinate named an artifact that
+  could never exist anywhere. **Fixed**: `python-multiplatform-ksp/build.gradle.kts` now applies
+  `maven-publish` with a `MavenPublication` built `from(components["java"])`; default
+  group/artifactId/version already matched what the generated coordinates expect, so no other
+  change was needed. Verified — `./gradlew :python-multiplatform-ksp:publishToMavenLocal` now
+  produces `~/.m2/repository/io/github/thisisthepy/python-multiplatform-ksp/<version>/`.
+
+### 15b. A real bug the in-repo build could never surface: `generateCoordinates` baked `"null"` as the group
+
+Publishing the fix from §15a exposed a second, independent bug, and it is the one worth reading
+carefully — nothing in this repository's own build could ever have caught it, because nothing in
+this repository resolves the processor by its published coordinates.
+
+`python-multiplatform-gradle-plugin/build.gradle.kts` generates `ProcessorCoordinates.kt` from:
+
+    val generateCoordinates = tasks.register("generateCoordinates") {
+        val coordinates = "$group:python-multiplatform-ksp:$version"
+        ...
+
+This reads as project-scoped (the file's own doc comment says "this build's own group and
+version"), but the lambda passed to `tasks.register(...)` has `Task` as its receiver, not
+`Project`. `Task` has a `group: String?` property of its own — a task's category label (`"build"`,
+`"verification"`, ...), always null on a task nobody assigned one to — and it shadows
+`Project.group` inside that block. `Task` has no `version` property, so `$version` fell through to
+`Project.version` by coincidence and looked correct. The generated constant was therefore:
+
+    internal const val DEFAULT_PROCESSOR_COORDINATES: String = "null:python-multiplatform-ksp:3.13.0"
+
+Every external consumer relying on the default (i.e. not setting `pythonBindings { processor.set
+(...) }`, which the plugin's own doc comment calls out as the in-repo-only override) would apply
+the plugin, add no KSP dependency of their own, and get:
+
+    Could not find null:python-multiplatform-ksp:3.13.0.
+    Searched in the following locations:
+      - file:/Users/.../.m2/repository/null/python-multiplatform-ksp/3.13.0/....pom
+      - https://repo.maven.apache.org/maven2/null/python-multiplatform-ksp/3.13.0/....pom
+
+This reproduced with a real external Gradle project (`/Volumes/macMini/consumer-plugin-test`)
+applying `id("io.github.thisisthepy.python.multiplatform.bindings") version "3.13.0"` from
+`mavenLocal()` — `:kspKotlin` failed with exactly that message on the first attempt.
+
+**Fixed**: qualified both reads as `project.group` / `project.version`. Re-published, re-ran the
+same external consumer with no other change — `:kspKotlin` now runs and generates the fragment
+table. Both fixes are isolated to `python-multiplatform-gradle-plugin/build.gradle.kts` and
+`python-multiplatform-ksp/build.gradle.kts`; nothing in `python-multiplatform/`, `sample/`, or
+`ksp-fixtures/` was touched, and `desktopTest` stayed at 352/0 (1 skipped) throughout — see §14a
+for the counting recipe, this run just re-applies it.
+
+### 15c. The library itself, once published, works exactly as advertised for a plain JVM consumer
+
+With `python-multiplatform` published to `mavenLocal()`, a from-scratch external Gradle project
+(`/Volumes/macMini/consumer-test`, plain `kotlin("jvm")` + `application`, *not* Kotlin
+Multiplatform) depending on `io.github.thisisthepy:python-multiplatform-desktop:<version>` and
+running README's own "Usage" example verbatim:
+
+- **Compiled clean** against the published artifact — the object-model API (`Python3`, `PyObject`,
+  `PyList`, `PyInt`) resolves with no extra repositories beyond `mavenLocal()` + `mavenCentral()`.
+- **Ran and produced the correct result** (`Result from Python: 56`, i.e. `sum([2,3,5,7,11]) * 2`)
+  once `PYTHONHOME` was pointed at a real CPython prefix. The native `libpython` shared library
+  itself *is* bundled in the published jar (`tasks.withType<Jar>` in `python-multiplatform/
+  build.gradle.kts` copies it under `lib/<platform>/`) and loads correctly from the classpath with
+  no extra wiring — `manager.loadLibPython()` found it without complaint. Only the interpreter's
+  standard library (`encodings`, `lib/python3.14/`, ...) is missing; `Py_Initialize()` fails with
+  `Fatal Python error: Failed to import encodings module` until `PYTHONHOME` supplies it.
+
+So the object model, the FFI layer, the upcall marshalling, and the native-library packaging are
+all consumer-ready today. **The one remaining blocker for a plain-JVM consumer is CPython
+distribution**, and it is a real one:
+
+- `desktopMain/README.md` already documents that `PYTHONHOME` must point at a matching stdlib
+  prefix and that this is deliberate (the jar carries the loader library, not the interpreter
+  tree) — so this is a known, accepted design point, not an oversight.
+  But **there is no published or documented way for an external consumer to obtain that prefix.**
+  Every path that produces one today (`downloadAllPythonBuilds` and its per-platform
+  `downloadPython_*` tasks) is a task defined in `python-multiplatform/build.gradle.kts` itself,
+  reachable only by building this repository from source. A consumer who adds the Maven dependency
+  and follows README's own "Usage" section hits `Failed to import encodings module` with no next
+  step documented anywhere.
+- This was proven the direct way, not inferred: pointing the external consumer's `PYTHONHOME` at
+  this repo's own `python-multiplatform/build/python-standalone/extracted/<version>/<platform>/
+  python` (a path that only exists because this repo's own build already ran
+  `downloadAllPythonBuilds`) made the same consumer project run correctly. That confirms the gap
+  is exactly "no distribution channel for the stdlib prefix" and nothing else — once a consumer
+  has *a* correct prefix from *any* source, everything downstream of it (native loading, object
+  model, upcalls) already works.
+- **Next step, not done here** (this pass fixed what was cheaply and safely fixable; packaging and
+  shipping a CPython distribution is a real design decision, not a one-line fix): either (a)
+  publish a small companion artifact/archive per platform that a consumer's build can unpack into
+  a `PYTHONHOME`-shaped directory, mirroring what `downloadAllPythonBuilds` already assembles from
+  `python-build-standalone`, or (b) document, in README's "Use Pre-Built Package" section, the
+  exact python-build-standalone release URL and unpack layout a consumer needs to reproduce by
+  hand. (a) is better for anyone who isn't willing to hand-roll it; (b) is the cheaper stopgap.
+
+### 15d. Found in passing, not fixed: `androidTarget` has no Maven publication at all
+
+`./gradlew tasks --all` lists `publish<Target>PublicationToMavenLocal` for every one of
+`python-multiplatform`'s targets (`desktop`, `iosArm64`, `iosSimulatorArm64`, `iosX64`,
+`androidNativeArm64`, `androidNativeX64`, `wasmJs`) **except `androidTarget`.** Kotlin Multiplatform
+only auto-creates a Maven publication for an Android target when the target block calls
+`publishLibraryVariants(...)`; `python-multiplatform/build.gradle.kts`'s `androidTarget { ... }`
+block (it configures `compilerOptions` and the native-binary/asset copy wiring, both unrelated)
+never calls it. Practical effect: **an Android app consumer cannot get this library from Maven at
+all today**, published or not — the gap is orthogonal to §14c's "nothing is published" finding and
+would still block Android specifically even after that one is resolved.
+
+Not fixed in this pass: enabling `publishLibraryVariants` would try to package a release AAR that,
+per this module's own `Jar` config and `copyAndroidPythonBinaries`/`copyAndroidPythonAssets` tasks,
+bundles per-ABI native `.so`s and a full CPython stdlib into `assets/` — a real packaging design
+question (variant selection, artifact size, whether the stdlib belongs in the AAR at all given
+§15c's finding for desktop) rather than a safe mechanical fix, and out of scope for a pass that was
+asked to fix only what's cheaply and safely fixable.
+
+### 15e. Summary — corrected punch list for "can a consumer use this"
+
+1. ~~`python-multiplatform-ksp` has no publishing plugin~~ **fixed this pass.**
+2. ~~`generateCoordinates` bakes `"null"` as the processor's group~~ **fixed this pass** — was
+   silently broken for every external consumer of the default coordinates since the day this task
+   was written; the in-repo build can never exercise this path.
+3. `python-multiplatform-gradle-plugin` publishes fine but is invisible to `./gradlew tasks` from
+   the repo root because it's a separate included build — needs a documented publish step, not a
+   code change.
+4. No distribution channel exists for the CPython stdlib prefix a consumer's `PYTHONHOME` needs —
+   confirmed to be the *only* remaining blocker for a plain-JVM consumer once 1–2 are fixed.
+   Packaging/documenting one is real follow-up work, not done here.
+5. `androidTarget` has no Maven publication at all (found in passing, §15d) — a second, independent
+   blocker specific to Android consumers, also not done here.
+
+None of §1–5 were guessed at: each was reproduced against a real external Gradle project outside
+this repository (`/Volumes/macMini/consumer-test`, `/Volumes/macMini/consumer-plugin-test`) rather
+than inferred from reading the build scripts alone.
