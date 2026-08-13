@@ -19,8 +19,27 @@ package python.multiplatform.ffi.upcall
  * |---|---|
  * | desktop | `ctypes.CFUNCTYPE` over the Panama upcall stubs in `UpcallStub` |
  * | iOS, androidNative | `PyMethodDef`s installed by `nativeMain`'s `UpcallEntry.publish` |
+ * | Android/ART | the same `PyMethodDef`s, with C shims in `jni_onload.def` behind `ml_meth` |
  *
- * `false`, with what each would need, on:
+ * ### What the ART row cost, and why the note that used to be here was wrong
+ *
+ * It said one C function was missing: a `pmp_upcall_invoke_free_meth` beside the existing
+ * `pmp_upcall_invoke_meth`, reading the handle out of `args[0]` and the tuple out of `args[1]` and
+ * published as `_pm_invoke`. That was true, and it was not the whole of it.
+ *
+ * With only that added, every test in [PythonProxyInstallTest] got *past* the generated module's
+ * entry-point guard and failed one line later -- on `pmp_api26` and `pmp_api36` alike, 11 of 11 --
+ * with `TypeError: bad argument type for built-in operation`. `pmp_upcall_resolve_meth` read its
+ * argument with `PyUnicode_AsUTF8` alone, and [PythonProxySource]'s `_pm_lookup` sends `bytes`,
+ * because desktop reaches its resolver through `ctypes.CFUNCTYPE(c_long, c_char_p)` and `c_char_p`
+ * refuses a `str` outright. `nativeMain`'s `pmResolveMethod` had already been taught both spellings
+ * for exactly that reason; the ART shim had not, and nothing had ever asked it to -- the only caller
+ * it had, `androidInstrumentedTest`'s `bindUpcallOrNull`, passes a `str`.
+ *
+ * The note could not have found that, because it was written from reading and the second half only
+ * exists at run time. It took an emulator, which is the same shape of gap this file exists to close.
+ *
+ * `false`, with what it would need, on:
  *
  * - **wasmJs.** Nothing crosses into Python here but a *bound* callable: `UpcallEntry.bind` builds
  *   one over the single `@WasmExport`ed `pmp_invoke`, and resolution happens in Kotlin. Publishing
@@ -29,14 +48,5 @@ package python.multiplatform.ffi.upcall
  *   be declared by the *embedding application* (the three-line `wasmJsTest/UpcallExports.kt` shape),
  *   not by this library. The async half cannot follow even then: `import asyncio` traps in this
  *   CPython build, so every suspending proxy would fail at its first `await`.
- * - **Android/ART.** `androidMain`'s `UpcallEntry.publish` installs `_pm_resolve`, `_pm_bind`,
- *   `_pm_release` and `_pm_cancel` through C shims in `artMain/cinterop/jni_onload.def`, and there
- *   is no `_pm_invoke` among them. What is missing is only the C half: a
- *   `pmp_upcall_invoke_free_meth(self, args)` beside the existing `pmp_upcall_invoke_meth` that
- *   reads the handle out of `args[0]` and the argument tuple out of `args[1]`, and calls the
- *   `UpcallCallbacks.invoke(long, long)` method ID `jni_onload.def` already holds. No Kotlin is
- *   missing on that target -- [python.native.ffi.UpcallCallbacks.invoke] is already the right
- *   shape. It is not done here because it cannot be *run* here: the Android path needs an
- *   emulator, and untested C in the JNI shim is worse than a recorded gap.
  */
 expect val publishesProxyEntryPoints: Boolean

@@ -40,9 +40,13 @@ import kotlin.test.assertTrue
  *
  * A test that only ever ran on the platform whose shim it was written against could not have found
  * that. So the contract lives here, where every target that has a boundary shim runs it, and
- * [publishesProxyEntryPoints] carries the two that do not -- as a per-target constant rather than
+ * [publishesProxyEntryPoints] carries the one that does not -- as a per-target constant rather than
  * as something sniffed out of `globals()`, so a target that *stops* publishing fails rather than
  * quietly taking the other branch.
+ *
+ * It has already earned that once more: running here is what found the second half of the ART gap,
+ * a `_pm_resolve` that read `str` but not the `bytes` [PythonProxySource] sends. Nothing that could
+ * be read off the source said so -- see [publishesProxyEntryPoints].
  *
  * ### What stayed behind
  *

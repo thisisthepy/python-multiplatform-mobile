@@ -1,6 +1,6 @@
 package org.thisisthepy.python.multiplatform.demo.bindings
 
-import python.multiplatform.reflection.UpcallTable
+import python.multiplatform.ffi.Python3
 
 /**
  * Android reaches the generated table the same way desktop does, and for the same reason: this
@@ -19,17 +19,39 @@ import python.multiplatform.reflection.UpcallTable
  */
 
 /**
- * The call is made from Kotlin, exactly as on iOS, and says so.
+ * Python makes the call, through the same raw entry points the proxy module is built on.
  *
- * The *table* is real and generated here. What is missing on Android is the boundary shim:
- * desktop's `python.native.ffi.UpcallStub` is a pair of Panama upcall stubs, and nothing
- * equivalent exists for the JNI path yet. Reporting this as a call Python made would hide the one
- * part of ROADMAP §7 that is still open.
+ * This used to resolve and invoke from *Kotlin* and say so, because "the boundary shim is
+ * desktop-only today". That is no longer true: `androidMain`'s `UpcallEntry.publish` binds
+ * `_pm_resolve` and `_pm_invoke` into `__main__` as `PyMethodDef`s whose `ml_meth` is a C shim in
+ * `artMain/cinterop/jni_onload.def`, and [installPythonProxies] has already run by the time
+ * anything on the demo screen can call this ([org.thisisthepy.python.multiplatform.demo.PythonDemo.start]
+ * publishes before it returns).
+ *
+ * So this is now the same two-shape demonstration desktop gives -- a zero-argument entry and an
+ * argument-carrying one -- with a JNI upcall under it instead of a Panama stub. It is written as
+ * Python source rather than as Kotlin calls because that is the claim being made.
  */
-actual fun callKotlinFromPython(): String {
-    val handle = UpcallTable.resolve(UPCALL_ENTRY_NAME)
-    if (!handle.isValid) return "the name was not in the table (handle -1)"
-    val value = UpcallTable.invoke(handle, emptyArray())
-    return "table hit: handle ${handle.raw} -> $value  (Kotlin-side call; " +
-        "the boundary shim is desktop-only today)"
+actual fun callKotlinFromPython(): String = try {
+    Python3.exec(
+        """
+        _pm_demo_raw = {}
+        _pm_demo_raw['h'] = _pm_resolve('$UPCALL_ENTRY_NAME')
+        _pm_demo_raw['args_h'] = _pm_resolve('$UPCALL_ARGS_ENTRY_NAME')
+        if _pm_demo_raw['h'] != -1:
+            _pm_demo_raw['value'] = _pm_invoke(_pm_demo_raw['h'], ())
+            _pm_demo_raw['described'] = _pm_invoke(
+                _pm_demo_raw['args_h'], ('presses x3 = ', 3)
+            )
+        """.trimIndent(),
+    )
+    val handle = evalToString("_pm_demo_raw['h']")
+    if (handle == "-1") {
+        "the name was not in the table (handle -1)"
+    } else {
+        "handle $handle -> ${evalToString("_pm_demo_raw['value']")}  ·  " +
+            "with args -> ${evalToString("_pm_demo_raw['described']")}"
+    }
+} catch (t: Throwable) {
+    "${t::class.simpleName}: ${t.message}"
 }

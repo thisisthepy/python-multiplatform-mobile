@@ -138,17 +138,23 @@ object UpcallCallbacks {
 object UpcallEntry {
 
     /**
-     * Installs `_pm_resolve`, `_pm_bind`, `_pm_release` and `_pm_cancel` into [namespace] (a
-     * Python dict).
+     * Installs `_pm_resolve`, `_pm_invoke`, `_pm_bind`, `_pm_release` and `_pm_cancel` into
+     * [namespace] (a Python dict).
      *
      * That set is the whole bootstrap: everything after it is Python calling Python objects.
-     * `pm_invoke` is deliberately *not* published -- it is only ever reached through the callable
-     * `_pm_bind` returns, which is what keeps the handle out of Python's hands as a separate
-     * argument.
+     *
+     * `_pm_invoke` -- the unbound `(handle, args_tuple) -> result` form -- used to be withheld, on
+     * the argument that it would put the handle in Python's hands as a separate argument. But
+     * `_pm_bind` already takes a raw handle from Python and gives back a callable over it, so
+     * `_pm_bind(h)(*a)` and `_pm_invoke(h, a)` are one capability with one failure mode, and the
+     * only consumer this bootstrap has is
+     * [python.multiplatform.ffi.upcall.PythonProxySource]'s generated module, every call in which
+     * is `_pm_invoke(handle, args)`. `nativeMain`'s `UpcallEntry.publish` reversed the same
+     * decision first, for the same reason.
      *
      * Callable from Kotlin without the GIL; takes it for the duration.
      *
-     * @return true if all four landed.
+     * @return true if all five landed.
      */
     fun publish(namespace: NativePointer): Boolean {
         // Forces UpcallCallbacks' <clinit> -- and with it UpcallTrampoline's and UpcallTable's --

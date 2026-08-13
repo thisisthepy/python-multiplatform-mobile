@@ -1469,6 +1469,7 @@ static jmethodID g_upcallReleaseM = NULL;
 static jmethodID g_upcallCancelM = NULL;
 
 static jlong pmp_upcall_invoke_meth(jlong self, jlong args);
+static jlong pmp_upcall_invoke_free_meth(jlong self, jlong args);
 static jlong pmp_upcall_resolve_meth(jlong self, jlong name);
 static jlong pmp_upcall_bind_meth(jlong self, jlong handle);
 static jlong pmp_upcall_release_meth(jlong self, jlong handle);
@@ -1477,10 +1478,12 @@ static jlong pmp_upcall_cancel_meth(jlong self, jlong handle);
 /*
  * Static rather than heap-allocated: a PyCFunction object stores the PyMethodDef * it was built
  * from instead of copying it, so anything freed here would leave every callable built from it
- * pointing at released memory. Five structs for the life of the process.
+ * pointing at released memory. Six structs for the life of the process.
  */
 static pmp_method_def g_pmInvokeDef =
     {"pm_invoke", &pmp_upcall_invoke_meth, PMP_METH_VARARGS, NULL};
+static pmp_method_def g_pmInvokeFreeDef =
+    {"_pm_invoke", &pmp_upcall_invoke_free_meth, PMP_METH_VARARGS, NULL};
 static pmp_method_def g_pmResolveDef =
     {"_pm_resolve", &pmp_upcall_resolve_meth, PMP_METH_O, NULL};
 static pmp_method_def g_pmBindDef =
@@ -1545,7 +1548,72 @@ static jlong pmp_upcall_invoke_meth(jlong self, jlong args) {
     return result;
 }
 
-/* METH_O: str -> handle, or -1. Called once per name; every call after that carries the integer. */
+/*
+ * PyObject *_pm_invoke(PyObject *self, PyObject *args) -- METH_VARARGS, **unbound**: `args` is
+ * `(handle, args_tuple)`.
+ *
+ * The shape PythonProxySource's generated module calls, and the same one desktop's
+ * `ctypes.CFUNCTYPE(py_object, c_long, py_object)` shim and nativeMain's `pmInvokeFreeMethod`
+ * present. It grants nothing pmp_upcall_bind_meth did not already grant -- `_pm_bind` takes a raw
+ * handle straight from Python and hands back a callable over it, so `_pm_bind(h)(*a)` and
+ * `_pm_invoke(h, a)` are the same capability with the same failure mode.
+ *
+ * Both tuple items are borrowed and nothing here releases either; the result is a new reference,
+ * which is UpcallTrampoline's contract and the same one pmp_upcall_invoke_meth relies on.
+ */
+static jlong pmp_upcall_invoke_free_meth(jlong self, jlong args) {
+    JNIEnv *env;
+    int attached = 0;
+    jlong handleItem;
+    jlong callArgs;
+    jlong raw;
+    jlong result;
+
+    if (g_upcallBridge == NULL || g_upcallInvokeM == NULL) {
+        return pmp_upcall_fail("the Kotlin upcall bridge was not registered at load time");
+    }
+    /* METH_VARARGS guarantees a tuple, so this can only be the wrong arity. */
+    if (args == 0 || PyTuple_Size(args) != 2) {
+        return pmp_upcall_fail("_pm_invoke(handle, args_tuple) takes exactly two arguments");
+    }
+    handleItem = PyTuple_GetItem(args, 0);
+    /* CallableHandle.NONE for a missing item; a non-integer leaves its own TypeError pending. */
+    raw = (handleItem == 0) ? -1 : PyLong_AsLongLong(handleItem);
+    if (PyErr_Occurred() != 0) return 0;
+    /* Cannot fail for index 1 of a size-2 tuple. */
+    callArgs = PyTuple_GetItem(args, 1);
+
+    env = pmp_attach(&attached);
+    if (env == NULL) return pmp_upcall_fail("no JNIEnv is available on this thread");
+
+    result = (*env)->CallStaticLongMethod(env, g_upcallBridge, g_upcallInvokeM, raw, callArgs);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        result = 0;
+    }
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+
+    if (result == 0) return pmp_upcall_fail("the Kotlin upcall failed");
+    return result;
+}
+
+/*
+ * METH_O: `str` **or** `bytes` -> handle, or -1. Called once per name; every call after that
+ * carries the integer.
+ *
+ * Both spellings are accepted because both are forced on real callers, exactly as nativeMain's
+ * pmResolveMethod records. A PyMethodDef host writes `_pm_resolve('pkg.fn')`, which is what `str`
+ * is for -- androidInstrumentedTest's bindUpcallOrNull does. But the one piece of Python that has
+ * to work against every host, PythonProxySource's `_pm_lookup`, sends `bytes`: desktop reaches its
+ * resolver through `ctypes.CFUNCTYPE(c_long, c_char_p)` and `c_char_p` refuses a `str` outright.
+ *
+ * This is the second half of the ART gap, and it was not the half that was written down. With only
+ * `_pm_invoke` added, PythonProxyInstallTest got past the generated module's entry-point guard and
+ * failed one line later on both emulators with `TypeError: bad argument type for built-in
+ * operation` -- PyUnicode_AsUTF8 refusing the `bytes` `_pm_lookup` had just encoded.
+ *
+ * Costs one failed PyUnicode_AsUTF8 and a PyErr_Clear on the `bytes` path, at install time only.
+ */
 static jlong pmp_upcall_resolve_meth(jlong self, jlong name) {
     JNIEnv *env;
     int attached = 0;
@@ -1556,9 +1624,17 @@ static jlong pmp_upcall_resolve_meth(jlong self, jlong name) {
     if (g_upcallBridge == NULL || g_upcallResolveM == NULL) {
         return pmp_upcall_fail("the Kotlin upcall bridge was not registered at load time");
     }
-    /* A non-str argument leaves a TypeError pending, which is a better answer than -1. */
     text = (name == 0) ? NULL : PyUnicode_AsUTF8(name);
-    if (text == NULL) return pmp_upcall_fail("_pm_resolve expects a str");
+    if (text == NULL && name != 0) {
+        /* The failed str read left a TypeError pending; it is not the answer yet. */
+        PyErr_Clear();
+        text = PyBytes_AsString(name);
+    }
+    /*
+     * Neither spelling matched, so PyBytes_AsString's TypeError is left pending -- a better answer
+     * than -1, which would read as "no such name". pmp_upcall_fail keeps whatever is already set.
+     */
+    if (text == NULL) return pmp_upcall_fail("_pm_resolve expects a str or bytes");
 
     env = pmp_attach(&attached);
     if (env == NULL) return pmp_upcall_fail("no JNIEnv is available on this thread");
@@ -1673,13 +1749,16 @@ static int pmp_install_method(jlong ns, pmp_method_def *def) {
 }
 
 /*
- * Installs `_pm_resolve`, `_pm_bind`, `_pm_release` and `_pm_cancel` into the Python dict at `ns`.
- * 1 on success.
+ * Installs `_pm_resolve`, `_pm_invoke`, `_pm_bind`, `_pm_release` and `_pm_cancel` into the Python
+ * dict at `ns`. 1 on success.
  *
  * That set is the whole bootstrap: everything after it is Python calling Python objects.
- * `pm_invoke` is deliberately not published on its own -- it is only ever reached through the
- * callable `_pm_bind` returns, which is what keeps the handle out of Python's hands as a separate
- * argument.
+ *
+ * `_pm_invoke` used to be withheld here, on the argument that the handle should never reach Python
+ * as a separate argument -- but `_pm_bind` hands Python the same handle and gives back a callable
+ * over it, so the two are one capability, and the only consumer the bootstrap has (the module
+ * PythonProxySource generates) calls `_pm_invoke(handle, args)` and refuses to install without it.
+ * nativeMain's UpcallEntry.publish reversed the same decision for the same reason.
  *
  * Ordinary JNI. It builds function objects and stores them in a dict, so it allocates GC-tracked
  * containers and can reach a Python-level hook (androidMain/README.md, step 2) -- and it runs once
@@ -1689,6 +1768,7 @@ static jint upcall_publish(JNIEnv *e, jclass c, jlong ns) {
     if (ns == 0) return 0;
     if (g_upcallBridge == NULL) return 0;
     if (!pmp_install_method(ns, &g_pmResolveDef)) return 0;
+    if (!pmp_install_method(ns, &g_pmInvokeFreeDef)) return 0;
     if (!pmp_install_method(ns, &g_pmBindDef)) return 0;
     if (!pmp_install_method(ns, &g_pmReleaseDef)) return 0;
     if (!pmp_install_method(ns, &g_pmCancelDef)) return 0;
