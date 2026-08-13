@@ -1,0 +1,690 @@
+package python.multiplatform.ffi.upcall
+
+import python.multiplatform.currentPlatform
+import python.multiplatform.ffi.Python3
+import python.multiplatform.ffi.PythonTestFixture
+import python.multiplatform.overhead.Benchmark
+import python.multiplatform.reflection.ClassLookup
+import python.multiplatform.reflection.HandleTable
+import python.multiplatform.reflection.UpcallTable
+import python.native.ffi.bindUpcallOrNull
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFails
+import kotlin.test.assertTrue
+
+/**
+ * What the *generated proxy* costs, on top of the boundary `UpcallBoundaryCostTest` already prices.
+ *
+ * That test answers "what does one upcall cost", and its answer is a `_pm_invoke(handle, args)`
+ * called straight from Python. **Nobody writes that.** What a user writes is `demo.calc.ping()`,
+ * `Counter(10).increment(5)`, `c.value`, `Counter.created`, `await g.fetch()` -- and each of those
+ * goes through a layer of generated Python that the boundary figure says nothing about: a global
+ * lookup, a bound-method dispatch, an argument tuple built one element longer to carry the receiver,
+ * a `property` descriptor, a metaclass descriptor, or an `async def` wrapper with a `hasattr` in it.
+ *
+ * So this is `UpcallBoundaryCostTest`'s shape applied one level up. It follows that test's design
+ * deliberately and in full, because that design has already been argued and validated:
+ *
+ * - **every baseline is measured in the same run**, on the same machine, in the same thermal state.
+ *   A ratio against a remembered number is not a measurement.
+ * - **the same warmup count as the measured loop, in the same shape**, run first. An unwarmed first
+ *   row in this repository once made a subset of the work look cheaper than the whole of it.
+ * - **nothing asserts a duration.** A wall-clock threshold on a shared build machine, a simulator or
+ *   a Node host is a flake generator and this repository has had exactly that failure. What is
+ *   asserted is structural: the proxies returned the right values, the async row really took the
+ *   fast path (zero `Future`s constructed), and every figure came back positive rather than a zero
+ *   from a clock with no resolution.
+ *
+ * ### The harness, and why every row has the same shape
+ *
+ * Every row is a **zero-argument Python function** called `N` times by one shared timing loop, so
+ * each row pays exactly one identical loop iteration plus one identical zero-arg call. The floor row
+ * ([NOOP]) is that and nothing else, so *row minus floor* is the body and only the body. Rows are
+ * not comparable to each other any other way: a `lambda` here and an inlined expression there would
+ * differ by a Python call frame, which on the fast targets is a fifth of the whole figure.
+ *
+ * The **global lookups stay inside the timed body on purpose**, because they are part of what the
+ * user pays: `demo.calc.tally` really is a module attribute access, and `c.increment(5)` really does
+ * resolve `increment` on the instance before it calls anything. The one thing hoisted out is the
+ * receiver handle in the raw rows (`_pc_self = _pc_c._pm_handle`), because there the attribute lookup
+ * is exactly the overhead being measured and leaving it in both halves would cancel it out of the
+ * answer.
+ *
+ * ### The two floors, and why a Python-only one is needed
+ *
+ * A proxy property read is a descriptor *and* a boundary crossing. Priced against the raw boundary
+ * alone, the descriptor and the extra Python frame are indistinguishable from each other. So a pure
+ * Python class with a plain attribute and a `@property` over a constant is measured beside them:
+ * that is what CPython charges for the descriptor machinery with no Kotlin anywhere, and the proxy's
+ * excess over the raw boundary should land near it if the generated shape is not doing anything
+ * unusual.
+ *
+ * ### What this test has already found
+ *
+ * A top-level Kotlin `val`/`var` read cost **551-587 ns more than the boundary call underneath it**
+ * on desktop, while every other generated surface -- including the metaclass descriptor doing the
+ * same job for a class static -- cost between 2 and 82 ns more. That was not noise and it was not
+ * the boundary: [PythonProxySource] answered a module attribute with a `__getattr__` hook, which
+ * CPython consults only *after* `module_getattro` has built and raised the formatted "module has no
+ * attribute" `AttributeError` for the hook to catch and throw away. One raised exception per read.
+ * Replacing it with a `property` on a per-module type -- the same data-descriptor shape the class
+ * statics already used -- moved that row to 16-29 ns, in line with everything else.
+ *
+ * The measurement is what found it. Nothing about the two shapes differs in behaviour, both pass
+ * `PythonProxyInstallTest` unchanged, and reading the generated source tells you nothing about the
+ * cost of either.
+ *
+ * ### wasm
+ *
+ * There are **no generated proxies on wasmJs** and there structurally cannot be -- see
+ * [publishesProxyEntryPoints]'s wasmJs row and `docs/upcall-async-design.md` §12.4. Nothing crosses
+ * into Python there but an already-bound callable, so `_pm_resolve`/`_pm_invoke` do not exist and
+ * `PythonProxySource.install()` refuses. This test therefore asserts that documented refusal on that
+ * target and measures nothing, which is the same branch [PythonProxyInstallTest] takes. Reporting a
+ * proxy figure for wasm would mean reporting something that cannot be executed there.
+ *
+ * ### `import asyncio` and the wasm precedent
+ *
+ * `AsyncUpcallPortabilityTest` records that `import asyncio` does not raise on this wasm build --
+ * it **traps the instance**, killing the process. The async row below therefore sits behind the same
+ * [publishesProxyEntryPoints] guard as everything else, which returns before any Python runs on wasm,
+ * exactly as `PythonProxyInstallTest`'s own asyncio-using test already does.
+ */
+class GeneratedProxyCostTest {
+
+    private companion object {
+        /** Calls per timed loop; the same count [UpcallBoundaryCostTest] uses. */
+        const val N = 10_000
+
+        /** Same shape as the measured loop, run first, and the same count. */
+        const val WARMUP = 3_000
+
+        /**
+         * `install()` renders several hundred lines and `exec`s them, so it is milliseconds rather
+         * than nanoseconds and a 10 000-iteration loop would dominate the suite. Small counts are
+         * defensible here for the reason they are not elsewhere: the quantity being measured is
+         * large relative to the clock, and it is a **once per process** cost, so what matters is its
+         * order of magnitude against application startup and not its last digit.
+         */
+        const val INSTALL_N = 20
+        const val INSTALL_WARMUP = 5
+
+        const val NOOP = "empty Python function (the harness floor)"
+
+        // Sync rows: each raw row is the boundary call the proxy row above/below it wraps.
+        const val RAW_FUNCTION = "_pm_invoke(h, ())                        raw boundary, arity 0"
+        const val PROXY_FUNCTION = "demo.calc.ping()                          module function proxy"
+        const val RAW_CTOR = "_pm_invoke(h, (10,))                     raw boundary"
+        const val PROXY_CTOR = "Counter(10)                               constructor proxy"
+        const val RAW_METHOD = "_pm_invoke(h, (self, 5))                 raw boundary"
+        const val PROXY_METHOD = "c.increment(5)                            instance method proxy"
+        const val RAW_GETTER = "_pm_invoke(h, (self,))                   raw boundary"
+        const val PROXY_GETTER = "c.value                                   property read (descriptor)"
+        const val RAW_SETTER = "_pm_invoke(h, (self, 'x'))               raw boundary"
+        const val PROXY_SETTER = "c.label = 'x'                             property write (descriptor)"
+        /**
+         * Deliberately the *same call* as [RAW_FUNCTION] -- arity zero, a different handle -- and
+         * kept as a separate row for two reasons at once. It is the honest basis for the static
+         * rows, which really are arity-zero calls; and because the two rows differ only in noise,
+         * whatever they differ *by* is this report's own resolution. A proxy delta smaller than
+         * that is not a number.
+         *
+         * The two labels must stay distinct: they keyed the same map entry once, which silently
+         * priced every arity-0 proxy row against one of the two measurements instead of its own,
+         * and made the resolution row print a constant zero. The uniqueness check in the test body
+         * is the guard against that returning.
+         */
+        const val RAW_STATIC = "_pm_invoke(h, ())                        raw boundary, arity 0 again"
+        const val RAW_STATIC_SET = "_pm_invoke(h, (12,))                     raw boundary"
+        const val PROXY_STATIC_GET = "Counter.created                           static read (metaclass)"
+        const val PROXY_STATIC_SET = "Counter.created = 12                      static write (metaclass)"
+        const val PROXY_MODULE_GET = "demo.calc.tally                           top-level read (module type)"
+        const val PROXY_MODULE_SET = "demo.calc.tally = 9                       top-level write (module type)"
+
+        // Pure-Python floors: the descriptor machinery with no boundary under it at all.
+        const val PY_ATTR = "plain.x            pure Python, no boundary"
+        const val PY_PROPERTY = "plain.p            pure Python @property, no boundary"
+
+        // Async rows.
+        const val ASYNC_RAW = "_pm_invoke(h, (21,)) inside the coroutine, no await"
+        const val ASYNC_PY = "await a pure-Python coroutine that never suspends"
+        const val ASYNC_PROXY = "await demo.calc.doubleNow(21)   generated async def, fast path"
+
+        // install() rows.
+        const val INSTALL_RENDER = "PythonProxySource.render()      Kotlin string building only"
+        const val INSTALL_FULL = "PythonProxySource.install()     render + Python3.exec"
+    }
+
+    @BeforeTest
+    fun setUp() {
+        UpcallTable.install(listOf(ProxyFragment))
+        ProxyFragment.parked = null
+        ProxyFragment.tally = 0
+        ProxyFragment.created = 0
+    }
+
+    @AfterTest
+    fun tearDown() {
+        UpcallTable.clear()
+        HandleTable.releaseAll()
+        ProxyFragment.parked = null
+        if (PythonTestFixture.available) Python3.exec("_pc = None")
+    }
+
+    private fun py(expression: String): String = PythonTestFixture.eval(expression).toString()
+
+    private fun pyDouble(expression: String): Double = py(expression).toDouble()
+
+    // ------------------------------------------------------------------------------ sync surfaces
+
+    @Test
+    fun everyGeneratedSyncSurfaceIsPricedAgainstTheRawBoundaryItWraps() = withProxies {
+        Python3.exec(HARNESS)
+        Python3.exec(SYNC_BODIES)
+
+        // The proxies are timed only after they have been shown to answer correctly. A row that
+        // measured an AttributeError path would be a fast, meaningless number.
+        Python3.exec(
+            """
+            _pc_check = {
+                'fn': _pc_ping(),
+                'ctor': _pc_Counter(10).value,
+                'method': _pc_c.increment(0),
+                'getter': _pc_c.value,
+                'static': _pc_Counter.created,
+                'module': _pc_calc.tally,
+            }
+            """.trimIndent(),
+        )
+        assertEquals("7", py("_pc_check['fn']"), "the module-function proxy does not reach Kotlin")
+        assertEquals("10", py("_pc_check['ctor']"), "the constructor proxy does not reach Kotlin")
+        assertEquals("1", py("_pc_check['method']"), "the instance-method proxy does not reach Kotlin")
+        assertEquals("1", py("_pc_check['getter']"), "the property descriptor does not reach Kotlin")
+        assertEquals("0", py("_pc_check['static']"), "the metaclass descriptor does not reach Kotlin")
+        assertEquals("0", py("_pc_check['module']"), "the module descriptor does not reach Kotlin")
+
+        val rows = timeAll(
+            NOOP to "_pc_noop",
+            PY_ATTR to "_pc_py_attr",
+            PY_PROPERTY to "_pc_py_prop",
+            RAW_FUNCTION to "_pc_raw_fn",
+            PROXY_FUNCTION to "_pc_pxy_fn",
+            RAW_CTOR to "_pc_raw_ctor",
+            PROXY_CTOR to "_pc_pxy_ctor",
+            RAW_METHOD to "_pc_raw_method",
+            PROXY_METHOD to "_pc_pxy_method",
+            RAW_GETTER to "_pc_raw_getter",
+            PROXY_GETTER to "_pc_pxy_getter",
+            RAW_SETTER to "_pc_raw_setter",
+            PROXY_SETTER to "_pc_pxy_setter",
+            RAW_STATIC to "_pc_raw_static",
+            RAW_STATIC_SET to "_pc_raw_static_set",
+            PROXY_STATIC_GET to "_pc_pxy_static_get",
+            PROXY_STATIC_SET to "_pc_pxy_static_set",
+            PROXY_MODULE_GET to "_pc_pxy_module_get",
+            PROXY_MODULE_SET to "_pc_pxy_module_set",
+        )
+
+        // Before the report, not after: `reportSync` keys everything by row name, so two rows
+        // sharing a name would quietly price one against the other's measurement. That happened --
+        // `RAW_FUNCTION` and `RAW_STATIC` were the same string -- and it is invisible in the
+        // output, because both rows still print and both still look plausible.
+        assertEquals(
+            rows.size, rows.map { it.first }.toSet().size,
+            "two rows share a name, so at least one figure below is another row's measurement",
+        )
+        reportSync(rows)
+
+        for ((name, ns) in rows) {
+            assertTrue(ns > 0.0, "$name measured ${ns}ns/call; nothing can be compared against a zero")
+        }
+        assertEquals(19, rows.size, "every comparison basis must come from this run, not a remembered one")
+        // Nothing became a no-op somewhere in 18 loops of 10 000.
+        assertEquals("7", py("_pc_ping()"))
+        assertEquals("counter-class", py("_pc_Counter.KIND"))
+    }
+
+    // ----------------------------------------------------------------------------- the await path
+
+    @Test
+    fun theAwaitFastPathIsPricedAgainstTheRawBoundaryAndAPurePythonCoroutine() = withProxies {
+        Python3.exec(HARNESS)
+        Python3.exec(ASYNC_HARNESS)
+
+        Python3.exec("_pc['warm'] = _pc_loop.run_until_complete(_pc_bench('proxy', $WARMUP))")
+        Python3.exec("_pc['warm'] = _pc_loop.run_until_complete(_pc_bench('py', $WARMUP))")
+        Python3.exec("_pc['warm'] = _pc_loop.run_until_complete(_pc_bench('raw', $WARMUP))")
+        // The counter is armed *after* warmup, so the assertion below is about the timed loop.
+        Python3.exec("_pc['futures'] = 0")
+
+        // Minimum of three loops per row, for the reason `_pc_time` gives: the figure of interest
+        // is a difference between two rows, and one-sided noise lands entirely in a difference.
+        fun bench(kind: String): Double = (1..3).minOf {
+            Python3.exec("_pc['t'] = _pc_loop.run_until_complete(_pc_bench('$kind', $N))")
+            pyDouble("_pc['t']")
+        }
+
+        val rows = listOf(
+            ASYNC_RAW to bench("raw"),
+            ASYNC_PY to bench("py"),
+            ASYNC_PROXY to bench("proxy"),
+        )
+        Python3.exec("_pc['value'] = _pc_loop.run_until_complete(_pc_once())")
+        val futures = py("_pc['futures']")
+
+        reportAsync(rows, futures)
+
+        Python3.exec("_pc_loop.close()")
+
+        assertEquals("42", py("_pc['value']"), "the awaited proxy does not reach Kotlin")
+        for ((name, ns) in rows) {
+            assertTrue(ns > 0.0, "$name measured ${ns}ns/call; nothing can be compared against a zero")
+        }
+        // The contamination guard this row needs: a slow-path figure would be a different
+        // measurement wearing the same label, and the only way to tell from Python is to count the
+        // Futures -- the generated proxy deliberately makes the two indistinguishable to its caller.
+        assertEquals(
+            "0", futures,
+            "the fast path built a Future, so what was timed is not the fast path",
+        )
+        assertTrue(ProxyFragment.parked == null, "nothing was left outstanding")
+    }
+
+    // -------------------------------------------------------------------------- install() as cost
+
+    @Test
+    fun installingTheGeneratedModuleIsPricedAsTheStartupCostItIs() = withProxies {
+        val source = PythonProxySource.render(UpcallTable.entries(), ClassLookup.all())
+        val lines = source.count { it == '\n' } + 1
+
+        val renderNs = Benchmark.measure(INSTALL_WARMUP, INSTALL_N) {
+            PythonProxySource.render(UpcallTable.entries(), ClassLookup.all())
+        }
+        // `install` is documented as safe to run more than once -- every statement it emits is an
+        // assignment, a `def` or a `class` -- which is what makes it measurable in a loop at all.
+        val installNs = Benchmark.measure(INSTALL_WARMUP, INSTALL_N) {
+            PythonProxySource.install()
+        }
+
+        reportInstall(lines, source.length, renderNs, installNs)
+
+        assertTrue(renderNs > 0.0, "render() measured ${renderNs}ns; the clock has no resolution here")
+        assertTrue(installNs > 0.0, "install() measured ${installNs}ns; the clock has no resolution here")
+        assertTrue(lines > 0, "render() produced no source at all")
+        // No relative-duration assertion here, deliberately, even though `install` strictly contains
+        // `render`: the policy this file follows is that nothing asserts a duration, and "cheaper
+        // than" is a duration comparison. The printed rows carry the claim instead.
+
+        // The last of the INSTALL_N reinstalls left a working module behind, so what was timed was
+        // a real install and not a run that failed early.
+        Python3.exec("from demo.calc import ping as _pc_after\n_pc_installed = _pc_after()")
+        assertEquals("7", py("_pc_installed"))
+    }
+
+    // --------------------------------------------------------------------------------- harnesses
+
+    /**
+     * Publishes this target's raw entry points, installs the proxies and runs [block].
+     *
+     * On a target [publishesProxyEntryPoints] says has no proxy bootstrap -- wasmJs, and only
+     * wasmJs -- [block] is not run and the *documented refusal* is asserted instead. That is not a
+     * skip and it is not a measurement of zero: there is nothing on that target to measure, and
+     * saying so is the honest row. If such a target ever grows a shim, or one that has one loses it,
+     * one of the two branches fails.
+     */
+    private inline fun withProxies(block: () -> Unit) = PythonTestFixture.withInterpreter {
+        assertTrue(bindUpcallOrNull("demo.calc.ping"), "the fixture table is not installed")
+
+        if (!publishesProxyEntryPoints) {
+            val refusal = assertFails { PythonProxySource.install() }
+            assertTrue(
+                refusal.message?.contains("raw upcall entry points are not bound") == true,
+                "a target with no proxy bootstrap must fail the generated module's own guard, " +
+                    "not something else: $refusal",
+            )
+            println(
+                "\n--- Generated proxy cost: ${currentPlatform.name} --- " +
+                    "no proxies are installable on this target, so there is nothing to measure; " +
+                    "see docs/upcall-async-design.md 12.4\n",
+            )
+            return@withInterpreter
+        }
+
+        PythonProxySource.install()
+        block()
+    }
+
+    /** Times each named zero-arg Python callable with one shared loop, warming every one first. */
+    private fun timeAll(vararg rows: Pair<String, String>): List<Pair<String, Double>> {
+        // Every row is warmed before any row is timed, so a row is never measured on a colder
+        // interpreter than the row it will be compared with.
+        for ((_, fn) in rows) Python3.exec("_pc_time($fn, $WARMUP)")
+        return rows.map { (name, fn) ->
+            Python3.exec("_pc['t'] = _pc_time($fn, $N)")
+            name to pyDouble("_pc['t']")
+        }
+    }
+
+    private fun reportSync(rows: List<Pair<String, Double>>) {
+        val by = rows.toMap()
+        val floor = by[NOOP] ?: 0.0
+        fun net(name: String): Double = (by[name] ?: 0.0) - floor
+        fun over(proxy: String, raw: String): String {
+            val p = net(proxy)
+            val r = net(raw).coerceAtLeast(1.0)
+            return "${fmt(p / r)}x  (+${(p - net(raw)).ns()})"
+        }
+
+        val lines = buildList {
+            add("")
+            add("--- Generated proxy cost: ${currentPlatform.name} ---")
+            add("iterations per row: $N x 3 (best taken), warmup: $WARMUP; every row is one zero-arg Python call")
+            add("")
+            add("Raw figures (timed inside Python, one shared loop)")
+            for ((name, ns) in rows) add("  ${name.padEnd(64)}${ns.ns()}")
+            add("")
+            add("Net of the harness floor (${floor.ns()}), and what the proxy layer adds")
+            add("  module function   raw ${net(RAW_FUNCTION).ns().padEnd(14)} proxy ${net(PROXY_FUNCTION).ns().padEnd(14)} ${over(PROXY_FUNCTION, RAW_FUNCTION)}")
+            add("  constructor       raw ${net(RAW_CTOR).ns().padEnd(14)} proxy ${net(PROXY_CTOR).ns().padEnd(14)} ${over(PROXY_CTOR, RAW_CTOR)}")
+            add("  instance method   raw ${net(RAW_METHOD).ns().padEnd(14)} proxy ${net(PROXY_METHOD).ns().padEnd(14)} ${over(PROXY_METHOD, RAW_METHOD)}")
+            add("  property read     raw ${net(RAW_GETTER).ns().padEnd(14)} proxy ${net(PROXY_GETTER).ns().padEnd(14)} ${over(PROXY_GETTER, RAW_GETTER)}")
+            add("  property write    raw ${net(RAW_SETTER).ns().padEnd(14)} proxy ${net(PROXY_SETTER).ns().padEnd(14)} ${over(PROXY_SETTER, RAW_SETTER)}")
+            add("  static read       raw ${net(RAW_STATIC).ns().padEnd(14)} proxy ${net(PROXY_STATIC_GET).ns().padEnd(14)} ${over(PROXY_STATIC_GET, RAW_STATIC)}")
+            add("  static write      raw ${net(RAW_STATIC_SET).ns().padEnd(14)} proxy ${net(PROXY_STATIC_SET).ns().padEnd(14)} ${over(PROXY_STATIC_SET, RAW_STATIC_SET)}")
+            add("  module read       raw ${net(RAW_STATIC).ns().padEnd(14)} proxy ${net(PROXY_MODULE_GET).ns().padEnd(14)} ${over(PROXY_MODULE_GET, RAW_STATIC)}")
+            add("  module write      raw ${net(RAW_STATIC_SET).ns().padEnd(14)} proxy ${net(PROXY_MODULE_SET).ns().padEnd(14)} ${over(PROXY_MODULE_SET, RAW_STATIC_SET)}")
+            add("")
+            add("Pure-Python floors, net of the harness (no boundary anywhere in these)")
+            add("  plain attribute read                    ${net(PY_ATTR).ns()}")
+            add("  @property read                          ${net(PY_PROPERTY).ns()}")
+            add("  the descriptor itself costs             ${(net(PY_PROPERTY) - net(PY_ATTR)).ns()}")
+            add("")
+            // RAW_FUNCTION and RAW_STATIC are the *same call* -- `_pm_invoke(h, ())`, arity zero,
+            // differing only in which handle -- measured in two different rows. Whatever they
+            // differ by is what this report cannot resolve, and a proxy delta smaller than it is
+            // not a number. Printed rather than assumed, because it is an order of magnitude apart
+            // between targets: single-digit ns on desktop, around a hundred on the simulator.
+            add("Resolution: two identical raw rows differ by ${(net(RAW_STATIC) - net(RAW_FUNCTION)).ns()}")
+            add("  -- a proxy delta below that is not separable from the boundary's own variation")
+            add("")
+            // The constructor pair is the one row whose *fixture* moves under it: both halves root
+            // a Kotlin object in `HandleTable` per call and nothing releases it, so each of them is
+            // measured against a table that grew by tens of thousands of entries while it ran. That
+            // is a property of this test, not of the constructor proxy, and it is why desktop's
+            // constructor delta swings either side of zero between runs while every other row's
+            // does not. Printed so the reader can see the size of what moved.
+            add("Handles rooted by the constructor rows and never released: ${HandleTable.liveCount}")
+            add("-".repeat(78))
+            add("")
+        }
+        for (line in lines) println(line)
+    }
+
+    private fun reportAsync(rows: List<Pair<String, Double>>, futures: String) {
+        val by = rows.toMap()
+        val raw = (by[ASYNC_RAW] ?: 1.0).coerceAtLeast(1.0)
+        val lines = buildList {
+            add("")
+            add("--- Generated proxy cost, await fast path: ${currentPlatform.name} ---")
+            add("iterations per row: $N x 3 (best taken), warmup: $WARMUP; one loop turn inside one coroutine")
+            add("")
+            for ((name, ns) in rows) add("  ${name.padEnd(56)}${ns.ns()}")
+            add("")
+            add("  await proxy / raw boundary in the same loop            ${fmt((by[ASYNC_PROXY] ?: 0.0) / raw)}x")
+            add("  what the async def wrapper adds                        ${((by[ASYNC_PROXY] ?: 0.0) - (by[ASYNC_RAW] ?: 0.0)).ns()}")
+            add("  asyncio.Futures constructed during the timed loops     $futures")
+            add("-".repeat(78))
+            add("")
+        }
+        for (line in lines) println(line)
+    }
+
+    private fun reportInstall(lines: Int, chars: Int, renderNs: Double, installNs: Double) {
+        val out = buildList {
+            add("")
+            add("--- Generated proxy install cost: ${currentPlatform.name} ---")
+            add("iterations: $INSTALL_N, warmup: $INSTALL_WARMUP")
+            add("  generated source                        $lines lines, $chars chars")
+            add("  ${INSTALL_RENDER.padEnd(40)}${(renderNs / 1000.0).us()}")
+            add("  ${INSTALL_FULL.padEnd(40)}${(installNs / 1000.0).us()}")
+            add("  ...of which Python3.exec                 ${((installNs - renderNs) / 1000.0).us()}")
+            add("-".repeat(78))
+            add("")
+        }
+        for (line in out) println(line)
+    }
+
+    /** Sign handled separately: a net figure can legitimately come out negative on a noisy host. */
+    private fun Double.ns(): String = "${if (this < 0) "-" else ""}${fmt(kotlin.math.abs(this))} ns"
+
+    private fun Double.us(): String = "${if (this < 0) "-" else ""}${fmt(kotlin.math.abs(this))} us"
+
+    private fun fmt(v: Double): String {
+        val whole = v.toLong()
+        val hundredths = ((v - whole) * 100).toLong()
+        return "$whole.${hundredths.toString().padStart(2, '0')}"
+    }
+}
+
+/**
+ * The shared timing loop and the two pure-Python floors.
+ *
+ * `time.perf_counter_ns` rather than anything Kotlin-side: the whole point is to time the Python
+ * expression a user writes, from inside Python, with no boundary crossing added by the measurement
+ * itself. This is the same instrument `UpcallBoundaryCostTest` uses for its Python-driven rows.
+ */
+private val HARNESS = """
+    import time
+
+    _pc = {}
+
+
+    def _pc_once_round(fn, n):
+        t0 = time.perf_counter_ns()
+        for _ in range(n):
+            fn()
+        return (time.perf_counter_ns() - t0) / n
+
+
+    def _pc_time(fn, n, reps=3):
+        # The **minimum** of `reps` timed loops, not the mean, and this is the one place this file
+        # departs from `UpcallBoundaryCostTest`'s loop. It departs for a reason that is specific to
+        # what is being measured here: the quantity of interest is a *difference* between two rows
+        # (proxy minus raw), and on desktop it is tens of nanoseconds sitting on top of a boundary
+        # of five hundred. Wall-clock noise from a GC pause or a descheduled thread is one-sided --
+        # it can only make a loop slower, never faster -- so with a mean it lands entirely in that
+        # difference and swamps it, while with a minimum it does not. Measured: with a single loop
+        # per row, four consecutive runs of this file put the instance-method delta at -17, -31,
+        # -60 and -71 ns, i.e. the proxy came out *cheaper than the boundary it wraps* every time,
+        # which cannot be true.
+        #
+        # Nothing else changes: same warmup, same shape, same everything-in-one-run rule.
+        best = None
+        for _ in range(reps):
+            r = _pc_once_round(fn, n)
+            if best is None or r < best:
+                best = r
+        return best
+
+
+    def _pc_noop():
+        pass
+
+
+    class _PcPlain:
+        # The Python-only floor for the descriptor rows: what CPython charges for a plain
+        # attribute and for a `property` over a constant, with nothing crossing anywhere. The
+        # proxy's excess over its raw boundary should land near the difference between these two
+        # if the generated shape is not doing something unusual.
+
+        def __init__(self):
+            self.x = 1
+
+        @property
+        def p(self):
+            return 1
+
+
+    _pc_plain = _PcPlain()
+
+
+    def _pc_py_attr():
+        return _pc_plain.x
+
+
+    def _pc_py_prop():
+        return _pc_plain.p
+""".trimIndent()
+
+/**
+ * One zero-arg function per measured surface, and the raw `_pm_invoke` call each proxy row wraps.
+ *
+ * The handles come from `_pm_lookup`, which is what the generated module itself uses, so the raw
+ * rows call through exactly the object the proxies call through -- on desktop a `ctypes.CFUNCTYPE`,
+ * elsewhere a `PyCFunction`. Pricing a proxy against a differently-obtained callable would fold the
+ * difference between the two bootstraps into the answer.
+ *
+ * `_pc_self` is hoisted out of the raw rows on purpose: `c._pm_handle` is an instance attribute
+ * lookup, and an instance attribute lookup is part of what the *proxy* row is being measured for.
+ * Leaving it in both halves would cancel it out of the very number this test exists to produce.
+ */
+private val SYNC_BODIES = """
+    from demo.calc import ping as _pc_ping
+    from proxycls import Counter as _pc_Counter
+    import demo.calc as _pc_calc
+
+    _pc_h_fn = _pm_lookup('demo.calc.ping')
+    _pc_h_ctor = _pm_lookup('proxycls.Counter.<init>')
+    _pc_h_method = _pm_lookup('proxycls.Counter.increment')
+    _pc_h_getter = _pm_lookup('proxycls.Counter.value')
+    _pc_h_setter = _pm_lookup('proxycls.Counter.label=')
+    _pc_h_static = _pm_lookup('proxycls.Counter.created')
+    _pc_h_static_set = _pm_lookup('proxycls.Counter.created=')
+
+    _pc_c = _pc_Counter(1)
+    _pc_self = _pc_c._pm_handle
+
+
+    def _pc_raw_fn():
+        return _pm_invoke(_pc_h_fn, ())
+
+
+    def _pc_pxy_fn():
+        return _pc_ping()
+
+
+    def _pc_raw_ctor():
+        return _pm_invoke(_pc_h_ctor, (10,))
+
+
+    def _pc_pxy_ctor():
+        return _pc_Counter(10)
+
+
+    def _pc_raw_method():
+        return _pm_invoke(_pc_h_method, (_pc_self, 5))
+
+
+    def _pc_pxy_method():
+        return _pc_c.increment(5)
+
+
+    def _pc_raw_getter():
+        return _pm_invoke(_pc_h_getter, (_pc_self,))
+
+
+    def _pc_pxy_getter():
+        return _pc_c.value
+
+
+    def _pc_raw_setter():
+        return _pm_invoke(_pc_h_setter, (_pc_self, 'x'))
+
+
+    def _pc_pxy_setter():
+        _pc_c.label = 'x'
+
+
+    def _pc_raw_static():
+        return _pm_invoke(_pc_h_static, ())
+
+
+    def _pc_raw_static_set():
+        return _pm_invoke(_pc_h_static_set, (12,))
+
+
+    def _pc_pxy_static_get():
+        return _pc_Counter.created
+
+
+    def _pc_pxy_static_set():
+        _pc_Counter.created = 12
+
+
+    def _pc_pxy_module_get():
+        return _pc_calc.tally
+
+
+    def _pc_pxy_module_set():
+        _pc_calc.tally = 9
+""".trimIndent()
+
+/**
+ * The await rows, and the `create_future` counter that proves which path was timed.
+ *
+ * All three rows are loop bodies inside **one coroutine shape**, so the coroutine frame and the
+ * `run_until_complete` are paid once per row rather than once per iteration and cancel out of the
+ * comparison. The branch is outside the loop, so no row pays for the dispatch.
+ *
+ * The counter is the contamination guard: `AsyncUpcall` returns the real value on the fast path and
+ * an `asyncio.Future` on the slow one, and the generated `async def` deliberately makes the two
+ * indistinguishable to its caller. Counting `create_future` is the only way left to tell, and it is
+ * a stronger statement than checking the returned type -- it says no `Future` was built at all.
+ */
+private val ASYNC_HARNESS = """
+    import asyncio
+    import demo.calc as _pc_calc
+
+    _pc_h_async = _pm_lookup('demo.calc.doubleNow')
+    _pc_await = _pc_calc.doubleNow
+
+    _pc_loop = asyncio.new_event_loop()
+    _pc['futures'] = 0
+    _pc_orig_create = _pc_loop.create_future
+
+
+    def _pc_counted():
+        _pc['futures'] += 1
+        return _pc_orig_create()
+
+
+    _pc_loop.create_future = _pc_counted
+
+
+    async def _pc_py_coro(a0):
+        return a0 * 2
+
+
+    async def _pc_bench(kind, n):
+        if kind == 'proxy':
+            t0 = time.perf_counter_ns()
+            for _ in range(n):
+                await _pc_await(21)
+            return (time.perf_counter_ns() - t0) / n
+        if kind == 'py':
+            t0 = time.perf_counter_ns()
+            for _ in range(n):
+                await _pc_py_coro(21)
+            return (time.perf_counter_ns() - t0) / n
+        t0 = time.perf_counter_ns()
+        for _ in range(n):
+            _pm_invoke(_pc_h_async, (21,))
+        return (time.perf_counter_ns() - t0) / n
+
+
+    async def _pc_once():
+        return await _pc_await(21)
+""".trimIndent()
