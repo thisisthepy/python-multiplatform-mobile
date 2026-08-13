@@ -799,6 +799,9 @@ _pmp_result = asyncio.new_event_loop().run_until_complete(_pmp_probe())
 
 ### 12.4 못 맞춘 두 타깃과, 각각 무엇이 필요한가
 
+> §12.5 에서 **Android(ART) 는 맞췄다.** 아래 Android 항목은 그때의 진단이고, **절반만 맞았다.**
+> 남은 미구현 타깃은 wasmJs 하나다.
+
 - **wasmJs — 안 된다.** 파이썬으로 건너가는 것이 *바인딩된 callable* 하나뿐이다(`UpcallEntry.bind`
   가 유일한 `@WasmExport` `pmp_invoke` 위에 만든다). 이름 해석은 Kotlin 안에서 끝난다.
   `_pm_resolve`/`_pm_invoke` 를 깔려면 `@WasmExport` 가 더 필요하고, `@WasmExport` 는 `.wasm` 을
@@ -814,3 +817,71 @@ _pmp_result = asyncio.new_event_loop().run_until_complete(_pmp_probe())
   빠진 것이 없다 — `UpcallCallbacks.invoke(long, long)` 이 이미 그 모양이고 method ID 도 있다.
   **에뮬레이터 없이 돌릴 수 없어서 넣지 않았다**; 테스트 쪽 `publishesProxyEntryPoints` 가 false 로
   같은 메모를 들고 있으므로, 구현되는 날 "이 타깃은 거절한다"는 단언이 실패해서 알려준다.
+
+## 13. ART 에서 프록시가 돈다 — 그리고 §12.4 의 진단은 절반만 맞았다
+
+에뮬레이터에서 돌려보고 맞췄다. 필요한 것은 **C 함수 하나가 아니라 C 변경 두 개**였다.
+
+### 13.1 기록된 절반: `_pm_invoke`
+
+§12.4 가 적은 그대로다. `jni_onload.def` 에 `pmp_upcall_invoke_free_meth(self, args)` 를 두고
+(`args[0]` 이 handle, `args[1]` 이 인자 튜플), `g_pmInvokeFreeDef` 를 `upcall_publish` 에 더했다.
+Kotlin 은 정말로 빠진 것이 없었다 — `UpcallCallbacks.invoke(long, long)` 과 그 method ID 를 그대로
+썼다. `PyMethodDef` 설치는 개수를 세는 배열이 아니라 `if (!pmp_install_method(...)) return 0;` 의
+연쇄이므로 어긋날 리터럴이 애초에 없다(`RegisterNatives` 의 개수는 이전부터 `sizeof` 계산이다).
+
+### 13.2 기록되지 않은 절반: `_pm_resolve` 가 `bytes` 를 안 받았다
+
+`_pm_invoke` 만 넣고 돌린 결과가 이것이다 — **가드는 통과하고 그다음 줄에서 죽었다.**
+
+| | pmp_api26 | pmp_api36 |
+|---|---|---|
+| `_pm_invoke` 만 추가 | 11개 전부 실패: `TypeError: bad argument type for built-in operation` | 같음 |
+| `_pm_resolve` 까지 고침 | 11개 전부 통과 | 같음 |
+
+`pmp_upcall_resolve_meth` 는 인자를 `PyUnicode_AsUTF8` 로만 읽었는데, `PythonProxySource` 의
+`_pm_lookup` 은 `bytes` 를 보낸다(desktop 이 `ctypes.CFUNCTYPE(c_long, c_char_p)` 로 resolver 에
+닿고 `c_char_p` 가 `str` 을 거부하므로, 모든 호스트에서 통하는 철자는 `bytes` 뿐이다). nativeMain 의
+`pmResolveMethod` 는 **바로 그 이유로 이미 두 철자를 다 받게 고쳐져 있었고**, ART shim 만 안 고쳐져
+있었다. 아무도 묻지 않았기 때문이다 — 이 shim 의 유일한 호출자였던
+`androidInstrumentedTest/bindUpcallOrNull` 이 `str` 을 넘긴다.
+
+`support` 의 주석은 "다른 부트스트랩은 전부 두 철자를 받는다"고 단언하고 있었다. 그것은 **검증된
+적 없는 문장**이었고, ART 에서 거짓이었다.
+
+**소스를 읽어서는 찾을 수 없는 종류의 결함이다.** 두 번째 절반은 런타임에만 존재하고, 첫 번째
+절반을 고쳐야 비로소 도달한다. §12.3 이 `PythonProxyInstallTest` 를 `commonTest` 로 옮긴 이유가
+이것 그대로다.
+
+### 13.3 순서
+
+`publishesProxyEntryPoints` 의 ART 값은 **11개가 실제로 통과하는 것을 본 뒤에** true 로 바꿨다.
+그 전 단계에서는 두 번 다 빨간색이었고, 두 실패 메시지가 서로 다른 것을 가리켰다(먼저
+`TypeError`, 고친 뒤 "Expected an exception to be thrown, but was completed successfully").
+
+### 13.4 측정
+
+| | 결과 |
+|---|---|
+| ART 계측 (`connectedDebugAndroidTest`) | **336개 0 실패** × pmp_api26 · pmp_api36 (그중 `PythonProxyInstallTest` 11개가 이제 진짜 경로) |
+| androidNative (`androidNativeArm64Test`) | 316개 0 실패 × 2대 |
+| desktop (`desktopTest`) | 342개 0 실패, 스킵 1 |
+
+### 13.5 sample
+
+`ProxyDemo.android.kt` 는 "unavailable on Android" 를 반환하고 있었고, `UpcallDemo.android.kt` 의
+§3 은 "the boundary shim is desktop-only today" 라고 적혀 있었다. 둘 다 이제 거짓이므로 고쳤다.
+두 에뮬레이터에서 앱을 띄워 확인한 화면:
+
+| 섹션 | pmp_api26 · pmp_api36 |
+|---|---|
+| 3 — 업콜 | `handle 4294967327 -> 0 · with args -> presses x3 = 0` (Kotlin 이 아니라 **파이썬이** `_pm_resolve`/`_pm_invoke` 로 호출) |
+| 5 — 클래스 프록시 | `installed over PyMethodDef via JNI: 466 lines, 2 proxy classes`, `Greeter('Kotlin').greet(2) -> hello Kotlin! hello Kotlin!`, `g.greetings = 99 -> AttributeError (private set held)` |
+| 6 — companion | `Greeter.forget() -> 100, then built=0`, `Greeter('x').built -> AttributeError (companion is class-only)` |
+| 7 — fast path | `await g.greetNow(1) -> hello fast path!`, `Futures created -> 0` |
+| 7 — really suspends | `await g.greetLater(2) -> hello slow path! hello slow path!`, `Futures created -> 1`, `raised -> None`, `completer thread -> clean` |
+
+마지막 줄이 iOS 가 아직 못 하는 것이다: `awaitSuspendingDemo` 는 파킹된 continuation 을 재개할
+Kotlin 스레드가 필요한데, `androidMain` 은 Kotlin/JVM 이라 `java.lang.Thread` 로 desktop 과 같은
+모양을 쓸 수 있다. 재개는 CPython 도 ART 도 모르는 스레드에서 오므로, 전달뿐 아니라 `pmp_attach`
+까지 함께 돈다.

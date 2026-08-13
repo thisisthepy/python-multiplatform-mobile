@@ -1,4 +1,11 @@
 package python.multiplatform.ffi.upcall
 
-/** The JNI shim publishes `_pm_bind` but no `_pm_invoke`; see [publishesProxyEntryPoints]'s ART row. */
-actual val publishesProxyEntryPoints: Boolean = false
+/**
+ * `androidMain`'s `UpcallEntry.publish` installs both names, as `PyMethodDef`s whose `ml_meth` is a
+ * C shim in `artMain/cinterop/jni_onload.def` that calls back into `UpcallCallbacks`.
+ *
+ * Flipped from `false` only after the tests below were watched to pass on `pmp_api26` and
+ * `pmp_api36`; the constant is the claim, not the cause. Getting there took two C changes and not
+ * the one that was recorded here -- see [publishesProxyEntryPoints]'s ART row.
+ */
+actual val publishesProxyEntryPoints: Boolean = true

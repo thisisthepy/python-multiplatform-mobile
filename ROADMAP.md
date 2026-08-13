@@ -1635,6 +1635,11 @@ and, since the AGP bump below, the same four sections on Android — observed on
 Twenty-two rather than desktop's nineteen because the Android compilation also scans
 `MainActivity`; the module name is the same one, since it is one module now.
 
+Section 3's parenthesis is out of date as of `docs/upcall-async-design.md` §13: ART does have a
+boundary shim, the two C gaps in it are closed, and that section now reads
+`handle 4294967327 -> 0  ·  with args -> presses x3 = 0` from a call **Python** makes through
+`_pm_resolve`/`_pm_invoke`. Sections 5-7 run on both emulators as well.
+
 `:sample:run` did not work before this and it was not the sample's fault twice over: the task had
 no `PYTHONHOME`, so `Py_Initialize` could not find `encodings`, and a project dependency resolves
 to class directories rather than to `desktopJar`, so `manager.loadLibPython` found no bundled
