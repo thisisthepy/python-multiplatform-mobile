@@ -5,6 +5,7 @@ import python.multiplatform.ffi.exceptions.errors.PyTypeError
 import python.multiplatform.ffi.types.basic.PyNone
 import python.multiplatform.ffi.types.basic.asPyObject
 import python.multiplatform.ffi.types.collections.pyObjectToNative
+import python.native.ffi.NativePointer
 
 
 /**
@@ -48,8 +49,13 @@ import python.multiplatform.ffi.types.collections.pyObjectToNative
  *
  * A cached native value and the [PyObject] it came from have *different*
  * lifetimes, so the rule is: **nothing cached in [cachedNativeValue] may
- * point into Python-owned memory.** Case by case, for everything
- * [pyObjectToNative] can produce:
+ * point into Python-owned memory.** It is enforced, not just stated:
+ * [isIndependentOfPythonMemory] decides, every store to [cachedNativeValue]
+ * on the conversion path goes through it, and a value it rejects is returned
+ * but re-converted on the next call instead of kept. The full per-type table
+ * -- including the types that are refused outright, and why -- is in
+ * `docs/object-lifetime.md`. Case by case, for everything [pyObjectToNative]
+ * can produce:
  *
  * - `int`/`float`/`bool` -> Kotlin `Long`/`Double`/`Boolean`.
  *   `PyLong_AsLongLong` and friends copy a scalar out of the object; the
@@ -68,14 +74,28 @@ import python.multiplatform.ffi.types.collections.pyObjectToNative
  *   independent too. It is, however, a **snapshot**: mutating the Python
  *   container afterwards does not update it. Call [invalidateNativeCache] to
  *   force the next read to re-convert.
- * - anything else -> nothing is cached; [toKotlin] throws.
+ * - `bytes`/`bytearray`/`memoryview` -> **refused.** Their native form is a
+ *   pointer into the object's own buffer (`PyBytes_AsStringAndSize` and the
+ *   buffer protocol hand out exactly that), and a `bytearray`'s buffer moves
+ *   when it is resized. No wrapper converts them, so they take the branch
+ *   below rather than acquiring a cache that would outlive what it points at.
+ * - anything else (a user-defined class, a subclass of a builtin, `complex`,
+ *   ...) -> nothing is cached; [toKotlinOrNull] returns `null` and [toKotlin]
+ *   throws.
  *
  * The other direction has the mirror-image rule: [cachedPyObjectValue] must
  * hold an *owned* reference, never a borrowed one, because the proxy can
  * outlive whatever handed the object over. Everything that populates it does
- * so: [PyContext]'s `typedWrap` builds its wrappers with `borrowed = true`
- * (which increfs), and [toPython]'s native-to-Python path builds new objects
- * whose sole reference the returned wrapper owns.
+ * so: [PyContext]'s `proxyConvert` hands over either a `typedWrap` wrapper
+ * (built `borrowed = true`, which increfs) or, for a type with no dedicated
+ * wrapper, a fresh wrapper it increfs for exactly this reason; and
+ * [toPython]'s native-to-Python path builds new objects whose sole reference
+ * the returned wrapper owns.
+ *
+ * A [PyValue] a caller constructs directly is the caller's own business, with
+ * one exception the rule can rule out on sight: a bare
+ * [python.native.ffi.NativePointer] as the initial native value is rejected by
+ * [PyValue]'s constructor.
  */
 interface PyProxy<T> {
     /**
@@ -125,7 +145,7 @@ interface PyProxy<T> {
         // null here instead, so they fall through to the generic walk below.
         if (source !== this && source is PyProxy<*>) {
             (source.cachedNativeValue as T?)?.let {
-                cachedNativeValue = it
+                if (isIndependentOfPythonMemory(it)) cachedNativeValue = it
                 return it
             }
         }
@@ -137,10 +157,12 @@ interface PyProxy<T> {
         if (!hasNativeCounterpart(source)) return null
 
         val converted = pyObjectToNative(source) as T?
-        // Safe to cache and to outlive `source`: see the lifetime rule above --
-        // every branch pyObjectToNative can reach here produces an independent
-        // Kotlin value, never a view into Python-owned memory.
-        cachedNativeValue = converted
+        // Cached only if the lifetime rule allows it. Every branch pyObjectToNative can reach
+        // today produces an independent Kotlin value, so the guard passes for all of them -- it
+        // is here so that a branch added later cannot acquire a cache it is not entitled to
+        // without someone deciding that it should. A value that fails the guard is still
+        // returned; it is simply re-converted on the next call rather than kept.
+        if (isIndependentOfPythonMemory(converted)) cachedNativeValue = converted
         return converted
     }
 
@@ -214,6 +236,37 @@ interface PyProxy<T> {
 }
 
 /**
+ * Whether [value] may be kept in [PyProxy.cachedNativeValue] -- i.e. whether it
+ * would still be valid after the [PyObject] it was converted from is released.
+ *
+ * This is the class doc's lifetime rule written as code rather than prose, so
+ * that a conversion added later cannot quietly acquire a cache it is not
+ * entitled to. The full per-type table, and what each branch of
+ * [pyObjectToNative] actually returns, is in `docs/object-lifetime.md`.
+ *
+ * `true` for the values that walk copies out of CPython -- `Long`, `Double`,
+ * `Boolean`, `String`, and containers built recursively out of those. `false`
+ * for everything else, and the two cases that matter are:
+ *
+ * - a [python.native.ffi.NativePointer]. `ConversionStrategy.RAW` hands one
+ *   back deliberately: no wrapper, no incref, nothing that releases it. It is
+ *   an address, not a reference, so it stops being valid at a moment nothing
+ *   here can observe.
+ * - a [PyObject]. This one *is* a reference and would not dangle, but it is
+ *   not a native value either -- caching it would mean [PyProxy.toKotlin]
+ *   handing back the Python side under a `T` it cannot honour.
+ */
+internal fun isIndependentOfPythonMemory(value: Any?): Boolean = when (value) {
+    null, is Long, is Int, is Short, is Byte, is Double, is Float, is Boolean, is Char, is String -> true
+    // A Kotlin array is a copy by construction; it cannot alias a C buffer.
+    is ByteArray -> true
+    is List<*> -> value.all { isIndependentOfPythonMemory(it) }
+    is Set<*> -> value.all { isIndependentOfPythonMemory(it) }
+    is Map<*, *> -> value.all { isIndependentOfPythonMemory(it.key) && isIndependentOfPythonMemory(it.value) }
+    else -> false
+}
+
+/**
  * Whether [obj]'s Python type has a native Kotlin counterpart at all.
  *
  * Answered by [typedWrap] rather than by a table of its own: `typedWrap`
@@ -271,6 +324,15 @@ class PyValue<T>(
     init {
         require(pyObj != null || initialNativeValue != null) {
             "A PyValue needs a source PyObject, a native value, or both -- it cannot convert from nothing"
+        }
+        // The one caller-supplied shape the lifetime rule can rule out on sight. Everything else
+        // handed in here is the caller's own value; a bare pointer is not -- it is what
+        // ConversionStrategy.RAW returns, owned by nobody, and storing it would produce exactly
+        // the failure this class's rule exists to prevent, at a point where nothing can detect it.
+        require(initialNativeValue !is NativePointer) {
+            "A bare NativePointer (what ConversionStrategy.RAW returns) is an address, not a reference: " +
+                "nothing increfs it and nothing releases it, so it cannot be cached as a native value. " +
+                "Pass the PyObject instead, or convert first."
         }
     }
 

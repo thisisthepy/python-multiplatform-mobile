@@ -95,9 +95,23 @@ class PyContext(private var strategy: ConversionStrategy = ConversionStrategy.DE
      * Python-level type has a dedicated wrapper for (via [typedWrap]) so that
      * subclass's own `cachedNativeValue` accessor is what eventually performs
      * the native conversion.
+     *
+     * Whichever branch [typedWrap] takes, the [PyValue] ends up holding a
+     * reference of its own -- see the comment in the body, and [PyProxy]'s
+     * lifetime rule.
      */
     private fun <T> proxyConvert(obj: PyObject): PyValue<T> {
-        return PyValue(typedWrap(obj))
+        val typed = typedWrap(obj)
+        // `typedWrap` returns a *fresh* wrapper (built `borrowed = true`, i.e. with its own
+        // incref) for the nine builtins it knows, and [obj] itself for everything else. On that
+        // second path the PyValue used to hold the caller's wrapper rather than a reference of
+        // its own -- measured as a missing +1 on `sys.getrefcount` in
+        // `PyValueLazyConversionTest.pyContextGivesEveryPyValueItsOwnReference` -- so closing that
+        // wrapper, which callers do, left the PyValue pointing at a released object. Taking an
+        // independent reference here is what makes PyProxy's stated rule ("cachedPyObjectValue
+        // must hold an owned reference, never a borrowed one") true for both branches instead of
+        // only the first.
+        return PyValue(if (typed === obj) PyObject(obj.pointer, borrowed = true) else typed)
     }
 
     /**
