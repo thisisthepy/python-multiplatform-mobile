@@ -311,6 +311,19 @@ static.
 **`pythonx.*` is ours.** Whatever we wrap or add lives under that prefix. Kotlin fully-qualified
 names point at the original; `pythonx` points at our Pythonic layer. The two namespaces do not mix.
 
+**The wrapping happens in Python, not in Kotlin.** `pythonx.compose.material3` is Python code that
+uses the generated `androidx.compose.material3` bindings and presents a Pythonic API over them.
+There is no hand-written Kotlin wrapper module in between — that is what the existing
+`io.github.thisisthepy.pycomposeui` `RuntimeKt` and `Runtime_androidKt` are, and they are the shape
+being moved away from.
+
+This settles a question that otherwise looks hard. A `@Composable` function is, after compilation,
+an ordinary function taking `$composer` and `$changed`; a binding generated from the artefact
+exposes that signature as it is, and the Python wrapper passes the composer as a value — which is
+what `pythonx-compose`'s `Composable` class already does. So nothing on the Kotlin side needs a
+`@Composable` callable type, and the upcall trampolines do not have to preserve a `@Composable`
+context.
+
 **`JClass`/`JavaClass`, `KClass`/`KotlinClass`, `ObjcClass` work only where the platform has the
 thing they name.** No stubs, no substitutes, no forced uniformity across targets — a target that
 has no JVM has no `JClass`, and says so.
