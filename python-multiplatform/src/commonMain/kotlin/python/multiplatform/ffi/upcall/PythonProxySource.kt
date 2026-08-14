@@ -216,6 +216,24 @@ import python.multiplatform.reflection.UpcallTable
  * chaining costs one `isinstance` per OBJECT argument. Every rendered class derives from the same
  * owner, so there is one notion of "a Python object holding a Kotlin root" rather than two.
  *
+ * #### Where a class with a metaclass gets that base from
+ *
+ * A class with static members already has a metaclass, and the two requirements do not both fit in
+ * a base list: Python has no syntax for a base *after* a keyword, so the only spelling available is
+ * `class Foo(_PmObject, metaclass=_pm_t_1):` -- which separates the class from the metaclass a
+ * reader is pairing it with, and did more than that. `ksp-fixtures:app` locates a companion by
+ * matching `class (_pm_t_\d+)\(type\):` lazily through to `class Foo\(metaclass=\1\):`, and once
+ * that terminator no longer existed the match could not complete: `java.util.regex`'s lazy loop
+ * recurses once per character, so it scanned the rest of a 30 KB module and raised
+ * **StackOverflowError** instead of returning no match. Two fixture tests failed with a stack
+ * overflow that said nothing about rendering.
+ *
+ * So the base comes from the metaclass instead -- `__new__ = _pm_owned_new`, one line at the top of
+ * the metaclass body, appending `_PmObject` to `bases` unless something there already is one. The
+ * class statement stays adjacent to its metaclass and says only what is specific to it, a class
+ * with no statics still names its base outright (`class Counter(_PmObject):`), and a Python
+ * subclass of a rendered class inherits the metaclass without collecting a duplicate base.
+ *
  * **It is gated on the producer having named the return type**, and [ownedTypeOf] is where the
  * reason is written out: `OBJECT` means two different things in the result direction and the tag
  * alone cannot separate them. The walker names its return types; KSP does not, so the KSP path
@@ -673,6 +691,23 @@ object PythonProxySource {
                     return None
                 return _PmObject(_pm_h, _pm_t)
 
+            def _pm_owned_new(_pm_m, _pm_n, _pm_b, _pm_ns, **_pm_kw):
+                # How a rendered class that has a **metaclass** becomes an owner. A rendered class
+                # is one either way, but Python has no syntax for a base after a keyword, so the
+                # only spelling available puts the owner ahead of `metaclass=` in the base list --
+                # which separates the class statement from the metaclass a reader, and a consumer's
+                # regex, is pairing it with. So the base comes from the only thing that holds the
+                # class before it exists: its own metaclass, one line of which says so.
+                #
+                # Guarded rather than unconditional because the metaclass is inherited: a Python
+                # subclass of a rendered class is built through this too, and its bases already
+                # carry the owner. Appending a second copy would be a duplicate base and `type`
+                # refuses those outright.
+                for _pm_x in _pm_b:
+                    if isinstance(_pm_x, type) and issubclass(_pm_x, _PmObject):
+                        return type.__new__(_pm_m, _pm_n, _pm_b, _pm_ns, **_pm_kw)
+                return type.__new__(_pm_m, _pm_n, _pm_b + (_PmObject,), _pm_ns, **_pm_kw)
+
             def _pm_unwrap(_pm_v):
                 # What an owner is worth on the wire: the handle inside it. Everything else is
                 # passed through untouched, which is what keeps a bare handle working for every
@@ -1017,6 +1052,11 @@ object PythonProxySource {
             if (metaclassName != null) {
                 appendLine("class $metaclassName(type):")
                 appendLine()
+                // The owner base, put on from here rather than written into the class statement
+                // below; `_pm_owned_new`'s own comment has the reason and [renderClass]'s KDoc has
+                // what it cost. First line of the body so a reader meets it before the descriptors.
+                appendLine("    __new__ = _pm_owned_new")
+                appendLine()
                 append(metaBody)
                 appendLine()
             }
@@ -1024,10 +1064,11 @@ object PythonProxySource {
             // and the `__del__` already gave it back: a rendered class *is* an owner. Sharing the
             // type is what lets `_pm_unwrap` accept an instance of one as an OBJECT argument, which
             // it could not do before -- a `Counter` passed to a function taking one crossed as a
-            // `PyObject` and failed the Kotlin cast.
+            // `PyObject` and failed the Kotlin cast. A class that has a metaclass gets the same base
+            // from `_pm_owned_new` above instead of naming it here.
             appendLine(
                 if (metaclassName == null) "class $className(_PmObject):"
-                else "class $className(_PmObject, metaclass=$metaclassName):",
+                else "class $className(metaclass=$metaclassName):",
             )
             if (body.isEmpty()) appendLine("    pass") else append(body)
             appendLine()

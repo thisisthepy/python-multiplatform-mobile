@@ -223,6 +223,49 @@ class PythonProxyInstallTest {
         }
 
     @Test
+    fun aRenderedClassThatHasAMetaclassIsStillAnOwnerAtRunTimeAndNotJustInTheSource() =
+        withProxies {
+            // The base does not appear in the class statement for a class with statics -- Python has
+            // no syntax for a base after a keyword, so `_pm_owned_new` on the metaclass puts it on
+            // instead. That is a run-time step, and nothing about the generated text proves it ran.
+            // Both classes this fixture renders have a metaclass (`Counter` has a companion,
+            // `Factory` is nothing but one), so both go through it; `demo.calc`'s plain functions
+            // do not, which is what makes the `_PmObject` question specific to these.
+            Python3.exec(
+                """
+                from proxycls import Counter, Factory
+                c = Counter(7)
+                _p_owner = {
+                    'instance': isinstance(c, _PmObject),
+                    'class': issubclass(Counter, _PmObject),
+                    'empty_body_class': issubclass(Factory, _PmObject),
+                    # the metaclass is still the metaclass: injecting a base must not have cost the
+                    # thing the base was moved out of the way for
+                    'meta': type(Counter).__name__.startswith('_pm_t_'),
+                    # and an instance crosses back as its handle rather than as a PyObject, which is
+                    # the reason a rendered class had to become an owner in the first place
+                    'unwraps': _pm_unwrap(c) == c._pm_handle,
+                    # exactly one copy of the owner in the MRO, so a subclass of a rendered class
+                    # cannot collect a duplicate base from the inherited metaclass
+                    'once': [b.__name__ for b in Counter.__mro__].count('_PmObject'),
+                }
+                class _PSub(Counter):
+                    pass
+                _p_owner['subclass_once'] = [b.__name__ for b in _PSub.__mro__].count('_PmObject')
+                del c
+                """.trimIndent(),
+            )
+
+            assertEquals("true", PythonTestFixture.eval("_p_owner['instance']").toString().lowercase())
+            assertEquals("true", PythonTestFixture.eval("_p_owner['class']").toString().lowercase())
+            assertEquals("true", PythonTestFixture.eval("_p_owner['empty_body_class']").toString().lowercase())
+            assertEquals("true", PythonTestFixture.eval("_p_owner['meta']").toString().lowercase())
+            assertEquals("true", PythonTestFixture.eval("_p_owner['unwraps']").toString().lowercase())
+            assertEquals("1", PythonTestFixture.eval("_p_owner['once']").toString())
+            assertEquals("1", PythonTestFixture.eval("_p_owner['subclass_once']").toString())
+        }
+
+    @Test
     fun aRenderedClassIsNotShadowedByAModuleNamedAfterItsCompanionFunctions() =
         withProxies {
             // Before the fix `proxycls.Counter` was published twice: once as a module (by the

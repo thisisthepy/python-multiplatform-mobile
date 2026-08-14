@@ -197,7 +197,7 @@ class PythonProxySourceTest {
 
         val metaclass = Regex("class (_pm_t_\\d+)\\(type\\):").find(source)?.groupValues?.get(1)
         assertTrue(metaclass != null, "a class with static members needs a metaclass to hold them:\n$source")
-        assertContains(source, "class Foo(_PmObject, metaclass=$metaclass):")
+        assertContains(source, "class Foo(metaclass=$metaclass):")
         assertContains(source, "    def count(cls):")
         assertContains(source, "    @count.setter")
         assertContains(source, "    def count(cls, a0):")
@@ -270,7 +270,7 @@ class PythonProxySourceTest {
 
         val metaclass = Regex("class (_pm_t_\\d+)\\(type\\):").find(source)?.groupValues?.get(1)
         assertTrue(metaclass != null, "a class with a static function needs a metaclass to hold it:\n$source")
-        assertContains(source, "class Foo(_PmObject, metaclass=$metaclass):")
+        assertContains(source, "class Foo(metaclass=$metaclass):")
         assertContains(source, "    def create(cls, a0):")
         // No receiver: a companion function's args start at args[0], exactly like a STATIC_SETTER's.
         assertFalse(source.contains("(cls._pm_handle"), "a static function has no receiver to pass")
@@ -304,7 +304,7 @@ class PythonProxySourceTest {
         val metaclassNames = Regex("^class (_pm_t_\\d+)\\(type\\):", RegexOption.MULTILINE)
             .findAll(source).map { it.groupValues[1] }.toList()
         assertEquals(1, metaclassNames.size, "one companion, so one metaclass carries both halves")
-        assertContains(source, "class Foo(_PmObject, metaclass=${metaclassNames[0]}):")
+        assertContains(source, "class Foo(metaclass=${metaclassNames[0]}):")
         assertContains(source, "    def create(cls, a0):")
         assertContains(source, "    def count(cls):")
         assertContains(source, "    @count.setter")
@@ -430,7 +430,7 @@ class PythonProxySourceTest {
         val metaclassNames = Regex("^class (_pm_t_\\d+)\\(type\\):", RegexOption.MULTILINE)
             .findAll(source).map { it.groupValues[1] }.toList()
         assertEquals(1, metaclassNames.size, "one class with statics, so exactly one metaclass")
-        assertContains(source, "class Foo(_PmObject, metaclass=${metaclassNames[0]}):")
+        assertContains(source, "class Foo(metaclass=${metaclassNames[0]}):")
     }
 
     // ------------------------------------------------------------------------------- classes
@@ -747,7 +747,81 @@ class PythonProxySourceTest {
 
         val metaclass = Regex("class (_pm_t_\\d+)\\(type\\):").find(source)?.groupValues?.get(1)
         assertTrue(metaclass != null, "a class with static members needs a metaclass:\n$source")
-        assertContains(source, "class Foo(_PmObject, metaclass=$metaclass):")
+        assertContains(source, "class Foo(metaclass=$metaclass):")
+        // Still an owner, and this is the only place that says how: the metaclass puts the base on.
+        assertContains(source, "    __new__ = _pm_owned_new")
+    }
+
+    @Test
+    fun aClassThatHasAMetaclassGetsTheOwnerBaseFromItRatherThanFromItsOwnBaseList() {
+        // A rendered class must be a `_PmObject` (so `_pm_unwrap` accepts an instance of one) *and*
+        // its statics must sit on a metaclass. Written the obvious way those two read as
+        // `class Foo(_PmObject, metaclass=_pm_t_1):`, and that spelling is what broke
+        // `ksp-fixtures:app`: see [theCompanionShapeAConsumerMatchesWithALazyRegexStaysAdjacent].
+        //
+        // Python has no syntax for putting a base *after* a keyword, so the base has to come from
+        // somewhere other than the base list, and the metaclass is the only thing left holding the
+        // class before it exists. `_pm_owned_new` is that: a `__new__` on the metaclass that adds
+        // the owner to `bases` unless something in there is already one -- so a Python subclass of a
+        // rendered class does not get a second copy, and an ordinary `class Foo(_PmObject):` with no
+        // statics keeps saying so in the source where a reader can see it.
+        val ctor = entry("p.Foo.<init>", kind = CallableKind.CONSTRUCTOR)
+        val getter = entry("p.Foo.count", kind = CallableKind.STATIC_GETTER)
+        val cls = ReflectedClass(name = "p.Foo", memberNames = listOf(ctor.name, getter.name))
+
+        val source = PythonProxySource.render(listOf(ctor, getter), listOf(cls))
+
+        val metaclass = Regex("class (_pm_t_\\d+)\\(type\\):").find(source)?.groupValues?.get(1)
+        assertTrue(metaclass != null, "a class with static members needs a metaclass:\n$source")
+        assertFalse(
+            source.contains("class Foo(_PmObject, metaclass="),
+            "the owner must not be in the base list of a class that has a metaclass:\n$source",
+        )
+        assertContains(source, "def _pm_owned_new(")
+        assertTrue(
+            source.indexOf("def _pm_owned_new(") < source.indexOf("__new__ = _pm_owned_new"),
+            "the injector has to be defined before a metaclass names it",
+        )
+        assertTrue(
+            source.indexOf("class $metaclass(type):") < source.indexOf("class Foo(metaclass="),
+            "the metaclass has to exist before the class that is built by it",
+        )
+    }
+
+    @Test
+    fun theCompanionShapeAConsumerMatchesWithALazyRegexStaysAdjacent() {
+        // Pinned here because the consumer that reads it cannot pin it for itself, and because the
+        // way it failed hid what had happened. `ksp-fixtures:app`'s
+        // `GeneratedStaticPropertyProxyTest` locates a companion's metaclass with
+        //
+        //     class (_pm_t_\d+)\(type\):\n(?:.|\n)*?class Foo\(metaclass=\1\):
+        //
+        // When the owner base moved into that base list the terminator stopped existing anywhere in
+        // the module, and `java.util.regex`'s lazy loop recurses once per character it consumes:
+        // a pattern that can never complete scans from the first metaclass to the end of a 30 KB
+        // module and dies with **StackOverflowError**, not with a clean "no match". Both fixture
+        // tests that read a metaclass failed that way, and neither said anything about rendering.
+        //
+        // So the assertion is not "the regex is satisfiable" -- it is that the class statement
+        // follows its own metaclass with nothing but that metaclass's body in between, which is the
+        // shape the section above chose and the only one a consumer can match cheaply.
+        val ctor = entry("p.Foo.<init>", kind = CallableKind.CONSTRUCTOR)
+        val create = entry("p.Foo.create", arity = 1)
+        val getter = entry("p.Foo.TAG", kind = CallableKind.STATIC_GETTER)
+        val cls = ReflectedClass(
+            name = "p.Foo",
+            memberNames = listOf(ctor.name, create.name, getter.name),
+        )
+
+        val source = PythonProxySource.render(listOf(ctor, create, getter), listOf(cls))
+
+        val consumer = Regex("class (_pm_t_\\d+)\\(type\\):\\n(?:.|\\n)*?class Foo\\(metaclass=\\1\\):")
+        val match = consumer.find(source)
+        assertTrue(match != null, "a consumer's metaclass regex has to find the pair:\n$source")
+        // and everything the companion owns is inside the span it matched, which is what makes the
+        // consumer's follow-up `assertContains(match.value, ...)` meaningful.
+        assertContains(match.value, "    def create(cls, a0):")
+        assertContains(match.value, "    def TAG(cls):")
     }
 
     @Test
