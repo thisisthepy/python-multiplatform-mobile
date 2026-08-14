@@ -92,8 +92,52 @@ class UpcallBoundaryCostTest {
         /** Calls per timed loop. Large enough to swamp the clock, small enough for the wasm host. */
         const val N = 10_000
 
-        /** Same shape as the measured loop, run first, and the same count the Android test uses. */
-        const val WARMUP = 3_000
+        /**
+         * Calls per row before any row is timed, and **the count is the measurement**.
+         *
+         * This was 3 000 -- the count the Android test used -- and at 3 000 this file did not
+         * measure the boundary. It measured how warm the host's JIT happened to be when the row
+         * ran, which is a property of *the rest of the suite* rather than of this commit. That is
+         * not a hypothesis: `GeneratedProxyCostTest` became able to install proxies on wasmJs, which
+         * put ~270 000 calls through the same entry point earlier in the same Node process, and this
+         * file's wasm figure moved from 484-500 ns to 307-316 ns with the downcall column standing
+         * still. Short-circuiting that one test at the same commit moved it back. Two of this
+         * table's rows were published as boundary costs and neither reproduces.
+         *
+         * ### What is actually warming, established by sweep rather than argued
+         *
+         * The timed loops were run 40 times in succession, cold and warm, on both hosts. Per 10 000
+         * calls, cold desktop read 1307, 716, 696, 660, 548, then flat at ~535; warm desktop read
+         * 801, 744, 704, 705, 676, 602, 593, then flat at ~535. **The two configurations converge on
+         * the same value**, and they converge from opposite sides -- so the plateau is a property of
+         * the boundary and the pre-plateau readings are a property of the suite.
+         *
+         * The same sweep says what is warming, because two rows in it do not move at all: the empty
+         * Python loop (8-9 ns) and the pure-Python callee (24-27 ns) are flat from the very first
+         * 10 000 calls, on both hosts, cold and warm. So this is **not** CPython-side state -- not
+         * the specializing interpreter, not free lists, not the allocator, not interning; all of
+         * those would move the pure-Python rows too, and CPython's own paths are already at steady
+         * state inside the first rep. Only the rows that cross into host code move. It is host JIT
+         * tier-up: C2 on the JVM, and V8's tiering on wasm.
+         *
+         * ### Why this number and not a rounder one
+         *
+         * Convergence needed 40 000 calls cold and 70 000 warm on desktop, and 70 000 on wasm; the
+         * warm side is slower to settle, so it sets the requirement. 100 000 is that 70 000 with
+         * margin, and it is checked rather than assumed -- see the equality this file's figures are
+         * required to hold in `docs/upcall-design.md`, where the same rows are quoted from a full
+         * suite, from a suite with the proxy cost test short-circuited, and from a `--tests`-filtered
+         * run of this class alone.
+         *
+         * Raising it is affordable because the warmup is bounded by the boundary cost it is warming:
+         * eight rows of 100 000 calls is under a second per host, measured.
+         *
+         * `inline` on [Benchmark.measure] was tried and made this worse, which is worth recording so
+         * it is not tried again: each inlined copy is separate code to the JIT and tiers up on its
+         * own, and desktop's downcall row then needed ~230 000 iterations to reach the plateau it
+         * reaches in ~50 000 through the shared, non-inlined loop.
+         */
+        const val WARMUP = 100_000
 
         const val DOWNCALL_REFCOUNT = "Py_IncRef + Py_DecRef (2 downcalls, a GIL scope each)"
         const val DOWNCALL_CALL = "PyObject_CallObject on a Python def (downcall, same shape)"
@@ -220,8 +264,13 @@ class UpcallBoundaryCostTest {
         }
 
         val results = LinkedHashMap<String, Double>()
+        // [WARMUP], not `N / 4`. These rows warm on the same curve as the Python-driven ones and
+        // for the same reason, and 2 500 was even further down it: swept 40 times, desktop's
+        // downcall row read 653, 266, 266, 161 and only then settled at ~134-141, so at 2 500 it
+        // was being read three tiers early. The Python-driven and Kotlin-driven halves have to be
+        // warmed alike or the ratio between them is a ratio of two different compilation states.
         fun record(name: String, block: () -> Unit) {
-            results[name] = Benchmark.measure(warmupIterations = N / 4, iterations = N, block = block)
+            results[name] = Benchmark.measure(warmupIterations = WARMUP, iterations = N, block = block)
         }
 
         try {

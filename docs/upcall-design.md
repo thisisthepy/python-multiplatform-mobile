@@ -338,23 +338,68 @@ measured on exactly one target, while the downcall path has been comparable acro
 `overhead/BenchmarkTest` — so "is the upcall expensive?" had no answer that could be given per
 platform.
 
-`UpcallBoundaryCostTest` (`commonTest`) is `UpcallOverheadTest` with the attach half removed and
-nothing else changed: same loop shape, same warmup counts (10 000 iterations after 3 000 of warmup),
-the same three baselines measured in the same run (plus the two controls the next heading
-introduces), and the same printed-not-asserted policy. It sits
+`UpcallBoundaryCostTest` (`commonTest`) is `UpcallOverheadTest` with the attach half removed: same
+loop shape, the same three baselines measured in the same run (plus the two controls the next heading
+introduces), and the same printed-not-asserted policy. The one thing it no longer inherits is the
+warmup count — it ran 10 000 iterations after 3 000 of warmup, copied from the Android test, and
+3 000 turned out to be the defect rather than a detail. It is now 10 000 after **100 000**. It sits
 in `commonTest` because every seam it needs is already common — `bindUpcallOrNull` (the per-platform
 binding step `UpcallEntryTest` introduced), `UpcallTrampoline`, and the `expect` C API — so one copy
 runs on every target.
 
 | Platform | upcall | downcall, same shape | trampoline alone | upcall / downcall | upcall / trampoline |
 |---|---|---|---|---|---|
-| **desktop** (JVM 21.0.12, macOS arm64) | 861–1313 ns | 315–527 ns | 170–269 ns | 2.49–2.89x | 4.88–5.51x |
-| **iOS simulator** (arm64) | 2263–2502 ns | 1599–1826 ns | 1928–2139 ns | 1.33–1.43x | 1.15–1.22x |
-| **wasmJs** (Node) | 703–1075 ns | 230–369 ns | 228–271 ns | 2.56–3.36x | 3.04–3.97x |
-| **androidNative** (`pmp_api36`, arm64) | 3339–3598 ns | 2170–2222 ns | 2805–3469 ns | 1.52–1.62x | 1.03–1.23x |
-| **androidNative** (`pmp_api26`, arm64) | 3314–4140 ns | 2636–5554 ns | 2843–4863 ns | 0.62–1.34x | 0.71–1.20x |
+| **desktop** (JVM 21.0.12, macOS arm64) | 510–560 ns | 132–144 ns | 76–91 ns ‡ | 3.71–4.14x | 5.62–7.02x ‡ |
+| **wasmJs** (Node) | 290–304 ns ‡ | 95–109 ns | 122–129 ns | 2.67–3.21x | 2.33–2.47x ‡ |
+| *iOS simulator* (arm64) ¶ | *2263–2502 ns* | *1599–1826 ns* | *1928–2139 ns* | *1.33–1.43x* | *1.15–1.22x* |
+| *androidNative* (`pmp_api36`, arm64) ¶ | *3339–3598 ns* | *2170–2222 ns* | *2805–3469 ns* | *1.52–1.62x* | *1.03–1.23x* |
+| *androidNative* (`pmp_api26`, arm64) ¶ | *3314–4140 ns* | *2636–5554 ns* | *2843–4863 ns* | *0.62–1.34x* | *0.71–1.20x* |
 | *Android API 26* †| *1209–1329 ns* | *not recorded* | *not recorded* | *0.99–1.09x* | *not recorded* |
 | *Android API 36* †| *2301–3086 ns* | *not recorded* | *not recorded* | *2.00–2.34x* | *not recorded* |
+
+**The two roman rows are the only ones measured with a warmup large enough to mean anything, and
+they are the reason the whole table was re-cut.** `UpcallBoundaryCostTest` warmed 3 000 calls per row
+and every figure it had ever published was taken before the host JIT had finished tiering up, so the
+number it printed was a function of how much upcall traffic the *rest of the suite* had pushed
+through the same process first. The warmup is now 100 000, chosen from a measured convergence point
+rather than picked; the counts, the sweep behind them and the check below are in
+[`downcall-design.md`](downcall-design.md) under "The benchmark was measuring the benchmark".
+
+**These desktop and wasmJs figures agree between a full suite and a suite with the boundary's biggest
+other consumer removed** — the exact comparison that used to break them. Running the whole suite with
+`GeneratedProxyCostTest` short-circuited, so it drives none of its ~270 000 calls, moves desktop's
+upcall row from 510–560 ns to 501–530 ns and wasmJs's from 290–304 ns to 287–301 ns; both overlap.
+Under the old 3 000-call warmup the same lever moved desktop from 674 ns to 537 ns and wasmJs from
+322 ns to 292 ns. **13 desktop runs and 12 wasmJs runs of the full suite, 3 of each with the lever
+pulled.**
+
+A desktop `--tests`-filtered run of this class alone reads 506–550 ns, inside the full-suite band, and
+its pure-Python control rows are identical to the full suite's (8.4–8.6 ns against 8.4 ns). **wasmJs
+is the exception and it is not fixable from inside this test**: filtered to this class alone it reads
+321–353 ns, but its *pure-Python* rows — an empty Python loop and a Python callee, with no boundary
+anywhere in them — read 23.1 ns and 83.1 ns against the full suite's 15.0 ns and 47.2 ns. CPython is
+itself a wasm module there, so a short-lived Node process runs the interpreter's own bytecode 55–74%
+slower and inflates numerator and denominator alike. Tripling the warmup to 300 000 does not move it,
+which is what says the residual is host-lifetime-bound rather than call-count-bound. **wasmJs's ratio
+columns survive the filtering (2.66–3.13x filtered against 2.91–3.14x in the suite); its absolute
+columns are a full-suite figure and are only meaningful as one.**
+
+‡ **Each platform threw exactly one outlying run out of eleven, and both are quoted here rather than
+dropped**, for the reason `pmp_api26`'s row below is kept — the min–max convention exists to show
+when a host's spread is larger than the effect. Desktop's outlier is confined to the GIL-held
+trampoline row: 10 of 11 runs sit at 76–91 ns and one read 186.81 ns, which is the single run behind
+that ratio column's other value, 2.89x against 5.62–7.02x for the rest. wasmJs's is the opposite
+shape — one run inflated *every* boundary row at once (upcall 432.55 ns, downcall 144.64 ns,
+trampoline 264.44 ns) while the empty GIL scope stayed at 24.67 ns; the eleven other runs give the bands
+above and three deliberate re-runs immediately afterwards read 298.27, 301.73 and 304.47 ns. **Its
+ratio column was unaffected — 2.99x, inside the band** — because numerator and denominator moved
+together, which is the case for preferring the ratio on that target.
+
+¶ **The three italic device rows are the old measurement and were not re-taken** — this pass had no
+access to a simulator or an emulator. They were recorded at 3 000 warmup, so they carry the defect
+described above and are not comparable with the two rows above them. They are left in place rather
+than deleted because they are still the only figures those targets have, but a cross-platform ratio
+must not be read off this table until they are re-measured.
 
 Ranges are min–max over five runs of the whole suite (four for wasmJs); a single reading is not a
 measurement. **The rows in italics marked † are quoted, not re-measured** — from commit `409da6fc`
@@ -377,18 +422,21 @@ not dropped, because the min–max convention here exists precisely to show that
 can be larger than the effect being measured. Read `pmp_api36`'s row for the shape and `pmp_api26`'s
 for how much confidence an emulator supports.
 
-**This table's absolute upcall figures have since been shown to depend on the rest of the suite,
-not on the commit alone.** Two of its rows were re-measured later and neither reproduced: desktop's
-861–1313 ns and wasmJs's 703–1075 ns both fell, in each case with the downcall column standing
-still. On wasmJs the cause was pinned to one commit (`4472f83a`) and demonstrated: it made generated
-proxies installable there, so `GeneratedProxyCostTest` went from driving zero upcalls to driving
-~270 000 of them through the same Node process *before* `UpcallBoundaryCostTest` is timed, and
-short-circuiting that one test at today's tip puts the figure back on this table's band. Desktop's
-moved for a repository-located reason too, in a different and non-overlapping commit window, with
-the same mechanism as its most likely explanation. Read the rows here as "this commit, with the
-suite as it stood", not as the boundary's per-call cost; the full account, both bisections and the
-controlled experiment are in
-[`downcall-design.md`](downcall-design.md) under "Ratio consistency".
+**The history that produced the two roman rows.** This table's original absolute figures were shown
+to depend on the rest of the suite rather than on the commit: desktop's 861–1313 ns and wasmJs's
+703–1075 ns both fell on re-measurement, in each case with the downcall column standing still. On
+wasmJs the cause was pinned to one commit (`4472f83a`) and demonstrated — it made generated proxies
+installable there, so `GeneratedProxyCostTest` went from driving zero upcalls to driving ~270 000 of
+them through the same Node process *before* `UpcallBoundaryCostTest` is timed, and short-circuiting
+that one test put the figure back. Desktop moved for a repository-located reason too, in a different
+and non-overlapping window.
+
+That was diagnosed but not fixed, so the numbers stayed unusable for two more passes. It is fixed
+now, and the fix is the warmup count: the same lever no longer moves either platform's figure. The
+bisections, the controlled experiment, the 40-rep sweep that identified host JIT tier-up as the
+mechanism and ruled CPython-side state out, and the cost of the change are all in
+[`downcall-design.md`](downcall-design.md) under "Ratio consistency" and "The benchmark was measuring
+the benchmark".
 
 **The androidNative row was empty because the target had no test *run* task**, only
 `androidNativeArm64TestBinaries` — KGP registers an execution task only where it knows how to reach
@@ -423,14 +471,26 @@ expensive than the whole upcall through it, i.e. the boundary priced negative (0
 So it is measured twice, differing in exactly that one thing, with an empty `Python3.withPython { }`
 beside them for scale:
 
-| | desktop | iOS simulator | wasmJs | androidNative `pmp_api36` | androidNative `pmp_api26` |
+| | desktop | wasmJs | *iOS simulator* ¶ | *androidNative `pmp_api36`* ¶ | *androidNative `pmp_api26`* ¶ |
 |---|---|---|---|---|---|
-| trampoline, caller holding nothing | 252–507 ns | 2764–3109 ns | 280–307 ns | 3861–4093 ns | 4383–5068 ns |
-| trampoline, GIL already held | 170–269 ns | 1928–2139 ns | 228–271 ns | 2805–3469 ns | 2843–4863 ns |
-| `Python3.withPython { }`, empty | 124–152 ns | 725–982 ns | 79–81 ns | 937–1010 ns | 1193–1298 ns |
+| trampoline, caller holding nothing | 164–181 ns | 146–164 ns | *2764–3109 ns* | *3861–4093 ns* | *4383–5068 ns* |
+| trampoline, GIL already held | 76–91 ns ‡ | 122–129 ns | *1928–2139 ns* | *2805–3469 ns* | *2843–4863 ns* |
+| `Python3.withPython { }`, empty | 50–57 ns | 24–28 ns | *725–982 ns* | *937–1010 ns* | *1193–1298 ns* |
 
 The **GIL-held** row is the one the table above uses, because it is the one the Python-driven
 numerator is comparable with.
+
+Desktop and wasmJs are re-measured at the 100 000 warmup; the three italic columns are the old
+3 000-warmup readings and carry the same caveat as their rows above. The re-measurement changed these
+rows by more than it changed the headline: desktop's empty `withPython` scope went from 124–152 ns to
+50–57 ns and wasmJs's from 79–81 ns to 24–28 ns, because a GIL round trip is the cheapest thing in
+the report and therefore the thing an unwarmed loop overstates most. **This is why the old table's
+"boundary priced negative" problem looked worse than it was** — one of the two rows being subtracted
+was further from its steady state than the other.
+
+The ordering also flipped on wasmJs and the flip is real: its GIL-held trampoline (122–129 ns) is now
+*more* expensive than desktop's (76–91 ns) even though its empty GIL scope is half the price
+(24–28 ns against 50–57 ns), so what wasm pays for is the trampoline body rather than the GIL.
 
 androidNative is the second target to make the case for this control on its own: without it the
 boundary prices negative there too (0.86–0.88x on `pmp_api36`, 0.68–0.86x on `pmp_api26`), for the
@@ -445,17 +505,22 @@ and neither is about the boundary.** (androidNative, added later, is higher stil
 absolute cost — see below; the explanation is the same one, which is the point.)
 There is no runtime boundary on that target at all — a `PyMethodDef` whose `ml_meth` is a
 `staticCFunction` in the same binary. What is expensive is the per-call scaffolding every C API call
-shares: an empty `withPython` scope costs 725–982 ns there against 124–152 ns on desktop and 79–81 ns
+shares: an empty `withPython` scope costs 725–982 ns there against 50–57 ns on desktop and 24–28 ns
 on wasm, and `Py_IncRef + Py_DecRef` — two calls, two GIL scopes, no marshalling — costs 1551–2032 ns
-against 165–326 ns and 166–228 ns. The denominator is inflated by the same thing as the numerator,
+against 110–120 ns and 44–49 ns. (iOS's own figures are the old unwarmed ones and will come down when
+that target is re-measured; the gap is wide enough that the conclusion survives, but the multiple is
+not quotable.) The denominator is inflated by the same thing as the numerator,
 which is exactly why the ratio comes out near 1: an iOS upcall is barely more than an iOS downcall,
 and both are expensive for a reason that has nothing to do with upcalls. This is where the work is
 if the iOS number is to move, not in `UpcallEntry`.
 
-**Desktop is the opposite shape.** Its trampoline with the GIL held is 170–269 ns, and the
-Python-driven figure is 861–1313 ns, so 600–1000 ns per call is the Panama upcall stub plus the
+**Desktop is the opposite shape.** Its trampoline with the GIL held is 76–91 ns, and the
+Python-driven figure is 510–560 ns, so roughly 420–480 ns per call is the Panama upcall stub plus the
 `ctypes` shim in front of it — a real boundary, and the largest one measured here in *relative*
-terms (4.88–5.51x). One caveat is genuine and is not measured away: on desktop `_pm_bound` is a
+terms (5.62–7.02x). Both halves came down when the warmup was fixed and the *ratio went up*, because
+the trampoline row had further to fall than the Python-driven one; the shape of the conclusion is
+unchanged and its size is larger than previously recorded. One caveat is genuine and is not measured
+away: on desktop `_pm_bound` is a
 Python `lambda *a: _pm_invoke(_pm_h, a)` over a `ctypes.CFUNCTYPE`, where the other targets bind a
 `PyCFunction` directly. Desktop therefore pays one extra Python call (26.7–27.2 ns, printed as the
 pure-Python callee) plus ctypes' own argument conversion inside every figure in its row. **Desktop's
@@ -463,21 +528,23 @@ row is an upper bound on its boundary cost**, not a measurement of the boundary 
 
 **wasm's 3.1 ns is not this number, and was never claiming to be.** The "already proven" row in the
 platform table quotes `wasm-experiment`'s `call_indirect` figure, which is the *mechanism* with no
-arguments. The argument-passing path measured here is 703–1075 ns, of which 228–271 ns is the
-trampoline; the remaining 470–800 ns is the Python-side callable plus the crossing with a real
+arguments. The argument-passing path measured here is 290–304 ns, of which 122–129 ns is the
+trampoline; the remaining ~170–180 ns is the Python-side callable plus the crossing with a real
 argument tuple. Two orders of magnitude between the two is not a contradiction — they measure
 different things — but the 3.1 ns figure must not be quoted for an upcall that carries arguments.
 
-**wasm's scaffolding is the cheapest and by far the most stable of the three** (79.50, 80.15, 80.50,
-80.69 ns for an empty scope across four runs), which follows from there being no OS thread machinery
-under it.
+**wasm's scaffolding is the cheapest and by far the most stable of the three** (24.47–27.52 ns for an
+empty scope across eleven runs), which follows from there being no OS thread machinery under it. That
+stability is within one suite scope, though, and does not extend across scopes: the same row reads
+34–37 ns when this class is run on its own, for the process-lifetime reason the table's note gives.
 
 **androidNative is iOS's shape, moved onto an emulator.** It has the highest absolute upcall
 measured here (3.3–4.1 µs) and, on `pmp_api36`, a ratio of 1.52–1.62x — and neither figure is about
 the boundary, because on this target there is no boundary either: the same `nativeMain`
 `PyMethodDef` whose `ml_meth` is a `staticCFunction` in the same binary. What it shares with iOS is
-the reason both are expensive: an empty `withPython` scope costs 937–1010 ns here against 124–152 ns
-on desktop, and `Py_IncRef + Py_DecRef` costs 2010–2132 ns against 165–326 ns. The per-call
+the reason both are expensive: an empty `withPython` scope costs 937–1010 ns here against 50–57 ns
+on desktop, and `Py_IncRef + Py_DecRef` costs 2010–2132 ns against 110–120 ns. (As with iOS, the
+androidNative side of both comparisons is an old unwarmed reading.) The per-call
 scaffolding is the whole story on both native targets, and it is where the work is if either number
 is to move.
 
