@@ -267,6 +267,41 @@ its hardcoded `\\` path separators, which break on macOS and Linux.
 
 ---
 
+## 5b. The Python import surface — decided
+
+Four questions were open about what Python code should look like. They are settled.
+
+**A Kotlin fully-qualified name means the original Kotlin.** `import androidx.compose.material3`
+reaches real AndroidX, not a wrapper of ours wearing its name.
+
+That has a consequence this repository has not dealt with before. A KSP-generated table can never
+contain AndroidX, because KSP only sees modules that apply the bindings plugin. So that import
+cannot resolve through the table — it has to resolve through **the platform's own class lookup**,
+which is JVM class loading on JVM and Android, and is exactly what chaquopy does. We have not
+declined to build that; we have not built it yet.
+
+So on JVM there will be **two resolution paths side by side**: the ahead-of-time generated table,
+and dynamic class lookup. Which one answers a given name, and what happens when both could, is a
+design question that has to be answered explicitly rather than discovered.
+
+On iOS, androidNative and wasm there is no such lookup, and those imports should **fail** — with a
+message that says the platform has no JVM class lookup, rather than a missing-module error that
+reads like a typo.
+
+**`pythonx.*` is ours.** Whatever we wrap or add lives under that prefix. Kotlin fully-qualified
+names point at the original; `pythonx` points at our Pythonic layer. The two namespaces do not mix.
+
+**`JClass`/`JavaClass`, `KClass`/`KotlinClass`, `ObjcClass` work only where the platform has the
+thing they name.** No stubs, no substitutes, no forced uniformity across targets — a target that
+has no JVM has no `JClass`, and says so.
+
+**`.pyi` generation belongs to the Gradle plugin**, the way PyREPL did it: read the resolved
+artefacts at build time and emit stubs per source set. It is not a sibling of `PythonProxySource`,
+which fills `sys.modules` at runtime; these are different products for different consumers, one for
+the interpreter and one for the IDE. Long term that generator belongs to `toolchain` — see §5.
+
+---
+
 ## 6. Where this file should live
 
 It describes five repositories and sits in one of them, because that is the only one with an
