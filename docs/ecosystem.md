@@ -294,6 +294,20 @@ jars and the walker applies directly. On iOS, androidNative and wasm the artefac
 whether the same walk is possible there — and what a Kotlin declaration from a klib can be bound
 to at runtime with no JVM underneath — is the open question, not AndroidX.
 
+**Dynamic binding is a removed option, not a missing one.** The 2024 design document
+(*PyComposeUI*, the open-source contest report) specifies a dynamic binder — Java/Kotlin
+Reflection on the JVM target, `ctypes` and `pyobjc` on Kotlin/Native — with a generated meta
+package existing only so an IDE can infer types against it. That is history. The binder was built
+statically instead, and the reason is the same one §7 records for choosing a build-time table:
+a GraalVM native image is a closed world and Kotlin/Native has no reflection, so a name that only
+exists at runtime cannot be reached on the targets this library has to support.
+
+So there is one axis, not two. Bindings are produced at build time, by KSP for the consumer's own
+source and by an artefact walk for everything the build resolves. Anyone reading the 2024 document
+will find a dynamic path described as the plan; it was dropped deliberately, and the meta package
+that document treats as a typing aid is, here, generated beside bindings that are themselves
+static.
+
 **`pythonx.*` is ours.** Whatever we wrap or add lives under that prefix. Kotlin fully-qualified
 names point at the original; `pythonx` points at our Pythonic layer. The two namespaces do not mix.
 
