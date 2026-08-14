@@ -55,6 +55,33 @@ suspend fun neverBound(): Int = 1
 internal fun secretlyInternal(): Int = 42
 
 /**
+ * An ordinary public class: neither a primitive nor a value class, and therefore the shape
+ * `androidx.compose.ui.Modifier` has. Nothing about it can be erased to something the boundary
+ * already carries, so it can only cross as an opaque handle
+ * (`python.multiplatform.reflection.HandleTable`).
+ */
+class Rope(val length: Double)
+
+/** OBJECT in return position: Python receives a handle it did not previously hold. */
+fun makeRope(length: Double): Rope = Rope(length)
+
+/** OBJECT in parameter position: the handle Python holds resolves back to the same instance. */
+fun ropeLength(rope: Rope): Double = rope.length
+
+/**
+ * `Modifier.padding(Dp): Modifier` reproduced with types this module controls: an extension whose
+ * receiver **and** return are the same ordinary class, which is what makes chaining possible at all.
+ */
+fun Rope.lengthened(by: Double): Rope = Rope(length + by)
+
+/** Two overloads whose *value* parameter lists are identical and whose receivers are not -- the
+ * case `Int.times`/`Double.times` has in `androidx.compose.ui.unit`. Disambiguating on value
+ * parameters alone cannot separate these, so the receiver has to join the name. */
+fun Rope.tagged(): String = "rope"
+
+fun Meters.tagged(): String = "meters"
+
+/**
  * `kotlin.time.Duration.getInWholeSeconds-impl(J)J`'s exact shape: a value class with a *public*
  * constructor and accessor (unlike `Duration`'s own `internal` one), but where the mangled method is
  * a true member declared inside the class body rather than a top-level extension declared elsewhere.

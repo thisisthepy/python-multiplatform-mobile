@@ -29,53 +29,70 @@ class WalkedArtifactTableTest {
         UpcallTable.clear()
     }
 
+    /**
+     * The wiring, pinned against the two artefacts this fixture fully controls.
+     *
+     * `junit:junit:4.13.2` and `:ksp-fixtures:artifact-valueclass` are both version-pinned by this
+     * build, so their contribution is a fixed list and `ArtifactScannerTest
+     * .theWholeJUnitJarYieldsExactlyTheseUnsuffixedDeclarations` pins the same seven names from the
+     * other end -- that test walks the jar directly in a plugin unit test, this one reads what the
+     * *build* produced, compiled and installed. If the two ever disagree, the wiring between them is
+     * what broke.
+     *
+     * `kotlin-stdlib` and Compose are deliberately **not** pinned as lists. Their contribution is a
+     * property of a version this repository bumps, and pinning ~250 names would turn every Kotlin or
+     * Compose bump into a mechanical edit of this file while catching nothing the assertions below
+     * do not. What is asserted about them instead is the thing that is a property of *this* code:
+     * that a package asked for contributed something, and that the overload rule spelled it the way
+     * `ArtifactScanner.disambiguateOverloads` says.
+     */
     @Test
     fun theWalkerBoundExactlyTheJarsDeclarationsItCouldCarry() {
         ArtifactTable.registerInto()
+        val names = UpcallTable.entries().map { it.name }.sorted()
+
         assertEquals(
             listOf(
                 // `:ksp-fixtures:artifact-valueclass`, built for exactly one proof: see that
                 // module's `build.gradle.kts`.
                 "fixture.valueclass.sumMeters",
-                "junit.framework.Assert.failSame",
-                "junit.framework.TestCase.failSame",
                 "junit.runner.BaseTestRunner.getFilteredTrace",
+                "junit.runner.BaseTestRunner.getPreference__String",
+                "junit.runner.BaseTestRunner.getPreference__String_Int",
                 "junit.runner.BaseTestRunner.savePreferences",
                 "junit.runner.BaseTestRunner.setPreference",
                 "junit.runner.BaseTestRunner.truncate",
                 "junit.runner.Version.id",
-                // `kotlin.text`: see the `build.gradle.kts` comment on `artifactIncludePackages` --
-                // `kotlin-stdlib` needs no dependency of its own, and these are exactly the top-level
-                // extension functions that used to be unreachable behind `StringsKt`'s multi-file
-                // facade. `trimIndent` is the one `WalkedArtifactPythonImportTest` calls from Python.
-                "kotlin.text.capitalize",
-                "kotlin.text.compareTo",
-                "kotlin.text.decapitalize",
-                "kotlin.text.drop",
-                "kotlin.text.dropLast",
-                "kotlin.text.endsWith",
-                "kotlin.text.prependIndent",
-                "kotlin.text.regionMatches",
-                "kotlin.text.replace",
-                "kotlin.text.replaceAfter",
-                "kotlin.text.replaceAfterLast",
-                "kotlin.text.replaceBefore",
-                "kotlin.text.replaceBeforeLast",
-                "kotlin.text.replaceFirst",
-                "kotlin.text.replaceIndent",
-                "kotlin.text.replaceIndentByMargin",
-                "kotlin.text.substringAfter",
-                "kotlin.text.substringAfterLast",
-                "kotlin.text.substringBefore",
-                "kotlin.text.substringBeforeLast",
-                "kotlin.text.take",
-                "kotlin.text.takeLast",
-                "kotlin.text.toBooleanStrict",
-                "kotlin.text.trimIndent",
-                "kotlin.text.trimMargin",
             ),
-            UpcallTable.entries().map { it.name }.sorted(),
+            names.filter { it.startsWith("junit.runner.") || it.startsWith("fixture.valueclass.") },
         )
+
+        // `kotlin.text`: `kotlin-stdlib` needs no dependency of its own, and `trimIndent` is the
+        // top-level extension that used to be unreachable behind `StringsKt`'s multi-file facade --
+        // the case `ArtifactScanner`'s KDoc names. `WalkedArtifactPythonImportTest` calls it.
+        assertTrue("kotlin.text.trimIndent" in names, "the multi-file facade case is missing")
+        // `kotlin.text.get` is `MatchGroupCollection.get(String)`, which is declared in Kotlin's
+        // `kotlin.text` but compiled into `kotlin/text/jdk8/` by `@file:JvmPackageName`. Binding it
+        // under the JVM package produced `import kotlin.text.jdk8.get`, which does not compile --
+        // see `kotlinPackageNameOverrideOf`. It is here because that is now read.
+        assertTrue("kotlin.text.get" in names, "the @JvmPackageName case is missing")
+
+        // Compose. `docs/kotlin-extensions-in-python.md` §3 measured **zero** declarations bound
+        // from this package; `WalkedArtifactComposeModifierTest` calls two of these from Python.
+        val layout = names.filter { it.startsWith("androidx.compose.foundation.layout.") }
+        assertTrue(layout.size >= 60, "expected androidx.compose.foundation.layout to bind; got $layout")
+        assertTrue("androidx.compose.foundation.layout.padding__Dp" in layout, layout.toString())
+        assertTrue("androidx.compose.foundation.layout.size__Dp" in layout, layout.toString())
+        assertTrue("androidx.compose.foundation.layout.fillMaxSize" in layout, layout.toString())
+
+        // The rule, stated as an invariant over the whole table rather than per name: a bare Kotlin
+        // name means exactly one declaration, and a `__`-suffixed one names a member of an overload
+        // set whose bare name is therefore absent.
+        val suffixed = names.filter { "__" in it }
+        assertTrue(suffixed.isNotEmpty())
+        suffixed.forEach { name ->
+            assertFalse(name.substringBefore("__") in names, "$name coexists with its own bare name")
+        }
     }
 
     /**

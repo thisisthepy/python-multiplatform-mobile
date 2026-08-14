@@ -40,19 +40,22 @@ internal class BoundaryType(
 }
 
 /**
- * The whole of the walker's type admission policy.
+ * The **descriptor-only** half of the walker's type admission policy: what can be bound from a class
+ * file that carries no `kotlin.Metadata` at all, i.e. a Java class.
  *
- * `null` means "this declaration is not bound", and there is no `OBJECT` fallback on purpose. A
- * `TypeTag.OBJECT` parameter needs a Kotlin type name to cast the boundary's handle to, and a jar
- * offers only an erased JVM one -- `Ljava/util/List;` has no Kotlin spelling at all (Kotlin maps it
- * onto `kotlin.collections.List`, which is not the same name), a `Ljava/lang/Object;` cast checks
- * nothing, and a value class erases to the primitive it wraps so its descriptor actively lies about
- * what the method takes. Every one of those produces generated Kotlin that either does not compile
- * or compiles into the wrong call.
+ * `null` means "this declaration is not bound", and there is still no `OBJECT` fallback here on
+ * purpose. A `TypeTag.OBJECT` parameter needs a **Kotlin type name** to cast the boundary's handle
+ * to, and a descriptor is not one: `Ljava/util/List;` has no Kotlin spelling at all (Kotlin maps it
+ * onto `kotlin.collections.List`, and refuses `java.util.List` written out), a `Ljava/lang/Object;`
+ * cast checks nothing, and a value class erases to the primitive it wraps so its descriptor actively
+ * lies about what the method takes. Every one of those produces generated Kotlin that either does
+ * not compile or compiles into the wrong call.
  *
- * The cost is that the walker binds a small, obviously-correct subset today. See
- * `ArtifactScannerTest.kotlinFileFacadesAreSkippedBecauseKotlinCannotNameThem` for what widening it
- * actually requires (`kotlin-metadata-jvm`, not more descriptor cases).
+ * **What changed, and where.** `resolveKotlinType` (`KotlinMetadata.kt`) *does* have an object case,
+ * because `@Metadata`'s classifier already **is** the Kotlin name -- `androidx/compose/ui/Modifier`,
+ * `/` for `.` and nothing else to guess. So the sentence above is not "the walker cannot bind
+ * objects"; it is "a descriptor cannot name one". The Java path keeps the small,
+ * obviously-correct subset; the Kotlin path is where Compose is reached.
  */
 internal fun boundaryTypeOf(descriptor: String): BoundaryType? = when (descriptor) {
     // `TypeTag.INT` carries a Long, so a narrower integral type converts in both directions --

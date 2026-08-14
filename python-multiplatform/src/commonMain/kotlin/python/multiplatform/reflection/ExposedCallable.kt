@@ -102,6 +102,67 @@ class ExposedCallable(
      * a synchronous entry would.
      */
     val isSuspend: Boolean = false,
+    /**
+     * The Kotlin declaration's parameter names, in [paramTypes] order, or empty when the producer
+     * did not supply them.
+     *
+     * `docs/pythonx-adapter-design.md` §2.4 is the reason this exists: mapping a Python keyword
+     * argument onto a positional slot needs names, and neither side of the boundary had them --
+     * "this is not a `pythonx` design choice, it is arithmetic." Both producers can read them
+     * (`KmValueParameter.name` for the walker, KSP's own parameter list for the processor), so the
+     * only thing that was missing is the field.
+     *
+     * For an [isExtension] entry, slot 0 is the receiver and is named `<receiver>`: it is
+     * positional-only by construction (Kotlin has no keyword form for a receiver either), and a name
+     * no Python identifier can spell is the honest way to say so.
+     *
+     * Empty rather than absent-per-entry so that a producer that has not been taught to fill it in
+     * -- and every hand-written fragment in this repository's tests -- keeps compiling and keeps
+     * working positionally.
+     */
+    val paramNames: List<String> = emptyList(),
+    /**
+     * The Kotlin type each parameter was **declared** as, in [paramTypes] order, or empty when the
+     * producer did not supply them.
+     *
+     * [paramTypes] says how a value is *marshalled*, which is deliberately lossy: a `Dp` parameter is
+     * a [TypeTag.FLOAT] because the generated Kotlin wraps the raw number back up into a `Dp` on the
+     * way in (`docs/pythonx-adapter-design.md` §4.4). That is correct for calling and useless for
+     * describing -- a Python adapter cannot tell `Dp` from `Float`, and a `.pyi` generator cannot
+     * name the type it is meant to stub. This is the declaration as written.
+     */
+    val paramTypeNames: List<String> = emptyList(),
+    /** [paramTypeNames] for the return, or `null` when the producer did not supply it. */
+    val returnTypeName: String? = null,
+    /**
+     * Whether this entry is a Kotlin extension function, and therefore whether slot 0 of `args` is a
+     * receiver rather than an ordinary first parameter.
+     *
+     * Distinct from [CallableKind.hasReceiver], which asks a different question: a [CallableKind
+     * .METHOD]'s receiver is an *instance* resolved from a proxy's handle and is not counted in
+     * [arity], whereas an extension's receiver is an ordinary argument that is. Both are "there is a
+     * receiver"; only this one means "and it is already in `args[0]` and counted".
+     *
+     * `docs/kotlin-extensions-in-python.md` §4.1 -- an extension becomes a method on its receiver's
+     * proxy -- has no input without this and [receiverTypeName].
+     */
+    val isExtension: Boolean = false,
+    /** The Kotlin type [isExtension] extends, e.g. `androidx.compose.ui.Modifier`; `null` otherwise. */
+    val receiverTypeName: String? = null,
+    /**
+     * Whether each parameter declares a default value, in [paramTypes] order, or empty when the
+     * producer did not supply it.
+     *
+     * **A flag, and nothing acts on it yet.** Every entry this repository generates passes every
+     * argument explicitly; there is no route from here to a call that omits one.
+     * `docs/pythonx-adapter-design.md` §4.5 names four candidates and a measured reason each may not
+     * work -- notably that Compose carries a composable's `$default` mask as a *declared* trailing
+     * parameter and emits no `fn$default` bridge at all, so "call the synthetic" is not available.
+     * The flag is carried because metadata has it and because a stub that marks 254 of `Modifier`'s
+     * 435 parameters required would be wrong about most of the API; the calling convention that uses
+     * it is out of scope and open.
+     */
+    val paramHasDefault: List<Boolean> = emptyList(),
     val callable: (Array<Any?>) -> Any?,
 ) {
     init {
@@ -109,6 +170,18 @@ class ExposedCallable(
         // call from Python with the wrong number of arguments.
         require(paramTypes.size == arity) {
             "$name declares arity $arity but ${paramTypes.size} parameter types"
+        }
+        // Empty is "not supplied"; any other length is a producer that disagrees with itself about
+        // how many parameters this declaration has, which would silently misalign every keyword
+        // argument by one slot.
+        require(paramNames.isEmpty() || paramNames.size == arity) {
+            "$name declares arity $arity but ${paramNames.size} parameter names"
+        }
+        require(paramTypeNames.isEmpty() || paramTypeNames.size == arity) {
+            "$name declares arity $arity but ${paramTypeNames.size} parameter type names"
+        }
+        require(paramHasDefault.isEmpty() || paramHasDefault.size == arity) {
+            "$name declares arity $arity but ${paramHasDefault.size} default flags"
         }
     }
 

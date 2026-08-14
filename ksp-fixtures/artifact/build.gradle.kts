@@ -47,6 +47,25 @@ kotlin {
                 // See its own `build.gradle.kts`: a real jar for the value-class round trip
                 // `kotlin.time.Duration` cannot prove.
                 implementation(projects.kspFixtures.artifactValueclass)
+
+                // Compose Multiplatform, as plain Maven coordinates and **without** the Compose
+                // Gradle or compiler plugin. That is deliberate and is the whole shape of the claim:
+                // `docs/kotlin-extensions-in-python.md` §3 measured zero declarations bound from
+                // these exact jars, and what makes `Modifier.padding(16.dp)` reachable is the
+                // walker's own two gates opening, not any cooperation from Compose's tooling.
+                //
+                // A `Modifier` chain is also the one part of Compose that needs no composition at
+                // all: `padding` is an ordinary function returning an ordinary object, so
+                // `WalkedArtifactComposeModifierTest` can call it in a plain JVM test with no
+                // `Composer` anywhere. Composables are a different problem
+                // (`docs/pythonx-adapter-design.md` §5) and are not touched here.
+                //
+                // Version pinned to the catalog's `compose-plugin`, which is what the rest of this
+                // build resolves, so no second Compose version enters the cache.
+                val composeVersion = libs.versions.compose.plugin.get()
+                implementation("org.jetbrains.compose.ui:ui-desktop:$composeVersion")
+                implementation("org.jetbrains.compose.ui:ui-unit-desktop:$composeVersion")
+                implementation("org.jetbrains.compose.foundation:foundation-layout-desktop:$composeVersion")
             }
         }
         val desktopTest by getting {
@@ -76,7 +95,15 @@ pythonBindings {
     // it from real Python.
     // `fixture.valueclass` is `:ksp-fixtures:artifact-valueclass`'s `Meters`/`sumMeters` -- see that
     // module's `build.gradle.kts` for why `kotlin.time.Duration` cannot stand in for it.
-    artifactIncludePackages.set(listOf("junit.runner", "junit.framework", "kotlin.text", "fixture.valueclass"))
+    //
+    // `androidx.compose.foundation.layout` is the scorecard of
+    // `docs/kotlin-extensions-in-python.md`: the package `Modifier.padding` and `Modifier.size` live
+    // in, measured at **zero bound declarations** before the metadata-kind gate and the type gate
+    // were opened. Narrow on purpose -- binding all of Compose here would make this fixture's
+    // compile time the cost of a proof it does not need.
+    artifactIncludePackages.set(
+        listOf("junit.runner", "junit.framework", "kotlin.text", "fixture.valueclass", "androidx.compose.foundation.layout"),
+    )
 }
 
 /**
