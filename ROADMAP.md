@@ -325,8 +325,13 @@ guessing wrong the other way is a crash once upcalls exist.
 **Closed.** A thousand Python lists holding a target object are dropped with no explicit
 `close()`, Kotlin's collector takes the wrappers, and the target's count falls as the lists are
 destroyed. Verified on both collectors — desktop through `java.lang.ref.Cleaner`, iOS through
-Kotlin/Native's `createCleaner`. Android below API 33 uses the `PhantomReference` path and is not
-covered yet.
+Kotlin/Native's `createCleaner`. Android below API 33 uses the `PhantomReference` path, which is
+now covered on every desktop build — the loop moved to `jvmMain` because nothing in it is
+Android-specific and `desktopTest` can reach it there. It could not be tested where it lived: both
+emulators are API 36, so they take the `Cleaner` branch and no test in the repository reached the
+other one. It held a defect the whole time, and the shape of that defect is the argument for the
+move — the drain loop caught `InterruptedException` alone, so one throwing release killed the
+thread and every later release leaked in silence.
 
 **Two things still cannot be freed**: wrappers outliving `Py_Finalize()` are skipped
 deliberately, leaving stale pointers if the interpreter is restarted; and cross-boundary cycles
@@ -2571,9 +2576,15 @@ what is blocking it and what the next concrete step is.
    `PhantomReference` fallback path specifically — the emulators available in this environment
    skew toward API 26/36 (CLAUDE.md), and 26 is itself ≥ the API 33 cutoff only in the wrong
    direction (26 < 33, so it *should* already exercise the fallback — worth checking whether it
-   actually does before assuming this needs new hardware). **(b) next step:** find or confirm which
-   available emulator is below API 33, then write a test that forces a GC on it and asserts the
-   `PhantomReference` path actually runs (nothing today asserts on which of the two paths executed).
+   actually does before assuming this needs new hardware).
+
+   **The second half of this is closed, and it did not need hardware.** The premise was that the
+   fallback could only be reached from a device below API 33. Nothing in a `PhantomReference` drain
+   loop is Android-specific, so it moved to `jvmMain` and `desktopTest` reaches it on every build —
+   which immediately found a defect that had been there the whole time. What is *not* closed is the
+   `androidMain` wiring around it: no test still asserts which of the two paths a given API level
+   takes, and that part does need a device. `ksp-fixtures/android`'s 8 `jvmTest`s are also still
+   not exercised on one.
 
 8. **wasm's `ProxyTypeExports.kt`-shaped trampoline generation is manual.** (§10, "Upcalls: closed")
    The three delegating lines a wasm executable module must declare by hand are currently
