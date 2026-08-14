@@ -697,6 +697,15 @@ by elimination — it is not broken out by API level the way the other rows are,
 Android/ART rows there record only the upcall side ("not recorded" for downcall), which is why
 every cell in those two rows is blank here: there is nothing to quote, not an oversight.
 
+> **The `PyUnicode_FromString, 8 chars` column is superseded.** It is the one column sourced from
+> `overhead/BenchmarkTest`, whose warmup for that row has since gone from `100` to `100 000`, for
+> the reason "The benchmark was measuring the benchmark" sets out in `upcall-design.md`. That row
+> was among the worst affected: swept on desktop in full suites it reads 1132–1146 ns at the old
+> `100` and 167–458 ns once warmed, so the figure quoted here is roughly 3–7x the warmed cost. That
+> warmed row is bimodal and is quoted as a spread rather than averaged. Read the column as a record
+> of the old methodology, not as the price of an 8-character marshal. The other three columns come
+> from `UpcallBoundaryCostTest`, which `7e9c6b8c` had already fixed, and are unaffected.
+
 ### Ratio consistency: mostly holds, desktop is the exception
 
 > **Superseded as a source of numbers, kept as the record of how the defect was found.** Every figure
