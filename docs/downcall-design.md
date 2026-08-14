@@ -707,7 +707,7 @@ is a direct comparison, not a re-derivation):
 |---|---|---|---|
 | desktop | 2.49–2.89x | 2.13–2.34x | **no — see below** |
 | iOS simulator | 1.33–1.43x | 1.38–1.42x | yes, nested inside the old range |
-| wasmJs | 2.56–3.36x | 2.36–2.63x | mostly — top of the new range overlaps the bottom of the old one |
+| wasmJs | 2.56–3.36x | 2.36–2.63x | mostly — top of the new range overlaps the bottom of the old one. **Superseded: since drifted to 1.58–1.68x, pinned to `4472f83a` and explained — see "wasmJs: closed too" below** |
 
 **Desktop's ratio moved outside the previously recorded range, and it is the upcall side that
 moved, not the downcall side.** This pass's downcall-same-shape figure (315.69–335.32 ns) sits at
@@ -803,12 +803,97 @@ wasmJs's upcall figure well below the 687–741 ns-equivalent range implied by t
 "this pass" ratio (2.36–2.63x against a ~192–205 ns downcall figure that still matches today's
 run) — today's ratio is 1.26–1.67x. So the "yes, mostly consistent" verdict recorded for wasmJs
 above was accurate for the commit it was measured on (`65e1bf5d`) and has since gone stale in the
-same direction as desktop's did. This pass's own `git merge` at its start pulled in wasm
-browser-runtime staging changes from `develop`, which is a plausible independent cause specific to
-wasmJs and has not been investigated here — flagged for a follow-up pass rather than resolved, since
-this task's scope was the desktop discrepancy specifically. iOS was not re-checked this pass: this
-task's constraints rule out using the iOS simulator, so its "yes, nested inside the old range"
-verdict above stands unverified rather than reconfirmed.
+same direction as desktop's did. iOS was not re-checked: this task's constraints rule out using the
+iOS simulator, so its "yes, nested inside the old range" verdict above stands unverified rather
+than reconfirmed.
+
+### wasmJs: closed too — one commit, and the mechanism demonstrated rather than argued (2026-08-14)
+
+wasmJs's drift is **repository drift, not noise**, it is pinned to the **single commit `4472f83a`**,
+and — unlike desktop's, which stayed at the level of a plausible story — its mechanism was
+reproduced by a controlled experiment. It is *not* a genuine change in what the wasm upcall boundary
+costs.
+
+The measurement protocol was the one the desktop section above used, with two changes forced by
+this machine: runs at the two ends were **interleaved** rather than run in two blocks, and the
+timed task was re-run with `--rerun` on `wasmJsNodeTest` alone rather than `--rerun-tasks`, so a
+full Kotlin recompile does not finish moments before the benchmark starts. Every run is the **whole
+wasm suite** (filtering changes the measured region — see the pitfall below), `build/test-results`
+is cleared before each, and all of them are 344/0/0 (258/0/0 at `537c1a0b`, whose suite was smaller).
+
+| commit | upcall | downcall, same shape | ratio | runs |
+|---|---|---|---|---|
+| `65e1bf5d` (parent) | 484.22–500.38 ns | 190.11–191.00 ns | 2.53–2.61x | 3 |
+| **`4472f83a` (child)** | **306.66–315.82 ns** | **189.32–202.56 ns** | **1.52–1.66x** | 3 |
+| `ec8ff389` | 482.03–507.38 ns | 197.87–204.10 ns | 2.38–2.53x | 3 |
+| `4722cfe9` | 477.40–497.05 ns | 190.60–203.23 ns | 2.34–2.60x | 3 |
+| `17f058ca` | 302.55–320.54 ns | 189.47–203.92 ns | 1.50–1.65x | 3 |
+| `73f2af6b` | 312.50–322.11 ns | 188.95–213.49 ns | 1.46–1.66x | 3 |
+| current tip | 355.82–373.21 ns | 222.07–226.88 ns | 1.58–1.64x | 4 (+4 earlier) |
+
+`4472f83a` and its own parent are adjacent commits measured minutes apart in one worktree, and their
+upcall bands do not touch. **The downcall column does not move anywhere in this table** — it is the
+upcall side alone, exactly as on desktop.
+
+**The window does *not* overlap desktop's.** Desktop's was `4722cfe9..ec8ff389`; both of those
+endpoints measure in wasm's *slow* band and are indistinguishable from each other, so wasm did not
+move across desktop's window at all. `4472f83a` sits after `ec8ff389`. The two platforms therefore
+do **not** share a cause in `commonMain`'s marshalling or handle paths — which was the hypothesis
+worth testing, and it is refuted rather than left open.
+
+**The MEMFS change is not the cause either.** `3355851c` (stdlib zip installed into MEMFS instead
+of resolving out of a CPython source checkout) was the obvious environmental confound, since it
+lands after the desktop window. `73f2af6b` is its immediate parent and already measures 312–322 ns —
+fully in the fast band. The transition happened before it.
+
+**Why a commit that only adds a branch to the timed function made it measure cheaper.**
+`4472f83a`'s only edit to the timed path is a `when` on `self` in `UpcallEntry.invokeMethod`, which
+can only cost more, not less. What it also did was make `PythonProxySource.install()` succeed on
+wasm for the first time. Before it, `GeneratedProxyCostTest` and `ProxyHandleLifetimeTest` printed
+"no proxies are installable on this target, so there is nothing to measure" and drove **zero**
+upcalls; after it, `GeneratedProxyCostTest` drives on the order of 270 000 calls
+(`N = 10 000` × 3 kept × ~9 rows) straight through `UpcallEntry.invokeMethod` — earlier in the
+**same Node process**, and therefore into the same V8 wasm tier-up state that
+`UpcallBoundaryCostTest` is later timed in. The benchmark's own 3 000-iteration warmup does not
+reach that state on its own.
+
+That was tested, not just asserted. At the **current tip**, with nothing changed but
+`GeneratedProxyCostTest`'s body short-circuited so it installs nothing and calls nothing — the
+pre-`4472f83a` behaviour, same commit, same build, suite still 344/0/0 — the upcall figure went
+back up:
+
+| current tip | upcall | downcall | ratio |
+|---|---|---|---|
+| as it is | 355.82–373.21 ns | 222.07–226.88 ns | 1.58–1.64x |
+| with `GeneratedProxyCostTest` inert | 459.67–473.79 ns | 187.24–192.16 ns | 2.36–2.53x |
+
+One lever, at one commit, moves the number across the whole gap and lands it back on `65e1bf5d`'s
+band (2.53–2.61x) and on this document's own "this pass" reading (2.36–2.63x). So the desktop
+section's suspicion — that this benchmark reports a same-process warm-up artifact rather than a
+boundary cost — is **confirmed on wasmJs by direct experiment**, on a different commit and a
+non-overlapping window from desktop's. What the two platforms share is the methodology, not a
+code path.
+
+**The consequence for the table is that `UpcallBoundaryCostTest`'s absolute upcall figure is not a
+property of the commit alone.** It is a property of the commit *and* of how much upcall traffic the
+rest of the suite pushed through the same process first. Any future row should record the suite
+composition it was taken with, or the number will "drift" again the next time an unrelated test
+starts or stops exercising the boundary.
+
+**One thing did not reproduce and is left as observed.** `537c1a0b`, the commit
+`upcall-design.md`'s 703–1075 ns wasm row was recorded on, does not reproduce that row here: a
+freshly created worktree at it measured 546.45 ns once and then 1476.85–1602.25 ns on four
+subsequent runs (its trampoline figure was similarly unstable, 268–612 ns, while its downcall stayed
+flat at 239–247 ns). That commit's suite is 258 tests rather than 344 and predates the MEMFS change,
+so it is a different environment in two ways at once, and no attempt is made here to reconcile it.
+The conclusion above rests on the adjacent-commit pair `65e1bf5d`/`4472f83a` and on the tip-vs-tip
+experiment, neither of which depends on `537c1a0b` at all.
+
+**Load, since these numbers depend on it.** Machine load average was 1.4–1.6 at the start and
+stayed in the 1.7–3.2 band for every run quoted above. An earlier batch was thrown away: creating
+the comparison worktree set Spotlight indexing its 16 190 files, which took load to 10.4 and made
+the same commit read 546 ns then 1448–1677 ns. Those runs are not in this document. The machine also
+had an Android emulator resident throughout, which is why the floor is ~1.5 rather than ~0.
 
 ### What is deliberately not in the shared table
 

@@ -377,6 +377,19 @@ not dropped, because the min–max convention here exists precisely to show that
 can be larger than the effect being measured. Read `pmp_api36`'s row for the shape and `pmp_api26`'s
 for how much confidence an emulator supports.
 
+**This table's absolute upcall figures have since been shown to depend on the rest of the suite,
+not on the commit alone.** Two of its rows were re-measured later and neither reproduced: desktop's
+861–1313 ns and wasmJs's 703–1075 ns both fell, in each case with the downcall column standing
+still. On wasmJs the cause was pinned to one commit (`4472f83a`) and demonstrated: it made generated
+proxies installable there, so `GeneratedProxyCostTest` went from driving zero upcalls to driving
+~270 000 of them through the same Node process *before* `UpcallBoundaryCostTest` is timed, and
+short-circuiting that one test at today's tip puts the figure back on this table's band. Desktop's
+moved for a repository-located reason too, in a different and non-overlapping commit window, with
+the same mechanism as its most likely explanation. Read the rows here as "this commit, with the
+suite as it stood", not as the boundary's per-call cost; the full account, both bisections and the
+controlled experiment are in
+[`downcall-design.md`](downcall-design.md) under "Ratio consistency".
+
 **The androidNative row was empty because the target had no test *run* task**, only
 `androidNativeArm64TestBinaries` — KGP registers an execution task only where it knows how to reach
 a host (`KotlinNativeTest` for the build machine, `KotlinNativeSimulatorTest` for simctl), and an
