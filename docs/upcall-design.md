@@ -384,6 +384,13 @@ in `commonTest` because every seam it needs is already common — `bindUpcallOrN
 binding step `UpcallEntryTest` introduced), `UpcallTrampoline`, and the `expect` C API — so one copy
 runs on every target.
 
+> **This table is hand-cut and is a record of the round it was taken in.** The same rows, taken by
+> a harness that runs all six targets from one command and writes the conditions next to the
+> numbers, are in [`cost-table.md`](cost-table.md) — re-cut with
+> `./benchmarks/cost-table.sh --runs 3` on a quiet machine. Prefer that one when the two disagree:
+> it records the commit, the warmup, the load average and the device identity of its own cut, and
+> this one cannot, because those were transcribed by hand and only partly.
+
 | Platform | upcall | downcall, same shape | trampoline alone | upcall / downcall | upcall / trampoline |
 |---|---|---|---|---|---|
 | **desktop** (JVM 21.0.12, macOS arm64) | 510–560 ns | 132–144 ns | 76–91 ns ‡ | 3.71–4.14x | 5.62–7.02x ‡ |
