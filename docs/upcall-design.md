@@ -288,6 +288,28 @@ a Python worker and a thread ART already knows now straddles zero, i.e. it is in
 spread rather than being a cost. On API 26 an upcall from a Python worker is the same price as a
 downcall of the same shape.
 
+> **Re-run unchanged over five full suites per emulator, this table's absolute figures have fallen
+> a long way and its API 26 conclusion has weakened.** `UpcallOverheadTest` still warms 3 000 calls,
+> and since `09bf2397` put `commonTest` on the device it now runs *after* `UpcallBoundaryCostTest`
+> has driven several hundred thousand upcalls through the same ART process, so ART's JIT is warm
+> before it starts.
+>
+> | re-run, 5 suites each | API 26 | API 36 |
+> |---|---|---|
+> | instrumentation thread | 1085–1273 ns (was 1280–1327) | 1032–1229 ns (was 2982–5086) |
+> | Python worker, steady state | 1249–1334 ns (was 1209–1329) | 982–1219 ns (was 2301–3086) |
+> | worker minus instrumentation | **+43 to +249 ns** (was −118 to +49) | **−50 to +12 ns** (was −681 to −2000) |
+> | first upcall on a fresh worker | 88 250–242 375 ns | 41 208–611 416 ns |
+>
+> **On API 36 the claim survives and sharpens** — the gap is −50 to +12 ns, tight around zero.
+> **On API 26 it no longer straddles zero**: five runs out of five put the worker above the
+> instrumentation thread, by 43–249 ns. That is small against a ~1250 ns call and it does not restore
+> the per-call attach this section disproved — the old 44.59–47.93x is long gone — but the honest
+> statement for API 26 is now "a worker costs a little more", not "the difference is inside the
+> spread". The first upcall on a fresh worker remains enormous and enormously variable, which is
+> where the attach actually shows up. Read these rows against each other, not against the boundary
+> table's, and see that table's warmup footnote.
+
 **The first upcall on each worker still pays the attach in full** — 56–142 µs, larger than the
 per-call charge it replaced — and that is the honest shape of the cost now: once per thread, not
 once per call. A worker that upcalls once is no better off than before; a worker that upcalls in a
@@ -351,14 +373,14 @@ runs on every target.
 |---|---|---|---|---|---|
 | **desktop** (JVM 21.0.12, macOS arm64) | 510–560 ns | 132–144 ns | 76–91 ns ‡ | 3.71–4.14x | 5.62–7.02x ‡ |
 | **wasmJs** (Node) | 290–304 ns ‡ | 95–109 ns | 122–129 ns | 2.67–3.21x | 2.33–2.47x ‡ |
-| *iOS simulator* (arm64) ¶ | *2263–2502 ns* | *1599–1826 ns* | *1928–2139 ns* | *1.33–1.43x* | *1.15–1.22x* |
-| *androidNative* (`pmp_api36`, arm64) ¶ | *3339–3598 ns* | *2170–2222 ns* | *2805–3469 ns* | *1.52–1.62x* | *1.03–1.23x* |
-| *androidNative* (`pmp_api26`, arm64) ¶ | *3314–4140 ns* | *2636–5554 ns* | *2843–4863 ns* | *0.62–1.34x* | *0.71–1.20x* |
-| *Android API 26* †| *1209–1329 ns* | *not recorded* | *not recorded* | *0.99–1.09x* | *not recorded* |
-| *Android API 36* †| *2301–3086 ns* | *not recorded* | *not recorded* | *2.00–2.34x* | *not recorded* |
+| **iOS simulator** (iOS 26.2, arm64) | 2266–2301 ns | 1599–1610 ns | 1962–1990 ns | 1.41–1.43x | 1.13–1.17x |
+| **androidNative** (`pmp_api36`, arm64) | 3228–3275 ns | 2155–2229 ns | 2699–2760 ns | 1.45–1.51x | 1.17–1.20x |
+| **androidNative** (`pmp_api26`, arm64) | 3234–3310 ns | 2470–2554 ns | 2731–3228 ns ※ | 1.28–1.32x | 1.02–1.20x ※ |
+| **Android ART** (`pmp_api36`, arm64) | 944–1063 ns | 692–818 ns | 793–907 ns | 1.20–1.45x | 1.04–1.23x |
+| **Android ART** (`pmp_api26`, arm64) | 1146–1233 ns | 1185–1293 ns | 1012–1087 ns | 0.91–1.04x | 1.12–1.18x |
 
-**The two roman rows are the only ones measured with a warmup large enough to mean anything, and
-they are the reason the whole table was re-cut.** `UpcallBoundaryCostTest` warmed 3 000 calls per row
+**Every row is now measured at a warmup large enough to mean anything; getting there is why the table
+was re-cut twice.** `UpcallBoundaryCostTest` warmed 3 000 calls per row
 and every figure it had ever published was taken before the host JIT had finished tiering up, so the
 number it printed was a function of how much upcall traffic the *rest of the suite* had pushed
 through the same process first. The warmup is now 100 000, chosen from a measured convergence point
@@ -384,6 +406,26 @@ which is what says the residual is host-lifetime-bound rather than call-count-bo
 columns survive the filtering (2.66–3.13x filtered against 2.91–3.14x in the suite); its absolute
 columns are a full-suite figure and are only meaningful as one.**
 
+**The five device configurations were checked for the same effect and none of them has it, so wasmJs
+remains the only exception.** Three filtered runs of this class alone against the five full-suite
+runs above:
+
+| filtered vs full suite | upcall, filtered | upcall, full suite | empty Python loop | pure-Python callee |
+|---|---|---|---|---|
+| iOS simulator | 2320–2322 ns | 2266–2301 ns | 9.9–11.4 vs 9.9–10.3 ns | 36.8–38.0 vs 36.8–38.3 ns |
+| androidNative `pmp_api36` | 3275–3294 ns | 3228–3275 ns | 17.21 vs 17.22 ns | 48.9–58.2 vs 48.9–74.2 ns |
+| androidNative `pmp_api26` | 3245–3280 ns | 3234–3310 ns | 20.0–23.6 vs 20.0–20.6 ns | 51.7–55.3 vs 51.7–62.0 ns |
+| ART `pmp_api36` | 996–1031 ns | 944–1063 ns | 17.2–19.3 vs 17.2–22.8 ns | 49.0–60.0 vs 49.2–63.3 ns |
+| ART `pmp_api26` | 1118–1171 ns | 1146–1233 ns | 20.0–20.1 vs 20.0–21.5 ns | 51.7–63.4 vs 51.7–65.6 ns |
+
+**The control columns are the test.** On wasmJs the pure-Python rows moved 55–74% under filtering,
+which is what proved the whole interpreter had slowed down; here they are unchanged everywhere, to
+the last significant figure on `pmp_api36`'s empty loop (17.21 against 17.22 ns). The upcall columns
+overlap their full-suite bands in four of five cases and miss by 1% on iOS (2320–2322 against
+2266–2301). **So the device rows' absolute values are quotable as absolute values**, unlike wasmJs's,
+and the reason is structural: on these five, CPython is native code the host is merely executing, not
+a wasm module the host must itself compile.
+
 ‡ **Each platform threw exactly one outlying run out of eleven, and both are quoted here rather than
 dropped**, for the reason `pmp_api26`'s row below is kept — the min–max convention exists to show
 when a host's spread is larger than the effect. Desktop's outlier is confined to the GIL-held
@@ -395,32 +437,116 @@ above and three deliberate re-runs immediately afterwards read 298.27, 301.73 an
 ratio column was unaffected — 2.99x, inside the band** — because numerator and denominator moved
 together, which is the case for preferring the ratio on that target.
 
-¶ **The three italic device rows are the old measurement and were not re-taken** — this pass had no
-access to a simulator or an emulator. They were recorded at 3 000 warmup, so they carry the defect
-described above and are not comparable with the two rows above them. They are left in place rather
-than deleted because they are still the only figures those targets have, but a cross-platform ratio
-must not be read off this table until they are re-measured.
+**Every device row has now been re-measured at the 100 000 warmup.** No row in this table is a
+3 000-warmup reading any more, so the ¶ and † marks that carried that caveat are gone from it. The
+three Kotlin/Native rows barely moved; the two ART rows moved a great deal. That split is the
+finding.
+
+| re-measured at 100 000 | upcall, old → new | downcall, old → new |
+|---|---|---|
+| iOS simulator (26.2, arm64) | 2263–2502 → **2266–2301 ns** | 1599–1826 → **1599–1610 ns** |
+| androidNative `pmp_api36` | 3339–3598 → **3228–3275 ns** | 2170–2222 → **2155–2229 ns** |
+| androidNative `pmp_api26` | 3314–4140 → **3234–3310 ns** | 2636–5554 → **2470–2554 ns** |
+
+Every new band sits inside or just below its old one, and every one is narrower — `pmp_api36`'s
+downcall column is the extreme case, moving from 2170–2222 to 2155–2229, i.e. not moving at all.
+Compare what the same change did to the hosts with a JIT: desktop's upcall row fell 674 → 537 ns,
+wasmJs's 322 → 292 ns, and ART `pmp_api36`'s 2301–3086 → 944–1063 ns. **The three Kotlin/Native
+targets did not fall; all three JIT hosts did.** That is what the tier-up diagnosis predicts rather
+than merely permits, and it is the check that separates the two explanations. The defect `7e9c6b8c`
+fixed was real, and it is a property of the host's compiler, not of the boundary.
+
+**But "did not fall" is not the same as "needed no warmup", and the sweep below says so.** It would
+be easy to read the flat Kotlin/Native rows as meaning 3 000 was always enough there. It was not:
+from cold, androidNative's first 10 000 upcalls read ~1.3x the plateau. The old figures landed near
+the plateau anyway because the rest of the suite had already driven the boundary before this test was
+timed — which is the *same* dependence on what ran first, just with a smaller amplitude. The old
+Kotlin/Native rows were right by luck rather than by margin, and that is why they are replaced rather
+than kept. The old ART rows were not right at all.
+
+> **`7e9c6b8c` raised the warmup in `UpcallBoundaryCostTest` and nowhere else, and the other
+> benchmarks on the device still carry the defect.** In this round's ART logcat, alongside this
+> file's `warmup: 100000`, `UpcallOverheadTest` prints `warmup: 3000` and the two coroutine/proxy
+> benchmarks print `warmup: 5000`. `UpcallOverheadTest`'s API 36 instrumentation-thread row now reads
+> 1032–1229 ns where `409da6fc` recorded 2982–5086 ns — **at the same warmup count and on the same
+> emulator.** Nothing about that test changed; what changed is that `09bf2397` put the whole of
+> `commonTest` on the device, so `UpcallBoundaryCostTest`'s own several hundred thousand upcalls now
+> run *before* it and leave ART's JIT warm. That is precisely the "the number is a function of what
+> ran first" failure this section documents, still live, in a test the table no longer quotes but
+> other sections do. It has not been fixed here because fixing it is a change to a benchmark, not a
+> re-measurement of one.
+
+#### Is 100 000 enough on a device? Swept, not assumed — and on one target it only just is
+
+`WARMUP`'s doc justifies 100 000 from a sweep run on desktop and wasmJs only (40 000 cold and 70 000
+warm on desktop, 70 000 on wasm). Devices are slower, so the number was extrapolated rather than
+checked. Sweeping them the same way — 40 consecutive reps of 10 000 calls, from cold, nothing warmed
+before the first — gives the calls-to-plateau below. The first-rep ratio is that rep divided by the
+mean of reps 21–40.
+
+| target | rep 1 / plateau, Python-driven upcall | flat from | margin at 100 000 |
+|---|---|---|---|
+| iOS simulator | 1.01x | ~10 000 | 10x |
+| androidNative `pmp_api36` | 1.27x | ~40 000 | 2.5x |
+| androidNative `pmp_api26` | 1.30x | ~30 000 | 3.3x |
+| ART `pmp_api26` | 1.93x | ~20 000, noisily | 5x |
+| **ART `pmp_api36`** | **8.56x** | **~90 000–100 000** | **~1x — none** |
+
+**`pmp_api36`'s ART row is the one to act on.** Its sweep runs 9194.8, 3218.9, 2288.7, 1648.3,
+1218.3, 1173.3, 1129.5, 1532.7, 1057.8, 1044.6 ns, against a plateau of 1074.2 — so it is still 9%
+high at 70 000 calls and only arrives around 90 000–100 000. **The constant is not wrong there, but it
+has no margin**, and a slower device, a colder emulator or a busier host would read the boundary
+before it settles. Its Kotlin-driven rows need less: the downcall is flat from ~80 000 and the
+GIL-held trampoline from ~50 000, so the Python-driven upcall sets the requirement, as it does
+everywhere else.
+
+The two control rows behave on every device exactly as they did on the two hosts, which is what says
+the sweep is measuring the boundary rather than the interpreter: the empty Python loop and the
+pure-Python callee are flat from the very first 10 000 calls on all five device configurations
+(iOS 10.5 → 10.2 ns and 37.9 → 38.0 ns; ART `pmp_api36` 17.3 → 17.3 ns and 49.7 → 50.4 ns).
+
+**The number is not changed here.** Raising it is a change to a benchmark and would invalidate the
+table it was measured for; this pass was a re-measurement. What the sweep establishes is the fact
+needed to decide: 100 000 covers every device path measured, and covers `pmp_api36` on ART by
+approximately nothing.
 
 Ranges are min–max over five runs of the whole suite (four for wasmJs); a single reading is not a
-measurement. **The rows in italics marked † are quoted, not re-measured** — from commit `409da6fc`
-and the two tables above, which is why the columns those did not record are blank rather than
-inferred. The two Android rows are two different emulators, not two runs of one, and so are the two
-androidNative rows — the same two emulators, in fact, which is why the ART and Kotlin/Native figures
-for one API level can be read against each other.
+measurement. **The two ART rows are no longer quoted from another test.** They used to be — the †
+mark meant "taken from `UpcallOverheadTest` via commit `409da6fc`", which is why three of their five
+columns read *not recorded*. Since `09bf2397` put `commonTest` on the device, `UpcallBoundaryCostTest`
+itself runs on ART, so all five columns are now filled from the same test, the same run and the same
+thread as every other row in the table. The two ART rows are two different emulators, not two runs of
+one, and so are the two androidNative rows — the same two emulators, in fact, which is why the ART
+and Kotlin/Native figures for one API level can be read against each other.
 
-The two italic rows' upcall and ratio columns are both the *Python worker thread, steady state* row,
-taken together so the two halves of the ratio belong to the same measurement. That row is the right cross-platform
-analogue precisely because of what the section above established: with the attach amortised, the
-difference between a Python worker and a thread ART already knows straddles zero (the
-instrumentation-thread figures are 1280–1327 ns and 2982–5086 ns), so the worker no longer carries a
-cost the other four platforms have no equivalent of. Its ratio is the one that was recorded.
+**Those ART rows are measured on the instrumentation thread, and that is now the right thread to
+measure.** The old † rows quoted the *Python worker thread, steady state* figure instead, because a
+worker is the thread ART has never seen and has to attach. The section above is what makes the
+instrumentation thread the fair choice: with the attach amortised, the two are close enough that
+choosing between them does not decide the row. This round's `UpcallOverheadTest`, re-run five times
+per emulator, puts the worker −50 to +12 ns from the instrumentation thread on API 36 and +43 to
++249 ns on API 26 — so on API 26 the instrumentation thread is now the *cheaper* of the two by a
+little, and the ART row above is that much optimistic against a `threading.Thread` caller. The first
+upcall on a fresh worker is still expensive (88 250–611 416 ns across the two devices) and is still
+the number to quote for attach, not for a call.
 
-**`pmp_api26`'s androidNative row is noisy and is left noisy.** One of its five runs came in at
-5554 ns for the downcall and 4863 ns for the trampoline where the other four sat at 2636–3245 and
-2843–3672; that single run is what widens its two ratio columns to 0.62–1.34x and 0.71–1.20x. It is
-not dropped, because the min–max convention here exists precisely to show that an emulator's spread
-can be larger than the effect being measured. Read `pmp_api36`'s row for the shape and `pmp_api26`'s
-for how much confidence an emulator supports.
+**What replacing them changed, and it is not small on API 36.** The old † row said 2301–3086 ns; the
+same target now reads 944–1063 ns. API 26 barely moved — 1209–1329 → 1146–1233 ns. The asymmetry is
+the tier-up story again, and this time on the target that most nearly settles it: **ART has a JIT, so
+it belongs with desktop and wasmJs rather than with the three ahead-of-time rows, and it moved like
+them.** Every host in this table with a JIT fell when the warmup was raised; no host without one did.
+
+※ **`pmp_api26`'s androidNative row is noisy and is left noisy — but it is a different single-run
+outlier each time.** In the 3 000-warmup round, one of five runs read 5554 ns for the downcall and
+4863 ns for the trampoline where the other four sat at 2636–3245 and 2843–3672, widening its ratio
+columns to 0.62–1.34x and 0.71–1.20x. In the 100 000-warmup round that outlier is gone — the downcall
+column tightened to 2470–2554 ns — and a new one appeared in a different row: run 5's GIL-held
+trampoline read 3227.87 ns where the other four sat at 2731–2761, and that one run is the whole of
+what widens the `upcall / trampoline` column from 1.16–1.18x to 1.02–1.20x. Neither is dropped,
+because the min–max convention here exists precisely to show that an emulator's spread can be larger
+than the effect being measured. **That the outlier moves rows between rounds is the point**: it is
+the host, not the row. Read `pmp_api36`'s row for the shape and `pmp_api26`'s for how much confidence
+an emulator supports.
 
 **The history that produced the two roman rows.** This table's original absolute figures were shown
 to depend on the rest of the suite rather than on the commit: desktop's 861–1313 ns and wasmJs's
@@ -467,21 +593,26 @@ in the obvious arrangement they do not. `UpcallTrampoline` takes its own `PyGILS
 from a bare Kotlin thread pays a real GIL acquisition per call, while Python drives it already
 holding the GIL. The first run made that concrete: on iOS the trampoline alone came out *more*
 expensive than the whole upcall through it, i.e. the boundary priced negative (0.77–0.81x).
+**Re-measuring at the 100 000 warmup reproduces it, and on every device configuration rather than
+just iOS**: five runs each give 0.79–0.82x on the iOS simulator, 0.82–0.85x and 0.77–0.78x on the two
+androidNative emulators, and 0.86–0.95x and 0.65–0.70x on the same two under ART. The negative price
+is a property of the unconditional GIL pair, not of the old warmup — and the reason it never shows on
+desktop or wasmJs is visible in the table below: their GIL scope is 24–57 ns against 276–1221 ns on a
+device, so the uncontrolled acquisition is a rounding error there and the dominant term here.
 
 So it is measured twice, differing in exactly that one thing, with an empty `Python3.withPython { }`
 beside them for scale:
 
-| | desktop | wasmJs | *iOS simulator* ¶ | *androidNative `pmp_api36`* ¶ | *androidNative `pmp_api26`* ¶ |
-|---|---|---|---|---|---|
-| trampoline, caller holding nothing | 164–181 ns | 146–164 ns | *2764–3109 ns* | *3861–4093 ns* | *4383–5068 ns* |
-| trampoline, GIL already held | 76–91 ns ‡ | 122–129 ns | *1928–2139 ns* | *2805–3469 ns* | *2843–4863 ns* |
-| `Python3.withPython { }`, empty | 50–57 ns | 24–28 ns | *725–982 ns* | *937–1010 ns* | *1193–1298 ns* |
+| | desktop | wasmJs | iOS simulator | androidNative `pmp_api36` | androidNative `pmp_api26` | ART `pmp_api36` | ART `pmp_api26` |
+|---|---|---|---|---|---|---|---|
+| trampoline, caller holding nothing | 164–181 ns | 146–164 ns | 2794–2862 ns | 3789–3893 ns | 4174–4267 ns | 1093–1148 ns | 1693–1822 ns |
+| trampoline, GIL already held | 76–91 ns ‡ | 122–129 ns | 1962–1990 ns | 2699–2760 ns | 2731–3228 ns ※ | 793–907 ns | 1012–1087 ns |
+| `Python3.withPython { }`, empty | 50–57 ns | 24–28 ns | 720–731 ns | 932–1002 ns | 1112–1221 ns | 276–303 ns | 498–549 ns |
 
 The **GIL-held** row is the one the table above uses, because it is the one the Python-driven
 numerator is comparable with.
 
-Desktop and wasmJs are re-measured at the 100 000 warmup; the three italic columns are the old
-3 000-warmup readings and carry the same caveat as their rows above. The re-measurement changed these
+All seven columns are now at the 100 000 warmup. The re-measurement changed these
 rows by more than it changed the headline: desktop's empty `withPython` scope went from 124–152 ns to
 50–57 ns and wasmJs's from 79–81 ns to 24–28 ns, because a GIL round trip is the cheapest thing in
 the report and therefore the thing an unwarmed loop overstates most. **This is why the old table's
@@ -614,11 +745,17 @@ it is not a number.
 | `Counter(10)` constructor | 2591–2724 ns | 2769–2864 ns | 1.05–1.06x | +140…+177 ns |
 | *resolution of this table* | | | | *+15…+79 ns* |
 
-**The headline is that the boundary is the whole cost.** Read against the section above: the
-boundary is 861–1313 ns on desktop and 2263–2502 ns on the simulator, and the generated layer on top
-of it is tens of nanoseconds — 1.00x to 1.13x, and on the simulator half the rows are inside the
-table's own resolution. The sugar is not where the money goes, and a user who bypassed the proxies to
-call `_pm_invoke` by hand would recover almost nothing.
+**The headline is that the boundary is the whole cost.** The boundary was 861–1313 ns on desktop and
+2263–2502 ns on the simulator when this table was taken, and the generated layer on top of it is tens
+of nanoseconds — 1.00x to 1.13x, and on the simulator half the rows are inside the table's own
+resolution. The sugar is not where the money goes, and a user who bypassed the proxies to call
+`_pm_invoke` by hand would recover almost nothing.
+
+Those two boundary figures are the ones current when this table was measured, and the section above
+has since re-measured both — desktop to 510–560 ns and the simulator to 2266–2301 ns. **The
+conclusion is unchanged and the arithmetic is not**: this table's own columns were taken in the older
+round at that section's older warmup, so it may be read internally (raw against proxy, which is what
+the ratio column is) but its absolute figures must not be mixed with the re-measured table's.
 
 **The await fast path is the same story**, which is the whole claim §8.6 makes for it:
 
