@@ -20,12 +20,10 @@ import org.gradle.api.tasks.TaskAction
  * resolves. The two emit the same shape into the same `UpcallTable`; see [renderArtifactTableSource]
  * for why they keep separate aggregators.
  *
- * ### Only jars
+ * ### Only jars and klibs
  *
- * A resolved artefact that is not a `.jar` -- a klib, an `aar`, a project's classes directory -- is
- * skipped silently. Whether the same walk is possible over a klib, and what a Kotlin declaration
- * from one could be bound to at runtime with no JVM underneath, is `docs/ecosystem.md` §5b's stated
- * open question and is not answered here.
+ * A resolved artefact that is not a `.jar` or `.klib` -- an `aar`, a project's classes directory -- is
+ * skipped silently.
  */
 abstract class PythonArtifactBindingsTask : DefaultTask() {
 
@@ -63,15 +61,19 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
         val objectNames = mutableListOf<String>()
 
         artifacts.files
-            .filter { it.isFile && it.name.endsWith(".jar") }
+            .filter { it.isFile && (it.name.endsWith(".jar") || it.name.endsWith(".klib")) }
             .sortedBy { it.name }
-            .forEach { jar ->
-                val entries = ArtifactScanner.scanJar(jar, includes)
+            .forEach { file ->
+                val entries = if (file.name.endsWith(".jar")) {
+                    ArtifactScanner.scanJar(file, includes)
+                } else {
+                    KlibScanner.scanKlib(file, includes)
+                }
                 // An artefact that contributed nothing gets no fragment: a fragment with no entries
                 // would still take a `moduleName` in `UpcallTable`'s installed set, which is the one
                 // thing that set is read for.
                 if (entries.isEmpty()) return@forEach
-                val coordinate = coordinates[jar.name] ?: jar.name.removeSuffix(".jar")
+                val coordinate = coordinates[file.name] ?: file.name.substringBeforeLast('.')
                 val objectName = artifactFragmentObjectName(coordinate)
                 destination.resolve("$objectName.kt").writeText(
                     renderArtifactFragmentSource(ArtifactFragment(objectName, "artifact:$coordinate", entries)),

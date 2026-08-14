@@ -33,6 +33,7 @@ dependencies {
     // reach into Gradle's own copy.
     implementation("org.ow2.asm:asm:9.7.1")
     implementation("org.ow2.asm:asm-tree:9.7.1")
+    implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.0.20")
 
     testImplementation(kotlin("test"))
 }
