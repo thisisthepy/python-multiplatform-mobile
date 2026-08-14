@@ -4,6 +4,8 @@ import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.PyTypeChecks
 import python.multiplatform.ffi.pyErrorOrGeneric
 import python.multiplatform.ffi.types.basic.PyBool
+import python.multiplatform.ffi.types.basic.PyByteArray
+import python.multiplatform.ffi.types.basic.PyBytes
 import python.multiplatform.ffi.types.basic.PyFloat
 import python.multiplatform.ffi.types.basic.PyInt
 import python.multiplatform.ffi.types.basic.PyNone
@@ -165,6 +167,8 @@ internal fun typedWrap(obj: PyObject): PyObject {
             PyTypeChecks.intType -> PyInt(obj.pointer, true)
             PyTypeChecks.floatType -> PyFloat(obj.pointer, true)
             PyTypeChecks.strType -> PyString(obj.pointer, true)
+            PyTypeChecks.bytesType -> PyBytes(obj.pointer, true)
+            PyTypeChecks.bytearrayType -> PyByteArray(obj.pointer, true)
             PyTypeChecks.listType -> PyList(obj.pointer, true)
             PyTypeChecks.tupleType -> PyTuple(obj.pointer, true)
             PyTypeChecks.dictType -> PyDict(obj.pointer, true)
