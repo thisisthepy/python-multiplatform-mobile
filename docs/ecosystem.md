@@ -324,6 +324,17 @@ what `pythonx-compose`'s `Composable` class already does. So nothing on the Kotl
 `@Composable` callable type, and the upcall trampolines do not have to preserve a `@Composable`
 context.
 
+**`pythonx` adapts generically; it does not wrap function by function.** Writing a Python wrapper
+for every Composable is the cost that made the existing `pythonx-compose` 37 files of which 28 are
+empty. The conversions are rules, not per-function decisions: a Pythonic name maps to the original,
+the composer and change flags are threaded the same way every time, and a `content=` callable is
+adapted the same way every time. So the layer should resolve on demand — a module `__getattr__`
+that finds the corresponding binding, adapts it once and caches it — rather than enumerate.
+
+That trades away IDE completion, which is exactly why the plugin generates `.pyi` from the same
+metadata: the stubs carry the Pythonic names and signatures the adapter will produce, so an editor
+sees a fully enumerated surface while the runtime enumerates nothing.
+
 **`JClass`/`JavaClass`, `KClass`/`KotlinClass`, `ObjcClass` work only where the platform has the
 thing they name.** No stubs, no substitutes, no forced uniformity across targets — a target that
 has no JVM has no `JClass`, and says so.
