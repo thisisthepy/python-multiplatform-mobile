@@ -40,6 +40,27 @@ class PythonProxySourceTest {
         isSuspend = isSuspend,
     ) { 0L }
 
+    /**
+     * The walker's shape: a [CallableKind.FUNCTION] whose result is a Kotlin object and whose
+     * producer said which one. [returnTypeName] `null` is the KSP shape, where nothing said.
+     */
+    private fun objectEntry(
+        name: String,
+        arity: Int = 0,
+        paramTypes: List<TypeTag> = List(arity) { TypeTag.OBJECT },
+        returnTypeName: String? = "p.Link",
+        kind: CallableKind = CallableKind.FUNCTION,
+        isSuspend: Boolean = false,
+    ) = ExposedCallable(
+        name = name,
+        arity = arity,
+        paramTypes = paramTypes,
+        returnType = TypeTag.OBJECT,
+        returnTypeName = returnTypeName,
+        kind = kind,
+        isSuspend = isSuspend,
+    ) { null }
+
     @Test
     fun aSuspendingEntryBecomesAnAsyncDefThatAwaitsOnlyWhatIsAwaitable() {
         val source = PythonProxySource.render(listOf(entry("fixture.library.fetchLater", arity = 1, isSuspend = true)))
@@ -176,7 +197,7 @@ class PythonProxySourceTest {
 
         val metaclass = Regex("class (_pm_t_\\d+)\\(type\\):").find(source)?.groupValues?.get(1)
         assertTrue(metaclass != null, "a class with static members needs a metaclass to hold them:\n$source")
-        assertContains(source, "class Foo(metaclass=$metaclass):")
+        assertContains(source, "class Foo(_PmObject, metaclass=$metaclass):")
         assertContains(source, "    def count(cls):")
         assertContains(source, "    @count.setter")
         assertContains(source, "    def count(cls, a0):")
@@ -209,7 +230,7 @@ class PythonProxySourceTest {
 
         val source = PythonProxySource.render(listOf(ctor), listOf(cls))
 
-        assertContains(source, "class Foo:")
+        assertContains(source, "class Foo(_PmObject):")
         assertFalse(source.contains("(type):"), "nothing static to hold, so no metaclass")
     }
 
@@ -249,7 +270,7 @@ class PythonProxySourceTest {
 
         val metaclass = Regex("class (_pm_t_\\d+)\\(type\\):").find(source)?.groupValues?.get(1)
         assertTrue(metaclass != null, "a class with a static function needs a metaclass to hold it:\n$source")
-        assertContains(source, "class Foo(metaclass=$metaclass):")
+        assertContains(source, "class Foo(_PmObject, metaclass=$metaclass):")
         assertContains(source, "    def create(cls, a0):")
         // No receiver: a companion function's args start at args[0], exactly like a STATIC_SETTER's.
         assertFalse(source.contains("(cls._pm_handle"), "a static function has no receiver to pass")
@@ -283,7 +304,7 @@ class PythonProxySourceTest {
         val metaclassNames = Regex("^class (_pm_t_\\d+)\\(type\\):", RegexOption.MULTILINE)
             .findAll(source).map { it.groupValues[1] }.toList()
         assertEquals(1, metaclassNames.size, "one companion, so one metaclass carries both halves")
-        assertContains(source, "class Foo(metaclass=${metaclassNames[0]}):")
+        assertContains(source, "class Foo(_PmObject, metaclass=${metaclassNames[0]}):")
         assertContains(source, "    def create(cls, a0):")
         assertContains(source, "    def count(cls):")
         assertContains(source, "    @count.setter")
@@ -409,7 +430,7 @@ class PythonProxySourceTest {
         val metaclassNames = Regex("^class (_pm_t_\\d+)\\(type\\):", RegexOption.MULTILINE)
             .findAll(source).map { it.groupValues[1] }.toList()
         assertEquals(1, metaclassNames.size, "one class with statics, so exactly one metaclass")
-        assertContains(source, "class Foo(metaclass=${metaclassNames[0]}):")
+        assertContains(source, "class Foo(_PmObject, metaclass=${metaclassNames[0]}):")
     }
 
     // ------------------------------------------------------------------------------- classes
@@ -425,7 +446,7 @@ class PythonProxySourceTest {
 
         val source = PythonProxySource.render(listOf(ctor, increment), listOf(cls))
 
-        assertContains(source, "class Counter:")
+        assertContains(source, "class Counter(_PmObject):")
         assertContains(source, "def __init__(self, a0):")
         assertContains(source, "self._pm_handle = _pm_invoke(")
         assertContains(source, "def increment(self, a0):")
@@ -445,6 +466,12 @@ class PythonProxySourceTest {
         // HandleTable root and nothing anywhere gave it back, so every object Python constructed
         // stayed rooted in Kotlin for the life of the process. `ProxyHandleLifetimeTest` is the
         // behavioural half; this is the same claim made about the text, where it is readable.
+        //
+        // The `__del__` is **inherited** rather than rendered per class now -- the rendered class
+        // derives from `_PmObject`, which is the same owner an ordinary OBJECT result gets -- so
+        // what this asserts is that the class is one of those and that the owner has the release.
+        // One implementation rather than one per class; the behaviour is what it was.
+        assertContains(source, "class Counter(_PmObject):")
         assertContains(source, "def __del__(self, _pm_r=_pm_releaser()):")
         assertContains(source, "_pm_h = getattr(self, '_pm_handle', None)")
         assertContains(source, "_pm_r(_pm_h)")
@@ -455,16 +482,26 @@ class PythonProxySourceTest {
     }
 
     @Test
-    fun aClassWithNoConstructorHoldsNoHandleAndThereforeRendersNoRelease() {
-        // Nothing gives such a class a `_pm_handle`, so a `__del__` on it would release something
-        // it never took -- and on a class whose body is otherwise empty it would also displace the
-        // `pass` that makes the rendered class legal Python at all.
+    fun aClassWithNoConstructorHoldsNoHandleAndTheInheritedReleaseFindsNothingToGiveBack() {
+        // This used to assert that no `__del__` was rendered at all, which stopped being the
+        // question when the release moved onto `_PmObject`: a class with no constructor still
+        // *inherits* one, because it is still an owner -- something else may hand it a handle
+        // later, and a factory that does is the next step. What has to stay true is the property
+        // the old assertion was really about: nothing releases a root the class never took. The
+        // owner's `__del__` reads its handle with `getattr(..., None)` and does nothing when the
+        // slot was never assigned, which is the same guard that covers a Kotlin constructor that
+        // threw before `__init__` finished.
         val getter = entry("fixture.library.Counter.value", kind = CallableKind.GETTER)
         val cls = ReflectedClass(name = "fixture.library.Counter", memberNames = listOf(getter.name))
 
         val source = PythonProxySource.render(listOf(getter), listOf(cls))
 
-        assertFalse(source.contains("def __del__"), "no constructor means no handle to release")
+        assertEquals(
+            1, Regex("def __del__").findAll(source).count(),
+            "the release lives on the owner and nowhere else; a second one is a second policy",
+        )
+        assertContains(source, "_pm_h = getattr(self, '_pm_handle', None)")
+        assertContains(source, "if _pm_h is not None:")
     }
 
     @Test
@@ -551,6 +588,166 @@ class PythonProxySourceTest {
                 PythonProxySource.support.indexOf("_fut.set_result(_payload)"),
             "the guard has to come before the set, or it is not a guard",
         )
+    }
+
+    // ----------------------------------------------------------------------- owned object results
+
+    @Test
+    fun anObjectResultWhoseTypeTheProducerNamedIsHandedToPythonInsideSomethingThatOwnsIt() {
+        // The leak this closes: a `TypeTag.OBJECT` result crosses as a `HandleTable` integer, and an
+        // integer has nothing to hang a finaliser off, so every one of them was the caller's to
+        // release by hand. `docs/kotlin-extensions-in-python.md` §6 records the consequence for the
+        // Compose chain -- one handle per intermediate link -- and `OwnedResultLifetimeTest` counts
+        // it. The owner is a Python object, which is the only thing a `__del__` can live on.
+        val source = PythonProxySource.render(listOf(objectEntry("p.seed")))
+
+        assertContains(source, "return _pm_own(_pm_invoke(_pm_h_0, ()), 'p.Link')")
+    }
+
+    @Test
+    fun anObjectArgumentIsUnwrappedBackToItsHandleSoAChainKeepsWorking() {
+        // `size(padding(m, 16.0), 24.0)`: the result of one call is the first argument of the next,
+        // so wrapping the result is only half of it. What crosses is still the handle.
+        val source = PythonProxySource.render(
+            listOf(objectEntry("p.link", arity = 2, paramTypes = listOf(TypeTag.OBJECT, TypeTag.FLOAT))),
+        )
+
+        assertContains(source, "_pm_invoke(_pm_h_0, (_pm_unwrap(a0), a1))")
+        assertFalse(
+            source.contains("_pm_unwrap(a1)"),
+            "only an OBJECT-tagged parameter can be carrying a handle; unwrapping a float is cost " +
+                "for nothing",
+        )
+    }
+
+    @Test
+    fun anEntryWhoseProducerDidNotNameItsReturnKeepsTheBareHandleContract() {
+        // Every KSP-generated entry is this shape. `TypeTag.OBJECT` is two things at once in the
+        // result direction -- `UpcallTrampoline.fromKotlinObject` answers with a handle for a Kotlin
+        // object and with the Python object itself for a `PyObject` -- and Python cannot tell them
+        // apart when the second happens to be an `int`. Owning one of those would make `__del__`
+        // release a handle nobody issued, so the name is the gate.
+        val source = PythonProxySource.render(listOf(objectEntry("p.opaque", returnTypeName = null)))
+
+        assertContains(source, "return _pm_invoke(_pm_h_0, ())")
+        assertFalse(source.contains("return _pm_own("), "an unnamed return must stay the bare handle")
+    }
+
+    @Test
+    fun aReturnDeclaredAsAPyObjectIsNotOwnedEvenThoughItIsNamed() {
+        // The named case of the same ambiguity: a Kotlin declaration returning `PyObject` hands
+        // Python back a Python object, never a handle, so there is nothing to own and the value may
+        // legitimately *be* an `int`.
+        val source = PythonProxySource.render(
+            listOf(objectEntry("p.echo", returnTypeName = "python.multiplatform.ffi.PyObject")),
+        )
+
+        assertFalse(source.contains("return _pm_own("), "a PyObject result is not a Kotlin handle")
+
+        val any = PythonProxySource.render(listOf(objectEntry("p.anything", returnTypeName = "kotlin.Any")))
+        assertFalse(any.contains("return _pm_own("), "an `Any` return may be carrying a PyObject")
+    }
+
+    @Test
+    fun aSuspendingObjectResultIsOwnedAfterItIsAwaitedRatherThanBeforeIt() {
+        // `AsyncUpcall.deliver` marshals a completion with the same tag a synchronous return uses,
+        // so a slow-path OBJECT result is a handle too -- but it arrives inside the Future. Owning
+        // the Future rather than its value would release nothing and leak everything.
+        val source = PythonProxySource.render(listOf(objectEntry("p.later", arity = 1, isSuspend = true)))
+
+        assertContains(source, "async def _pm_f_0(a0):")
+        assertContains(source, "if hasattr(_pm_r, '__await__'):")
+        assertContains(source, "_pm_r = await _pm_r")
+        assertContains(source, "return _pm_own(_pm_r, 'p.Link')")
+    }
+
+    @Test
+    fun theOwnerIsDefinedOnceSoReinstallingTheTableDoesNotOrphanTheObjectsPythonAlreadyHolds() {
+        // `install()` is documented as safe to run more than once, and `GeneratedProxyCostTest`
+        // really does run it twenty-five times. A bare `class _PmObject:` would build a *new* class
+        // each time, and every object handed out before that point would stop being an instance of
+        // the one `_pm_unwrap` tests against -- so it would cross as a `PyObject` and fail the cast,
+        // silently and only for the objects that predate the reinstall.
+        val source = PythonProxySource.render(listOf(objectEntry("p.seed")))
+
+        assertContains(source, "if '_pm_own' not in globals():")
+        assertContains(source, "class _PmObject:")
+        assertContains(source, "def __del__(self, _pm_r=_pm_releaser()):")
+        assertTrue(
+            source.indexOf("if '_pm_own' not in globals():") < source.indexOf("class _PmObject:"),
+            "the guard has to come before the definition, or it is not a guard",
+        )
+    }
+
+    @Test
+    fun theOwnerClearsItsHandleBeforeReleasingItSoASecondReleaseCannotReachTheSlotsNewOwner() {
+        // Half of the double-release defence; `HandleTable`'s generation tag is the other half and
+        // catches the case where somebody *else* released it first. This half catches the case where
+        // the same owner is asked twice -- a resurrected object, or an explicit `__del__()`.
+        val source = PythonProxySource.render(listOf(objectEntry("p.seed")))
+
+        assertContains(source, "self._pm_handle = None")
+        assertTrue(
+            source.indexOf("self._pm_handle = None") < source.indexOf("_pm_r(_pm_h)"),
+            "clearing after the release leaves a window in which a second one is still possible",
+        )
+    }
+
+    @Test
+    fun aRenderedProxyClassIsTheSameKindOfOwnerSoAnInstanceCanBePassedBackAsAnObject() {
+        // One concept, not two. A rendered class already holds a handle and already releases it;
+        // making it a `_PmObject` is what lets `_pm_unwrap` accept an instance of it as an OBJECT
+        // argument, which it could not do before -- a `Counter` passed to a function taking one
+        // crossed as a `PyObject` and failed the cast.
+        val ctor = entry("p.Foo.<init>", kind = CallableKind.CONSTRUCTOR)
+        val cls = ReflectedClass(name = "p.Foo", memberNames = listOf(ctor.name))
+
+        val source = PythonProxySource.render(listOf(ctor), listOf(cls))
+
+        assertContains(source, "class Foo(_PmObject):")
+        assertTrue(
+            source.indexOf("class _PmObject:") < source.indexOf("class Foo(_PmObject):"),
+            "the base has to be defined before the class that inherits it",
+        )
+    }
+
+    @Test
+    fun everyPerEntrySurfaceThatCanReturnAKotlinObjectOwnsItAndNotJustTheModuleFunction() {
+        // A result is a result wherever it is read from. These are the four surfaces rendered *per
+        // entry*, so each one has the tag and the type name in hand at the point it emits the call;
+        // the module-attribute path is the one that does not, and the class KDoc says why it is
+        // left alone rather than made to pay a `_pm_own` on every top-level `val` read.
+        val method = objectEntry("p.Foo.spawn", arity = 1, kind = CallableKind.METHOD)
+        val getter = objectEntry("p.Foo.child", kind = CallableKind.GETTER)
+        val companion = objectEntry("p.Foo.make", arity = 1, kind = CallableKind.FUNCTION)
+        val static = objectEntry("p.Foo.DEFAULT", kind = CallableKind.STATIC_GETTER)
+        val cls = ReflectedClass(
+            name = "p.Foo",
+            memberNames = listOf(method.name, getter.name, companion.name, static.name),
+        )
+
+        val source = PythonProxySource.render(listOf(method, getter, companion, static), listOf(cls))
+
+        assertEquals(
+            4, Regex("return _pm_own\\(").findAll(source).count(),
+            "one owned result per surface, and the receiver's own handle is not one of them:\n$source",
+        )
+        // The receiver is already a handle -- this proxy's own -- so it is passed as it stands and
+        // is not unwrapped; only the declared OBJECT parameter beside it is.
+        assertContains(source, "(self._pm_handle, _pm_unwrap(a0))")
+    }
+
+    @Test
+    fun aRenderedProxyClassWithStaticsKeepsItsMetaclassAlongsideTheOwnerBase() {
+        val ctor = entry("p.Foo.<init>", kind = CallableKind.CONSTRUCTOR)
+        val getter = entry("p.Foo.count", kind = CallableKind.STATIC_GETTER)
+        val cls = ReflectedClass(name = "p.Foo", memberNames = listOf(ctor.name, getter.name))
+
+        val source = PythonProxySource.render(listOf(ctor, getter), listOf(cls))
+
+        val metaclass = Regex("class (_pm_t_\\d+)\\(type\\):").find(source)?.groupValues?.get(1)
+        assertTrue(metaclass != null, "a class with static members needs a metaclass:\n$source")
+        assertContains(source, "class Foo(_PmObject, metaclass=$metaclass):")
     }
 
     @Test

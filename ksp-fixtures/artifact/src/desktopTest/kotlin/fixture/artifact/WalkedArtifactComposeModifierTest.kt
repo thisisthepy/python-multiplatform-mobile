@@ -39,12 +39,17 @@ import kotlin.test.assertTrue
  * ### What Python actually holds
  *
  * An integer. A `Modifier` crosses as a `HandleTable` handle (`TypeTag.OBJECT`), so each link of the
- * chain is a fresh handle and **each one is a strong root until something releases it**. Nothing
- * releases them here: a bare handle out of a `CallableKind.FUNCTION` reaches Python as an `int`,
- * which has nothing to hang a finaliser off, so `PythonProxySource`'s KDoc records it as "the
- * caller's to release" -- and this test does not, deliberately, because doing so by hand is exactly
- * the ergonomics `docs/kotlin-extensions-in-python.md` §4.1's proxy exists to remove and does not
- * exist yet. Three handles leak per run of [aModifierChainIsAssembledInPythonFromTheComposeJars].
+ * chain is a fresh handle and **each one is a strong root until something releases it**.
+ *
+ * This used to leak three per run. The two walked links now come back wrapped, so Python drops
+ * their handles when it drops the chain. **One still leaks**: `emptyModifier()` is a KSP entry, and
+ * KSP emits no `returnTypeName` -- which is the gate, because `TypeTag.OBJECT` also covers a
+ * `PyObject` that may itself be an `int`, and owning one of those would release a handle nobody
+ * issued. The remaining leak closes when the processor supplies that field.
+ *
+ * Wrapping each return in the class rendered for its own type is still `§4.1`'s proxy and still
+ * does not exist: the walker emits no `ReflectedClass`, so no rendered class has ever shared a name
+ * with a walked return type.
  *
  * ### The overload names
  *
