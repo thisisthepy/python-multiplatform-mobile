@@ -158,6 +158,30 @@ argument.
 The C wrapper for the `@FastNative` twin is the same body with a leading `JNIEnv*, jclass`; the
 `@CriticalNative` one must have neither. See `artMain/cinterop/jni_onload.def`.
 
+### The five steps are enforced, not just written down
+
+`JniCallConventionClassificationTest` (desktopTest — it reads sources, so it needs no device)
+re-derives the classification on every run from `bindings.kt`, `artMain/cinterop/jni_onload.def` and
+the CPython headers bundled in `src/nativeInterop/cinterop/include`, and fails if a call site reaches
+a GC-blocking binding that is not in its enumerated promoted set.
+
+Two things it is deliberately not:
+
+- **It does not decide promotions.** The promoted set is a `Map` in the test with a reason per entry,
+  because step 4 has no derivable answer — every C API function can fail, and failure allocates a
+  GC-tracked exception. What the test enforces is that the set stays *enumerated*: a new
+  `@FastNative`/`@CriticalNative` declaration fails the build until someone writes down why.
+- **It does not claim to prove leafness.** A header prototype can condemn a function — a `PyObject *`
+  crossing it means a decref, a slot, or a GC-tracked allocation is reachable — but nothing in the
+  headers clears one. `Py_Initialize` and `PyRun_SimpleString` mention no `PyObject *` at all and both
+  run arbitrary Python, so everything the rule cannot condemn lands in an **UNDECIDED** bucket that
+  is barred from promotion. The bucket is currently 65 of 366 registrations. The audit that reported
+  "unresolved entries: none" put three re-entrant functions on its safe-to-promote list.
+
+The counts are printed by the run rather than written here, for the reason this test exists: the
+audit document classified 71 registrations, its own follow-up re-read the table at 187, and the table
+holds 366 today.
+
 ### Why the default is ordinary
 
 | guessed wrong toward | costs |
