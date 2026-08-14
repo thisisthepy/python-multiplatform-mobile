@@ -372,6 +372,14 @@ internal data class ResolvedFunction(
     /** Aligned with [allParameterTypes]; the receiver slot is always `false` (a receiver cannot
      * declare a default). Read, never acted on -- see `ExposedCallable.paramHasDefault`. */
     val allParameterDefaults: List<Boolean> = emptyList(),
+    /**
+     * Carried rather than filtered out at the source, because the two consumers of this want
+     * different things from it: the binder declines a `suspend` declaration outright, and the stub
+     * model records it as declined-because-suspend (`docs/pyi-generation-design.md` §3.1 -- "declined
+     * by both producers; must not be stubbed"). Dropping it here would make the second indistinguishable
+     * from a declaration that was never declared.
+     */
+    val isSuspend: Boolean = false,
 )
 
 /** The name given to the extension-receiver slot. Deliberately not a Python identifier: a receiver
@@ -414,7 +422,6 @@ internal fun functionsOf(container: KmDeclarationContainer): List<ResolvedFuncti
 
 private fun resolvedFunctionOrNull(function: KmFunction): ResolvedFunction? {
     if (function.visibility != Visibility.PUBLIC) return null
-    if (function.isSuspend) return null
     val signature = function.signature ?: return null
     val receiver = function.receiverParameterType
     val allParams = listOfNotNull(receiver) + function.valueParameters.map { it.type }
@@ -429,5 +436,49 @@ private fun resolvedFunctionOrNull(function: KmFunction): ResolvedFunction? {
             function.valueParameters.map { it.name },
         allParameterDefaults = (if (receiver != null) listOf(false) else emptyList()) +
             function.valueParameters.map { it.declaresDefaultValue },
+        isSuspend = function.isSuspend,
+    )
+}
+
+/**
+ * The declared Kotlin type as `docs/pyi-generation-design.md` §2.2's model wants it -- qualified
+ * name, nullability, type arguments, and value-class identity -- or `null` when the classifier is
+ * something no stub can name (a type *parameter*, a flexible type).
+ *
+ * Deliberately separate from [resolveKotlinType], which answers a different question: that one says
+ * *how a value marshals* and declines anything the boundary cannot carry, and this one says *what the
+ * declaration says*. `Dp` is `TypeTag.FLOAT` there and `androidx.compose.ui.unit.Dp` wrapping
+ * `kotlin.Float` here, and §2.2's whole argument is that a stub needs the second.
+ *
+ * [depth] bounds the recursion rather than trusting the input: a type argument list is attacker-free
+ * here (it comes from a jar this build resolved) but the cost of a pathological generic signature is
+ * paid at build time on every build, and nothing downstream needs more nesting than this.
+ */
+internal fun kotlinTypeModelOf(
+    type: KmType,
+    classpath: ArtifactClasspath,
+    depth: Int = 0,
+): python.multiplatform.gradle.model.KotlinTypeModel? {
+    if (depth > 8) return null
+    val classifier = type.classifier as? KmClassifier.Class ?: return null
+    val qualifiedName = classifier.name.replace('/', '.')
+    val arguments = type.arguments.map { argument ->
+        val argumentType = argument.type ?: return@map null // a star projection
+        kotlinTypeModelOf(argumentType, classpath, depth + 1)
+    }
+    val info = classpath.valueClassInfo(classifier.name)
+    val valueClass = info?.let { value ->
+        val underlying = kotlinTypeModelOf(value.underlyingType, classpath, depth + 1) ?: return@let null
+        python.multiplatform.gradle.model.ValueClassModel(
+            underlying = underlying,
+            constructorIsPublic = value.constructorIsPublic,
+            propertyIsPublic = value.propertyIsPublic,
+        )
+    }
+    return python.multiplatform.gradle.model.KotlinTypeModel(
+        qualifiedName = qualifiedName,
+        isNullable = type.isNullable,
+        arguments = arguments,
+        valueClass = valueClass,
     )
 }

@@ -3,6 +3,9 @@ package python.multiplatform.gradle.artifact
 import kotlin.metadata.jvm.KotlinClassMetadata
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
+import python.multiplatform.gradle.model.DeclarationModel
+import python.multiplatform.gradle.model.DeclaredParameter
+import python.multiplatform.gradle.model.KotlinTypeModel
 import java.io.File
 import java.util.jar.JarFile
 
@@ -134,9 +137,30 @@ internal object ArtifactScanner {
      *   `androidx.compose.ui.unit`. [PythonArtifactBindingsTask] passes the whole resolved
      *   configuration.
      */
-    fun scanJar(target: File, includePrefixes: List<String> = emptyList(), classpath: List<File> = listOf(target)): List<ArtifactCallable> {
+    fun scanJar(target: File, includePrefixes: List<String> = emptyList(), classpath: List<File> = listOf(target)): List<ArtifactCallable> =
+        scan(target, includePrefixes, classpath).mapNotNull { it.callable }.sortedBy { it.name }
+
+    /**
+     * The same walk, with the half `docs/pyi-generation-design.md` §2.2 asks for kept: one
+     * [DeclarationModel] per public declaration this walker considered, **including the ones it
+     * declined**, each carrying the table key the binder gave it or the reason there is none.
+     *
+     * Not a second scan. §2.2 rejects "two readers of the same jars that can disagree", so every
+     * model here is built at the point its binding is built, from the same `ResolvedFunction`; the
+     * two results of one walk are separated only at the end. `DeclarationModelTest
+     * .theModelAndTheBindingsAgreeBecauseTheyComeFromTheSameWalk` pins that they cannot drift.
+     */
+    fun scanDeclarations(
+        target: File,
+        includePrefixes: List<String> = emptyList(),
+        classpath: List<File> = listOf(target),
+    ): List<DeclarationModel> = scan(target, includePrefixes, classpath)
+        .map { it.declaration }
+        .sortedWith(compareBy({ it.owner }, { it.simpleName }, { it.bindingName ?: "" }))
+
+    private fun scan(target: File, includePrefixes: List<String>, classpath: List<File>): List<Candidate> {
         val artifactClasspath = ArtifactClasspath(classpath)
-        val entries = mutableListOf<ArtifactCallable>()
+        val entries = mutableListOf<Candidate>()
         forEachClassEntry(target) { relativePath, bytes ->
             // A nested class's binary name uses `$`, which is not how Kotlin spells the qualified
             // name (`Outer.Inner`), and `$1` anonymous classes have no Kotlin name at all. Skipped
@@ -151,8 +175,17 @@ internal object ArtifactScanner {
         // and Kotlin lets one live in two files. `docs/kotlin-extensions-in-python.md` §2.5 counts 11
         // such pairs in Compose alone -- two file facades, two `ClassNode`s, one Kotlin name -- which
         // a per-class grouping cannot see and would have emitted twice under one table key.
-        return disambiguateOverloads(entries).sortedBy { it.name }
+        return disambiguateOverloads(entries)
     }
+
+    /**
+     * One declaration, seen by both consumers of this walk at the moment it is read.
+     *
+     * [callable] is `null` exactly when the binder declined it, and [declaration] says why. Keeping
+     * them together up to the end of the walk is what makes `docs/pyi-generation-design.md` §2.2's
+     * "the two renderers cannot drift" a property of the code rather than a convention.
+     */
+    private data class Candidate(val callable: ArtifactCallable?, val declaration: DeclarationModel)
 
     /**
      * The `k` of each named class's `kotlin.Metadata`, or absent from the map when the class carries
@@ -210,26 +243,28 @@ internal object ArtifactScanner {
             qualifiedName == it || qualifiedName.startsWith("$it.")
         }
 
-    private fun scanClassNode(node: ClassNode, classpath: ArtifactClasspath): List<ArtifactCallable> {
+    private fun scanClassNode(node: ClassNode, classpath: ArtifactClasspath): List<Candidate> {
         if (!node.access.hasFlag(Opcodes.ACC_PUBLIC)) return emptyList()
         if (node.access.hasFlag(Opcodes.ACC_SYNTHETIC) or node.access.hasFlag(Opcodes.ACC_ANNOTATION)) return emptyList()
 
         // Ambiguity is counted over what *would be bound*, over the whole group a facade
         // contributes -- not per class -- so ambiguity introduced by splitting one Kotlin name
         // across two multi-file parts is still caught. See this object's KDoc.
-        val candidates: List<ArtifactCallable> = when (val metadata = kotlinClassMetadataOf(node)) {
+        val candidates: List<Candidate> = when (val metadata = kotlinClassMetadataOf(node)) {
             // No `kotlin.Metadata` at all: a Java class (or a Kotlin class whose metadata payload
             // this library could not decode -- declined the same way unparsable bytecode is, not
             // fatal). Bound the same way this walker always has, by JVM descriptor alone.
             null -> javaStaticCandidates(node)
             is KotlinClassMetadata.Class -> kotlinCandidates(
                 owner = binaryNameToQualified(node.name),
+                ownerIsClass = true,
                 functions = functionsOf(metadata.kmClass).filterNot { it.isExtension },
                 ownerNode = node,
                 classpath = classpath,
             )
             is KotlinClassMetadata.FileFacade -> kotlinCandidates(
                 owner = kotlinPackageNameOverrideOf(node) ?: packageNameOf(node.name),
+                ownerIsClass = false,
                 functions = functionsOf(metadata.kmPackage),
                 ownerNode = node,
                 classpath = classpath,
@@ -240,6 +275,7 @@ internal object ArtifactScanner {
                     ?: return@flatMap emptyList()
                 kotlinCandidates(
                     owner = kotlinPackageNameOverrideOf(partNode) ?: packageNameOf(partBinaryName),
+                    ownerIsClass = false,
                     functions = functionsOf(partMetadata.kmPackage),
                     ownerNode = partNode,
                     classpath = classpath,
@@ -304,18 +340,37 @@ internal object ArtifactScanner {
      * `paramNames` and `paramTypeNames` for it to select on. This layer's job is to make the choice
      * *possible*, not to make it.
      */
-    private fun disambiguateOverloads(candidates: List<ArtifactCallable>): List<ArtifactCallable> {
+    private fun disambiguateOverloads(candidates: List<Candidate>): List<Candidate> {
         val schemes: List<(ArtifactCallable) -> String> = listOf(
             { it.overloadSuffix(includeReceiver = false, qualified = false) },
             { it.overloadSuffix(includeReceiver = true, qualified = false) },
             { it.overloadSuffix(includeReceiver = true, qualified = true) },
         )
-        return candidates.groupBy { it.name }.values.flatMap { group ->
+        // A candidate the binder already declined has no name to be ambiguous about; it passes
+        // through so that `docs/pyi-generation-design.md` §2.2's "what is declined stays visible"
+        // survives this stage too.
+        val (bound, declined) = candidates.partition { it.callable != null }
+        val disambiguated = bound.groupBy { it.callable!!.name }.values.flatMap { group ->
             if (group.size == 1) return@flatMap group
-            val scheme = schemes.firstOrNull { scheme -> group.mapTo(HashSet()) { scheme(it) }.size == group.size }
-                ?: return@flatMap emptyList()
-            group.map { it.copy(name = "${it.name}__${scheme(it)}") }
+            val scheme = schemes.firstOrNull { scheme -> group.mapTo(HashSet()) { scheme(it.callable!!) }.size == group.size }
+                ?: return@flatMap group.map { candidate ->
+                    Candidate(
+                        callable = null,
+                        declaration = candidate.declaration.copy(
+                            bindingName = null,
+                            declineReason = "one of ${group.size} overloads no naming scheme separates",
+                        ),
+                    )
+                }
+            group.map { candidate ->
+                val name = "${candidate.callable!!.name}__${scheme(candidate.callable)}"
+                Candidate(
+                    callable = candidate.callable.copy(name = name),
+                    declaration = candidate.declaration.copy(bindingName = name),
+                )
+            }
         }
+        return disambiguated + declined
     }
 
     /**
@@ -339,7 +394,7 @@ internal object ArtifactScanner {
         }
     }
 
-    private fun javaStaticCandidates(node: ClassNode): List<ArtifactCallable> {
+    private fun javaStaticCandidates(node: ClassNode): List<Candidate> {
         val owner = binaryNameToQualified(node.name)
         return node.methods
             .filter { it.access.hasFlag(Opcodes.ACC_PUBLIC) && it.access.hasFlag(Opcodes.ACC_STATIC) }
@@ -349,41 +404,134 @@ internal object ArtifactScanner {
             // mangling, but nothing reaches this branch *with* Kotlin metadata to interpret it by --
             // a name like that here is unreadable, not merely unsupported, so it stays declined.
             .filter { '$' !in it.name && '-' !in it.name }
-            .mapNotNull { callableOrNull(owner, it.name, it.desc) }
+            .mapNotNull { candidateFromDescriptor(owner, it.name, it.desc) }
     }
 
     private fun kotlinCandidates(
         owner: String,
+        ownerIsClass: Boolean,
         functions: List<ResolvedFunction>,
         ownerNode: ClassNode,
         classpath: ArtifactClasspath,
-    ): List<ArtifactCallable> {
+    ): List<Candidate> {
         val bySignature = functions.associateBy { it.jvmSignature.name to it.jvmSignature.descriptor }
         return ownerNode.methods
             .filter { it.access.hasFlag(Opcodes.ACC_PUBLIC) && it.access.hasFlag(Opcodes.ACC_STATIC) }
             .filter { !it.access.hasFlag(Opcodes.ACC_SYNTHETIC) && !it.access.hasFlag(Opcodes.ACC_BRIDGE) }
             .filter { !it.name.startsWith("<") && '$' !in it.name }
             .mapNotNull { method ->
-                val function = bySignature[method.name to method.desc] ?: return@mapNotNull null
+                val function = bySignature[method.name to method.desc]
+                    // A `suspend` declaration's JVM shape carries a trailing `Continuation`, so its
+                    // descriptor never matches the one metadata records and it would fall out here
+                    // anyway. Looked up by Kotlin name instead so that it is declined *explicitly*
+                    // and reaches the model flagged -- CLAUDE.md's "제외한 것을 조용히 빠뜨리지 마라".
+                    ?: return@mapNotNull functions
+                        .firstOrNull { it.isSuspend && it.jvmSignature.name == method.name }
+                        ?.let { suspending ->
+                            declinedCandidate(owner, ownerIsClass, suspending, classpath, "suspend", isComposable(method))
+                        }
+                if (function.isSuspend) return@mapNotNull declinedCandidate(owner, ownerIsClass, function, classpath, "suspend", isComposable(method))
                 // A member whose Kotlin-declared parameter count does not match its JVM parameter
                 // count has an implicit JVM parameter metadata does not account for -- a value
-                // class's own instance turned into an unboxed receiver. There is no declared
-                // parameter to bind it to, so it is declined here rather than misread as one fewer
-                // parameter than the method actually takes. See this object's KDoc.
+                // class's own instance turned into an unboxed receiver, or a composable's synthetic
+                // `$composer`/`$changed`. There is no declared parameter to bind it to, so it is
+                // declined here rather than misread as one fewer parameter than the method actually
+                // takes. See this object's KDoc.
                 val (paramDescriptors, _) = splitMethodDescriptor(method.desc)
-                if (function.allParameterTypes.size != paramDescriptors.size) return@mapNotNull null
-                buildCallableFromFunction(owner, function, classpath)
+                if (function.allParameterTypes.size != paramDescriptors.size) {
+                    return@mapNotNull declinedCandidate(
+                        owner,
+                        ownerIsClass,
+                        function,
+                        classpath,
+                        "the JVM signature carries ${paramDescriptors.size - function.allParameterTypes.size} " +
+                            "parameter(s) metadata does not declare",
+                        isComposable(method),
+                    )
+                }
+                candidateFromFunction(owner, ownerIsClass, function, classpath, isComposable(method))
             }
     }
 
-    private fun buildCallableFromFunction(owner: String, function: ResolvedFunction, classpath: ArtifactClasspath): ArtifactCallable? {
-        val resolvedParams = function.allParameterTypes.map {
-            resolveKotlinType(it, classpath, BoundaryDirection.PARAMETER) ?: return null
+    /** `@Composable` is `RUNTIME`-retained, so ASM sees it without any metadata decoding. Read here
+     * because the *name* rule depends on it -- `docs/pyi-generation-design.md` §3.6: composables stay
+     * PascalCase where every other function becomes snake_case. No composable is bindable today (the
+     * arity check above declines every one of them for its synthetic parameters), so this is carried
+     * for the model's sake and for the day that changes. */
+    private fun isComposable(method: org.objectweb.asm.tree.MethodNode): Boolean =
+        method.visibleAnnotations?.any { it.desc == "Landroidx/compose/runtime/Composable;" } == true
+
+    /** The model for a declaration that will not be bound, with the reason. The Kotlin types are
+     * still read: a stub generator has to be able to say *what* was declined. */
+    private fun declinedCandidate(
+        owner: String,
+        ownerIsClass: Boolean,
+        function: ResolvedFunction,
+        classpath: ArtifactClasspath,
+        reason: String,
+        isComposable: Boolean,
+    ): Candidate? {
+        val declaration = declarationModelOf(owner, ownerIsClass, function, classpath, isComposable) ?: return null
+        return Candidate(callable = null, declaration = declaration.copy(bindingName = null, declineReason = reason))
+    }
+
+    /**
+     * The declared shape of one Kotlin function, independent of whether the boundary can carry it.
+     *
+     * `null` when some part of the signature has no name a stub could write -- a type *parameter*, a
+     * flexible type. `docs/pyi-generation-design.md` §3.1's last row and §7: `BindingPolicy` rejects
+     * generic declarations, and stubbing what cannot be called would be a lie.
+     */
+    private fun declarationModelOf(
+        owner: String,
+        ownerIsClass: Boolean,
+        function: ResolvedFunction,
+        classpath: ArtifactClasspath,
+        isComposable: Boolean,
+    ): DeclarationModel? {
+        val receiverIndex = if (function.isExtension) 1 else 0
+        val receiverModel = function.receiverType?.let { kotlinTypeModelOf(it, classpath) ?: return null }
+        val parameters = function.allParameterTypes.drop(receiverIndex).mapIndexed { index, type ->
+            DeclaredParameter(
+                name = function.allParameterNames.getOrNull(index + receiverIndex),
+                type = kotlinTypeModelOf(type, classpath) ?: return null,
+                declaresDefault = function.allParameterDefaults.getOrNull(index + receiverIndex) ?: false,
+            )
         }
-        val returnType = resolveKotlinType(function.returnType, classpath, BoundaryDirection.RETURN) ?: return null
+        return DeclarationModel(
+            simpleName = function.kotlinName,
+            owner = owner,
+            ownerIsClass = ownerIsClass,
+            receiver = receiverModel,
+            parameters = parameters,
+            returnType = kotlinTypeModelOf(function.returnType, classpath) ?: return null,
+            isComposable = isComposable,
+            isSuspend = function.isSuspend,
+        )
+    }
+
+    private fun candidateFromFunction(
+        owner: String,
+        ownerIsClass: Boolean,
+        function: ResolvedFunction,
+        classpath: ArtifactClasspath,
+        isComposable: Boolean,
+    ): Candidate? {
+        val model = declarationModelOf(owner, ownerIsClass, function, classpath, isComposable) ?: return null
+        val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
+        val receiverIndex = if (function.isExtension) 1 else 0
+
+        val resolvedParams = function.allParameterTypes.map { type ->
+            resolveKotlinType(type, classpath, BoundaryDirection.PARAMETER)
+                ?: return declined("no boundary type for parameter ${kotlinClassifierNameOf(type) ?: type.classifier}")
+        }
+        val returnType = resolveKotlinType(function.returnType, classpath, BoundaryDirection.RETURN)
+            ?: return declined("no boundary type for return ${kotlinClassifierNameOf(function.returnType) ?: function.returnType.classifier}")
         // Declared, not marshalled: a `Dp` parameter's tag is FLOAT and its declared name is
         // `androidx.compose.ui.unit.Dp`. `docs/pythonx-adapter-design.md` §2.4 row 4.
-        val paramTypeNames = function.allParameterTypes.map { kotlinClassifierNameOf(it) ?: return null }
+        val paramTypeNames = function.allParameterTypes.map {
+            kotlinClassifierNameOf(it) ?: return declined("unnameable parameter type")
+        }
         val returnTypeName = kotlinClassifierNameOf(function.returnType)
 
         val qualifiedName = "$owner.${function.kotlinName}"
@@ -406,7 +554,7 @@ internal object ArtifactScanner {
 
         val body = returnType.wrapReturn(call)
         val arity = resolvedParams.size
-        return ArtifactCallable(
+        val callable = ArtifactCallable(
             name = qualifiedName,
             arity = arity,
             paramTags = resolvedParams.map { it.tag },
@@ -419,9 +567,20 @@ internal object ArtifactScanner {
             returnTypeName = returnTypeName,
             paramHasDefault = function.allParameterDefaults,
         )
+        return Candidate(
+            callable = callable,
+            declaration = model.copy(
+                bindingName = qualifiedName,
+                returnBoundaryTag = returnType.tag,
+                receiverBoundaryTag = if (function.isExtension) resolvedParams.first().tag else null,
+                parameters = model.parameters.mapIndexed { index, parameter ->
+                    parameter.copy(boundaryTag = resolvedParams[index + receiverIndex].tag)
+                },
+            ),
+        )
     }
 
-    private fun callableOrNull(owner: String, methodName: String, descriptor: String): ArtifactCallable? {
+    private fun candidateFromDescriptor(owner: String, methodName: String, descriptor: String): Candidate? {
         val (paramDescriptors, returnDescriptor) = splitMethodDescriptor(descriptor)
         val returnType = boundaryTypeOf(returnDescriptor) ?: return null
         val paramTypes = paramDescriptors.map { boundaryTypeOf(it) ?: return null }
@@ -430,7 +589,9 @@ internal object ArtifactScanner {
         val argumentExpressions = paramTypes.mapIndexed { index, type -> type.read("args[$index]") }
         val call = "$owner.$methodName(${argumentExpressions.joinToString(", ")})"
         val body = returnType.wrapReturn(call)
-        return ArtifactCallable(
+        val paramTypeNames = paramDescriptors.map { kotlinNameOfAdmittedDescriptor(it) }
+        val returnTypeName = kotlinNameOfAdmittedDescriptor(returnDescriptor)
+        val callable = ArtifactCallable(
             name = "$owner.$methodName",
             arity = paramTypes.size,
             paramTags = paramTypes.map { it.tag },
@@ -440,8 +601,27 @@ internal object ArtifactScanner {
             // `paramNames` stays empty: a Java class file carries parameter names only when it was
             // compiled with `-parameters`, and JUnit 4 was not. Empty means "not supplied" (see
             // `ExposedCallable.paramNames`), which is the truth here rather than an invented `arg0`.
-            paramTypeNames = paramDescriptors.map { kotlinNameOfAdmittedDescriptor(it) },
-            returnTypeName = kotlinNameOfAdmittedDescriptor(returnDescriptor),
+            paramTypeNames = paramTypeNames,
+            returnTypeName = returnTypeName,
+        )
+        return Candidate(
+            callable = callable,
+            declaration = DeclarationModel(
+                simpleName = methodName,
+                owner = owner,
+                ownerIsClass = true,
+                receiver = null,
+                // `docs/pyi-generation-design.md` §3.2: the names are genuinely absent, and a wrong
+                // keyword name is worse than no keyword name because it type-checks at the call site
+                // and fails at run time.
+                parameters = paramTypeNames.mapIndexed { index, name ->
+                    DeclaredParameter(null, KotlinTypeModel(name), declaresDefault = false, boundaryTag = paramTypes[index].tag)
+                },
+                returnType = KotlinTypeModel(returnTypeName),
+                returnBoundaryTag = returnType.tag,
+                bindingName = "$owner.$methodName",
+                parameterNamesKnown = false,
+            ),
         )
     }
 

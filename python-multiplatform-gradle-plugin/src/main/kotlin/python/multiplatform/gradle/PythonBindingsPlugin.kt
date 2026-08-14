@@ -2,9 +2,11 @@ package python.multiplatform.gradle
 
 import org.gradle.api.Plugin
 import org.gradle.api.Project
+import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.Property
 import python.multiplatform.gradle.artifact.PythonArtifactBindingsTask
+import python.multiplatform.gradle.stubs.PythonStubsTask
 
 /**
  * KSP option names. Copied rather than imported: these are the processor's
@@ -173,6 +175,28 @@ interface PythonBindingsExtension {
 
     /** The Kotlin source set the generated fragments are compiled into, e.g. `desktopMain`. */
     val artifactSourceSet: Property<String>
+
+    /**
+     * Whether to emit `.pyi` stubs for the walked artefacts -- `docs/pyi-generation-design.md`.
+     *
+     * Defaults to true wherever the walker itself is registered, and is a no-op everywhere else:
+     * nothing is enumerable to stub until there is something to stub *from*. The output is
+     * `build/generated/pythonStubs/<sourceSet>/` and **nothing compiles it** -- see
+     * [python.multiplatform.gradle.stubs.PythonStubsTask] for why it is not written into the source
+     * tree the way PyREPL's generator was, and for what registering it with an interpreter still
+     * needs per environment.
+     */
+    val generateStubs: Property<Boolean>
+
+    /**
+     * §5.3's manifest -- which `pythonx` module wraps which Kotlin package, and which value classes
+     * may be written as their raw underlying primitive.
+     *
+     * Owned by the Python package, not by this plugin: `pythonx.compose.layout` wraps
+     * `androidx.compose.foundation.layout`, dropping `foundation.`, and no artefact says so. With no
+     * manifest only the Kotlin-FQN stubs are emitted, which is what §5.3 prescribes.
+     */
+    val stubManifest: RegularFileProperty
 }
 
 /**
@@ -304,6 +328,38 @@ class PythonBindingsPlugin : Plugin<Project> {
         }
 
         addKotlinSourceDirectory(project, sourceSetName, task)
+        configureStubGeneration(project, extension, resolved, includes, sourceSetName)
+    }
+
+    /**
+     * Registers `generatePythonStubs` -- `docs/pyi-generation-design.md`'s generator.
+     *
+     * Hooked onto `prepareKotlinIdeaImport` the way PyREPL hooked its own generator (§1.4 keeps that
+     * row): it is the one step that makes the stubs exist before the IDE indexes, and it costs one
+     * line. `tasks.matching` rather than `getByName`, because the task exists only when the Kotlin
+     * Gradle Plugin creates it -- a plain `./gradlew build` has no IDE import step.
+     *
+     * Nothing else depends on this task. **Nothing compiles a `.pyi`** (§6.2), so unlike the binding
+     * fragments there is no `srcDir(task)` that would pull it into a build; a consumer runs it, or
+     * their IDE import does.
+     */
+    private fun configureStubGeneration(
+        project: Project,
+        extension: PythonBindingsExtension,
+        resolved: org.gradle.api.artifacts.ArtifactCollection,
+        includes: List<String>,
+        sourceSetName: String,
+    ) {
+        if (!extension.generateStubs.getOrElse(true)) return
+        val task = project.tasks.register("generatePythonStubs", PythonStubsTask::class.java) {
+            group = "python"
+            description = "Emits .pyi stubs for the declarations the artefact walker bound."
+            artifacts.from(resolved.artifactFiles)
+            includePrefixes.set(includes)
+            manifest.set(extension.stubManifest)
+            outputDirectory.set(project.layout.buildDirectory.dir("generated/pythonStubs/$sourceSetName"))
+        }
+        project.tasks.matching { it.name == "prepareKotlinIdeaImport" }.configureEach { dependsOn(task) }
     }
 
     /**
