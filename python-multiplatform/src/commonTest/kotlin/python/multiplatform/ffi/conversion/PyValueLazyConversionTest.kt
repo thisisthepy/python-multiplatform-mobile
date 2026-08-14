@@ -37,8 +37,9 @@ import kotlin.time.TimeSource
  * - a container is cached as a **snapshot**, so it goes stale rather than
  *   dangling, and [PyProxy.invalidateNativeCache] is the stated remedy;
  * - a type whose native form would be a *view* into Python-owned memory
- *   (`bytes`, `bytearray`, `memoryview`) is refused outright rather than
- *   quietly cached;
+ *   (`memoryview`) is refused outright rather than quietly cached -- `bytes`
+ *   and `bytearray` were refused here too until they gained a `ByteArray`
+ *   *copy*, which `PyValueBytesConversionTest` owns;
  * - a bare `NativePointer` -- what `ConversionStrategy.RAW` hands back -- is
  *   not a reference at all and may never be stored as a native value.
  */
@@ -215,15 +216,21 @@ class PyValueLazyConversionTest {
     // --------------------------------------------------------------- refusals, not silent caches
 
     /**
-     * `bytes`/`bytearray`/`memoryview` have no dedicated wrapper, and their
-     * native form would be a *view* of Python-owned memory
-     * (`PyBytes_AsStringAndSize` hands out a pointer into the object). The rule
-     * is that such a type is refused rather than converted, and that the
-     * refusal leaves nothing behind in the cache.
+     * A type whose native form would be a *view* of Python-owned memory is
+     * refused rather than converted, and the refusal leaves nothing behind in
+     * the cache.
+     *
+     * This used to cover `bytes` and `bytearray` too. It no longer does, and
+     * the change is deliberate rather than a weakened assertion: those two are
+     * converted now, to a `ByteArray` *copy* that shares nothing with CPython
+     * (see `PyValueBytesConversionTest`, and `PyBytes`'s class doc for why the
+     * read never touches a buffer pointer). `memoryview` is the case the copy
+     * argument does not rescue -- it carries a format, a shape and strides, so
+     * no single flat `ByteArray` is its value -- so it is what is left here.
      */
     @Test
-    fun bufferTypesAreRefusedRatherThanCachedAsAViewOfPythonMemory() = PythonTestFixture.withInterpreter {
-        for (expression in listOf("b'abc'", "bytearray(b'abc')", "memoryview(b'abc')")) {
+    fun aBufferViewTypeIsRefusedRatherThanCachedAsAViewOfPythonMemory() = PythonTestFixture.withInterpreter {
+        for (expression in listOf("memoryview(b'abc')", "memoryview(bytearray(b'abc'))")) {
             val obj = PythonTestFixture.eval(expression)
             val value = PyValue<Any?>(obj)
 

@@ -74,11 +74,23 @@ import python.native.ffi.NativePointer
  *   independent too. It is, however, a **snapshot**: mutating the Python
  *   container afterwards does not update it. Call [invalidateNativeCache] to
  *   force the next read to re-convert.
- * - `bytes`/`bytearray`/`memoryview` -> **refused.** Their native form is a
- *   pointer into the object's own buffer (`PyBytes_AsStringAndSize` and the
- *   buffer protocol hand out exactly that), and a `bytearray`'s buffer moves
- *   when it is resized. No wrapper converts them, so they take the branch
- *   below rather than acquiring a cache that would outlive what it points at.
+ * - `bytes`/`bytearray` -> Kotlin `ByteArray`. These used to be refused
+ *   alongside `memoryview`, on the grounds that their native form is a pointer
+ *   into the object's own buffer (`PyBytes_AsStringAndSize` and the buffer
+ *   protocol hand out exactly that) and that a `bytearray`'s buffer moves when
+ *   it is resized. That objection is about the *pointer*: a `ByteArray` is a
+ *   copy by construction, exactly as the decoded `String` of a `str` is, so it
+ *   satisfies the same rule. The read therefore never touches a buffer pointer
+ *   -- it goes through `hex()`; see
+ *   [python.multiplatform.ffi.types.basic.PyBytes] for why, and for what that
+ *   costs. `bytes` is immutable so its cached copy can never go stale; a
+ *   `bytearray`'s is a **snapshot**, like a container's, with
+ *   [invalidateNativeCache] as the way to re-read it.
+ * - `memoryview` -> **refused**, and the copy argument above does not rescue
+ *   it: a memoryview carries a format, a shape and strides, so there is no one
+ *   flat `ByteArray` that is its value, and a non-contiguous view cannot
+ *   produce one at all. No wrapper converts it, so it takes the branch below
+ *   rather than acquiring a cache of a shape nobody chose.
  * - anything else (a user-defined class, a subclass of a builtin, `complex`,
  *   ...) -> nothing is cached; [toKotlinOrNull] returns `null` and [toKotlin]
  *   throws.
@@ -194,9 +206,9 @@ interface PyProxy<T> {
      * The Python side of this value, materialising it from the cached native
      * value if this proxy was built from a Kotlin value alone.
      *
-     * Only the scalar cases are materialised, because those have exactly one
-     * unambiguous Python spelling and an existing constructor to build it
-     * with. A Kotlin `List`/`Map`/`Set` does not: whether it should become a
+     * Only the scalar cases and `ByteArray` are materialised, because those
+     * have exactly one unambiguous Python spelling and an existing constructor
+     * to build it with. A Kotlin `List`/`Map`/`Set` does not: whether it should become a
      * `list` or a `tuple`, a `set` or a `frozenset`, and who then owns the
      * references to the converted elements, are decisions that belong to the
      * collection wrappers (`PyList.fromList` and friends), not to a generic
@@ -303,6 +315,10 @@ private fun nativeToPyObject(value: Any?): PyObject = when (value) {
     is Double -> value.asPyObject()
     is Float -> value.toDouble().asPyObject()
     is String -> value.asPyObject()
+    // A ByteArray has exactly one Python spelling, `bytes` -- unlike a List/Map/Set, whose
+    // ambiguity is why those are refused here. `bytearray` is the mutable spelling and would be a
+    // guess; a caller who wants one can build it from the `bytes` this returns.
+    is ByteArray -> value.asPyObject()
     else -> throw PyTypeError("No unambiguous Python counterpart for a cached value of type '${value::class.simpleName}'")
 }
 

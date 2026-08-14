@@ -34,6 +34,9 @@ class WalkedArtifactTableTest {
         ArtifactTable.registerInto()
         assertEquals(
             listOf(
+                // `:ksp-fixtures:artifact-valueclass`, built for exactly one proof: see that
+                // module's `build.gradle.kts`.
+                "fixture.valueclass.sumMeters",
                 "junit.framework.Assert.failSame",
                 "junit.framework.TestCase.failSame",
                 "junit.runner.BaseTestRunner.getFilteredTrace",
@@ -41,6 +44,35 @@ class WalkedArtifactTableTest {
                 "junit.runner.BaseTestRunner.setPreference",
                 "junit.runner.BaseTestRunner.truncate",
                 "junit.runner.Version.id",
+                // `kotlin.text`: see the `build.gradle.kts` comment on `artifactIncludePackages` --
+                // `kotlin-stdlib` needs no dependency of its own, and these are exactly the top-level
+                // extension functions that used to be unreachable behind `StringsKt`'s multi-file
+                // facade. `trimIndent` is the one `WalkedArtifactPythonImportTest` calls from Python.
+                "kotlin.text.capitalize",
+                "kotlin.text.compareTo",
+                "kotlin.text.decapitalize",
+                "kotlin.text.drop",
+                "kotlin.text.dropLast",
+                "kotlin.text.endsWith",
+                "kotlin.text.prependIndent",
+                "kotlin.text.regionMatches",
+                "kotlin.text.replace",
+                "kotlin.text.replaceAfter",
+                "kotlin.text.replaceAfterLast",
+                "kotlin.text.replaceBefore",
+                "kotlin.text.replaceBeforeLast",
+                "kotlin.text.replaceFirst",
+                "kotlin.text.replaceIndent",
+                "kotlin.text.replaceIndentByMargin",
+                "kotlin.text.substringAfter",
+                "kotlin.text.substringAfterLast",
+                "kotlin.text.substringBefore",
+                "kotlin.text.substringBeforeLast",
+                "kotlin.text.take",
+                "kotlin.text.takeLast",
+                "kotlin.text.toBooleanStrict",
+                "kotlin.text.trimIndent",
+                "kotlin.text.trimMargin",
             ),
             UpcallTable.entries().map { it.name }.sorted(),
         )

@@ -124,6 +124,55 @@ class WalkedArtifactPythonImportTest {
         )
     }
 
+    /**
+     * `kotlin.text.trimIndent`: a top-level Kotlin extension function, reached through a
+     * `MULTI_FILE_CLASS_FACADE` (`StringsKt`) into a package-private part (`StringsKt__IndentKt`) --
+     * exactly the shape `ArtifactScanner`'s KDoc names as unreachable before it read `@Metadata`.
+     * Called under the name `kotlin.text.trimIndent`, never under either JVM class name, which
+     * Kotlin (and so Python) has no way to spell.
+     */
+    @Test
+    fun aTopLevelExtensionBehindAMultiFileFacadeIsCallableFromPython() {
+        Python3.exec(
+            """
+            from kotlin.text import trimIndent
+
+            _observed = trimIndent('    line one\n    line two')
+            assert _observed == 'line one\nline two', 'trimIndent answered ' + repr(_observed)
+            """.trimIndent(),
+        )
+    }
+
+    /**
+     * `fixture.valueclass.sumMeters`: both parameters and the return are a public
+     * `@JvmInline value class` (`Meters`), from `:ksp-fixtures:artifact-valueclass` -- a jar built
+     * for exactly this proof, since `kotlin.time.Duration` (the real-world case) has an `internal`
+     * constructor and so can never round-trip. `12.0` is not producible except by unwrapping two
+     * `Meters` arguments, adding them, and wrapping the sum back up.
+     */
+    @Test
+    fun aValueClassParameterAndReturnRoundTripThroughPython() {
+        Python3.exec(
+            """
+            from fixture.valueclass import sumMeters
+
+            _observed = sumMeters(5.0, 7.0)
+            assert _observed == 12.0, 'sumMeters answered ' + repr(_observed)
+            """.trimIndent(),
+        )
+    }
+
+    /** A declined declaration going out of scope must fail the same way any other assertion does,
+     * not "unexpectedly pass" because the negative case was never actually reached. */
+    @Test
+    fun theWholeStringsKtFacadeItselfIsUnreachable() {
+        assertEquals(
+            false,
+            UpcallTable.resolve("kotlin.text.StringsKt.trimIndent").isValid,
+            "the facade's own JVM name has no Kotlin spelling and must never be a bound name",
+        )
+    }
+
     /** A declaration the walker declined is absent rather than broken: `assertEquals` has eight
      * bindable overloads and the walker refuses to pick one (see `ArtifactScannerTest`). */
     @Test

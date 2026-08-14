@@ -51,3 +51,7 @@ include(":ksp-fixtures:android")
 // reads the jars the build resolves rather than the source it compiles. `:library` and `:app` cover
 // KSP only, so nothing here exercised a third-party binary until this module existed.
 include(":ksp-fixtures:artifact")
+// A real, separately-compiled jar for the walker's value-class handling -- `kotlin.time.Duration`
+// cannot prove a positive round trip (its constructor is `internal`), so this stands in for it. See
+// its own `build.gradle.kts`.
+include(":ksp-fixtures:artifact-valueclass")

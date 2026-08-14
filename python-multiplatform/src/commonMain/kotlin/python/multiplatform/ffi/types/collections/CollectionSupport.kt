@@ -7,6 +7,8 @@ import python.multiplatform.ffi.PyTypeChecks
 import python.multiplatform.ffi.adoptingNewReference
 import python.multiplatform.ffi.exceptions.PyException
 import python.multiplatform.ffi.types.basic.PyNone
+import python.multiplatform.ffi.types.basic.readBufferAsByteArray
+import python.native.ffi.HighOverheadNativeCall
 import python.native.ffi.NativePointer
 import python.native.ffi.PyFloat_AsDouble
 import python.native.ffi.PyLong_AsLongLong
@@ -112,6 +114,7 @@ internal fun snapshotElements(pointer: NativePointer): List<PyObject> {
  * [python.multiplatform.ffi.conversion.PyContext]'s `autoConvert`/
  * `proxyConvert` exist (ROADMAP §7b closed the eager path).
  */
+@OptIn(HighOverheadNativeCall::class)
 internal fun pyObjectToNative(obj: PyObject): Any? {
     if (PyNone.isNone(obj)) return null
 
@@ -124,6 +127,10 @@ internal fun pyObjectToNative(obj: PyObject): Any? {
             PyTypeChecks.intType -> python.multiplatform.ffi.Python3.withPython { PyLong_AsLongLong(obj.pointer) }
             PyTypeChecks.floatType -> python.multiplatform.ffi.Python3.withPython { PyFloat_AsDouble(obj.pointer) }
             PyTypeChecks.strType -> python.multiplatform.ffi.Python3.withPython { PyUnicode_AsUTF8(obj.pointer) } ?: ""
+            // A ByteArray is a copy, so it is cacheable under the same rule the scalars are --
+            // see PyBytes's class doc for why the read goes through `hex()` and what it costs.
+            // No wrapper is built on this path: readBufferAsByteArray takes the raw pointer.
+            PyTypeChecks.bytesType, PyTypeChecks.bytearrayType -> readBufferAsByteArray(obj.pointer)
             PyTypeChecks.listType -> PyList(obj.pointer, true).toNativeList()
             PyTypeChecks.tupleType -> PyTuple(obj.pointer, true).toNativeList()
             PyTypeChecks.dictType -> PyDict(obj.pointer, true).toNativeMap()
