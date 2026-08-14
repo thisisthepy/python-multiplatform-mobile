@@ -3381,3 +3381,188 @@ not sitting at.
   `run`/`test` at it. An application shipped to an end user still needs its packaging step
   (`jpackage`, Conveyor, an installer) to carry a prefix and set `PYTHONHOME`; the staged directory
   is a reasonable thing for such a step to copy, but nothing here does it.
+
+---
+
+## 16. Bindings from resolved artefacts — the second producer, punched through on one path
+
+`docs/ecosystem.md` §5b settles that bindings are produced at build time by **two** producers, split
+by what they look at:
+
+    KSP                the consumer's own source — declarations it can see being compiled
+    artefact walker    everything the build resolves — third-party jars, AndroidX included
+
+Only the first existed. This section is the second, built to the smallest shape that reaches all the
+way to a Python `import` rather than to the largest shape that could be written.
+
+### 16a. What runs today
+
+`python-multiplatform-gradle-plugin` gained `generatePythonArtifactBindings`
+(`python.multiplatform.gradle.artifact`), registered when a consumer sets three properties:
+
+    pythonBindings {
+        artifactConfiguration.set("desktopCompileClasspath")
+        artifactSourceSet.set("desktopMain")
+        artifactIncludePackages.set(listOf("junit.runner", "junit.framework"))
+    }
+
+It walks the resolved jars with ASM, emits one `FunctionTableFragment` per contributing artefact into
+`python.multiplatform.generated.artifacts`, and an `ArtifactTable` listing them. The verified path,
+end to end, is `ksp-fixtures/artifact`:
+
+    junit-4.13.2.jar -> ASM -> ArtifactFragment_junit_junit_4_13_2 -> UpcallTable
+        -> PythonProxySource -> `from junit.runner.Version import id` -> "4.13.2"
+
+`"4.13.2"` is JUnit's own version string, compiled into `junit/runner/Version.class`; no generator or
+fixture can produce it, which is why it is the value the test reads back.
+
+`artifactIncludePackages` being empty leaves the whole thing unregistered — no task, no configuration
+resolution, no generated directory. A build that only wants KSP pays nothing.
+
+### 16b. Where the walker's output joins KSP's, and why it is a second list
+
+Same `UpcallTable`, same `FunctionTableFragment`, same Python surface. **Two aggregators.**
+`ArtifactTable` is not merged into KSP's `FunctionTable`, for three reasons:
+
+1. **`FunctionTable` already means something.** `PackageScanFragmentDiscovery` builds it from
+   `Resolver.getDeclarationsFromPackage(...generated.fragments)` — "every module in this build graph
+   compiled with the processor". `ksp-fixtures/app`'s `CommonInstallTest` asserts that set exactly.
+   Merging would silently change a shipped contract and make a consumer's Python namespace grow when
+   they added an unrelated dependency.
+2. **The ordering would have to be built the wrong way round.** For KSP to *see* a walked fragment,
+   the walker would have to run before `kspKotlin<Target>` and land its source where
+   `getDeclarationsFromPackage` looks. That API's behaviour for declarations present only in the
+   source being processed is undocumented, and a fragment it silently missed would vanish from the
+   table with no build failure anywhere.
+3. **Which artefacts to bind is a consumer's decision and should be visible at the install site.**
+
+So the install site is where they meet:
+
+    UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
+
+`ArtifactTable.registerInto()` is the additive form, for a caller who has already installed.
+
+### 16c. The filters, judged against `PyREPL`'s
+
+`PyREPL`'s generator (`app/build.gradle.kts`, 627 lines) is the reference implementation and its
+filters were re-derived rather than copied, because it emits `.pyi` **stubs** and this emits **calls**.
+A stub never has to compile.
+
+| PyREPL | here | why |
+|---|---|---|
+| not `private`/`protected` | **not enough** — must be `public` | PyREPL keeps package-private members. Generated Kotlin lives in another package and cannot call one. `kotlin.text.StringsKt__IndentKt` is exactly that shape |
+| drop `<init>` | kept | a constructor needs a `ReflectedClass` and a receiver handle |
+| drop `Companion` | subsumed | only statics are bound, and `Companion` is an instance field |
+| drop names containing `-` | **kept, and load-bearing for a different reason** | see below |
+| (none) | drop non-`static` | an instance method has nowhere to get a receiver yet |
+| (none) | drop unbindable types | see 16d |
+| (none) | drop ambiguous overloads | see below |
+
+**The `-` filter turns out to be load-bearing, and PyREPL's instinct was right.** A hyphen is Kotlin's
+value-class mangling suffix. It cannot simply be stripped, and — more importantly — it cannot be
+replaced by a type check, because *a value class erases to the type it wraps*: `Duration` is a `long`,
+so `getInWholeSeconds-impl(J)J` passes any descriptor-level filter while meaning something entirely
+different from `long -> long`. The mangled name is the only place the bytecode still admits it.
+
+**Overloads are dropped entire, not arbitrated.** This is the one place the walker diverges from
+`FragmentScanner.distinctByName`, which keeps the first. That rule is right for Kotlin source, where
+the collisions are duplicate *views* of one declaration (an instance and a companion property of the
+same name, an `expect`/`actual` pair seen twice). In a jar they are genuinely different functions:
+`org.junit.Assert.assertEquals` has eight the walker could bind, and picking one — deterministically or
+not — means `assertEquals(3, 3)` from Python calls whichever the sort order happened to put first,
+which for that method is the deprecated `(double, double)` that always fails. Ambiguity is counted over
+what *would be bound*, so an overload the type filter already declined does not make its sibling
+ambiguous (`BaseTestRunner.getFilteredTrace` has two overloads, one taking `Throwable`, and is kept).
+
+The whole of `junit-4.13.2.jar` — 380-odd classes — yields **seven** bindings under these rules. That
+smallness is the design, not a bug, and `ArtifactScannerTest` pins the exact list.
+
+### 16d. The wall: ASM is not enough for a *Kotlin* jar
+
+The walker binds only declarations callable from Kotlin **by their JVM shape** — a Java static, or a
+Kotlin `@JvmStatic`. A Kotlin top-level function is not one, and this is not a policy choice:
+
+- `kotlin.text.trimIndent` compiles to a public static on `kotlin/text/StringsKt__IndentKt`, which is
+  **package-private**. Generated Kotlin in another package cannot call it.
+- The public name is the facade `kotlin/text/StringsKt`, which declares no methods of its own (it
+  inherits them) and which **Kotlin cannot name at all** — there is no `StringsKt` in the Kotlin
+  namespace, only `kotlin.text.trimIndent`.
+- Even given the name, the bytecode does not say that `trimIndent`'s first parameter is an *extension
+  receiver* rather than an ordinary argument.
+
+The `@Metadata` *kind* is readable with ASM alone (`kotlin.Metadata` is `RUNTIME`-retained), and
+`ArtifactScannerTest` pins it against the real `kotlin-stdlib`: `StringsKt` is `k=4` (multi-file
+facade), `StringsKt__IndentKt` is `k=5` (multi-file part), `Regex` is `k=1`, `junit.runner.Version` has
+none. The *payload* — names, receivers, property/function, value classes, nullability — is in `d1`/`d2`
+and needs **`kotlin-metadata-jvm`**.
+
+**`androidx.compose.material3` is on the far side of that line.** §5b is right that the artefact walker
+is the mechanism that reaches it; what this pass establishes is that reaching it needs a metadata
+reader, not more descriptor cases.
+
+Also unbound today, and for the same "no Kotlin type name to cast to" reason (`boundaryTypeOf` returns
+`null` rather than falling back to `TypeTag.OBJECT`): every parameter or return that is not a
+primitive, `String`, `ByteArray` or `void`. `Ljava/util/List;` has no Kotlin spelling, a
+`Ljava/lang/Object;` cast checks nothing, and a value-class descriptor lies. Instance methods,
+constructors and fields are unbound too — those need a `ReflectedClass` and a receiver handle, which is
+`PythonProxySource`'s existing class-rendering path and a separate step.
+
+### 16e. klib — investigated, not implemented, and the answer is *easier* than the jar
+
+§5b left this open: "On iOS, androidNative and wasm the artefacts are klibs, and whether the same walk
+is possible there — and what a Kotlin declaration from a klib can be bound to at runtime with no JVM
+underneath — is the open question."
+
+Both halves were investigated against this repository's own klibs. Observed, not inferred:
+
+**Reading is solved, by an API that already ships with the Kotlin this build uses.** A `.klib` is a zip
+whose `default/linkdata/package_<fqName>/*.knm` entries are protobuf-serialised Kotlin metadata — the
+package inventory is readable from the directory names alone, and the declarations need a decoder.
+`org.jetbrains.kotlin.library.abi.LibraryAbiReader` in `kotlin-compiler-embeddable` (the same
+`2.4.20-Beta2` this build pins; the API carries `@ExperimentalLibraryAbiReader`) is that decoder. Run
+against `python-multiplatform-iosX64Main-3.14.7-alpha01.klib` it returned the manifest
+(`platform=NATIVE, platformTargets=[Native(name=ios_x64)]`) and **441 top-level declarations** with
+proper Kotlin qualified names — `python.multiplatform.ffi/withGIL`, `python.multiplatform.ffi/PyObject`
+— already sorted into `AbiClass` and `AbiFunction`.
+
+**And it answers exactly what ASM could not.** `AbiFunction` exposes `isSuspend`,
+`hasExtensionReceiverParameter`, `isInline`, `isConstructor`, `valueParameters: List<AbiValueParameter>`
+and `returnType: AbiType` — Kotlin types, not erased JVM descriptors. There is no facade problem
+because there is no facade: a klib records the Kotlin declaration.
+
+**The call side is easier too.** A generated fragment is Kotlin source compiled into the consumer's own
+binary, and the klib is on its compile classpath, so calling a klib declaration is an ordinary Kotlin
+call — no reflection, nothing that a closed world or a missing JVM would break. The JVM path is the
+awkward one, not the Native path.
+
+Not done here, and the reasons are scope rather than difficulty:
+
+- It puts `kotlin-compiler-embeddable` (~60 MB) on the plugin's classpath, versioned against the
+  consumer's Kotlin rather than the plugin's.
+- `@ExperimentalLibraryAbiReader` has no compatibility promise; the seam would have to be behind an
+  interface the way `FragmentDiscovery` is.
+- A Native consumer needs the per-platform `_pm_resolve`/`_pm_invoke` bootstrap that the desktop test
+  builds by hand out of `UpcallStub`, and no consumer-facing route to it exists yet (see 16f).
+
+### 16f. What is verified, and what is not
+
+Verified: one target (`desktop`/JVM), one configuration (`desktopCompileClasspath`), one source set
+(`desktopMain`), one artefact (`junit:junit:4.13.2`), on this host.
+
+Not verified, and each is a real next step rather than a caveat:
+
+1. **More than one target.** `artifactConfiguration`/`artifactSourceSet` are single-valued and named by
+   hand. Deriving them per target means asking the Kotlin Gradle Plugin what a target's compile
+   classpath is called, and this plugin deliberately carries no KGP types — the same constraint that
+   made `TEST_WORD` a name matcher. A per-target map is the shape, and it is untried.
+2. **`PythonProxySource` needs `_pm_resolve`/`_pm_invoke` bound**, which is per-platform and, in this
+   repository, exists only in `python-multiplatform`'s own **test** source
+   (`UpcallEntryBridge.desktop.kt`). `ksp-fixtures/artifact` rebuilds the two `ctypes.CFUNCTYPE`s by
+   hand from the public `UpcallStub` addresses. A consumer has no supported route to this today; that
+   is the gap, not the fixture's workaround.
+3. **The generated source directory is wired reflectively.** `kotlin.sourceSets.getByName(name).kotlin
+   .srcDir(task)` goes through `Class.getMethod`, for the same reason `setKspArg` does. Both ends of
+   the chain are Gradle types (`NamedDomainObjectContainer`, `SourceDirectorySet`); only `getKotlin()`
+   is reflected. A KGP change there fails loudly at configuration time.
+4. **No `aar`, no klib, no project classes directory.** Anything that is not a `.jar` is skipped
+   silently.
