@@ -4,37 +4,25 @@ import android.os.Build
 import android.os.Build.VERSION.SDK_INT
 import python.native.ffi.NativePointer
 import java.lang.ref.Cleaner
-import java.lang.ref.PhantomReference
-import java.lang.ref.ReferenceQueue
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
 
 actual interface PlatformCleaner : AutoCloseable {
     actual override fun close()
 }
 
+/**
+ * The shared `Cleaner`, or `null` on a device that has none.
+ *
+ * `java.lang.ref.Cleaner` arrives in **API 33** (Tiramisu). Below that the release goes through
+ * [PhantomCleanerRegistry], which is the same mechanism written by hand.
+ *
+ * This nullable value, not `SDK_INT`, is what the code below branches on. The two are equivalent
+ * only as long as nothing else can make the `Cleaner` absent — and the previous version of this
+ * file branched on `SDK_INT` and then called `sharedCleaner?.register(...)`, so a null here on
+ * API 33+ would have produced a wrapper with **no release registered at all**, silently, with the
+ * `?.` reading as caution. Branching on the object removes the case rather than tolerating it.
+ */
 private val sharedCleaner: Cleaner? =
     if (SDK_INT >= Build.VERSION_CODES.TIRAMISU) Cleaner.create() else null
-
-private val referenceQueue = ReferenceQueue<PlatformCleaner>()
-private val activeReferences = ConcurrentHashMap<PhantomCleanupReference, () -> Unit>()
-
-private val cleanerThread = Thread {
-    while (true) {
-        try {
-            val ref = referenceQueue.remove() as? PhantomCleanupReference
-            ref?.let {
-                activeReferences.remove(it)?.invoke()
-            }
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            break
-        }
-    }
-}.apply {
-    isDaemon = true
-    name = "PyAutoCloseable-Cleaner"
-}.start()
 
 actual fun registerCleaner(
     pointer: NativePointer,
@@ -43,48 +31,40 @@ actual fun registerCleaner(
     return AndroidCleaner(pointer, closeAction)
 }
 
+/**
+ * One release, run by whichever of `close()` and the collector gets there first — and never by
+ * both. Both branches guarantee that: `Cleaner.Cleanable.clean()` is documented to run its action
+ * at most once, and [PhantomCleanerRegistry.Cleanable] holds a compare-and-set flag for it. It has
+ * to be a guarantee rather than a convention, because a second run is a second `Py_DecRef` on a
+ * reference this wrapper no longer owns — the double free of ROADMAP §1 and §4.
+ */
 private class AndroidCleaner(
     pointer: NativePointer,
     closeAction: (NativePointer) -> Unit
 ) : PlatformCleaner {
     private val cleanable: Cleaner.Cleanable?
-    private var phantomRef: PhantomCleanupReference?
-    private val api26CloseAction: (() -> Unit)?
+    private val fallback: PhantomCleanerRegistry.Cleanable?
 
     init {
-        if (SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            cleanable = sharedCleaner?.register(this, CleanupAction(pointer, closeAction))
-            phantomRef = null
-            api26CloseAction = null
+        // `action` holds the pointer value and a top-level function, and nothing else. It must not
+        // be able to reach `this`: both mechanisms hold the action strongly while watching `this`
+        // weakly, so an action that reached back would keep the wrapper alive forever and the
+        // release would never happen. That is why `CleanupAction` is a class taking the two values
+        // rather than a lambda written inline here.
+        val action = CleanupAction(pointer, closeAction)
+        val cleaner = sharedCleaner
+        if (cleaner != null) {
+            cleanable = cleaner.register(this, action)
+            fallback = null
         } else {
             cleanable = null
-            val flag = AtomicBoolean(false)
-            val actionBlock = {
-                if (flag.compareAndSet(false, true)) {
-                    closeAction(pointer)
-                }
-            }
-            api26CloseAction = actionBlock
-            phantomRef = PhantomCleanupReference(this, referenceQueue).also { ref ->
-                activeReferences[ref] = actionBlock
-            }
+            fallback = PhantomCleanerRegistry.register(this, action)
         }
     }
 
     override fun close() {
-        if (SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            cleanable?.clean()
-        } else {
-            val ref = phantomRef
-            if (ref != null) {
-                val actionBlock = activeReferences.remove(ref)
-                actionBlock?.invoke()
-                api26CloseAction?.invoke()
-                phantomRef = null
-            } else {
-                api26CloseAction?.invoke()
-            }
-        }
+        cleanable?.clean()
+        fallback?.clean()
     }
 }
 
@@ -96,8 +76,3 @@ private class CleanupAction(
         action(pointer)
     }
 }
-
-private class PhantomCleanupReference(
-    referent: PlatformCleaner,
-    queue: ReferenceQueue<PlatformCleaner>
-): PhantomReference<PlatformCleaner>(referent, queue)
