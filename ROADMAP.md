@@ -729,8 +729,10 @@ the type looks like — and the cache is implemented against it:
   container is cached as a **snapshot**, independent of Python memory precisely because it is a
   copy, with `invalidateNativeCache()` as the stated way to re-read a container that has since
   been mutated;
-- `bytes`/`bytearray`/`memoryview` are **refused**, because their native form is a pointer into
-  the object's own buffer;
+- `memoryview` is **refused**, because a copy still would not carry its format, shape and strides.
+  `bytes` and `bytearray` were refused alongside it on the ground that their native form is a
+  pointer into the object's own buffer, until a `ByteArray` copy showed that ground does not reach
+  them — both convert now, `bytearray` as a snapshot;
 - a bare `NativePointer` — what `ConversionStrategy.RAW` returns — is rejected by `PyValue`'s
   constructor: it is an address, not a reference, and storing it would fail only once the address
   had been reused;
@@ -757,10 +759,19 @@ without a dedicated wrapper would fail. Both halves are gone: no `!!` on that fi
 library sources, and an untyped source now converts through the generic walk (observed, per
 builtin).
 
-**What is still not converted**, refused rather than guessed at: `bytes` (a `ByteArray` copy would
-also be correct under the rule and is not implemented), subclasses of builtins and `complex` (the
-dispatch is by exact type, mirroring `PyLong_Check` rather than `isinstance`), and any
-user-defined class — `TYPED` stops at the `PyObject` for those by design.
+**What is still not converted**, refused rather than guessed at: `memoryview`, subclasses of
+builtins (the dispatch is by exact type, mirroring `PyLong_Check` rather than `isinstance`),
+`complex`, and any user-defined class — `TYPED` stops at the `PyObject` for those by design.
+
+`bytes` was on that list with the note that a `ByteArray` copy would also be correct and was not
+implemented. It is implemented now, and `bytearray` with it: once the conversion is a copy, the
+buffer-pointer objection stops applying to either, so refusing one and not the other would have
+been arbitrary.
+
+`complex` was on that list under the subclasses-of-builtins reason, and that reason was wrong for
+it. `complex` **is** an exact type and `PyComplex` exists; it is refused only because neither
+`typedWrap` nor `pyObjectToNative` carries an entry for it. It stays refused — there is no Kotlin
+counterpart type to convert into — but not for the reason given here.
 
 ## 8. `jvmMain` unification
 

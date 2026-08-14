@@ -193,7 +193,8 @@ actually returns, not from what the type looks like.
 | `dict` | `toNativeMap()`, recursive over a snapshot of the entries | `Map<Any?, Any?>` | no | yes, as a **snapshot** |
 | `set`, `frozenset` | `toNativeSet()`, recursive over `PySequence_Tuple` | `Set<Any?>` | no | yes, as a **snapshot** |
 | anything else *inside a container* | `pyObjectToNative`'s `else`: `str(obj)` | `String` | no — a copy, but lossy and one-way | yes |
-| `bytes`, `bytearray`, `memoryview` | **none — refused** | `null` / `PyTypeError` | would be: `PyBytes_AsStringAndSize` and the buffer protocol hand out a pointer *into* the object, and a `bytearray`'s buffer moves when it is resized | never |
+| `bytes`, `bytearray` | `bytes.hex()` across the boundary, decoded to bytes on this side | `ByteArray` | yes — a copy, and `bytearray` a **snapshot** | yes |
+| `memoryview` | **none — refused** | `null` / `PyTypeError` | the buffer protocol hands out a pointer *into* the object, and a copy would still not carry format, shape and strides | never |
 | user-defined classes, subclasses of builtins, `complex`, ... | **none — refused** | `null` / `PyTypeError` | — | never |
 
 The container rows are the answer to "what happens when the elements are themselves `PyObject`s":
@@ -242,12 +243,18 @@ else holds.
 
 ### What this does not cover
 
-- **`bytes` has no conversion at all.** Refusing it is correct under the rule, but a `ByteArray`
-  copy would also be correct and is not implemented. The existing bindings do not get there:
-  `PyBytes_AsString`/`PyByteArray_AsString` are declared to return `String?`, i.e. each platform
-  decodes the buffer as a NUL-terminated UTF-8 string, which truncates binary data at the first
-  zero byte. A real conversion needs `PyBytes_AsStringAndSize` plus a per-platform copy of `n`
-  bytes out of the buffer — and, per the rule, must copy rather than keep the pointer.
+- **`bytes` and `bytearray` convert through `hex()`, not through the buffer.** This entry used to
+  say they had no conversion at all and that the bindings could not get there. The second half is
+  still true: `PyBytes_AsString`/`PyByteArray_AsString` are declared to return `String?`, so each
+  platform decodes the buffer as a NUL-terminated UTF-8 string and truncates binary data at the
+  first zero byte. They cannot represent arbitrary bytes.
+
+  What changed is that the buffer is not the only route. `bytes.hex()` is exact, pure ASCII, and
+  costs three FFI crossings whatever the length, where walking the sequence costs one per byte.
+  The price is four passes over the payload where a direct copy would make one, which makes this
+  the largest per-byte cost in the conversion layer — the case for adding a real
+  `PyBytes_AsStringAndSize` binding later. That binding is not free either: a non-primitive value
+  would have to cross four platform boundaries against `androidMain`'s primitives-only rule.
 - **Subclasses of builtins are refused** because the dispatch is by exact type. That is
   deliberate and consistent with `pyObjectToNative`, but it means `class MyInt(int)` gets no
   conversion even though `PyLong_AsLongLong` would work on it.
