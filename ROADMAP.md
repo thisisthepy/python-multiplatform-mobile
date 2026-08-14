@@ -559,6 +559,22 @@ PYTHON: @PythonInternal entry resolves to -1
 PYTHON: UPCALL_OK
 ```
 
+**Re-verified after the upcall runtime, the KSP table and the artefact walker landed** — the claim
+above was made before all three, so it was worth re-running rather than carrying forward:
+
+```
+KOTLIN: table = 41 entries, 4 classes, from io_github_thisisthepy_sample
+PYTHON: invoke result = 7
+PYTHON: invoke_args result = 'presses x3 = 21'
+PYTHON: @PythonInternal entry resolves to -1
+PYTHON: UPCALL_OK / PROXY_OK
+```
+
+19 entries became 41 because `ExposedToPython.kt` grew; the exposure policy still refuses
+`@PythonInternal` with `-1` under the closed world, which is the part that had to hold. The
+procedure, including the toolchain path and why `JAVA_HOME` must stay on JDK 21 while native-image
+runs on 25, is in `docs/graal-native-image-verification.md`.
+
 Python builds a function pointer with `ctypes`, resolves a Kotlin declaration by name through
 `HandleTable`, and calls back into Kotlin — inside a closed world where runtime reflection is
 forbidden. Every wall hit getting there was metadata or wiring; the lookup and invoke path itself
