@@ -31,7 +31,7 @@ import java.util.jar.JarFile
  * | drop names containing `-` | **not kept** | see below |
  * | (none) | drop non-`static` | an instance method needs a receiver; see [ArtifactCallable] |
  * | (none) | drop unbindable types | see [boundaryTypeOf] and `resolveKotlinType` |
- * | (none) | drop ambiguous overloads | see [scanClassNode] |
+ * | (none) | **rename** ambiguous overloads rather than drop them | see [disambiguateOverloads] |
  * | (none) | drop `suspend` | its JVM shape takes a `Continuation`, and `resolveKotlinType`/`@Metadata` both know this before `boundaryTypeOf` would have to discover it by rejecting the parameter |
  *
  * **Why the `-` filter is gone rather than kept.** A hyphen in a JVM method name is Kotlin's
@@ -54,6 +54,26 @@ import java.util.jar.JarFile
  * constructor is `internal`, so no Kotlin source outside `kotlin-stdlib` can ever build one, in
  * either direction. See `ValueClassFixtures.kt`'s `Meters` for the same shape with a public
  * constructor, and `ArtifactScannerTest` for both proved against real bytecode.
+ *
+ * ### What it takes to reach Compose, and what each piece was worth
+ *
+ * `docs/kotlin-extensions-in-python.md` §3 measured this walker binding **zero** declarations from
+ * all 19 Compose Multiplatform desktop jars, and identified three separate rules each of which
+ * produced that zero on its own. All three are now gone, and the measurement that replaced it --
+ * `ArtifactScannerTest.composeModifierExtensionsSurviveBothGates`, over the same jars -- is
+ * **314 declarations, 104 of them `Modifier` extensions**:
+ *
+ * | rule | what it cost | where it went |
+ * |---|---|---|
+ * | the metadata-kind gate: only `k=1` (an ordinary class) was dispatched on | **all 1,411** public top-level Compose functions, because a Kotlin top-level function compiles into a file facade (`k=2`) or a multi-file part (`k=5`) | the `when` in [scanClassNode], which now dispatches on `FileFacade` and `MultiFileClassFacade` too |
+ * | the type gate: no boundary type for an ordinary object | every remaining declaration, `Modifier` being an interface | `resolveKotlinType`'s object-handle case (`KotlinMetadata.kt`) |
+ * | drop a name carried by more than one binding | 33 of `Modifier`'s 130 names, `padding`/`size`/`background`/`border`/`clickable` among them | [disambiguateOverloads] |
+ *
+ * Of the 45 public top-level `Modifier` extensions still declined, **43 declare a function-typed
+ * parameter** (counted by the same test): a Python callable cannot become a Kotlin `FunctionN` at
+ * this boundary -- `UpcallTrampoline.toKotlinObject` would hand the cast a `PyObject` -- so binding
+ * them would produce entries that always fail. That is the honest remaining limit, and it is not a
+ * metadata problem.
  *
  * ### Facades, parts, and extension receivers
  *
@@ -127,7 +147,11 @@ internal object ArtifactScanner {
             val node = readClassNodeOrNull(bytes) ?: return@forEachClassEntry
             entries += scanClassNode(node, artifactClasspath)
         }
-        return entries.sortedBy { it.name }
+        // Over the whole walk rather than per class: an overload set is a property of a *package*,
+        // and Kotlin lets one live in two files. `docs/kotlin-extensions-in-python.md` §2.5 counts 11
+        // such pairs in Compose alone -- two file facades, two `ClassNode`s, one Kotlin name -- which
+        // a per-class grouping cannot see and would have emitted twice under one table key.
+        return disambiguateOverloads(entries).sortedBy { it.name }
     }
 
     /**
@@ -205,7 +229,7 @@ internal object ArtifactScanner {
                 classpath = classpath,
             )
             is KotlinClassMetadata.FileFacade -> kotlinCandidates(
-                owner = packageNameOf(node.name),
+                owner = kotlinPackageNameOverrideOf(node) ?: packageNameOf(node.name),
                 functions = functionsOf(metadata.kmPackage),
                 ownerNode = node,
                 classpath = classpath,
@@ -215,7 +239,7 @@ internal object ArtifactScanner {
                 val partMetadata = kotlinClassMetadataOf(partNode) as? KotlinClassMetadata.MultiFileClassPart
                     ?: return@flatMap emptyList()
                 kotlinCandidates(
-                    owner = packageNameOf(partBinaryName),
+                    owner = kotlinPackageNameOverrideOf(partNode) ?: packageNameOf(partBinaryName),
                     functions = functionsOf(partMetadata.kmPackage),
                     ownerNode = partNode,
                     classpath = classpath,
@@ -227,7 +251,92 @@ internal object ArtifactScanner {
             else -> emptyList()
         }
 
-        return candidates.groupBy { it.name }.filterValues { it.size == 1 }.values.map { it.single() }
+        return candidates
+    }
+
+    /**
+     * Gives every member of an overload set a name of its own, instead of dropping the set.
+     *
+     * ### What changed, and what did not
+     *
+     * The old rule dropped a Kotlin name outright as soon as more than one binding would carry it.
+     * Its reasoning was about **arbitration** and is still right: `org.junit.Assert.assertEquals` has
+     * eight bindable overloads, and letting a sort order pick one means `assertEquals(3, 3)` from
+     * Python silently calls the deprecated `(double, double)` that always fails. Nothing here picks.
+     *
+     * What changed is that there is now a third option between "arbitrate" and "drop". The old rule
+     * predates `@Metadata`: with only JVM descriptors there was no *Kotlin* parameter type to name an
+     * overload by, and 108 mangled JVM names are ambiguous within their own class
+     * (`docs/kotlin-extensions-in-python.md` §2.3), so the JVM name could not do it either. Metadata
+     * supplies the declared Kotlin types, so the overloads can be **told apart** rather than
+     * arbitrated between.
+     *
+     * The price of not doing so was measured: **33 of `Modifier`'s 130 names**
+     * (`docs/kotlin-extensions-in-python.md` §3.1), and the casualty list is the API's centre of
+     * gravity -- `padding`, `size`, `background`, `border`, `clickable`, `width`, `height`. For
+     * `padding` specifically, the *only* unmangled overload is the `PaddingValues` one nobody wants,
+     * so "keep whichever the descriptor-era filter happened to leave" was also the worst answer.
+     *
+     * ### The rule
+     *
+     * The bare name is bound only for a group of one. A group of more than one gets one name per
+     * member, `name__<types>`, under the first of three schemes that separates the group:
+     *
+     * 1. the simple names of the declared **value parameters** -- `padding__Dp`, `padding__Dp_Dp`,
+     *    `padding__PaddingValues`;
+     * 2. the **receiver** joined to them, for overloads that differ only in what they extend
+     *    (`Int.times` and `Double.times`, both in `androidx.compose.ui.unit`);
+     * 3. **fully qualified** names, for the case where two parameter types share a simple name.
+     *
+     * A group no scheme separates is dropped, which is the old rule surviving as the floor: two
+     * declarations this walker genuinely cannot tell apart must not both claim a table key, and
+     * neither may be picked.
+     *
+     * ### Why a name and not a Python-side dispatcher
+     *
+     * A dispatcher is the better surface and it cannot be built here. `UpcallTable` is keyed by name
+     * and `ExposedCallable` carries one fixed `arity` that `UpcallTrampoline.unmarshalArguments`
+     * enforces exactly, so one name reaches one signature by construction; and
+     * `PythonProxySource.renderOne` publishes an entry by `setattr`ing its *leaf* name onto a module,
+     * so two entries sharing a leaf would silently overwrite each other. A dispatcher therefore lives
+     * in `pythonx` (`docs/pythonx-adapter-design.md` §4.1) and selects among these names -- which is
+     * why they have to exist and be distinguishable, and why `ExposedCallable` now carries
+     * `paramNames` and `paramTypeNames` for it to select on. This layer's job is to make the choice
+     * *possible*, not to make it.
+     */
+    private fun disambiguateOverloads(candidates: List<ArtifactCallable>): List<ArtifactCallable> {
+        val schemes: List<(ArtifactCallable) -> String> = listOf(
+            { it.overloadSuffix(includeReceiver = false, qualified = false) },
+            { it.overloadSuffix(includeReceiver = true, qualified = false) },
+            { it.overloadSuffix(includeReceiver = true, qualified = true) },
+        )
+        return candidates.groupBy { it.name }.values.flatMap { group ->
+            if (group.size == 1) return@flatMap group
+            val scheme = schemes.firstOrNull { scheme -> group.mapTo(HashSet()) { scheme(it) }.size == group.size }
+                ?: return@flatMap emptyList()
+            group.map { it.copy(name = "${it.name}__${scheme(it)}") }
+        }
+    }
+
+    /**
+     * The `__`-suffix for one member of an overload set.
+     *
+     * The receiver is *not* included by default even though it is `paramTypeNames` slot 0: including
+     * it always would spell every `Modifier` extension `padding__Modifier_Dp`, and the receiver is
+     * the one parameter a reader already knows from where the name is attached
+     * (`docs/kotlin-extensions-in-python.md` §4.1). It joins only when it is what separates the
+     * group.
+     */
+    private fun ArtifactCallable.overloadSuffix(includeReceiver: Boolean, qualified: Boolean): String {
+        val skipReceiver = if (receiverTypeName != null && !includeReceiver) 1 else 0
+        val parts = paramTypeNames.drop(skipReceiver)
+        // A zero-parameter member of a group -- there can be at most one, so this only ever has to
+        // be distinct from the others, not descriptive.
+        if (parts.isEmpty()) return "0"
+        return parts.joinToString("_") { name ->
+            val chosen = if (qualified) name else name.substringAfterLast('.')
+            chosen.map { if (it.isLetterOrDigit()) it else '_' }.joinToString("")
+        }
     }
 
     private fun javaStaticCandidates(node: ClassNode): List<ArtifactCallable> {
@@ -272,6 +381,10 @@ internal object ArtifactScanner {
             resolveKotlinType(it, classpath, BoundaryDirection.PARAMETER) ?: return null
         }
         val returnType = resolveKotlinType(function.returnType, classpath, BoundaryDirection.RETURN) ?: return null
+        // Declared, not marshalled: a `Dp` parameter's tag is FLOAT and its declared name is
+        // `androidx.compose.ui.unit.Dp`. `docs/pythonx-adapter-design.md` §2.4 row 4.
+        val paramTypeNames = function.allParameterTypes.map { kotlinClassifierNameOf(it) ?: return null }
+        val returnTypeName = kotlinClassifierNameOf(function.returnType)
 
         val qualifiedName = "$owner.${function.kotlinName}"
         val argumentExpressions = resolvedParams.mapIndexed { index, type -> type.read("args[$index]") }
@@ -300,6 +413,11 @@ internal object ArtifactScanner {
             returnTag = returnType.tag,
             lambdaBody = if (arity == 0) "{ $body }" else "{ args -> $body }",
             imports = imports,
+            receiverTypeName = function.receiverType?.let { kotlinClassifierNameOf(it) },
+            paramNames = function.allParameterNames,
+            paramTypeNames = paramTypeNames,
+            returnTypeName = returnTypeName,
+            paramHasDefault = function.allParameterDefaults,
         )
     }
 
@@ -319,7 +437,32 @@ internal object ArtifactScanner {
             returnTag = returnType.tag,
             // Arity 0 has no `args` to name, exactly as `FragmentScanner`'s static-getter bodies do.
             lambdaBody = if (paramTypes.isEmpty()) "{ $body }" else "{ args -> $body }",
+            // `paramNames` stays empty: a Java class file carries parameter names only when it was
+            // compiled with `-parameters`, and JUnit 4 was not. Empty means "not supplied" (see
+            // `ExposedCallable.paramNames`), which is the truth here rather than an invented `arg0`.
+            paramTypeNames = paramDescriptors.map { kotlinNameOfAdmittedDescriptor(it) },
+            returnTypeName = kotlinNameOfAdmittedDescriptor(returnDescriptor),
         )
+    }
+
+    /**
+     * The Kotlin spelling of a descriptor [boundaryTypeOf] has **already admitted**, which is the
+     * only reason this can be total: the admitted set is the primitives, `String`, `byte[]` and
+     * `void`, all of which have a Kotlin name. It is not a general descriptor-to-Kotlin mapping --
+     * see [boundaryTypeOf]'s KDoc for why no such mapping exists.
+     */
+    private fun kotlinNameOfAdmittedDescriptor(descriptor: String): String = when (descriptor) {
+        "Z" -> "kotlin.Boolean"
+        "B" -> "kotlin.Byte"
+        "S" -> "kotlin.Short"
+        "I" -> "kotlin.Int"
+        "J" -> "kotlin.Long"
+        "F" -> "kotlin.Float"
+        "D" -> "kotlin.Double"
+        "Ljava/lang/String;" -> "kotlin.String"
+        "[B" -> "kotlin.ByteArray"
+        "V" -> "kotlin.Unit"
+        else -> error("descriptor $descriptor is not one boundaryTypeOf admits")
     }
 
     private fun Int.hasFlag(flag: Int): Boolean = (this and flag) != 0
