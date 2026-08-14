@@ -143,7 +143,9 @@ vendored material and prebuilt CPython artefacts.
 
 `UI.ipynb` imports `pythonx.compose.runtime`, `pythonx.compose.material3`, `pythonx.compose.ui`
 and `pythonx.compose.layout`, and documents signatures like `Text(text, color, font_size)`,
-`Button(onclick, enabled, corner_radius, color, content)`, `Column/Row/Spacer/TextField`. It also
+`Button(onclick, …)` — quoted as the notebook writes it, which is **not** the convention: the
+library spells that parameter `on_click`, and `docs/pythonx-adapter-design.md` §3 settles it in the
+library's favour — plus `Column/Row/Spacer/TextField`. It also
 requires `main.App` as a live object, `App.messages.getValue()/setValue()`, and
 `main.App.update(NewComposable)` for hot-swapping the UI from a Jupyter cell.
 
@@ -219,7 +221,7 @@ This section documents the current state, language/build system/distribution art
   - `@Composable`-capable callable shape: `ExposedCallable` typed `(Array<Any?>) -> Any?` cannot invoke `@Composable` functions taking synthetic `$composer` / `$changed` parameters. Needs dedicated `CallableKind` or opt-in annotation handling.
   - Python-side `sys.meta_path` finder for lazy import resolution of Kotlin namespaces (`pythonx.*` or FQCNs) upon import.
   - Opaque Kotlin object round-tripping for Compose `Composer` (`HandleTable` and `ObjectReference` exist, but runtime hand-off to Python needs verification).
-  - Lifetime and storage of Python callables passed into Kotlin across Compose recompositions (`content=lambda: ...`, `onclick=...`).
+  - Lifetime and storage of Python callables passed into Kotlin across Compose recompositions (`content=lambda: ...`, `on_click=...`).
   - Retire `stagePythonHome` in favor of `pypackpack`'s Python distribution management.
   - Hand `stageWasmBrowserRuntime` logic to `toolchain`.
 - **Dependency Direction**:

@@ -41,7 +41,7 @@ five copies of one 60-line body differing only in the name they look up.
 
 **The notebook is not that code.** `docs/ecosystem.md` §3 established that `UI.ipynb` runs against
 PyREPL's hand-written Kotlin shim, and the parameter names confirm it independently: the notebook
-writes `onclick`, the library writes `on_click`.
+writes `onclick`, the library writes `on_click`. **The library wins**; see §3's naming decision.
 
 The call these wrappers make cannot reach real AndroidX:
 
@@ -191,13 +191,18 @@ and it is worth reading before assuming "snake_case everything".
 | `fontSize` | `font_size` | parameter → snake_case |
 | `contentDescription` | `content_description` | parameter → snake_case |
 | `verticalArrangement`, `horizontalArrangement`, `horizontalAlignment` | `vertical_arrangement`, `horizontal_arrangement`, `horizontal_alignment` | parameter → snake_case |
-| `onClick` | **`onclick`** | parameter → **collapsed, not snake_case** |
+| `onClick` | `on_click` in `pythonx`, **`onclick`** in the notebook | parameter → snake_case; **`pythonx` is the reference, not the notebook** |
 | `State.getValue` / `setValue` | `getValue()` / `setValue()` | method on a Kotlin object → **camelCase kept** |
 | — | `corner_radius`, `text_state` | **invented**; `material3.Card` has no `corner_radius` in either overload |
 
 Five Kotlin-derived multi-word parameters are snake_case; one (`onclick`) is not. The library source
-in `pythonx-compose` spells that same parameter `on_click` in all five button wrappers. So the
-convention is snake_case and `onclick` is a one-off in a teaching notebook.
+in `pythonx-compose` spells that same parameter `on_click` in all five button wrappers.
+
+**Decided: `pythonx` is the reference, and the notebook is not.** `on_click` is what the rule
+produces and what the library already writes, so `onclick` is not a spelling to support, alias or
+carry forward — it is one cell of a teaching notebook disagreeing with the library it teaches. A
+table derived from `pythonx` needs no exception list here, which is the point: an exception that
+exists only in prose is one the generator and the adapter cannot both honour.
 
 **Judged — the rule.**
 
