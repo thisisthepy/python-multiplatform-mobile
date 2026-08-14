@@ -131,32 +131,53 @@ object Python3 {
      * 3. Its `Int` return is the process exit status and is thrown away, which is the part the
      *    original TODO named.
      *
-     * Nothing in `src/` or `sample/` calls this, so it is a landmine rather than a live failure.
-     * Fixing it is a design decision (what should "run a module" mean for an *embedded*
-     * interpreter that must survive the call?) and is recorded in ROADMAP §12.
+     * Nothing in `src/` or `sample/` called it, so it was a landmine rather than a live failure --
+     * but a landmine that takes the whole runtime with it when someone finally steps on it, which
+     * is why it now refuses instead of running. Refusing is **not** the design decision the entry
+     * above describes; what "run a module" should mean for an *embedded* interpreter that must
+     * survive the call is still open in ROADMAP §12. This only stops the broken answer from
+     * shipping as if it were one.
+     *
+     * `Python3Test.runMainRefusesRatherThanFinalizingTheSharedInterpreter` is the guard.
+     *
+     * @throws UnsupportedOperationException always.
      */
-    fun runMain(moduleName: String) {
-        withPython {
-            PyRun_SimpleString("import sys\nsys.argv[1] = '$moduleName'\n")
-            Py_RunMain()
-        }
-    }
+    fun runMain(moduleName: String): Nothing =
+        throw UnsupportedOperationException(
+            "Python3.runMain is not implemented. Its previous body called Py_RunMain(), which " +
+                "always finalizes the interpreter, so it destroyed the runtime it was asked to " +
+                "run a module in (and set sys.argv[1] on a sys.argv that Py_Initialize() never " +
+                "creates, raising IndexError invisibly). Running '$moduleName' the way an " +
+                "embedded interpreter can survive is an open design question -- see ROADMAP §12. " +
+                "Use Python3.exec/Python3.import in the meantime."
+        )
 
     /**
      * Run Python script as an application (Automatically initializes Python).
      *
-     * **This function does nothing at all** -- its only statement is commented out, and so is the
-     * `Py_BytesMain` `expect` declaration it would call (`EmbedAPI.kt`, two commented-out lines).
-     * It neither initializes Python nor runs anything, and returns `Unit` regardless, so a caller
-     * cannot tell. It has no caller in `src/` or `sample/`.
+     * **This used to do nothing at all** -- its only statement was commented out, and so is the
+     * `Py_BytesMain` `expect` declaration it would call (`EmbedAPI.kt`, two commented-out lines;
+     * `EmbedAPI.native.kt` additionally carries an `actual` for it that *looks* live but sits
+     * inside the file's leading nested block comment, so it is dead too). It neither initialized
+     * Python nor ran anything, and returned `Unit` regardless, so a caller could not tell.
+     * It has no caller in `src/` or `sample/`.
      *
      * `Py_BytesMain` cannot simply be declared, either: it takes `(int argc, char **argv)`, so
      * wiring it up means marshalling an array of C strings, which every platform in this build
-     * does differently. Recorded in ROADMAP §12 with what it would cost.
+     * does differently. Recorded in ROADMAP §12 with what it would cost. Until that exists this
+     * refuses rather than pretending to have run something.
+     *
+     * `Python3Test.runAppRefusesRatherThanSilentlyDoingNothing` is the guard.
+     *
+     * @throws UnsupportedOperationException always.
      */
-    fun runApp(argv: Array<String>) {
-        //Py_BytesMain(argv)
-    }
+    fun runApp(argv: Array<String>): Nothing =
+        throw UnsupportedOperationException(
+            "Python3.runApp is not implemented: it needs Py_BytesMain(int argc, char **argv), " +
+                "which is still commented out because marshalling an array of C strings differs " +
+                "on every platform in this build -- see ROADMAP §12. It previously returned " +
+                "silently without running ${argv.joinToString(" ")}."
+        )
 
     /** `Py_file_input`, the compiler-mode token for a sequence of statements (as opposed to a single expression). */
     private const val PY_FILE_INPUT: Int = 257

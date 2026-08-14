@@ -1946,15 +1946,43 @@ is the actual state of the Android object model, and that is the point of doing 
   `true`. Its `Int` exit status is also discarded. No caller in `src/` or `sample/`, so it is a
   landmine, not a live failure. Fixing it is a design decision: what should "run a module" mean
   for an embedded interpreter that has to survive the call?
+
+  **The design question is still open; the landmine is not.** Both `runMain` and `runApp` now
+  return `Nothing` and throw `UnsupportedOperationException` naming what is missing, so stepping
+  on either is a clear failure at the call site instead of a destroyed runtime or a silent no-op.
+  Guards: `Python3Test.runMainRefusesRatherThanFinalizingTheSharedInterpreter` and
+  `.runAppRefusesRatherThanSilentlyDoingNothing` (desktop 360 → 362, 0 failures, 1 skipped).
+  Refusing is deliberately *not* an answer to the design question — it only stops the broken
+  answer from shipping as if it were one.
+
+  One asymmetry worth recording, because it shaped how these were tested: the `runApp` red phase
+  is safe to observe and was observed (`Expected an exception of class
+  java.lang.UnsupportedOperationException to be thrown, but was completed successfully.`), while
+  the `runMain` one is not. Calling the pre-fix `runMain` reaches `Py_RunMain()`, which with no
+  `PyConfig.run_*` set enters the REPL on the process's stdin and finalizes the interpreter the
+  whole suite shares — it hangs the worker or crashes every class scheduled after it. The red
+  phase for it was therefore reasoned about, not triggered, and the test says so at the test.
 - **`Python3.runApp` does nothing at all** — its only statement is commented out, as is the
   `Py_BytesMain` `expect` it would call. It returns `Unit` either way, so a caller cannot tell.
   Declaring `Py_BytesMain` is not a one-liner: it takes `(int argc, char **argv)`, so it needs an
   array-of-C-strings marshalling path, which each of the four platforms does differently.
+  **Three commented-out places, not two**: `EmbedAPI.native.kt` also carries a full `Py_BytesMain`
+  `actual` — with `memScoped`/`allocArray` marshalling already written — that *looks* live at
+  lines 67-74 but sits inside the nested block comment spanning lines 46-128, so it compiles to
+  nothing. Kotlin block comments nest, and both `EmbedAPI.kt` (lines 28-249) and
+  `EmbedAPI.native.kt` open one at the top that swallows an entire duplicate "Section 1"; the live
+  declarations are the later copies. Read either file with a nesting-aware scan before concluding
+  a declaration exists, or the duplicate `Py_FinalizeEx`/`Py_RunMain` pairs will mislead.
 - **`Python3.finalize` reports no error detail**, and cannot: `Py_Finalize()` returns void and
   there is no interpreter left to hold an error indicator afterwards. The one improvement
   available is `Py_FinalizeEx()`'s `int` (0, or -1 when flushing buffered data failed). Left
   undone because finalization is untested — its only caller is `artMain/JniExport.kt`, and a test
   that exercises it destroys the interpreter the rest of the suite shares.
+  **The FFI half of it is already done, so what remains is one line, not four platforms**:
+  `Py_FinalizeEx` has a live `expect` and a live `actual` on desktop, androidNative/iOS, Android
+  and wasmJs (`EmbedAPI.{desktop,native,android,wasmJs}.kt`), plus the desktop `MethodHandle` and
+  the Android `RegisterNatives` entry. Only the untestability above still blocks it, which is why
+  it is still open rather than done in passing.
 - **`EmbedAPI.kt`'s section numbers are append order, not the C API docs' chapter order.**
   Sections 1–26 follow the docs; 27 (Type Objects), 28 (Tuple Objects) and 29 (Module Objects)
   were appended as needed. Documented target order: Type before Integer Objects (§16), Tuple
@@ -1990,7 +2018,8 @@ is the actual state of the Android object model, and that is the point of doing 
   of a badge, with the reason (see §14b). What has not changed: `gh api
   repos/thisisthepy/python-multiplatform/actions/workflows/<file>.yml` 404s for all four, i.e.
   **none of them has ever run on GitHub Actions**, because none of the commits that added or
-  touched them has been pushed to a branch GitHub runs workflows from. See §14b.
+  touched them has been pushed to a branch GitHub runs workflows from. See §14b. (Re-checked
+  2026-08-14: `desktop.yml` still 404s. Nothing here is fixable in a worktree — it needs a push.)
 - ~~**Sample app** has not been revisited since the object model landed.~~ **Done — see §13.**
 
 ## 13. The sample, and the AGP version that shapes it
