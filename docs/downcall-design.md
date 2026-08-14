@@ -680,6 +680,14 @@ measurement of this exact quantity are left blank rather than approximated from 
 (e.g. `CompositionBenchmark`'s composed `getAttr` is a different quantity — four crossings folded
 into one — not a bare `PyUnicode_FromString`).
 
+> **Four of this table's seven rows are quotes from another document and one column of it is
+> superseded (below), which is what happens to a table assembled by hand.** The same four columns,
+> cut for all six targets in one run with their conditions attached, are in
+> [`cost-table.md`](cost-table.md): `./benchmarks/cost-table.sh --runs 3` on a quiet machine fills
+> it. It draws the first three columns from the same `measureDowncalls()` rows this table does and
+> the fourth from the same `BenchmarkTest` row, so it is this table's recipe automated, not a
+> different measurement.
+
 | Platform | empty `withPython` scope | `Py_IncRef` + `Py_DecRef` | `PyObject_CallObject` (downcall, same shape as the upcall table's numerator) | `PyUnicode_FromString`, 8 chars |
 |---|---|---|---|---|
 | **desktop** (JVM 21.0.12, macOS arm64) | 123.88–135.99 ns | 321.69–334.10 ns | 315.69–335.32 ns | 1129.95–1270.76 ns |

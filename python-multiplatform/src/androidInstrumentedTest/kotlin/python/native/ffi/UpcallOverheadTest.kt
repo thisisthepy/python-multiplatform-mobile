@@ -372,7 +372,10 @@ class UpcallOverheadTest {
             add("  amortised across calls?               ${if (threadsWorker == 1) "yes" else "no -- one attach/detach per call"}")
             add("")
             add("Comparison basis, same run")
-            for ((name, ns) in downcalls) add("  ${name.padEnd(54)}${ns.ns()}")
+            // See UpcallBoundaryCostTest for why the space is load-bearing: `padEnd` is a floor, and
+            // the labels longer than it print glued to their value, which loses the row to any
+            // whitespace-based reader.
+            for ((name, ns) in downcalls) add("  ${name.padEnd(54)} ${ns.ns()}")
             add("")
             add("Ratios")
             add("  upcall (instrumentation thread) / downcall of same shape   ${fmt(upcallMain / downcallBasis)}x")
