@@ -251,6 +251,15 @@ its hardcoded `\\` path separators, which break on macOS and Linux.
   machinery takes a `sys.modules` hit for the full dotted name before consulting any finder.
   What is missing is the `pythonx` prefix, laziness, and stubs; see §5's entry for this
   repository.
+
+  **The explicit accessors still have to exist alongside it.** An import statement cannot cover a
+  name computed at runtime, and it cannot express which language a symbol comes from when that
+  matters. So the base import library also provides per-language class handles —
+  `JClass`/`JavaClass` for a JVM class, `KClass`/`KotlinClass` for a Kotlin declaration,
+  `ObjcClass` for an Objective-C class — with the import hook implemented on top of them rather
+  than beside them. (Naming note: `KClass` collides with `kotlin.reflect.KClass` in every
+  conversation about this, even though the Python name is its own namespace. Worth settling
+  early.)
 - Replace `remember_saveable`'s dispatch on `PyObject.toString()` of a type name with this
   repository's `PyValue` type tags.
 - Decide whether the port target is `pythonx-compose` or PyREPL's `app/`. The notebook's API is
