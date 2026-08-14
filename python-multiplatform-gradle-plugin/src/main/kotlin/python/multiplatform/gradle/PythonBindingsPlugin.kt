@@ -4,6 +4,7 @@ import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.Property
+import python.multiplatform.gradle.artifact.PythonArtifactBindingsTask
 
 /**
  * KSP option names. Copied rather than imported: these are the processor's
@@ -144,6 +145,34 @@ interface PythonBindingsExtension {
 
     /** Maven coordinates of the runtime zip. Defaults to the one this library published. */
     val wasmRuntimeCoordinates: Property<String>
+
+    /**
+     * Package or class names to bind out of the artefacts this build **resolves**, rather than out
+     * of the source it compiles -- `docs/ecosystem.md` §5b's second producer.
+     *
+     * KSP only ever sees declarations being compiled, so a third-party binary can never carry a
+     * fragment. Setting this (together with [artifactConfiguration] and [artifactSourceSet])
+     * registers `generatePythonArtifactBindings`, which walks the resolved jars with ASM and emits
+     * `python.multiplatform.generated.artifacts.ArtifactTable` beside KSP's `FunctionTable`.
+     *
+     * Each name is matched as a *namespace*: `junit.runner` covers `junit.runner.Version`, and
+     * `junit.run` covers nothing. Empty (the default) leaves the walker unregistered entirely --
+     * binding a whole compile classpath by accident is not a useful default.
+     */
+    val artifactIncludePackages: ListProperty<String>
+
+    /**
+     * The resolvable configuration to walk, e.g. `desktopCompileClasspath`.
+     *
+     * Named explicitly rather than derived, because this plugin carries no Kotlin Gradle Plugin
+     * types (see [TEST_WORD]) and so cannot ask a target what its compile classpath is called. One
+     * configuration and one source set is also the honest scope of what has been verified: see
+     * `ksp-fixtures/artifact`, and ROADMAP §16 for the generalisation.
+     */
+    val artifactConfiguration: Property<String>
+
+    /** The Kotlin source set the generated fragments are compiled into, e.g. `desktopMain`. */
+    val artifactSourceSet: Property<String>
 }
 
 /**
@@ -218,7 +247,99 @@ class PythonBindingsPlugin : Plugin<Project> {
             )
             val excluded = extension.excludePackages.getOrElse(emptyList())
             if (excluded.isNotEmpty()) setKspArg(OPTION_EXCLUDE_PACKAGES, excluded.joinToString(","))
+
+            // After evaluation, because it names a configuration and a Kotlin source set that the
+            // consumer's own `kotlin { ... }` block creates -- both of which are declared after
+            // `plugins { ... }` and so do not exist while this plugin is being applied.
+            configureArtifactBindings(this, extension)
         }
+    }
+
+    /**
+     * Registers the artefact walker -- `docs/ecosystem.md` §5b's second producer -- when a consumer
+     * has asked for one.
+     *
+     * A no-op unless all three of [PythonBindingsExtension.artifactIncludePackages],
+     * [PythonBindingsExtension.artifactConfiguration] and [PythonBindingsExtension.artifactSourceSet]
+     * are set, so a build that only wants KSP pays nothing: no task, no configuration resolution and
+     * no generated source directory.
+     */
+    private fun configureArtifactBindings(project: Project, extension: PythonBindingsExtension) {
+        val includes = extension.artifactIncludePackages.getOrElse(emptyList())
+        if (includes.isEmpty()) return
+        val configurationName = extension.artifactConfiguration.orNull
+            ?: error(
+                "pythonBindings.artifactIncludePackages is set but artifactConfiguration is not: " +
+                    "name the resolvable configuration to walk, e.g. \"desktopCompileClasspath\".",
+            )
+        val sourceSetName = extension.artifactSourceSet.orNull
+            ?: error(
+                "pythonBindings.artifactIncludePackages is set but artifactSourceSet is not: " +
+                    "name the Kotlin source set the generated fragments compile into, e.g. \"desktopMain\".",
+            )
+
+        val configuration = project.configurations.findByName(configurationName)
+            ?: error("no configuration named '$configurationName' in ${project.path}")
+        // `incoming.artifacts` rather than the configuration's own file collection: it is the only
+        // route that carries each file's *coordinates* alongside it, and a fragment has to be named
+        // after the artefact rather than after whatever the cache called the file.
+        val resolved = configuration.incoming.artifacts
+
+        val task = project.tasks.register(
+            "generatePythonArtifactBindings",
+            PythonArtifactBindingsTask::class.java,
+        ) {
+            group = "python"
+            description = "Walks resolved artefacts and emits Python bindings for their declarations."
+            artifacts.from(resolved.artifactFiles)
+            coordinatesByFileName.set(
+                resolved.resolvedArtifacts.map { set ->
+                    set.associate { it.file.name to it.id.componentIdentifier.displayName }
+                },
+            )
+            includePrefixes.set(includes)
+            outputDirectory.set(
+                project.layout.buildDirectory.dir("generated/pythonArtifactBindings/$sourceSetName"),
+            )
+        }
+
+        addKotlinSourceDirectory(project, sourceSetName, task)
+    }
+
+    /**
+     * `kotlin { sourceSets.getByName(name).kotlin.srcDir(task) }` without a compile-time reference
+     * to any Kotlin Gradle Plugin type -- the same constraint, and the same reflective answer, as
+     * [setKspArg].
+     *
+     * Only the last hop needs reflection to *read*: `KotlinSourceSet.getKotlin()` returns Gradle's
+     * own [org.gradle.api.file.SourceDirectorySet], and `sourceSets` is a Gradle
+     * [org.gradle.api.NamedDomainObjectContainer], so both ends of the chain are types this plugin
+     * can name. Passing the task provider rather than a directory is what makes the compilation --
+     * and KSP's own scan of the same source set -- depend on the walker having run.
+     */
+    private fun addKotlinSourceDirectory(
+        project: Project,
+        sourceSetName: String,
+        task: org.gradle.api.tasks.TaskProvider<*>,
+    ) {
+        val kotlin = project.extensions.findByName("kotlin")
+            ?: error("the kotlin extension is missing: pythonBindings.artifactIncludePackages needs a Kotlin project")
+        val sourceSets = kotlin.javaClass.methods
+            .firstOrNull { it.name == "getSourceSets" && it.parameterCount == 0 }
+            ?.also { it.isAccessible = true }
+            ?.invoke(kotlin) as? org.gradle.api.NamedDomainObjectContainer<*>
+            ?: error("the kotlin extension has no sourceSets container; the Kotlin Gradle Plugin API changed")
+        val sourceSet = sourceSets.findByName(sourceSetName)
+            ?: error(
+                "no Kotlin source set named '$sourceSetName' in ${project.path}; " +
+                    "pythonBindings.artifactSourceSet must name one that exists",
+            )
+        val directories = sourceSet.javaClass.methods
+            .firstOrNull { it.name == "getKotlin" && it.parameterCount == 0 }
+            ?.also { it.isAccessible = true }
+            ?.invoke(sourceSet) as? org.gradle.api.file.SourceDirectorySet
+            ?: error("Kotlin source set '$sourceSetName' has no kotlin SourceDirectorySet; the API changed")
+        directories.srcDir(task)
     }
 
     /**

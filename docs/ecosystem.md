@@ -294,6 +294,35 @@ jars and the walker applies directly. On iOS, androidNative and wasm the artefac
 whether the same walk is possible there — and what a Kotlin declaration from a klib can be bound
 to at runtime with no JVM underneath — is the open question, not AndroidX.
 
+**Update — the walker now exists on one path, and both of those questions have answers.**
+`python-multiplatform-gradle-plugin` gained `generatePythonArtifactBindings`, and
+`ksp-fixtures/artifact` carries a resolved `junit:junit:4.13.2` through ASM, a generated
+`FunctionTableFragment`, `UpcallTable` and `PythonProxySource` to
+`from junit.runner.Version import id` answering `"4.13.2"`. ROADMAP §16 records it in full; three
+things in it change what this section says:
+
+- **The walker's fragments are a second aggregator (`ArtifactTable`), not additions to KSP's
+  `FunctionTable`.** One `UpcallTable`, one fragment interface, one Python namespace — but
+  `FunctionTable` keeps meaning "every module in this graph compiled with the processor", which is
+  what `ksp-fixtures/app` asserts and what a consumer's own table should not silently outgrow.
+  Install site: `UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)`.
+- **ASM alone does not reach `androidx.compose.material3`.** It reaches Java statics and Kotlin
+  `@JvmStatic`s. A Kotlin *top-level* function compiles onto a package-private multi-file part
+  (`kotlin/text/StringsKt__IndentKt`) behind a facade Kotlin cannot name, and its extension receiver
+  is indistinguishable from an ordinary parameter in bytecode. The `@Metadata` *kind* is readable
+  with ASM; the payload that carries the Kotlin names is `d1`/`d2` and needs `kotlin-metadata-jvm`.
+  So AndroidX is reachable, as this section says — one library short of it, not one design short.
+- **klib is the easier half, not the harder one.**
+  `org.jetbrains.kotlin.library.abi.LibraryAbiReader`, already in the `kotlin-compiler-embeddable`
+  this build pins, read `python-multiplatform-iosX64Main.klib` and returned 441 top-level
+  declarations under their Kotlin qualified names, with `isSuspend`,
+  `hasExtensionReceiverParameter`, value parameters and Kotlin (unerased) types. There is no facade
+  problem because a klib records the Kotlin declaration; and since a generated fragment is Kotlin
+  source compiled into the consumer's own binary with the klib on its compile classpath, the *call*
+  is an ordinary Kotlin call with no reflection. The open question that remains is not feasibility
+  but cost: `@ExperimentalLibraryAbiReader`, and a ~60 MB compiler artefact on the plugin classpath
+  versioned against the consumer's Kotlin rather than the plugin's.
+
 **Dynamic binding is a removed option, not a missing one.** The 2024 design document
 (*PyComposeUI*, the open-source contest report) specifies a dynamic binder — Java/Kotlin
 Reflection on the JVM target, `ctypes` and `pyobjc` on Kotlin/Native — with a generated meta

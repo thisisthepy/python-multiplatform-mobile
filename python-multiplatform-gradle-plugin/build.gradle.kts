@@ -23,7 +23,37 @@ dependencies {
     // classpath resource, not from compiled types) while the two `ksp { arg(...) }` calls go
     // through `PythonBindingsPlugin.setKspArg`.
     runtimeOnly("com.google.devtools.ksp:symbol-processing-gradle-plugin:${libs.versions.ksp.get()}")
+
+    // The artefact walker (`docs/ecosystem.md` §5b's second producer) reads compiled class files
+    // out of the jars the build resolves. ASM is a *plugin* dependency and deliberately not a
+    // library one: nothing at runtime reads bytecode, and the walk happens once, at build time.
+    //
+    // Gradle bundles ASM, but under `org.gradle.internal.impldep.org.objectweb.asm` -- a relocated
+    // internal package with no compatibility promise -- so this is a real coordinate rather than a
+    // reach into Gradle's own copy.
+    implementation("org.ow2.asm:asm:9.7.1")
+    implementation("org.ow2.asm:asm-tree:9.7.1")
+
     testImplementation(kotlin("test"))
+}
+
+/**
+ * A real third-party jar for `ArtifactScannerTest` to walk, kept off the test *classpath* on
+ * purpose.
+ *
+ * `tasks.test` runs on the JUnit Platform and `kotlin-test` picks its framework from what it finds
+ * on the classpath; putting JUnit 4 there as well is exactly the kind of skew that makes the whole
+ * suite report zero tests without failing. A separate configuration gives the test a file path and
+ * nothing else -- which is all a walker needs, and is also how a consumer's build will hand it
+ * artefacts.
+ */
+val walkerFixtureJar: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+
+dependencies {
+    walkerFixtureJar(libs.junit) { isTransitive = false }
 }
 
 gradlePlugin {
@@ -114,4 +144,8 @@ sourceSets.main {
 
 tasks.test {
     useJUnitPlatform()
+    inputs.files(walkerFixtureJar).withPropertyName("walkerFixtureJar").withPathSensitivity(PathSensitivity.NAME_ONLY)
+    // Resolved here rather than inside the test so the test never has to know a repository, a
+    // coordinate or a cache layout -- it reads one system property holding one path.
+    systemProperty("python.multiplatform.walkerFixtureJar", walkerFixtureJar.singleFile.absolutePath)
 }
