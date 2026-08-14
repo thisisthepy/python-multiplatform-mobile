@@ -112,8 +112,28 @@ class GeneratedProxyCostTest {
         /** Calls per timed loop; the same count [UpcallBoundaryCostTest] uses. */
         const val N = 10_000
 
-        /** Same shape as the measured loop, run first, and the same count. */
-        const val WARMUP = 3_000
+        /**
+         * Same shape as the measured loop, run first -- and **19 rows are warmed before any row is
+         * timed**, which is why this number is an order of magnitude smaller than the one
+         * [python.native.ffi.UpcallBoundaryCostTest] needs and is still enough.
+         *
+         * That file's sweep established the quantity both files depend on: the host JIT needs
+         * ~70 000 calls through the boundary before the figure stops falling, on desktop and on wasm
+         * alike, and below that a row reports how warm the process happened to be rather than what
+         * the call costs. What protects this file is [timeAll]'s shape -- every row is warmed, then
+         * every row is timed -- so the *shared* `_pm_invoke` path receives 19 x WARMUP before the
+         * first row is measured, while each row's own Python function only has to warm its own
+         * bytecode, and the same sweep showed pure-Python bytecode is flat within the first 10 000
+         * calls.
+         *
+         * At 3 000 that shared total was 57 000, just under the knee. 5 000 puts it at 95 000, past
+         * it, and costs about 19 ms per host -- against roughly a second if this file copied the
+         * other's per-row count, which it does not need. Measured at 3 000, this file's raw rows
+         * already agreed to within 3-7% between a solo run and the full suite, because of the shape
+         * above; the point of the change is that the agreement is now by construction rather than by
+         * a margin that happened to be small.
+         */
+        const val WARMUP = 5_000
 
         /**
          * `install()` renders several hundred lines and `exec`s them, so it is milliseconds rather

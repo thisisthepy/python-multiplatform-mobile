@@ -699,6 +699,13 @@ every cell in those two rows is blank here: there is nothing to quote, not an ov
 
 ### Ratio consistency: mostly holds, desktop is the exception
 
+> **Superseded as a source of numbers, kept as the record of how the defect was found.** Every figure
+> in this section and the two that follow it was taken with `UpcallBoundaryCostTest`'s 3 000-call
+> warmup, which "The benchmark was measuring the benchmark" below shows was too small by more than an
+> order of magnitude. The reasoning is what still stands: these three sections are what established
+> that the number moved for a repository-located reason and then that the reason was the benchmark's
+> own methodology. Current figures are in `upcall-design.md`'s table.
+
 `upcall-design.md`'s own upcall/downcall ratios, from the same `UpcallBoundaryCostTest`, are
 reproduced by these three fresh runs (the test computes and prints its own ratio each time, so this
 is a direct comparison, not a re-derivation):
@@ -894,6 +901,110 @@ stayed in the 1.7–3.2 band for every run quoted above. An earlier batch was th
 the comparison worktree set Spotlight indexing its 16 190 files, which took load to 10.4 and made
 the same commit read 546 ns then 1448–1677 ns. Those runs are not in this document. The machine also
 had an Android emulator resident throughout, which is why the floor is ~1.5 rather than ~0.
+
+### The benchmark was measuring the benchmark, and the count that fixes it is measured (2026-08-14)
+
+The two sections above diagnosed `UpcallBoundaryCostTest` and stopped there: they established that
+its absolute figure was a same-process warm-up artefact, pinned wasmJs's shift to one commit, and
+attached a staleness note to the table. **The measurement itself was not changed**, so the next pass
+would have re-derived the same non-number. This section changes it and shows the change works.
+
+#### What is warming, decided by experiment rather than by plausibility
+
+Both earlier sections reached for "JIT tiering" as a story. It is testable, and the obvious rival —
+CPython-side state, meaning the specializing interpreter, free lists, the allocator, string
+interning — makes an opposite prediction about one row that the report already prints.
+
+The timed loops were run **40 times in succession** inside one run, on both hosts, in two suite
+configurations. Per 10 000 calls:
+
+| | rep 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | … plateau |
+|---|---|---|---|---|---|---|---|---|---|
+| desktop upcall, suite as-is | 801 | 744 | 704 | 705 | 676 | 602 | 593 | 537 | ~535 ns |
+| desktop upcall, proxy test inert | 1307 | 716 | 696 | 660 | 548 | 539 | 558 | 554 | ~535 ns |
+| desktop downcall (Kotlin-driven) | 475 | 264 | 264 | 212 | 141 | 141 | 140 | 143 | ~141 ns |
+| wasmJs upcall, suite as-is | 300 | 313 | 317 | 290 | 301 | 285 | 305 | 278 | ~280 ns |
+| wasmJs upcall, proxy test inert | 785 | 339 | 317 | 303 | 294 | 299 | 319 | 279 | ~280 ns |
+
+**The two configurations converge on the same value and they converge from opposite sides.** So the
+plateau belongs to the boundary and everything before it belongs to the suite. That alone settles
+what the number should be.
+
+**Two rows in the same sweep do not move at all**, and they are what identifies the mechanism: the
+empty Python loop (8–9 ns desktop, 14–16 ns wasm) and the pure-Python callee (24–27 ns, 47–54 ns) are
+flat from the very first rep, in every configuration, on both hosts. CPython-side state would move
+those — they are pure interpreter work — and it does not. Only rows that cross into host code move.
+It is host JIT tier-up: C2 on the JVM, V8's tiering on wasm.
+
+The confirmation is on desktop, where the two runtimes can be told apart: CPython is a **native
+dylib** there, so its own speed cannot depend on how warm the JVM is, and indeed desktop's
+pure-Python rows are identical (8.44–8.59 ns) whether the class runs alone or inside the full suite.
+
+#### The count, and why 100 000
+
+Convergence needed 40 000 calls cold and 70 000 warm on desktop, and ~70 000 on wasm. The warm side
+settles later, so it sets the requirement; 100 000 is that with margin. The Kotlin-driven rows were
+on the same curve and worse off — they warmed `N / 4` = 2 500, and desktop's downcall row reads 653,
+266, 266, 161 before settling at ~141 — so they use the same count now. Warming the Python-driven and
+Kotlin-driven halves differently would make the headline ratio a ratio of two compilation states.
+
+`GeneratedProxyCostTest` needed far less, and the reason is its shape: it warms all 19 rows before
+timing any, so the shared `_pm_invoke` path already received 19 × 3 000 = 57 000 calls — just under
+the knee. 5 000 puts it at 95 000. Measured, its raw rows moved from 3–7% solo-vs-suite disagreement
+to 1–3.4%.
+
+**`inline` on `Benchmark.measure` was tried and is worse.** The hypothesis was that one shared
+`block()` call site goes megamorphic across every benchmark in the process. Inlining it made desktop's
+downcall row need ~230 000 iterations to reach the plateau it reaches in ~50 000 through the shared
+non-inlined loop, because each inlined copy is separate code that tiers up on its own. Reverted, and
+recorded so it is not tried again.
+
+#### The check the old table could not pass
+
+| | full suite | proxy test short-circuited | this class alone (`--tests`) |
+|---|---|---|---|
+| desktop upcall, **3 000 warmup** | 673.91 ns | 536.75 ns | — |
+| desktop upcall, **100 000 warmup** | 510–560 ns (11 runs) | 501–530 ns (3) | 506–550 ns (3) |
+| wasmJs upcall, **3 000 warmup** | 322.03 ns | 291.67 ns | — |
+| wasmJs upcall, **100 000 warmup** | 290–304 ns (7 runs) | 287–301 ns (3) | 321–353 ns (3) |
+
+The middle column is the lever the wasmJs section above used to prove the defect existed. It used to
+move desktop by 25% and wasmJs by 10%; it now moves neither outside its own run-to-run band. **That
+is the fix.**
+
+**The third column is honest about what is still not fixed, on one target.** Desktop passes it. wasmJs
+does not, and the reason is not the boundary: filtered to this class alone, wasmJs's *pure-Python*
+rows read 23.05 ns and 83.10 ns against the full suite's 15.04 ns and 47.22 ns — 55–74% slower, in
+rows with no boundary in them. CPython is itself a wasm module under V8, so a Node process that lives
+one second runs the interpreter's own bytecode slower than one that lives ten, and every row is
+inflated together. Raising the warmup to 300 000 does not move it (solo read 318.83 and 326.21 ns
+against 100 000's 320.54–337.42), which is what distinguishes a host-lifetime effect from a
+call-count effect. **wasmJs's ratio columns do survive filtering** — 2.66–3.13x solo against
+2.91–3.14x in the suite — so the ratio is the quantity to quote there, and the absolute column is a
+full-suite figure that must be labelled as one. It is left in the table with that label rather than
+deleted, because desktop's is now sound and dropping both would lose a real result.
+
+#### What it costs
+
+Measured on this machine, full suite, `build/test-results` cleared before each run:
+
+| | 3 000 warmup | 100 000 warmup |
+|---|---|---|
+| `desktopTest`, total test time | 4.93–4.97 s | 5.10–5.20 s |
+| …of which `UpcallBoundaryCostTest` | 0.036 s | 0.155–0.162 s |
+| …of which `GeneratedProxyCostTest` | 0.553–0.571 s | 0.625–0.661 s |
+| `wasmJsNodeTest`, wall clock | 4.31 s / 5.85 s | 4.43 s / 6.11 s |
+
+**About +0.2 s on desktop (+4% of test time) and +0.1 s on wasm.** The warmup is bounded by the very
+cost it is warming, so eight rows of 100 000 calls at ~500 ns is under a second by construction. The
+wasm rows are wall clock because that runner reports 0.0 s per class in its XML.
+
+Test counts are unchanged throughout: **desktop 360/0/1, wasmJs 344/0/0**, on every run quoted here.
+
+**Load.** 1.14 at the start, 1.6–3.8 for every run quoted, `uptime` checked before each batch. No
+other agent was running and no worktree was created during this pass, so the Spotlight problem the
+previous section had did not arise. Two readings taken while load was transiently 6.25 (back-to-back
+Gradle invocations) were timing measurements only, and are not among the per-call figures.
 
 ### What is deliberately not in the shared table
 
