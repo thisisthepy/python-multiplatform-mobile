@@ -274,19 +274,25 @@ Four questions were open about what Python code should look like. They are settl
 **A Kotlin fully-qualified name means the original Kotlin.** `import androidx.compose.material3`
 reaches real AndroidX, not a wrapper of ours wearing its name.
 
-That has a consequence this repository has not dealt with before. A KSP-generated table can never
-contain AndroidX, because KSP only sees modules that apply the bindings plugin. So that import
-cannot resolve through the table — it has to resolve through **the platform's own class lookup**,
-which is JVM class loading on JVM and Android, and is exactly what chaquopy does. We have not
-declined to build that; we have not built it yet.
+This is reachable, and the mechanism is the one PyREPL already uses: **the Gradle plugin reads the
+resolved dependency artefacts.** For each Kotlin source set it makes a resolvable copy of the
+`implementation` and `api` configurations and walks the resulting jars with ASM. AndroidX is an
+ordinary jar in that set, so it is covered like anything else.
 
-So on JVM there will be **two resolution paths side by side**: the ahead-of-time generated table,
-and dynamic class lookup. Which one answers a given name, and what happens when both could, is a
-design question that has to be answered explicitly rather than discovered.
+The two producers are therefore split by *what they look at*, not by whether something is
+reachable:
 
-On iOS, androidNative and wasm there is no such lookup, and those imports should **fail** — with a
-message that says the platform has no JVM class lookup, rather than a missing-module error that
-reads like a typo.
+    KSP                 the consumer's own source — declarations it can see being compiled
+    artefact walker     everything the build resolves — third-party jars, AndroidX included
+
+Both run at build time under the same applied plugin. An earlier draft of this file claimed
+AndroidX could never be reached because KSP does not see it; that conflated one producer's limit
+with the system's.
+
+What genuinely differs per platform is what a *jar* means. On JVM and Android the artefacts are
+jars and the walker applies directly. On iOS, androidNative and wasm the artefacts are klibs, and
+whether the same walk is possible there — and what a Kotlin declaration from a klib can be bound
+to at runtime with no JVM underneath — is the open question, not AndroidX.
 
 **`pythonx.*` is ours.** Whatever we wrap or add lives under that prefix. Kotlin fully-qualified
 names point at the original; `pythonx` points at our Pythonic layer. The two namespaces do not mix.
