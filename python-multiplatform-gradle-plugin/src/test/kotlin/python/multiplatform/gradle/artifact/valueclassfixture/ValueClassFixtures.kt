@@ -82,6 +82,19 @@ fun Rope.tagged(): String = "rope"
 fun Meters.tagged(): String = "meters"
 
 /**
+ * A function-typed parameter: the shape 43 of the 45 declined public top-level `Modifier`
+ * extensions have (`ArtifactScannerTest.composeModifierExtensionsSurviveBothGates` counts them).
+ * `resolveKotlinType` declines it -- a Python callable cannot become a Kotlin `Function0` at this
+ * boundary -- so it binds nothing, and `DeclarationModelTest` uses it for the other half of
+ * `docs/pyi-generation-design.md` §2.2's third property: a declined declaration stays *visible* in
+ * the model, with its reason, instead of vanishing at a `return null`.
+ */
+fun withCallback(action: () -> Unit): Int {
+    action()
+    return 1
+}
+
+/**
  * `kotlin.time.Duration.getInWholeSeconds-impl(J)J`'s exact shape: a value class with a *public*
  * constructor and accessor (unlike `Duration`'s own `internal` one), but where the mangled method is
  * a true member declared inside the class body rather than a top-level extension declared elsewhere.

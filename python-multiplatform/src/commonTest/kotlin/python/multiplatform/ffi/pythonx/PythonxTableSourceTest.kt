@@ -1,0 +1,149 @@
+package python.multiplatform.ffi.pythonx
+
+import python.multiplatform.reflection.CallableKind
+import python.multiplatform.reflection.ExposedCallable
+import python.multiplatform.reflection.TypeTag
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+/**
+ * The generated half of `pythonx`, as text, with no interpreter anywhere.
+ *
+ * `PythonProxySource`'s KDoc gives the reason for keeping the renderer a pure function and this
+ * follows it: what crosses into Python per declaration is then a *readable artefact* that a person
+ * can diff, rather than a behaviour that only exists while an interpreter is running. The other
+ * half -- that the adapter does the right thing with these rows -- is `PythonxAdapterTest`, which
+ * needs one.
+ */
+class PythonxTableSourceTest {
+
+    private val extension = ExposedCallable(
+        name = "androidx.compose.foundation.layout.padding__Dp",
+        arity = 2,
+        paramTypes = listOf(TypeTag.OBJECT, TypeTag.FLOAT),
+        returnType = TypeTag.OBJECT,
+        paramNames = listOf("<receiver>", "all"),
+        paramTypeNames = listOf("androidx.compose.ui.Modifier", "androidx.compose.ui.unit.Dp"),
+        returnTypeName = "androidx.compose.ui.Modifier",
+        isExtension = true,
+        receiverTypeName = "androidx.compose.ui.Modifier",
+        paramHasDefault = listOf(false, false),
+    ) { null }
+
+    private val plain = ExposedCallable(
+        name = "demo.calc.ping",
+        arity = 0,
+        paramTypes = emptyList(),
+        returnType = TypeTag.INT,
+        kind = CallableKind.FUNCTION,
+    ) { 7L }
+
+    /** One row per entry, and every field `docs/pythonx-adapter-design.md` §2.4 asked for. */
+    @Test
+    fun aWalkedExtensionRendersAsOneRowCarryingItsWholeDeclaration() {
+        assertEquals(
+            "import pythonx as _px_pythonx\n" +
+                "_px_pythonx._register_table((\n" +
+                "    ('androidx.compose.foundation.layout.padding__Dp', 2, 'FUNCTION', False, " +
+                "('<receiver>', 'all'), ('OBJECT', 'FLOAT'), " +
+                "('androidx.compose.ui.Modifier', 'androidx.compose.ui.unit.Dp'), 'OBJECT', " +
+                "'androidx.compose.ui.Modifier', True, 'androidx.compose.ui.Modifier', " +
+                "(False, False)),\n" +
+                "))\n" +
+                "_px_pythonx._boundary()\n" +
+                "del _px_pythonx",
+            PythonxAdapter.renderTable(listOf(extension)),
+        )
+    }
+
+    /**
+     * A producer that supplied no declaration metadata renders empty tuples rather than nothing.
+     *
+     * Every hand-written fragment in this repository's tests is such a producer
+     * ([ExposedCallable.paramNames] is documented as empty-means-not-supplied), so the adapter has
+     * to keep working positionally for them -- which it can only do if the row shape is fixed.
+     */
+    @Test
+    fun anEntryWithNoDeclarationMetadataStillRendersAWellFormedRow() {
+        val rendered = PythonxAdapter.renderTable(listOf(plain))
+        assertTrue(
+            rendered.contains("('demo.calc.ping', 0, 'FUNCTION', False, (), (), (), 'INT', None, False, None, ())"),
+            rendered,
+        )
+    }
+
+    /** A one-element tuple needs the trailing comma or it is not a tuple at all. */
+    @Test
+    fun aSingleParameterRendersAsATupleAndNotAsAParenthesisedValue() {
+        val single = ExposedCallable(
+            name = "demo.calc.shout",
+            arity = 1,
+            paramTypes = listOf(TypeTag.STRING),
+            returnType = TypeTag.STRING,
+            paramNames = listOf("who"),
+        ) { null }
+        assertTrue(PythonxAdapter.renderTable(listOf(single)).contains("('who',), ('STRING',),"), "trailing comma")
+    }
+
+    /**
+     * The mechanical constraint the delivery route imposes on the hand-written source, checked
+     * where it can be broken rather than left to a `SyntaxError` inside a string nobody can see.
+     */
+    @Test
+    fun theHandWrittenSourceSurvivesBeingWrappedInAPythonRawLiteral() {
+        assertFalse(PythonxAdapter.SOURCE.contains("\"\"\""), "a triple double-quote would end the literal early")
+        assertFalse(PythonxAdapter.SOURCE.endsWith("\\"), "a trailing backslash would escape the closing quote")
+        val rendered = PythonxAdapter.render(listOf(plain))
+        assertTrue(rendered.startsWith("_px_src = r\"\"\"\n"), rendered.take(40))
+        assertTrue(rendered.contains("_px_sys.modules['pythonx'] = _px_mod"), "the module has to reach sys.modules")
+    }
+
+    /**
+     * The layer's whole claim about itself, as a grep: **it names no Kotlin declaration.**
+     *
+     * `docs/pythonx-adapter-design.md` §7 says the count of per-component files is the symptom to
+     * watch for, and this is that check one level finer -- a `Text`, a `Button` or a `padding` in
+     * the hand-written source would mean a rule had been written as a special case. The two
+     * package prefixes in the seeded map are the deliberate exception and are asserted to be the
+     * only one.
+     */
+    @Test
+    fun theHandWrittenSourceMentionsNoKotlinDeclaration() {
+        val code = codeOnly(PythonxAdapter.SOURCE)
+        val offenders = listOf("padding", "Modifier", "fillMaxWidth", "Button", "Text(", "material3")
+            .filter { code.contains(it) }
+        assertEquals(emptyList(), offenders, "a per-declaration name in a per-rule file")
+        // The package map is data, and `Dp` is the seeded allowlist entry §4.4 asks for by name.
+        assertTrue(code.contains("register_package('pythonx.compose', 'androidx.compose')"))
+        assertTrue(code.contains("androidx.compose.ui.unit.Dp"))
+    }
+
+    /**
+     * [PythonxAdapter.SOURCE] with its comments and docstrings removed.
+     *
+     * The distinction is the whole point of the test above: the *documentation* names `Modifier`
+     * and `padding` constantly, because they are what the rules were written against and a reader
+     * needs the example. The *code* may not, because a rule that names a declaration is not a rule.
+     */
+    private fun codeOnly(source: String): String {
+        val out = StringBuilder()
+        var inDocstring = false
+        for (line in source.lines()) {
+            if (inDocstring) {
+                if (line.contains("'''")) inDocstring = false
+                continue
+            }
+            if (line.trimStart().startsWith("#")) continue
+            val fences = line.split("'''").size - 1
+            if (fences == 1) {
+                inDocstring = true
+                out.appendLine(line.substringBefore("'''"))
+                continue
+            }
+            out.appendLine(line.substringBefore("  # "))
+        }
+        return out.toString()
+    }
+}

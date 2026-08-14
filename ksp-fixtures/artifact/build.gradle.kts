@@ -104,6 +104,11 @@ pythonBindings {
     artifactIncludePackages.set(
         listOf("junit.runner", "junit.framework", "kotlin.text", "fixture.valueclass", "androidx.compose.foundation.layout"),
     )
+
+    // `docs/pyi-generation-design.md` §5.3. The file is this fixture's, standing in for the one that
+    // would ship inside `pythonx-compose`; without it only the Kotlin-FQN stubs are emitted, which is
+    // what the design prescribes for a package that has declared no mapping.
+    stubManifest.set(layout.projectDirectory.file("pythonx-map.toml"))
 }
 
 /**
@@ -121,4 +126,15 @@ tasks.named<Test>("desktopTest") {
         },
     )
     jvmArgs("--enable-preview", "-Djava.library.path=.")
+
+    // `WalkedArtifactStubTest` reads the stubs the *build* generated -- not a fixture checked in
+    // beside it. Nothing compiles a `.pyi` (`docs/pyi-generation-design.md` §6.2), so unlike the
+    // generated Kotlin fragments there is no source-set registration that would make this task
+    // depend on the generator; the dependency has to be stated.
+    val stubs = tasks.named("generatePythonStubs")
+    dependsOn(stubs)
+    systemProperty(
+        "python.multiplatform.stubDir",
+        layout.buildDirectory.dir("generated/pythonStubs/desktopMain").get().asFile.absolutePath,
+    )
 }

@@ -7,6 +7,7 @@ import python.multiplatform.reflection.ClassLookup
 import python.multiplatform.reflection.ExposedCallable
 import python.multiplatform.reflection.ReflectedClass
 import python.multiplatform.reflection.ReflectedClassKind
+import python.multiplatform.reflection.TypeTag
 import python.multiplatform.reflection.UpcallTable
 
 /**
@@ -197,11 +198,53 @@ import python.multiplatform.reflection.UpcallTable
  * Kotlin declaration's name in the message. The assignment fails with `AttributeError` instead of
  * silently binding a plain attribute that would shadow the Kotlin declaration for every later read.
  *
+ * ### A `TypeTag.OBJECT` **result**, and who owns it
+ *
+ * This used to be the whole of the section below: a `TypeTag.OBJECT` value returned from an
+ * ordinary [CallableKind.FUNCTION] crossed as the bare handle integer, and *"that int is the
+ * caller's to release"*, because an integer has nothing to hang a `__del__` off. The path that made
+ * the cost of it visible is `docs/kotlin-extensions-in-python.md` §3.2's Compose chain --
+ * `Modifier.padding(16.dp).size(24.dp)`, assembled from Python out of Compose's own jars, where
+ * every link is exactly that shape. §6 records the consequence: **one leaked root per intermediate
+ * link**, and Compose modifiers are written long, so the leak grows with how idiomatic the calling
+ * code is. `WalkedArtifactComposeModifierTest` leaked three per run and said so in its own KDoc.
+ *
+ * What that needed is a *Python object* to hand back instead, since that is the only thing a
+ * finaliser can live on. [OWNED_HANDLE] renders it: `_PmObject`, an owner carrying the handle in a
+ * slot and giving it back in `__del__`. `_pm_own` puts a result into one and `_pm_unwrap` takes it
+ * back out on the way in, so `size(padding(m, 16.0), 24.0)` still passes a handle to Kotlin and
+ * chaining costs one `isinstance` per OBJECT argument. Every rendered class derives from the same
+ * owner, so there is one notion of "a Python object holding a Kotlin root" rather than two.
+ *
+ * #### Where a class with a metaclass gets that base from
+ *
+ * A class with static members already has a metaclass, and the two requirements do not both fit in
+ * a base list: Python has no syntax for a base *after* a keyword, so the only spelling available is
+ * `class Foo(_PmObject, metaclass=_pm_t_1):` -- which separates the class from the metaclass a
+ * reader is pairing it with, and did more than that. `ksp-fixtures:app` locates a companion by
+ * matching `class (_pm_t_\d+)\(type\):` lazily through to `class Foo\(metaclass=\1\):`, and once
+ * that terminator no longer existed the match could not complete: `java.util.regex`'s lazy loop
+ * recurses once per character, so it scanned the rest of a 30 KB module and raised
+ * **StackOverflowError** instead of returning no match. Two fixture tests failed with a stack
+ * overflow that said nothing about rendering.
+ *
+ * So the base comes from the metaclass instead -- `__new__ = _pm_owned_new`, one line at the top of
+ * the metaclass body, appending `_PmObject` to `bases` unless something there already is one. The
+ * class statement stays adjacent to its metaclass and says only what is specific to it, a class
+ * with no statics still names its base outright (`class Counter(_PmObject):`), and a Python
+ * subclass of a rendered class inherits the metaclass without collecting a duplicate base.
+ *
+ * **It is gated on the producer having named the return type**, and [ownedTypeOf] is where the
+ * reason is written out: `OBJECT` means two different things in the result direction and the tag
+ * alone cannot separate them. The walker names its return types; KSP does not, so the KSP path
+ * keeps the bare-handle contract exactly as [ProxyHandleLifetimeTest] pins it.
+ *
  * ### What is still not rendered
  *
  * | kind | why not |
  * |---|---|
- * | a `TypeTag.OBJECT` value returned from an arbitrary [CallableKind.FUNCTION] or [CallableKind.METHOD] | still crosses as the bare handle integer, not wrapped in the class rendered for it. Only a value that came from *this* proxy's own `__init__` -- i.e. something Python itself constructed -- gets the class. A factory function that should hand back a `Counter` today hands back an `int`, **and that int is the caller's to release**: an integer has nothing to hang a `__del__` off, so the lifetime contract above does not reach it and the caller must pass it to `_pm_release` by hand. `ProxyHandleLifetimeTest` pins that as the raw boundary's contract rather than as a defect of it |
+ * | a `TypeTag.OBJECT` result wrapped in the **class rendered for its type** | an owned result is a generic `_PmObject`, not a `Counter`. Nothing would be gained today: the walker emits no `ReflectedClass` at all (`ArtifactScanner` records constructors as needing one "which is the next step"), so no rendered class has ever shared a name with a walked return type. `docs/kotlin-extensions-in-python.md` §4.1's per-receiver proxy is where that belongs, and `_pm_type` carries the Kotlin type name so it has something to key on |
+ * | a `TypeTag.OBJECT` result read through a **module attribute** (a top-level or `object` property) | `_pm_static_property` is one shared descriptor for every module attribute and does not see the entry, so owning there means either a `_pm_own` call on the read path of *every* top-level `val` -- a row `GeneratedProxyCostTest` measures at 6-14 ns, which this would multiply -- or a second copy of the descriptor. Neither is worth building for a case no producer reaches: KSP emits no return type name, and the walker emits no properties |
  *
  * These are skipped silently *here* because the skip is a property of this stage, not a policy
  * decision -- `docs/binding-policy.md` already decided they are exposed, and they remain reachable
@@ -474,6 +517,8 @@ object PythonProxySource {
             }
             appendLine(ENTRY_POINT_GUARD)
             appendLine()
+            appendLine(OWNED_HANDLE)
+            appendLine()
             var index = 0
             functions.forEach { entry ->
                 appendLine(renderOne(index, entry, rootModule))
@@ -581,6 +626,110 @@ object PythonProxySource {
     """.trimIndent()
 
     /**
+     * The owner of a [python.multiplatform.reflection.HandleTable] root, and the two functions that
+     * put a value into one and take it back out.
+     *
+     * **Emitted here rather than in [support], and defined at most once.** Here because
+     * `_PmObject.__del__` resolves the host's release at class-definition time (see `_pm_releaser`)
+     * and [support] is `exec`'d on its own by [settleFunction] on a path that has no bootstrap
+     * requirement at all -- a class defined there could capture `_pm_no_release` permanently. After
+     * [ENTRY_POINT_GUARD] the bootstrap is known to be present, and every target that publishes
+     * `_pm_invoke` publishes `_pm_release` with it.
+     *
+     * At most once because `install()` is safe to run again and `GeneratedProxyCostTest` really does
+     * run it twenty-five times. A bare `class _PmObject:` would build a **new class** on each pass,
+     * and every object handed to Python before that point would stop being an instance of the one
+     * `_pm_unwrap` tests against: it would cross as a `PyObject`, fail the Kotlin cast, and do so
+     * only for the objects that predate the reinstall. The guard is what makes "safe to exec more
+     * than once" true of this block as well as of the assignments around it.
+     */
+    private val OWNED_HANDLE = """
+        if '_pm_own' not in globals():
+
+            class _PmObject:
+                # The Python object that owns a Kotlin object handle.
+                #
+                # A `TypeTag.OBJECT` result crosses as a `HandleTable` integer -- Python cannot hold
+                # a Kotlin reference on any target -- and an integer has nothing to hang a finaliser
+                # off, so every one of them was the caller's to release by hand and nothing ever
+                # did. `docs/kotlin-extensions-in-python.md` 6 records what that cost on the path
+                # that made it visible: `Modifier.padding(16.dp).size(24.dp)` leaks one root per
+                # intermediate link, and Compose modifiers are written long.
+                #
+                # This is the smallest thing that can own one: an object whose `__del__` gives it
+                # back. `__slots__` because there may be one per link of every chain, and because
+                # an owner with no `__dict__` cannot itself be part of a reference cycle;
+                # `__weakref__` because a caller that wants to observe one dying should be able to.
+                __slots__ = ('_pm_handle', '_pm_type', '__weakref__')
+
+                def __init__(self, _pm_h, _pm_t=None):
+                    self._pm_handle = _pm_h
+                    self._pm_type = _pm_t
+
+                def __repr__(self):
+                    return (
+                        '<kotlin ' + (getattr(self, '_pm_type', None) or 'object') +
+                        ' handle=' + repr(getattr(self, '_pm_handle', None)) + '>'
+                    )
+
+                def __del__(self, _pm_r=_pm_releaser()):
+                    # getattr, not self._pm_handle: __init__ can raise before the assignment (a
+                    # Kotlin constructor that threw), and __del__ runs on the half-built instance
+                    # regardless. Cleared *before* the release, so a second __del__ -- an explicit
+                    # call, or a resurrection -- cannot hand the same handle back twice. That is
+                    # half of the double-release defence; HandleTable's generation tag is the other
+                    # half, and it covers the case where somebody else released it first.
+                    _pm_h = getattr(self, '_pm_handle', None)
+                    if _pm_h is not None:
+                        self._pm_handle = None
+                        _pm_r(_pm_h)
+
+            def _pm_own(_pm_h, _pm_t=None):
+                # `None` is how a nullable Kotlin return arrives -- `marshalResult` answers a null
+                # with Python's `None` whatever the tag says -- and there is nothing to own.
+                if _pm_h is None:
+                    return None
+                return _PmObject(_pm_h, _pm_t)
+
+            def _pm_owned_new(_pm_m, _pm_n, _pm_b, _pm_ns, **_pm_kw):
+                # How a rendered class that has a **metaclass** becomes an owner. A rendered class
+                # is one either way, but Python has no syntax for a base after a keyword, so the
+                # only spelling available puts the owner ahead of `metaclass=` in the base list --
+                # which separates the class statement from the metaclass a reader, and a consumer's
+                # regex, is pairing it with. So the base comes from the only thing that holds the
+                # class before it exists: its own metaclass, one line of which says so.
+                #
+                # Guarded rather than unconditional because the metaclass is inherited: a Python
+                # subclass of a rendered class is built through this too, and its bases already
+                # carry the owner. Appending a second copy would be a duplicate base and `type`
+                # refuses those outright.
+                for _pm_x in _pm_b:
+                    if isinstance(_pm_x, type) and issubclass(_pm_x, _PmObject):
+                        return type.__new__(_pm_m, _pm_n, _pm_b, _pm_ns, **_pm_kw)
+                return type.__new__(_pm_m, _pm_n, _pm_b + (_PmObject,), _pm_ns, **_pm_kw)
+
+            def _pm_unwrap(_pm_v):
+                # What an owner is worth on the wire: the handle inside it. Everything else is
+                # passed through untouched, which is what keeps a bare handle working for every
+                # caller written against the raw contract, and what lets an ordinary Python object
+                # reach a `PyObject` parameter.
+                #
+                # `isinstance` rather than a `getattr(v, '_pm_handle', v)` probe: the miss is the
+                # ordinary Python object, and a missing attribute is a raised-and-discarded
+                # AttributeError -- the same shape of cost the module `__getattr__` hook was
+                # replaced for, at 551-587 ns a time.
+                if isinstance(_pm_v, _PmObject):
+                    _pm_h = _pm_v._pm_handle
+                    if _pm_h is None:
+                        raise ValueError(
+                            'this Kotlin object was already released; its handle cannot be sent '
+                            'again, because the slot behind it may belong to something else now'
+                        )
+                    return _pm_h
+                return _pm_v
+    """.trimIndent()
+
+    /**
      * A parenthesised Python tuple literal for [elements], with the one-element trailing comma
      * that turns `(a0)` (just `a0`) into an actual tuple -- the trampoline calls `PyTuple_Size` on
      * whatever it is handed, and a bare non-tuple argument fails that call rather than being
@@ -594,30 +743,99 @@ object PythonProxySource {
 
     private fun params(arity: Int): List<String> = (0 until arity).map { "a$it" }
 
+    /**
+     * [params], with every [TypeTag.OBJECT] slot unwrapped back to the handle it carries.
+     *
+     * The other half of ownership: wrapping a result is pointless if the wrapper cannot be passed
+     * back in, and `size(padding(m, 16.0), 24.0)` does exactly that. Only OBJECT slots are
+     * unwrapped -- no other tag can be carrying an owner, and `_pm_unwrap` on a float would be a
+     * Python call per argument for nothing.
+     */
+    private fun argValues(entry: ExposedCallable): List<String> =
+        params(entry.arity).mapIndexed { i, name ->
+            if (entry.paramTypes[i] == TypeTag.OBJECT) "_pm_unwrap($name)" else name
+        }
+
+    /**
+     * The Kotlin type name a result should be owned as, or `null` if it must reach Python exactly
+     * as the boundary produced it.
+     *
+     * [TypeTag.OBJECT] is **two things at once** in the result direction, the same way it is in the
+     * argument direction: [UpcallTrampoline]'s `fromKotlinObject` answers with a
+     * [python.multiplatform.reflection.HandleTable] integer for a Kotlin object and with the Python
+     * object itself for a [PyObject]. Python cannot tell those apart when the second one happens to
+     * be an `int`, and owning one of those would make `__del__` release a handle nobody issued --
+     * which, if it collided with a live slot, is the silent cross-object corruption the generation
+     * tag exists to make impossible from the other direction.
+     *
+     * So the gate is [ExposedCallable.returnTypeName]: the producer naming the Kotlin type is the
+     * only signal that says "this really is a handle". The artefact walker supplies it
+     * (`WalkedArtifactComposeModifierTest` asserts `androidx.compose.ui.Modifier` on `padding__Dp`);
+     * the KSP processor supplies none at all, so every KSP entry keeps the bare-handle contract
+     * `ProxyHandleLifetimeTest.testRawHandleIsTheCallersToRelease` pins and nothing on that path
+     * moves. Teaching KSP to emit the name is what would extend this to it, and that is the
+     * processor's change, not this one's.
+     */
+    private fun ownedTypeOf(entry: ExposedCallable): String? =
+        entry.returnTypeName?.takeIf { entry.returnType == TypeTag.OBJECT && it !in NOT_A_HANDLE }
+
+    /**
+     * Return types that are named and still are not handles.
+     *
+     * A declaration returning [PyObject] hands Python back a Python object, and one returning `Any`
+     * may be carrying one. Both are legitimately `int`-valued, which is exactly the collision
+     * [ownedTypeOf] refuses to guess about.
+     */
+    private val NOT_A_HANDLE = setOf(
+        "python.multiplatform.ffi.PyObject",
+        "kotlin.Any",
+    )
+
+    /** Wraps [expression] in the owner for [entry], or leaves it alone where there is none. */
+    private fun owned(entry: ExposedCallable, expression: String): String {
+        val type = ownedTypeOf(entry) ?: return expression
+        return "_pm_own($expression, ${type.quoted()})"
+    }
+
     private fun renderOne(index: Int, entry: ExposedCallable, rootModule: String): String {
         val handle = "_pm_h_$index"
         val function = "_pm_f_$index"
         val paramList = params(entry.arity).joinToString(", ")
-        val argsTuple = tupleOf(params(entry.arity))
+        val argsTuple = tupleOf(argValues(entry))
         val dot = entry.name.lastIndexOf('.')
         val module = if (dot < 0) rootModule else entry.name.substring(0, dot)
         val leaf = if (dot < 0) entry.name else entry.name.substring(dot + 1)
 
         val body = if (entry.isSuspend) {
+            // The awaited value is what gets owned, never the Future: `AsyncUpcall.deliver`
+            // marshals a completion with the same tag a synchronous return uses, so a slow-path
+            // OBJECT result is a handle too -- but it arrives *inside* the Future, and owning the
+            // Future would release nothing and leak everything.
+            val tail = if (ownedTypeOf(entry) == null) {
+                """
+                |    if hasattr(_pm_r, '__await__'):
+                |        return await _pm_r
+                |    return _pm_r
+                """.trimMargin()
+            } else {
+                """
+                |    if hasattr(_pm_r, '__await__'):
+                |        _pm_r = await _pm_r
+                |    return ${owned(entry, "_pm_r")}
+                """.trimMargin()
+            }
             """
             |async def $function($paramList):
             |    _pm_r = _pm_invoke($handle, $argsTuple)
             |    # Two return types for one declaration: the real value when the Kotlin body never
             |    # reached a suspension point, an asyncio.Future when it did. Only the second costs
             |    # an await, which is what keeps the fast path free of the event loop.
-            |    if hasattr(_pm_r, '__await__'):
-            |        return await _pm_r
-            |    return _pm_r
+            |$tail
             """.trimMargin()
         } else {
             """
             |def $function($paramList):
-            |    return _pm_invoke($handle, $argsTuple)
+            |    return ${owned(entry, "_pm_invoke($handle, $argsTuple)")}
             """.trimMargin()
         }
 
@@ -710,23 +928,22 @@ object PythonProxySource {
             binds.appendLine("$handle = _pm_lookup(${ctor.name.quoted()})")
             val paramList = params(ctor.arity).joinToString(", ")
             val callParams = if (paramList.isEmpty()) "self" else "self, $paramList"
-            val argsTuple = tupleOf(params(ctor.arity))
+            val argsTuple = tupleOf(argValues(ctor))
             body.appendLine("    def __init__($callParams):")
+            // A CONSTRUCTOR result is the one OBJECT result that is *never* wrapped: the instance
+            // being built is the owner, so the handle goes straight into its slot. Wrapping it here
+            // would put an owner inside an owner and release the same root twice.
             body.appendLine("        self._pm_handle = _pm_invoke($handle, $argsTuple)")
             body.appendLine()
-            // The other half of the handle's lifetime. `HandleTable`'s own class doc names this
-            // exact method as the whole of the contract -- "the proxy's tp_dealloc calling release
-            // is the entire lifetime contract" -- and until this line existed nothing called it:
-            // `ProxyHandleLifetimeTest` and `GeneratedProxyCostTest` both measured every handle a
-            // constructor ever issued still rooted at the end of the run.
-            body.appendLine("    def __del__(self, _pm_r=_pm_releaser()):")
-            body.appendLine("        # getattr, not self._pm_handle: __init__ can raise before the")
-            body.appendLine("        # assignment (a Kotlin constructor that threw), and __del__ runs")
-            body.appendLine("        # on the half-built instance regardless.")
-            body.appendLine("        _pm_h = getattr(self, '_pm_handle', None)")
-            body.appendLine("        if _pm_h is not None:")
-            body.appendLine("            _pm_r(_pm_h)")
-            body.appendLine()
+            // The other half of the handle's lifetime is inherited rather than rendered: `_PmObject`
+            // -- which every rendered class now derives from -- carries the `__del__` that gives the
+            // root back. `HandleTable`'s own class doc names that method as the whole of the
+            // contract ("the proxy's tp_dealloc calling release is the entire lifetime contract"),
+            // and for as long as neither existed, `ProxyHandleLifetimeTest` and
+            // `GeneratedProxyCostTest` both measured every handle a constructor ever issued still
+            // rooted at the end of the run. One implementation rather than one per class, because
+            // the base's also clears the handle before releasing it, which is what makes a second
+            // release a no-op without consulting the table at all.
         }
 
         // Preserves [ReflectedClass.memberNames] order (declaration order) for methods, but
@@ -764,16 +981,17 @@ object PythonProxySource {
             binds.appendLine("$getterHandle = _pm_lookup(${getter.name.quoted()})")
             body.appendLine("    @property")
             body.appendLine("    def $propName(self):")
-            body.appendLine("        return _pm_invoke($getterHandle, (self._pm_handle,))")
+            body.appendLine("        return ${owned(getter, "_pm_invoke($getterHandle, (self._pm_handle,))")}")
             body.appendLine()
 
             val setter = setterFor(getter, byName, CallableKind.SETTER)
             if (setter != null) {
                 val setterHandle = bindHandle()
+                val value = argValues(setter).single()
                 binds.appendLine("$setterHandle = _pm_lookup(${setter.name.quoted()})")
                 body.appendLine("    @$propName.setter")
                 body.appendLine("    def $propName(self, a0):")
-                body.appendLine("        _pm_invoke($setterHandle, (self._pm_handle, a0))")
+                body.appendLine("        _pm_invoke($setterHandle, (self._pm_handle, $value))")
                 body.appendLine()
             }
         }
@@ -806,16 +1024,17 @@ object PythonProxySource {
             metaBody.appendLine("    def $staticName(cls):")
             // No receiver: a STATIC_GETTER's args are empty and a STATIC_SETTER's args[0] is the
             // new value, so `cls` is a Python-side formality and never crosses the boundary.
-            metaBody.appendLine("        return _pm_invoke($getterHandle, ())")
+            metaBody.appendLine("        return ${owned(getter, "_pm_invoke($getterHandle, ())")}")
             metaBody.appendLine()
 
             val setter = setterFor(getter, byName, CallableKind.STATIC_SETTER)
             if (setter != null) {
                 val setterHandle = bindHandle()
+                val value = argValues(setter).single()
                 binds.appendLine("$setterHandle = _pm_lookup(${setter.name.quoted()})")
                 metaBody.appendLine("    @$staticName.setter")
                 metaBody.appendLine("    def $staticName(cls, a0):")
-                metaBody.appendLine("        _pm_invoke($setterHandle, (a0,))")
+                metaBody.appendLine("        _pm_invoke($setterHandle, ($value,))")
                 metaBody.appendLine()
             }
         }
@@ -833,10 +1052,24 @@ object PythonProxySource {
             if (metaclassName != null) {
                 appendLine("class $metaclassName(type):")
                 appendLine()
+                // The owner base, put on from here rather than written into the class statement
+                // below; `_pm_owned_new`'s own comment has the reason and [renderClass]'s KDoc has
+                // what it cost. First line of the body so a reader meets it before the descriptors.
+                appendLine("    __new__ = _pm_owned_new")
+                appendLine()
                 append(metaBody)
                 appendLine()
             }
-            appendLine(if (metaclassName == null) "class $className:" else "class $className(metaclass=$metaclassName):")
+            // `_PmObject` is the base for the same reason the constructor already stashed a handle
+            // and the `__del__` already gave it back: a rendered class *is* an owner. Sharing the
+            // type is what lets `_pm_unwrap` accept an instance of one as an OBJECT argument, which
+            // it could not do before -- a `Counter` passed to a function taking one crossed as a
+            // `PyObject` and failed the Kotlin cast. A class that has a metaclass gets the same base
+            // from `_pm_owned_new` above instead of naming it here.
+            appendLine(
+                if (metaclassName == null) "class $className(_PmObject):"
+                else "class $className(metaclass=$metaclassName):",
+            )
             if (body.isEmpty()) appendLine("    pass") else append(body)
             appendLine()
             appendLine("$className.__qualname__ = ${cls.name.quoted()}")
@@ -850,20 +1083,32 @@ object PythonProxySource {
     private fun renderMethodBody(name: String, handle: String, entry: ExposedCallable): String {
         val paramList = params(entry.arity).joinToString(", ")
         val callParams = if (paramList.isEmpty()) "self" else "self, $paramList"
-        val argsTuple = tupleOf(listOf("self._pm_handle") + params(entry.arity))
+        // The receiver is already a handle -- this proxy's own -- so it is passed as it stands.
+        val argsTuple = tupleOf(listOf("self._pm_handle") + argValues(entry))
 
         return if (entry.isSuspend) {
+            val tail = if (ownedTypeOf(entry) == null) {
+                """
+                |        if hasattr(_pm_r, '__await__'):
+                |            return await _pm_r
+                |        return _pm_r
+                """.trimMargin()
+            } else {
+                """
+                |        if hasattr(_pm_r, '__await__'):
+                |            _pm_r = await _pm_r
+                |        return ${owned(entry, "_pm_r")}
+                """.trimMargin()
+            }
             """
             |    async def $name($callParams):
             |        _pm_r = _pm_invoke($handle, $argsTuple)
-            |        if hasattr(_pm_r, '__await__'):
-            |            return await _pm_r
-            |        return _pm_r
+            |$tail
             """.trimMargin()
         } else {
             """
             |    def $name($callParams):
-            |        return _pm_invoke($handle, $argsTuple)
+            |        return ${owned(entry, "_pm_invoke($handle, $argsTuple)")}
             """.trimMargin()
         }
     }
@@ -879,20 +1124,31 @@ object PythonProxySource {
     private fun renderStaticFunctionBody(name: String, handle: String, entry: ExposedCallable): String {
         val paramList = params(entry.arity).joinToString(", ")
         val callParams = if (paramList.isEmpty()) "cls" else "cls, $paramList"
-        val argsTuple = tupleOf(params(entry.arity))
+        val argsTuple = tupleOf(argValues(entry))
 
         return if (entry.isSuspend) {
+            val tail = if (ownedTypeOf(entry) == null) {
+                """
+                |        if hasattr(_pm_r, '__await__'):
+                |            return await _pm_r
+                |        return _pm_r
+                """.trimMargin()
+            } else {
+                """
+                |        if hasattr(_pm_r, '__await__'):
+                |            _pm_r = await _pm_r
+                |        return ${owned(entry, "_pm_r")}
+                """.trimMargin()
+            }
             """
             |    async def $name($callParams):
             |        _pm_r = _pm_invoke($handle, $argsTuple)
-            |        if hasattr(_pm_r, '__await__'):
-            |            return await _pm_r
-            |        return _pm_r
+            |$tail
             """.trimMargin()
         } else {
             """
             |    def $name($callParams):
-            |        return _pm_invoke($handle, $argsTuple)
+            |        return ${owned(entry, "_pm_invoke($handle, $argsTuple)")}
             """.trimMargin()
         }
     }
