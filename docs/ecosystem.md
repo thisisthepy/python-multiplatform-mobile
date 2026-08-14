@@ -173,9 +173,11 @@ smallest and most blocking item, and it is entirely inside this repository.
 unimplementable.
 
 **3. A Python-facing upcall module.** Today the only Python-side surface is the generated proxy
-module plus, in a demo, raw `ctypes` pointers. `pythonx-compose` needs an importable module giving
-`resolve(name) -> handle` and attribute-style access, so `_material3.SimpleTextWidget` becomes a
-table lookup instead of a `jclass` attribute.
+module plus, in a demo, raw `ctypes` pointers. `pythonx-compose` needs Kotlin namespaces to be
+**importable**, so `_material3 = jclass("...Material3Kt")` becomes an ordinary import. Most of
+this exists: generated modules are injected into `sys.modules` under their Kotlin fully-qualified
+name. What is missing is a `sys.meta_path` finder so a name resolves on demand rather than only
+after an eager `install()`, the `pythonx` prefix, and generated `.pyi` beside it.
 
 **4. One CPython acquisition path, not two.** This repository's `stagePythonHome` downloads from
 python-build-standalone into a Gradle cache; ppp's `python install` downloads from this
@@ -238,9 +240,17 @@ its hardcoded `\\` path separators, which break on macOS and Linux.
   because KSP only sees modules that apply the bindings plugin — a third-party binary artefact can
   never have a fragment. The name-prefix scan has no table equivalent and must go, not be ported.
 - Adopt the PyREPL shape instead: a hand-written `pycomposeui` module of `@Composable` wrappers,
-  which *is* exactly what the table serves. Apply the bindings plugin to it and
-  `UpcallTable.resolve("SimpleTextWidget")` replaces `jclass(...).SimpleTextWidget` — with the
-  mangling gone, because KSP reads the source declaration name.
+  which *is* exactly what the table serves. Apply the bindings plugin to it and the wrappers
+  become importable — with the mangling gone, because KSP reads the source declaration name.
+
+  **The Python surface is an import statement, not a resolve call.** Exposing
+  `UpcallTable.resolve("SimpleTextWidget")` would repeat chaquopy's `jclass` mistake in a new
+  spelling. This repository already gets most of the way there: `PythonProxySource` injects each
+  generated module into `sys.modules` under its Kotlin fully-qualified name, so
+  `from fixture.library import greet` works with no import hook at all — CPython's import
+  machinery takes a `sys.modules` hit for the full dotted name before consulting any finder.
+  What is missing is the `pythonx` prefix, laziness, and stubs; see §5's entry for this
+  repository.
 - Replace `remember_saveable`'s dispatch on `PyObject.toString()` of a type name with this
   repository's `PyValue` type tags.
 - Decide whether the port target is `pythonx-compose` or PyREPL's `app/`. The notebook's API is
