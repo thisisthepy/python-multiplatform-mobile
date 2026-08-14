@@ -288,11 +288,18 @@ a Python worker and a thread ART already knows now straddles zero, i.e. it is in
 spread rather than being a cost. On API 26 an upcall from a Python worker is the same price as a
 downcall of the same shape.
 
+> **Both blocks of absolute figures above and below are superseded: `UpcallOverheadTest` now warms
+> 100 000 calls, not 3 000, and every number in this section was taken at 3 000.** They are kept as
+> the record of how the defect was found, not as current costs, and the rows below are quoted from
+> `409da6fc` and its five-suite re-run rather than re-measured here.
+>
 > **Re-run unchanged over five full suites per emulator, this table's absolute figures have fallen
-> a long way and its API 26 conclusion has weakened.** `UpcallOverheadTest` still warms 3 000 calls,
-> and since `09bf2397` put `commonTest` on the device it now runs *after* `UpcallBoundaryCostTest`
-> has driven several hundred thousand upcalls through the same ART process, so ART's JIT is warm
-> before it starts.
+> a long way and its API 26 conclusion has weakened.** At the time, `UpcallOverheadTest` still warmed
+> 3 000 calls, and since `09bf2397` put `commonTest` on the device it ran *after*
+> `UpcallBoundaryCostTest` had driven several hundred thousand upcalls through the same ART process,
+> so ART's JIT was warm before it started. That is the observation the warmup fix was made from: the
+> two rows below differ by a factor of four with **the same warmup and the same emulator**, and the
+> only variable was how much ran first.
 >
 > | re-run, 5 suites each | API 26 | API 36 |
 > |---|---|---|
@@ -309,6 +316,14 @@ downcall of the same shape.
 > spread". The first upcall on a fresh worker remains enormous and enormously variable, which is
 > where the attach actually shows up. Read these rows against each other, not against the boundary
 > table's, and see that table's warmup footnote.
+>
+> **What survives the warmup change and what does not.** The *differences* and *ratios* here are
+> within-run comparisons — worker against instrumentation thread, upcall against downcall, both
+> measured in the same process at the same warmup — so raising the warmup moves both sides together
+> and they are the quotable quantities, exactly as they were for wasm in `7e9c6b8c`. The absolute
+> nanosecond columns are not: they were read three tiers early and are expected to fall when this
+> section is re-measured at 100 000. The structural assertion the test actually enforces — one ART
+> thread per Python worker, not one per call — is a count and is unaffected by either.
 
 **The first upcall on each worker still pays the attach in full** — 56–142 µs, larger than the
 per-call charge it replaced — and that is the honest shape of the cost now: once per thread, not
@@ -464,17 +479,26 @@ timed — which is the *same* dependence on what ran first, just with a smaller 
 Kotlin/Native rows were right by luck rather than by margin, and that is why they are replaced rather
 than kept. The old ART rows were not right at all.
 
-> **`7e9c6b8c` raised the warmup in `UpcallBoundaryCostTest` and nowhere else, and the other
-> benchmarks on the device still carry the defect.** In this round's ART logcat, alongside this
-> file's `warmup: 100000`, `UpcallOverheadTest` prints `warmup: 3000` and the two coroutine/proxy
-> benchmarks print `warmup: 5000`. `UpcallOverheadTest`'s API 36 instrumentation-thread row now reads
-> 1032–1229 ns where `409da6fc` recorded 2982–5086 ns — **at the same warmup count and on the same
-> emulator.** Nothing about that test changed; what changed is that `09bf2397` put the whole of
-> `commonTest` on the device, so `UpcallBoundaryCostTest`'s own several hundred thousand upcalls now
-> run *before* it and leave ART's JIT warm. That is precisely the "the number is a function of what
-> ran first" failure this section documents, still live, in a test the table no longer quotes but
-> other sections do. It has not been fixed here because fixing it is a change to a benchmark, not a
-> re-measurement of one.
+> **`7e9c6b8c` raised the warmup in `UpcallBoundaryCostTest` and nowhere else. That has since been
+> carried to the two benchmarks that were left behind.** The observation was this: in that round's
+> ART logcat, alongside this file's `warmup: 100000`, `UpcallOverheadTest` printed `warmup: 3000`,
+> and its API 36 instrumentation-thread row read 1032–1229 ns where `409da6fc` recorded
+> 2982–5086 ns — **at the same warmup count and on the same emulator.** Nothing about that test had
+> changed; what changed is that `09bf2397` put the whole of `commonTest` on the device, so
+> `UpcallBoundaryCostTest`'s own several hundred thousand upcalls ran *before* it and left ART's JIT
+> warm. That is precisely the "the number is a function of what ran first" failure this section
+> documents, in a test the table does not quote but other sections do.
+>
+> `UpcallOverheadTest` now uses 100 000 for both its Python-driven loops and its Kotlin-driven
+> downcall rows — the latter were on `N / 4`, i.e. 2 500 — and `overhead/BenchmarkTest`, which runs on
+> all six targets, now uses 100 000 uniformly in place of a mix of 100 and `Benchmark`'s 1 000
+> default. The value comes from the sweep immediately below: ART `pmp_api36` is the tightest path
+> measured and only reaches its plateau at ~90 000–100 000.
+>
+> **The coroutine/proxy `warmup: 5000` is not an instance of this defect and is deliberately left
+> alone.** `GeneratedProxyCostTest` warms nineteen rows before it times any, so the shared
+> `_pm_invoke` path receives 19 x 5 000 before the first measurement — which is past the same knee.
+> `7e9c6b8c` justified that number when it set it; it is not a leftover.
 
 #### Is 100 000 enough on a device? Swept, not assumed — and on one target it only just is
 
@@ -505,10 +529,18 @@ the sweep is measuring the boundary rather than the interpreter: the empty Pytho
 pure-Python callee are flat from the very first 10 000 calls on all five device configurations
 (iOS 10.5 → 10.2 ns and 37.9 → 38.0 ns; ART `pmp_api36` 17.3 → 17.3 ns and 49.7 → 50.4 ns).
 
-**The number is not changed here.** Raising it is a change to a benchmark and would invalidate the
-table it was measured for; this pass was a re-measurement. What the sweep establishes is the fact
-needed to decide: 100 000 covers every device path measured, and covers `pmp_api36` on ART by
-approximately nothing.
+**`UpcallBoundaryCostTest`'s own number is not changed here.** Raising it is a change to a benchmark
+and would invalidate the table it was measured for; this pass was a re-measurement. What the sweep
+establishes is the fact needed to decide: 100 000 covers every device path measured, and covers
+`pmp_api36` on ART by approximately nothing.
+
+**This sweep is what set the value for the two benchmarks that were still on the old warmup.** ART
+`pmp_api36`'s ~90 000–100 000 is the largest requirement of the six configurations, so it is the one
+that fixes the constant, and it is why `UpcallOverheadTest` — which runs only on ART, i.e. only on
+the tightest host — starts at 100 000 rather than at desktop's ~70 000. The desktop sweep of
+`overhead/BenchmarkTest` agrees independently: its worst row, `PyUnicode_AsUTF8 (8 chars)`, reads
+557 ns at a 40 000 warmup and 78–84 ns at 70 000 and above, a 7x step in one interval, so 70 000 is
+the desktop knee there too and 100 000 is that with margin.
 
 Ranges are min–max over five runs of the whole suite (four for wasmJs); a single reading is not a
 measurement. **The two ART rows are no longer quoted from another test.** They used to be — the †
