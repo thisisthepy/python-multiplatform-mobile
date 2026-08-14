@@ -95,6 +95,8 @@ internal object PyTypeChecks {
     val boolType: NativePointer by lazy { builtin("bool") }
     val floatType: NativePointer by lazy { builtin("float") }
     val strType: NativePointer by lazy { builtin("str") }
+    val bytesType: NativePointer by lazy { builtin("bytes") }
+    val bytearrayType: NativePointer by lazy { builtin("bytearray") }
     val listType: NativePointer by lazy { builtin("list") }
     val tupleType: NativePointer by lazy { builtin("tuple") }
     val dictType: NativePointer by lazy { builtin("dict") }

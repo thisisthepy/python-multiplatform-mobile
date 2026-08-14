@@ -680,6 +680,14 @@ measurement of this exact quantity are left blank rather than approximated from 
 (e.g. `CompositionBenchmark`'s composed `getAttr` is a different quantity — four crossings folded
 into one — not a bare `PyUnicode_FromString`).
 
+> **Four of this table's seven rows are quotes from another document and one column of it is
+> superseded (below), which is what happens to a table assembled by hand.** The same four columns,
+> cut for all six targets in one run with their conditions attached, are in
+> [`cost-table.md`](cost-table.md): `./benchmarks/cost-table.sh --runs 3` on a quiet machine fills
+> it. It draws the first three columns from the same `measureDowncalls()` rows this table does and
+> the fourth from the same `BenchmarkTest` row, so it is this table's recipe automated, not a
+> different measurement.
+
 | Platform | empty `withPython` scope | `Py_IncRef` + `Py_DecRef` | `PyObject_CallObject` (downcall, same shape as the upcall table's numerator) | `PyUnicode_FromString`, 8 chars |
 |---|---|---|---|---|
 | **desktop** (JVM 21.0.12, macOS arm64) | 123.88–135.99 ns | 321.69–334.10 ns | 315.69–335.32 ns | 1129.95–1270.76 ns |
@@ -696,6 +704,15 @@ androidNative is stated there as "against 165–326 ns" for desktop and is attri
 by elimination — it is not broken out by API level the way the other rows are, hence "~"). The
 Android/ART rows there record only the upcall side ("not recorded" for downcall), which is why
 every cell in those two rows is blank here: there is nothing to quote, not an oversight.
+
+> **The `PyUnicode_FromString, 8 chars` column is superseded.** It is the one column sourced from
+> `overhead/BenchmarkTest`, whose warmup for that row has since gone from `100` to `100 000`, for
+> the reason "The benchmark was measuring the benchmark" sets out in `upcall-design.md`. That row
+> was among the worst affected: swept on desktop in full suites it reads 1132–1146 ns at the old
+> `100` and 167–458 ns once warmed, so the figure quoted here is roughly 3–7x the warmed cost. That
+> warmed row is bimodal and is quoted as a spread rather than averaged. Read the column as a record
+> of the old methodology, not as the price of an 8-character marshal. The other three columns come
+> from `UpcallBoundaryCostTest`, which `7e9c6b8c` had already fixed, and are unaffected.
 
 ### Ratio consistency: mostly holds, desktop is the exception
 

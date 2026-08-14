@@ -35,6 +35,23 @@ dependencies {
     implementation("org.ow2.asm:asm-tree:9.7.1")
     implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.0.20")
 
+    // Reads `@Metadata`'s `d1`/`d2` payload -- the facts ASM's view of a class file cannot reach:
+    // a multi-file facade's part classes, an extension function's receiver, a value class's
+    // underlying type and accessor, `suspend`. See `ArtifactScanner`'s KDoc. Also a *plugin*
+    // dependency, for the same reason ASM is: the walk happens once, at build time, and nothing
+    // this plugin emits into a consumer's own build re-reads bytecode at runtime.
+    //
+    // Pinned to "2.0.20" rather than `libs.versions.kotlin` (2.4.20-Beta2): this module's own
+    // `compileKotlin` runs on Gradle's *embedded* Kotlin compiler (2.0.20 on Gradle 8.11.1, see the
+    // `kotlin-dsl` comment above), which cannot read a dependency whose own metadata a newer
+    // compiler wrote -- "the actual metadata version is 2.4.0, but the compiler version 2.0.0 can
+    // read versions up to 2.1.0". The library's own read/write logic tolerates a wide range of
+    // *target* metadata versions regardless of which release of the library does the reading, so an
+    // older `kotlin-metadata-jvm` reading androidx's or kotlin-stdlib's newer-than-2.0.20 metadata is
+    // not the same constraint -- see `ArtifactScannerTest`'s real-jar cases, which this version reads
+    // correctly.
+    implementation("org.jetbrains.kotlin:kotlin-metadata-jvm:2.0.20")
+
     testImplementation(kotlin("test"))
 }
 

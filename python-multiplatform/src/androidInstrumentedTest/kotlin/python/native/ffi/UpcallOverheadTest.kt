@@ -75,8 +75,38 @@ class UpcallOverheadTest {
         /** Calls per timed loop. Large enough to swamp `perf_counter_ns`, small enough for API 26. */
         const val N = 10_000
 
-        /** Same shape as the measured loop, run first. */
-        const val WARMUP = 3_000
+        /**
+         * Same shape as the measured loop, run first.
+         *
+         * ### Why 100 000 and not the 3 000 this used to be
+         *
+         * At 3 000 this test reported a same-process warm-up state rather than a boundary cost.
+         * The evidence is in this file's own history: the API 36 upcall row read `2982-5086` ns
+         * and later `1032-1229` ns with **the same warmup and the same emulator** -- the only
+         * thing that differed was how many tests ran before it. A number that moves by 4x on what
+         * ran first is not measuring the boundary.
+         *
+         * `UpcallBoundaryCostTest` diagnosed the mechanism and `7e9c6b8c` fixed it there: it is
+         * host JIT tier-up, not CPython-side state. The discriminator is that the rows with no
+         * boundary in them -- the empty Python loop and the pure-Python callee -- are flat from
+         * the first repetition, while only the rows crossing into host code move. On ART that
+         * host is a JIT too, so the same fix applies here.
+         *
+         * ART is the tightest of the hosts swept in `ec53b6e5`: API 36 only reached its plateau
+         * at roughly 90 000-100 000 calls, where desktop needed ~70 000 and wasm ~70 000. So
+         * 100 000 is ART's requirement with little margin to spare, and that is why this constant
+         * is 100 000 rather than something smaller that would do elsewhere.
+         *
+         * The cost is bounded by what it warms: three warmup loops of 100 000 calls, at the
+         * ~1 us per call this test reports for the dearest of them, is a fraction of a second.
+         *
+         * This deliberately does **not** warm the worker thread's upcall path -- see
+         * `_pm_worker_body`, whose first upcall is a measurement (`upcall_worker_first`), not
+         * waste. The worker still benefits from this warmup, because JIT tier-up is a property of
+         * the process rather than of the thread, which is what leaves the per-thread attach as
+         * the only thing that row still has to pay.
+         */
+        const val WARMUP = 100_000
 
         /** How many calls the attach is counted over. */
         const val PROBE_CALLS = 64
@@ -259,8 +289,13 @@ class UpcallOverheadTest {
         }
 
         val results = LinkedHashMap<String, Double>()
+        // [WARMUP], not `N / 4`. These rows cross the same JNI boundary as the Python-driven ones
+        // and warm on the same curve, and 2 500 was far down it -- `UpcallBoundaryCostTest` swept
+        // its equivalent 40 times and read 653, 266, 266, 161 before it settled at ~134-141, i.e.
+        // three tiers early at 2 500. The Python-driven and Kotlin-driven halves have to be warmed
+        // alike, or the ratio this test exists to report is a ratio of two compilation states.
         fun record(name: String, block: () -> Unit) {
-            results[name] = Benchmark.measure(warmupIterations = N / 4, iterations = N, block = block)
+            results[name] = Benchmark.measure(warmupIterations = WARMUP, iterations = N, block = block)
         }
 
         try {
@@ -337,7 +372,10 @@ class UpcallOverheadTest {
             add("  amortised across calls?               ${if (threadsWorker == 1) "yes" else "no -- one attach/detach per call"}")
             add("")
             add("Comparison basis, same run")
-            for ((name, ns) in downcalls) add("  ${name.padEnd(54)}${ns.ns()}")
+            // See UpcallBoundaryCostTest for why the space is load-bearing: `padEnd` is a floor, and
+            // the labels longer than it print glued to their value, which loses the row to any
+            // whitespace-based reader.
+            for ((name, ns) in downcalls) add("  ${name.padEnd(54)} ${ns.ns()}")
             add("")
             add("Ratios")
             add("  upcall (instrumentation thread) / downcall of same shape   ${fmt(upcallMain / downcallBasis)}x")

@@ -305,6 +305,14 @@ The 116 registrations added since the audit (71 → 187) are **all ordinary, wit
 or `@FastNative` twin registered for any of them**, so the crash this section warns about cannot be
 reached through the new surface.
 
+**The table is at 366 now, and that claim was re-derived rather than carried forward** — it still
+holds, and so does every other substantive claim in this section. What did not hold is the numbers:
+the audit classified 71 by hand, this section quoted 187, and roughly 180 registrations had never
+been classified by anything. `JniCallConventionClassificationTest` derives the classification on
+every desktop build, so the count stops being something a document has to remember. It also records
+what the audit could not: **65 registrations are undecided**, because a header prototype can condemn
+a function and never clear one.
+
 One change came out of it, in the opposite direction to the audit's: `PyList_GetItem` was pinned to
 `@CriticalNative` with no `preferFastNative` branch — the only binding ignoring the device axis, and
 the per-element call of bulk iteration, where §5 measured 50 ns per element on API 36 against a
@@ -325,8 +333,13 @@ guessing wrong the other way is a crash once upcalls exist.
 **Closed.** A thousand Python lists holding a target object are dropped with no explicit
 `close()`, Kotlin's collector takes the wrappers, and the target's count falls as the lists are
 destroyed. Verified on both collectors — desktop through `java.lang.ref.Cleaner`, iOS through
-Kotlin/Native's `createCleaner`. Android below API 33 uses the `PhantomReference` path and is not
-covered yet.
+Kotlin/Native's `createCleaner`. Android below API 33 uses the `PhantomReference` path, which is
+now covered on every desktop build — the loop moved to `jvmMain` because nothing in it is
+Android-specific and `desktopTest` can reach it there. It could not be tested where it lived: both
+emulators are API 36, so they take the `Cleaner` branch and no test in the repository reached the
+other one. It held a defect the whole time, and the shape of that defect is the argument for the
+move — the drain loop caught `InterruptedException` alone, so one throwing release killed the
+thread and every later release leaked in silence.
 
 **Two things still cannot be freed**: wrappers outliving `Py_Finalize()` are skipped
 deliberately, leaving stale pointers if the interpreter is restarted; and cross-boundary cycles
@@ -559,6 +572,22 @@ PYTHON: @PythonInternal entry resolves to -1
 PYTHON: UPCALL_OK
 ```
 
+**Re-verified after the upcall runtime, the KSP table and the artefact walker landed** — the claim
+above was made before all three, so it was worth re-running rather than carrying forward:
+
+```
+KOTLIN: table = 41 entries, 4 classes, from io_github_thisisthepy_sample
+PYTHON: invoke result = 7
+PYTHON: invoke_args result = 'presses x3 = 21'
+PYTHON: @PythonInternal entry resolves to -1
+PYTHON: UPCALL_OK / PROXY_OK
+```
+
+19 entries became 41 because `ExposedToPython.kt` grew; the exposure policy still refuses
+`@PythonInternal` with `-1` under the closed world, which is the part that had to hold. The
+procedure, including the toolchain path and why `JAVA_HOME` must stay on JDK 21 while native-image
+runs on 25, is in `docs/graal-native-image-verification.md`.
+
 Python builds a function pointer with `ctypes`, resolves a Kotlin declaration by name through
 `HandleTable`, and calls back into Kotlin — inside a closed world where runtime reflection is
 forbidden. Every wall hit getting there was metadata or wiring; the lookup and invoke path itself
@@ -713,8 +742,10 @@ the type looks like — and the cache is implemented against it:
   container is cached as a **snapshot**, independent of Python memory precisely because it is a
   copy, with `invalidateNativeCache()` as the stated way to re-read a container that has since
   been mutated;
-- `bytes`/`bytearray`/`memoryview` are **refused**, because their native form is a pointer into
-  the object's own buffer;
+- `memoryview` is **refused**, because a copy still would not carry its format, shape and strides.
+  `bytes` and `bytearray` were refused alongside it on the ground that their native form is a
+  pointer into the object's own buffer, until a `ByteArray` copy showed that ground does not reach
+  them — both convert now, `bytearray` as a snapshot;
 - a bare `NativePointer` — what `ConversionStrategy.RAW` returns — is rejected by `PyValue`'s
   constructor: it is an address, not a reference, and storing it would fail only once the address
   had been reused;
@@ -741,10 +772,19 @@ without a dedicated wrapper would fail. Both halves are gone: no `!!` on that fi
 library sources, and an untyped source now converts through the generic walk (observed, per
 builtin).
 
-**What is still not converted**, refused rather than guessed at: `bytes` (a `ByteArray` copy would
-also be correct under the rule and is not implemented), subclasses of builtins and `complex` (the
-dispatch is by exact type, mirroring `PyLong_Check` rather than `isinstance`), and any
-user-defined class — `TYPED` stops at the `PyObject` for those by design.
+**What is still not converted**, refused rather than guessed at: `memoryview`, subclasses of
+builtins (the dispatch is by exact type, mirroring `PyLong_Check` rather than `isinstance`),
+`complex`, and any user-defined class — `TYPED` stops at the `PyObject` for those by design.
+
+`bytes` was on that list with the note that a `ByteArray` copy would also be correct and was not
+implemented. It is implemented now, and `bytearray` with it: once the conversion is a copy, the
+buffer-pointer objection stops applying to either, so refusing one and not the other would have
+been arbitrary.
+
+`complex` was on that list under the subclasses-of-builtins reason, and that reason was wrong for
+it. `complex` **is** an exact type and `PyComplex` exists; it is refused only because neither
+`typedWrap` nor `pyObjectToNative` carries an entry for it. It stays refused — there is no Kotlin
+counterpart type to convert into — but not for the reason given here.
 
 ## 8. `jvmMain` unification
 
@@ -1930,15 +1970,43 @@ is the actual state of the Android object model, and that is the point of doing 
   `true`. Its `Int` exit status is also discarded. No caller in `src/` or `sample/`, so it is a
   landmine, not a live failure. Fixing it is a design decision: what should "run a module" mean
   for an embedded interpreter that has to survive the call?
+
+  **The design question is still open; the landmine is not.** Both `runMain` and `runApp` now
+  return `Nothing` and throw `UnsupportedOperationException` naming what is missing, so stepping
+  on either is a clear failure at the call site instead of a destroyed runtime or a silent no-op.
+  Guards: `Python3Test.runMainRefusesRatherThanFinalizingTheSharedInterpreter` and
+  `.runAppRefusesRatherThanSilentlyDoingNothing` (desktop 360 → 362, 0 failures, 1 skipped).
+  Refusing is deliberately *not* an answer to the design question — it only stops the broken
+  answer from shipping as if it were one.
+
+  One asymmetry worth recording, because it shaped how these were tested: the `runApp` red phase
+  is safe to observe and was observed (`Expected an exception of class
+  java.lang.UnsupportedOperationException to be thrown, but was completed successfully.`), while
+  the `runMain` one is not. Calling the pre-fix `runMain` reaches `Py_RunMain()`, which with no
+  `PyConfig.run_*` set enters the REPL on the process's stdin and finalizes the interpreter the
+  whole suite shares — it hangs the worker or crashes every class scheduled after it. The red
+  phase for it was therefore reasoned about, not triggered, and the test says so at the test.
 - **`Python3.runApp` does nothing at all** — its only statement is commented out, as is the
   `Py_BytesMain` `expect` it would call. It returns `Unit` either way, so a caller cannot tell.
   Declaring `Py_BytesMain` is not a one-liner: it takes `(int argc, char **argv)`, so it needs an
   array-of-C-strings marshalling path, which each of the four platforms does differently.
+  **Three commented-out places, not two**: `EmbedAPI.native.kt` also carries a full `Py_BytesMain`
+  `actual` — with `memScoped`/`allocArray` marshalling already written — that *looks* live at
+  lines 67-74 but sits inside the nested block comment spanning lines 46-128, so it compiles to
+  nothing. Kotlin block comments nest, and both `EmbedAPI.kt` (lines 28-249) and
+  `EmbedAPI.native.kt` open one at the top that swallows an entire duplicate "Section 1"; the live
+  declarations are the later copies. Read either file with a nesting-aware scan before concluding
+  a declaration exists, or the duplicate `Py_FinalizeEx`/`Py_RunMain` pairs will mislead.
 - **`Python3.finalize` reports no error detail**, and cannot: `Py_Finalize()` returns void and
   there is no interpreter left to hold an error indicator afterwards. The one improvement
   available is `Py_FinalizeEx()`'s `int` (0, or -1 when flushing buffered data failed). Left
   undone because finalization is untested — its only caller is `artMain/JniExport.kt`, and a test
   that exercises it destroys the interpreter the rest of the suite shares.
+  **The FFI half of it is already done, so what remains is one line, not four platforms**:
+  `Py_FinalizeEx` has a live `expect` and a live `actual` on desktop, androidNative/iOS, Android
+  and wasmJs (`EmbedAPI.{desktop,native,android,wasmJs}.kt`), plus the desktop `MethodHandle` and
+  the Android `RegisterNatives` entry. Only the untestability above still blocks it, which is why
+  it is still open rather than done in passing.
 - **`EmbedAPI.kt`'s section numbers are append order, not the C API docs' chapter order.**
   Sections 1–26 follow the docs; 27 (Type Objects), 28 (Tuple Objects) and 29 (Module Objects)
   were appended as needed. Documented target order: Type before Integer Objects (§16), Tuple
@@ -1974,7 +2042,8 @@ is the actual state of the Android object model, and that is the point of doing 
   of a badge, with the reason (see §14b). What has not changed: `gh api
   repos/thisisthepy/python-multiplatform/actions/workflows/<file>.yml` 404s for all four, i.e.
   **none of them has ever run on GitHub Actions**, because none of the commits that added or
-  touched them has been pushed to a branch GitHub runs workflows from. See §14b.
+  touched them has been pushed to a branch GitHub runs workflows from. See §14b. (Re-checked
+  2026-08-14: `desktop.yml` still 404s. Nothing here is fixable in a worktree — it needs a push.)
 - ~~**Sample app** has not been revisited since the object model landed.~~ **Done — see §13.**
 
 ## 13. The sample, and the AGP version that shapes it
@@ -2515,9 +2584,15 @@ what is blocking it and what the next concrete step is.
    `PhantomReference` fallback path specifically — the emulators available in this environment
    skew toward API 26/36 (CLAUDE.md), and 26 is itself ≥ the API 33 cutoff only in the wrong
    direction (26 < 33, so it *should* already exercise the fallback — worth checking whether it
-   actually does before assuming this needs new hardware). **(b) next step:** find or confirm which
-   available emulator is below API 33, then write a test that forces a GC on it and asserts the
-   `PhantomReference` path actually runs (nothing today asserts on which of the two paths executed).
+   actually does before assuming this needs new hardware).
+
+   **The second half of this is closed, and it did not need hardware.** The premise was that the
+   fallback could only be reached from a device below API 33. Nothing in a `PhantomReference` drain
+   loop is Android-specific, so it moved to `jvmMain` and `desktopTest` reaches it on every build —
+   which immediately found a defect that had been there the whole time. What is *not* closed is the
+   `androidMain` wiring around it: no test still asserts which of the two paths a given API level
+   takes, and that part does need a device. `ksp-fixtures/android`'s 8 `jvmTest`s are also still
+   not exercised on one.
 
 8. **wasm's `ProxyTypeExports.kt`-shaped trampoline generation is manual.** (§10, "Upcalls: closed")
    The three delegating lines a wasm executable module must declare by hand are currently

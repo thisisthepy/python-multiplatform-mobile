@@ -342,7 +342,11 @@ class UpcallBoundaryCostTest {
             add("  upcall net of a Python call           ${(upcall - pyCall).ns()}")
             add("")
             add("Comparison basis, same run (timed inside Kotlin)")
-            for ((name, ns) in downcalls) add("  ${name.padEnd(54)}${ns.ns()}")
+            // The space is not cosmetic. `padEnd` is a floor, not a width: five of these labels are
+            // longer than 54, so without it they print glued to their value -- `...same shape)137.06 ns`
+            // -- and any whitespace-based reader silently drops exactly the five rows that make up
+            // the downcall basis. Widening the pad would only move the cliff.
+            for ((name, ns) in downcalls) add("  ${name.padEnd(54)} ${ns.ns()}")
             add("")
             add("Ratios")
             add("  upcall / downcall of the same shape                        ${fmt(upcall / downcallBasis)}x")
