@@ -35,6 +35,19 @@ class ArtifactScannerTest {
         }
 
     /**
+     * `ValueClassFixtures.kt` and its `multipart` siblings, compiled as part of this module's own
+     * test sourceSet -- located the same way [kotlinStdlibJar] is (`protectionDomain.codeSource`),
+     * except a test run leaves this one a directory of `.class` files rather than a jar, which
+     * [ArtifactScanner.scanJar] now accepts directly. They are never compiled *by* the test, only
+     * looked up after the fact: the walker still meets them purely as bytecode plus `@Metadata`.
+     */
+    private val fixtureClasses: File
+        get() {
+            val location = Class.forName("fixture.artifactvalueclass.Meters").protectionDomain.codeSource.location
+            return File(location.toURI()).also { assertTrue(it.isDirectory, "expected a directory of .class files: $it") }
+        }
+
+    /**
      * The fixed text: every declaration the walker takes out of the whole JUnit 4 jar, with no
      * include filter at all.
      *
@@ -155,31 +168,199 @@ class ArtifactScannerTest {
     }
 
     /**
-     * Why walking `kotlin.text` produces no `trimIndent`, and why that is a limit of ASM rather than
-     * a decision.
+     * `kotlin.text.trimIndent` used to be unreachable: it compiles to a public static on
+     * `kotlin/text/StringsKt__IndentKt`, which is **package-private** (generated Kotlin in another
+     * package cannot call it), behind the public facade `kotlin/text/StringsKt`, which declares no
+     * methods of its own and which Kotlin cannot name at all -- there is no `StringsKt` in the
+     * Kotlin namespace, only `kotlin.text.trimIndent`. Recovering that name, and knowing that its
+     * first JVM parameter is an extension *receiver* rather than an ordinary argument, needs
+     * `@Metadata`'s `d1`/`d2` payload, which `KotlinMetadata.kt` now decodes.
      *
-     * `kotlin.text.trimIndent` compiles to a public static on `kotlin/text/StringsKt__IndentKt`,
-     * which is **package-private** -- generated Kotlin in another package cannot call it. The public
-     * name is the facade `kotlin/text/StringsKt`, which declares no methods of its own (it inherits
-     * them) and which Kotlin cannot name at all: there is no `StringsKt` in the Kotlin namespace,
-     * only `kotlin.text.trimIndent`. Recovering that name, and knowing that its first JVM parameter
-     * is an extension *receiver* rather than an ordinary argument, means decoding `@Metadata`'s
-     * `d1`/`d2` -- i.e. `kotlin-metadata-jvm`, not ASM.
-     *
-     * So the walker binds only what is callable from Kotlin by its JVM shape: a Java static, or a
-     * Kotlin `@JvmStatic`. `docs/ecosystem.md` §5b's target (`androidx.compose.material3`) is on the
-     * far side of this line, and this test is the statement of how far away it is.
+     * The facade and part class names themselves must still never appear anywhere a caller could
+     * see them -- neither has a Kotlin spelling, so a bound entry naming one would generate source
+     * that cannot compile.
      */
     @Test
-    fun kotlinFileFacadesAreSkippedBecauseKotlinCannotNameThem() {
-        val names = ArtifactScanner.scanJar(kotlinStdlibJar, includePrefixes = listOf("kotlin.text")).map { it.name }
-        assertTrue(
-            names.none { it.endsWith(".trimIndent") || it.endsWith(".trimMargin") },
-            "a multi-file part's statics must not be bound: $names",
+    fun aTopLevelExtensionBehindAMultiFileFacadeIsNowReachable() {
+        val entries = ArtifactScanner.scanJar(kotlinStdlibJar, includePrefixes = listOf("kotlin.text"))
+        val names = entries.map { it.name }
+        assertTrue(names.none { it.startsWith("kotlin.text.StringsKt") }, "nothing may be attributed to a facade or a part: $names")
+
+        val trimIndent = entries.single { it.name == "kotlin.text.trimIndent" }
+        assertEquals(1, trimIndent.arity, "the receiver is the one argument this declaration takes")
+        assertEquals(listOf("STRING"), trimIndent.paramTags)
+        assertEquals("STRING", trimIndent.returnTag)
+        assertEquals(listOf("import kotlin.text.trimIndent as artifact_ext_kotlin_text_trimIndent"), trimIndent.imports)
+        assertEquals(
+            "{ args -> ((args[0] as String).artifact_ext_kotlin_text_trimIndent()) }",
+            trimIndent.lambdaBody,
+            "Kotlin has no fully-qualified call syntax for an extension -- the alias from imports is load-bearing",
         )
-        assertTrue(
-            names.none { it.startsWith("kotlin.text.StringsKt") },
-            "nothing may be attributed to a facade or a part: $names",
+    }
+
+    /**
+     * `getInWholeSeconds-impl` (`kotlin.time.Duration`) was the case the old `-` filter was written
+     * against, and it is *still* declined -- but now because `Duration`'s constructor is `internal`,
+     * a fact read from `@Metadata`, not because its JVM name contains a hyphen. `Meters` is the same
+     * shape (`@JvmInline value class` wrapping a single primitive) with a public constructor, which
+     * is what makes the difference observable: replacing the name filter with a blanket "value class
+     * implies declined" rule would still decline this and prove nothing.
+     */
+    @Test
+    fun aPublicValueClassRoundTripsThroughItsUnderlyingPrimitive() {
+        val entries = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass"))
+        val sumMeters = entries.single { it.name == "fixture.artifactvalueclass.sumMeters" }
+        assertEquals(2, sumMeters.arity)
+        assertEquals(listOf("FLOAT", "FLOAT"), sumMeters.paramTags)
+        assertEquals("FLOAT", sumMeters.returnTag)
+        assertEquals(emptyList(), sumMeters.imports, "not an extension -- no import needed to call an ordinary top-level function")
+        assertEquals(
+            "{ args -> ((fixture.artifactvalueclass.sumMeters(" +
+                "fixture.artifactvalueclass.Meters((args[0] as Double)), " +
+                "fixture.artifactvalueclass.Meters((args[1] as Double)))).value) }",
+            sumMeters.lambdaBody,
         )
+    }
+
+    /** `kotlin.time.Duration.getInWholeSeconds-impl(J)J`'s exact shape, reproduced with a
+     * constructor the walker *is* allowed to call: a JVM parameter (the unboxed receiver) with no
+     * declared Kotlin parameter behind it. Declined by the arity check in `ArtifactScanner
+     * .kotlinCandidates`, not by [aPublicValueClassRoundTripsThroughItsUnderlyingPrimitive]'s
+     * constructor-visibility check -- both have to hold for a value class to be usable at all. */
+    @Test
+    fun aValueClasssOwnMemberIsDeclinedForItsImplicitReceiverNotItsVisibility() {
+        val names = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass.Seconds")).map { it.name }
+        assertEquals(emptyList(), names, "Seconds.doubled is a true member: its receiver has no declared Kotlin parameter to bind")
+    }
+
+    /** Same Kotlin name, unrelated JVM shape (one mangled by a value-class parameter, one not):
+     * grouping has to key off the *resolved* Kotlin name for this to be caught at all -- keying off
+     * the raw JVM/ASM name would never have seen these two as the same declaration. */
+    @Test
+    fun overloadsThatCollideOnlyAfterResolvingTheKotlinNameAreStillDropped() {
+        val names = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass")).map { it.name }
+        assertTrue("fixture.artifactvalueclass.addMeters" !in names, "two overloads named addMeters must both be dropped: $names")
+    }
+
+    /** An extension whose receiver is itself the value class -- unwrap-on-the-way-in for the
+     * receiver, wrap-on-the-way-out for the return, in the one declaration. */
+    @Test
+    fun anExtensionOnAValueClassUnwrapsTheReceiverAndWrapsTheReturn() {
+        val doubled = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass"))
+            .single { it.name == "fixture.artifactvalueclass.doubled" }
+        assertEquals(1, doubled.arity)
+        assertEquals(listOf("FLOAT"), doubled.paramTags)
+        assertEquals("FLOAT", doubled.returnTag)
+        assertEquals(
+            listOf("import fixture.artifactvalueclass.doubled as artifact_ext_fixture_artifactvalueclass_doubled"),
+            doubled.imports,
+        )
+        assertEquals(
+            "{ args -> ((fixture.artifactvalueclass.Meters((args[0] as Double))" +
+                ".artifact_ext_fixture_artifactvalueclass_doubled()).value) }",
+            doubled.lambdaBody,
+        )
+    }
+
+    /** `suspend` is declined explicitly, from `@Metadata`, per CLAUDE.md's "제외한 것을 조용히
+     * 빠뜨리지 마라" -- not merely absent as a side effect of [boundaryTypeOf] rejecting a
+     * `Continuation` parameter it never even has to see. */
+    @Test
+    fun aSuspendFunctionIsExplicitlyDeclined() {
+        val names = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass")).map { it.name }
+        assertTrue("fixture.artifactvalueclass.neverBound" !in names, "suspend must never reach the table: $names")
+    }
+
+    /**
+     * `@JvmMultifileClass` split across two files, reproducing `kotlin.text.trimIndent`'s own shape
+     * with a fixture the test controls: a plain top-level function in one part, and -- combining the
+     * two hard cases at once -- an extension function in the other.
+     */
+    @Test
+    fun aMultiFileFacadesPartsAreAllReachableUnderThePackageName() {
+        val entries = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass.multipart"))
+        val names = entries.map { it.name }
+        assertTrue(names.none { "MultiFacadeKt" in it }, "the facade's own JVM name has no Kotlin spelling: $names")
+
+        val greeting = entries.single { it.name == "fixture.artifactvalueclass.multipart.partGreeting" }
+        assertEquals("{ (fixture.artifactvalueclass.multipart.partGreeting()) }", greeting.lambdaBody)
+
+        val shout = entries.single { it.name == "fixture.artifactvalueclass.multipart.shoutViaFacade" }
+        assertEquals(
+            listOf("import fixture.artifactvalueclass.multipart.shoutViaFacade as artifact_ext_fixture_artifactvalueclass_multipart_shoutViaFacade"),
+            shout.imports,
+        )
+    }
+
+    /** `internal` is JVM-public but not a name generated Kotlin may call; filtered from `@Metadata`'s
+     * own visibility, not from the JVM `ACC_PUBLIC` bit every one of these methods also carries. */
+    @Test
+    fun anInternalTopLevelFunctionIsDeclinedRegardlessOfItsJvmVisibility() {
+        val names = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass")).map { it.name }
+        assertTrue("fixture.artifactvalueclass.secretlyInternal" !in names, "internal must not reach the table: $names")
+    }
+
+    /**
+     * The exploratory count `docs/ecosystem.md` §5b's second producer was written to answer, run
+     * against real, locally-cached Compose Multiplatform desktop jars. Skipped (not failed) when
+     * this machine's Gradle cache does not have them, since the path is local-machine state, not
+     * something a clean checkout can be expected to have -- see `ArtifactScannerTest`'s own KDoc for
+     * why the jars this test *does* control (junit, kotlin-stdlib) are found the same way rather
+     * than pinned as a path.
+     *
+     * The honest result this pins, run 2026-08-14 against Compose Multiplatform 1.6.11: **zero**
+     * `androidx.compose.foundation.layout` declarations are reachable, `Modifier.padding` included.
+     * Not a bug in this walker's cross-jar resolution (which is what made `ui.unit`'s result below
+     * possible) -- `Modifier.padding(Dp): Modifier` has `Modifier` as *both* its receiver and its
+     * return, and `Modifier` is an ordinary interface, not a value class or a primitive.
+     * `resolveKotlinType` has nothing to resolve it to: `boundaryTypeOf`'s KDoc explains why there is
+     * no `OBJECT` fallback, and that reasoning is unchanged by this walker now knowing `Modifier`'s
+     * real Kotlin name -- a name is not a boundary representation. Reaching `Modifier` itself is a
+     * different, larger piece of work than this one (an object-handle boundary type), not something
+     * `resolveKotlinType`'s value-class case was ever going to cover.
+     *
+     * `androidx.compose.ui.unit`, by contrast, *is* mostly `Dp` extensions of `Dp` -- receiver,
+     * parameter and return all the same value class -- and eight of them (`coerceAtLeast`, `lerp`,
+     * `max`, ...) are reachable, proving the cross-jar classifier resolution this task added: `Dp`'s
+     * own class lives in this same jar, but a Compose consumer's `Modifier` extensions would need it
+     * resolved from `foundation-layout`, which is the shape [ArtifactClasspath] exists for.
+     *
+     * `docs/ecosystem.md` §5b's own target (calling a composable) is out of scope here on purpose --
+     * this only counts what the walker's *declarations* pass, not whether Compose's runtime would
+     * accept a call built this way.
+     */
+    @Test
+    fun androidxComposeDeclarationCountsAreHonestAboutWhatValueClassSupportDoesAndDoesNotReach() {
+        val gradleCaches = listOf(
+            File(System.getProperty("user.home"), ".gradle/caches/modules-2/files-2.1"),
+            File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
+        ).firstOrNull { it.isDirectory }
+        if (gradleCaches == null) return // no local Gradle cache found at either known location
+
+        fun jarUnder(group: String, artifact: String): File? = gradleCaches.resolve(group).resolve(artifact)
+            .walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+
+        val layoutJar = jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop") ?: return
+        val unitJar = jarUnder("org.jetbrains.compose.ui", "ui-unit-desktop") ?: return
+        val classpath = listOfNotNull(
+            layoutJar,
+            unitJar,
+            jarUnder("org.jetbrains.compose.ui", "ui-desktop"),
+            jarUnder("org.jetbrains.compose.ui", "ui-geometry-desktop"),
+            jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop"),
+            jarUnder("org.jetbrains.compose.ui", "ui-util-desktop"),
+            jarUnder("org.jetbrains.compose.runtime", "runtime-desktop"),
+            kotlinStdlibJar,
+        )
+
+        val layoutEntries = ArtifactScanner.scanJar(layoutJar, includePrefixes = listOf("androidx.compose.foundation.layout"), classpath = classpath)
+        assertEquals(
+            emptyList(),
+            layoutEntries.map { it.name },
+            "Modifier itself has no boundary representation yet -- see this test's KDoc for why that is expected",
+        )
+
+        val unitEntries = ArtifactScanner.scanJar(unitJar, includePrefixes = listOf("androidx.compose.ui.unit"), classpath = classpath)
+        assertTrue(unitEntries.isNotEmpty(), "expected at least one Dp-only declaration in androidx.compose.ui.unit to be reachable")
     }
 }

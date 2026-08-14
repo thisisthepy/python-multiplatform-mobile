@@ -44,6 +44,9 @@ kotlin {
                 // to be walked, which is the whole claim: KSP cannot see inside it, and the walker
                 // does not need it to cooperate.
                 implementation(libs.junit)
+                // See its own `build.gradle.kts`: a real jar for the value-class round trip
+                // `kotlin.time.Duration` cannot prove.
+                implementation(projects.kspFixtures.artifactValueclass)
             }
         }
         val desktopTest by getting {
@@ -65,7 +68,15 @@ pythonBindings {
     // Narrow on purpose. `junit.runner.Version.id()` answers `"4.13.2"`, which is the artefact's own
     // version and therefore cannot be produced by anything except the artefact's own code -- the
     // end-to-end test reads exactly that string back out of Python.
-    artifactIncludePackages.set(listOf("junit.runner", "junit.framework"))
+    //
+    // `kotlin.text` is here for a different proof: it needs no dependency of its own (`kotlin-stdlib`
+    // is already on every Kotlin module's classpath), and `kotlin.text.trimIndent` is the exact case
+    // `ArtifactScanner`'s KDoc names as unreachable before it read `@Metadata` -- a top-level
+    // extension function behind a `MULTI_FILE_CLASS_FACADE`. `WalkedArtifactPythonImportTest` calls
+    // it from real Python.
+    // `fixture.valueclass` is `:ksp-fixtures:artifact-valueclass`'s `Meters`/`sumMeters` -- see that
+    // module's `build.gradle.kts` for why `kotlin.time.Duration` cannot stand in for it.
+    artifactIncludePackages.set(listOf("junit.runner", "junit.framework", "kotlin.text", "fixture.valueclass"))
 }
 
 /**

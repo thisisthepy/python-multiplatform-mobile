@@ -8,18 +8,35 @@ package python.multiplatform.gradle.artifact
  *   `python.multiplatform.ksp.CallableEntryModel` gives for its own: this whole model stays
  *   independent of the runtime module, so it is reachable from a plugin unit test that has no
  *   Kotlin Multiplatform anything on its classpath.
- * @param readTemplate `%s` is the `args[i]` slot; the result is the declared parameter type.
- * @param wrapTemplate `%s` is the call expression; the result is what [tag] promises.
+ * @param readFn given the `args[i]` slot expression, produces the declared parameter type.
+ * @param wrapFn given the call expression, produces what [tag] promises.
  * @param isReturnOnly `void`, which is a legal return descriptor and never a parameter one.
  */
 internal class BoundaryType(
     val tag: String,
-    private val readTemplate: String,
-    private val wrapTemplate: String,
+    private val readFn: (String) -> String,
+    private val wrapFn: (String) -> String,
     val isReturnOnly: Boolean = false,
 ) {
-    fun read(slot: String): String = readTemplate.replace("%s", slot)
-    fun wrapReturn(call: String): String = wrapTemplate.replace("%s", call)
+    /**
+     * @param readTemplate `%s` is the `args[i]` slot; the result is the declared parameter type.
+     * @param wrapTemplate `%s` is the call expression; the result is what [tag] promises.
+     *
+     * The primitive table below only ever needs a single textual substitution, so it stays on this
+     * constructor. `KotlinMetadata.kt`'s value-class case needs to *compose* one [BoundaryType]
+     * inside another (`Meters(%s as Double)` wrapping `%s as Double`) for an arbitrary slot
+     * expression supplied later, which a second `%s`-replace on an already-substituted string
+     * cannot do -- hence the function-typed primary constructor these two forward to.
+     */
+    constructor(tag: String, readTemplate: String, wrapTemplate: String, isReturnOnly: Boolean = false) : this(
+        tag,
+        readFn = { slot -> readTemplate.replace("%s", slot) },
+        wrapFn = { call -> wrapTemplate.replace("%s", call) },
+        isReturnOnly = isReturnOnly,
+    )
+
+    fun read(slot: String): String = readFn(slot)
+    fun wrapReturn(call: String): String = wrapFn(call)
 }
 
 /**

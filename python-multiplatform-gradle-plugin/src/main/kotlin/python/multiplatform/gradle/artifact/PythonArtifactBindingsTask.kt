@@ -62,11 +62,16 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
         val coordinates = coordinatesByFileName.get()
         val objectNames = mutableListOf<String>()
 
-        artifacts.files
-            .filter { it.isFile && it.name.endsWith(".jar") }
+        // Every resolved jar, not just the one being enumerated: a value-class parameter or an
+        // extension receiver declared in one artefact routinely lives in another --
+        // `androidx.compose.foundation.layout`'s `Modifier.padding(Dp)` needs `Dp`, which is
+        // `androidx.compose.ui.unit`'s. See `ArtifactScanner.scanJar`'s `classpath` parameter.
+        val resolvedJars = artifacts.files.filter { it.isFile && it.name.endsWith(".jar") }
+
+        resolvedJars
             .sortedBy { it.name }
             .forEach { jar ->
-                val entries = ArtifactScanner.scanJar(jar, includes)
+                val entries = ArtifactScanner.scanJar(jar, includes, classpath = resolvedJars)
                 // An artefact that contributed nothing gets no fragment: a fragment with no entries
                 // would still take a `moduleName` in `UpcallTable`'s installed set, which is the one
                 // thing that set is read for.

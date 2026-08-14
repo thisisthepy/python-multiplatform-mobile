@@ -29,6 +29,11 @@ internal data class ArtifactCallable(
     val paramTags: List<String>,
     val returnTag: String,
     val lambdaBody: String,
+    /** `import ... as ...` lines [lambdaBody] depends on -- non-empty only for a Kotlin extension
+     * function, which [lambdaBody] calls as `receiver.alias(...)`. Kotlin has no fully-qualified
+     * call syntax for an extension (the receiver can never be a positional argument), so the alias
+     * has to come from an import instead; see `ArtifactScanner`'s KDoc. */
+    val imports: List<String> = emptyList(),
 )
 
 /** One artefact's worth of bindings: what becomes a single `FunctionTableFragment` object. */
@@ -82,6 +87,11 @@ internal fun renderArtifactFragmentSource(fragment: ArtifactFragment): String = 
     appendLine()
     appendLine("package $ARTIFACTS_PACKAGE")
     appendLine()
+    // Deduplicated and sorted: two entries binding the same extension function (possible once an
+    // ambiguous-overload group is what prevents it, not the walker's enumeration order) must not
+    // produce two conflicting `as` aliases for the same import.
+    fragment.entries.flatMap { it.imports }.toSortedSet().forEach { appendLine(it) }
+    if (fragment.entries.any { it.imports.isNotEmpty() }) appendLine()
     appendLine("object ${fragment.objectName} : $FRAGMENT_INTERFACE {")
     appendLine("    override val moduleName: String = ${fragment.moduleName.quoted()}")
     appendLine()
