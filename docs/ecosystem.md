@@ -196,74 +196,150 @@ its hardcoded `\\` path separators, which break on macOS and Linux.
 
 ---
 
-## 5. What each repository owes
+## 5. What each repository owes (Implementation Goals per Repository)
 
-### `PythonMultiplatform` (this one)
+This section documents the current state, language/build system/distribution artifact, ecosystem goals, gaps to goal, and dependency direction for each of the 5 repositories in `/Volumes/macMini/thisisthepy/`, based on direct inspection of working trees on 2026-08-14.
 
-- A `@Composable`-capable callable shape, with its own `CallableKind` or an opt-in annotation the
-  generator recognises. Blocking item 1 above.
-- A Python-facing module for resolving and invoking table entries, replacing `jclass`.
-- Opaque Kotlin object round-tripping for Compose's `Composer`. `HandleTable` and
-  `ObjectReference` exist; nothing hands them to Python.
-- Python callables passed into Kotlin and **stored across recomposition** — `content=lambda: ...`
-  and `onclick=...` are stored in Compose's slot table and re-invoked later. The invoke path
-  exists; that lifetime is untested.
-- Keep the KSP wiring. It encodes AGP and KSP knowledge that versions with the processor — the
-  camel-case `Test` matcher exists because `kspAndroidTestDebug` once silently shadowed the real
-  table. toolchain should *apply* this plugin, not absorb it.
-- Hand `stageWasmBrowserRuntime` to toolchain, and retire `stagePythonHome` in favour of ppp.
+### `PythonMultiplatform` (this repository)
+
+- **Observed Current State**:
+  - Embedded CPython 3.13 FFI binder (`python-multiplatform/src/commonMain/kotlin/.../EmbedAPI.kt`, platform implementations in `EmbedAPI.desktop.kt`, `bindings.kt`, JNI/Panama/cinterop).
+  - Kotlin object model hierarchy (`python-multiplatform/src/commonMain/kotlin/.../PyObject.kt` and wrappers).
+  - Code generators: KSP processor (`python-multiplatform-ksp/`) producing `FunctionTableFragment`s, and Gradle plugin (`python-multiplatform-gradle-plugin/src/main/kotlin/.../ArtifactBindingGenerator.kt`) scanning resolved dependency JARs via ASM for `ArtifactTable` fragments.
+  - Multiplatform target support: Desktop JVM/Panama, Android JNI, iOS Native Cinterop, androidNativeArm64 (`:python-multiplatform:compileKotlinAndroidNativeArm64`).
+  - CPython binary download and SHA-256 lockfile / Sigstore verification (`python-checksums.properties`, `python-multiplatform/build.gradle.kts`).
+- **Language / Build System / Distribution**:
+  - Kotlin Multiplatform (Kotlin 2.0+), Java 21, C/C++ FFI.
+  - Gradle (`build.gradle.kts`, `settings.gradle.kts`, included build `python-multiplatform-gradle-plugin`).
+  - Maven artifact publication (`id("maven-publish")` in `python-multiplatform/build.gradle.kts`, published under group `io.github.thisisthepy:python-multiplatform`).
+- **Goal in Ecosystem**:
+  - Core language boundary and binder between Kotlin Multiplatform and CPython.
+  - Manages low-level FFI, object reference handles, upcall/downcall function tables, GIL lifecycle, and proxy injection into CPython `sys.modules`.
+- **Gap to Goal**:
+  - `@Composable`-capable callable shape: `ExposedCallable` typed `(Array<Any?>) -> Any?` cannot invoke `@Composable` functions taking synthetic `$composer` / `$changed` parameters. Needs dedicated `CallableKind` or opt-in annotation handling.
+  - Python-side `sys.meta_path` finder for lazy import resolution of Kotlin namespaces (`pythonx.*` or FQCNs) upon import.
+  - Opaque Kotlin object round-tripping for Compose `Composer` (`HandleTable` and `ObjectReference` exist, but runtime hand-off to Python needs verification).
+  - Lifetime and storage of Python callables passed into Kotlin across Compose recompositions (`content=lambda: ...`, `onclick=...`).
+  - Retire `stagePythonHome` in favor of `pypackpack`'s Python distribution management.
+  - Hand `stageWasmBrowserRuntime` logic to `toolchain`.
+- **Dependency Direction**:
+  - `PythonMultiplatform` has no dependencies on other repos in the ecosystem.
+  - `pythonx-compose` and consumer applications depend on `PythonMultiplatform` runtime and its Gradle/KSP bindings plugin.
+- **Unverified**:
+  - Behavior of WASM browser runtime (`wasm-experiment/`) under production web bundlers.
+
+---
 
 ### `toolchain`
 
-- Become the Gradle vocabulary and nothing else: translate the DSL into ppp middleware calls.
-- Delete its own implementations of what ppp owns — `InstallDependenciesTask`,
-  `BuildPythonArtifactTask`, `AssemblePythonPackageTask`, and the Android assets copy.
-- Finish what ppp has no equivalent for: the DSL surface itself, the `integration()` dependency
-  type with `KLIBDEPENS`, and Kotlin-to-pyi generation.
-- Replace `createMetaClass.kt` with PyREPL's stub generator.
-- Make `usage-example` apply the plugin.
-- Issues: #2 (plugin and build tools — only "basic plugin structure" is ticked), #1 (a
-  Python-only CLI, `tcl install pythonx-compose`).
+- **Observed Current State**:
+  - Plugin project structure (`toolchain/src/main/kotlin/.../PythonPlugin.kt`) registering `python` extension and 3 tasks (`InstallDependenciesTask`, `BuildPythonArtifactTask`, `AssemblePythonPackageTask`).
+  - Naive, self-contained task implementations in `bundle/` (`AssemblePythonPackageTask.kt`, `BuildPythonArtifactTask.kt`): copying local directory to `src/main/assets/python`, zipping to `build/pythonBundle/libs`, and executing `uv install -r` (which is an invalid `uv` command).
+  - DSL definitions in `dsl/` (`DSLBuild.kt`, `DSLCore.kt`, `DSLPackaging.kt`, `DSLPlatforms.kt`, `PythonConfiguration.kt`) covering ~60% of target spec `(플러그인예시)build.gradle.kts`.
+  - Mutated PyREPL generator `toolchain/src/main/kotlin/.../dependency/lang/createMetaClass.kt` producing runtime `.py` files using `from java import *`.
+- **Language / Build System / Distribution**:
+  - Kotlin (`kotlin-dsl`, `java-gradle-plugin`).
+  - Gradle (`build.gradle.kts`, `settings.gradle.kts`).
+  - Gradle Plugin published to Maven (`org.thisisthepy.python.multiplatform` plugin ID).
+- **Goal in Ecosystem**:
+  - Developer-facing Gradle DSL vocabulary (`python { ... }`) and nothing else.
+  - Translates Gradle DSL configuration into `pypackpack` middleware API calls.
+  - Owns Kotlin-to-`.pyi` stub generation (porting PyREPL's ASM-based stub generator).
+  - Handles `integration()` dependency types with `KLIBDEPENS`.
+- **Gap to Goal**:
+  - **Delegate to `pypackpack`**: Currently delegates nothing to `pypackpack` because `pypackpack` is not published to Maven. All tasks must be rewritten to invoke `pypackpack` middleware.
+  - **Delete redundant tasks**: Remove internal naive tasks (`InstallDependenciesTask`, `BuildPythonArtifactTask`, `AssemblePythonPackageTask`, and asset copy).
+  - **Wire up DSL**: DSL blocks in `dsl/` (`hotReload`, `codePush`, `buildTypes`, `projectFlavors`, `buildFeatures`, `metaDirs`, `libDirs`, `integration()`) are not read by any task. `PythonConfiguration.kt` extension is dead code (never registered).
+  - **Replace stub generator**: Replace runtime `createMetaClass.kt` with PyREPL's ASM-based build-time `.pyi` generator, fixing hardcoded Windows path separators (`\\`).
+  - **Executable specification**: `usage-example/` does not apply the plugin and is commented out in `settings.gradle.kts`.
+- **Dependency Direction**:
+  - `toolchain` -> `pypackpack` (calls `pypackpack` JVM library API).
+  - Applied by end-user Kotlin Multiplatform projects.
+- **Unverified**:
+  - Behavior of `integration()` configuration with `KLIBDEPENS` wheel metadata (only documented in DSL spec).
+
+---
 
 ### `pypackpack`
 
-- Publish to Maven so toolchain can depend on it.
-- Fix the `python install` / `list` / `find` destination disagreement before anything is built on
-  top of it.
-- Implement `bundle`, at least bundle-type `resource`.
-- Known issues its own docs record: uv marker mismatch between `add` and `remove --target`, no CLI
-  pass-through flags, meson and ninja never auto-installed.
+- **Observed Current State**:
+  - ~4,900 lines of Kotlin implementing CLI subcommands in `packpack/src/main/kotlin/.../cli/`: `init`, `python use/list/find/install/uninstall`, `package add/remove/sync/tree`, `target list/add/remove`, `add`/`remove`/`sync`/`tree` with target markers (`platform_system`, `platform_machine`).
+  - `uv` integration (`dependency/backend/external/UV.kt`) for downloading uv and managing `DevEnv` / `CrossEnv` venvs.
+  - `build` subcommand driving Meson CLI (`compile/backend/external/Meson.kt`) for C/C++ extension modules (`py.extension_module()`) and Python sources (`py.install_sources()`).
+  - Architecture ready for dual usage (`dependency/frontend/BaseInterface.kt` has `enum FrontendType { CLI, GRADLE }` and `Gradle.kt`).
+  - Specification in `docs/SPEC.md` marking feature statuses.
+- **Language / Build System / Distribution**:
+  - Kotlin JVM (Kotlin 2.3.0 / Java 21), Clikt CLI, Ktor client, Ktoml, zstd-jni.
+  - Gradle (`packpack/build.gradle.kts`, GraalVM Native Image plugin `org.graalvm.buildtools.native`).
+  - GraalVM native binary executable (`pypackpack`), intended to also publish as a Kotlin/JVM Maven library (`org.thisisthepy.python.multiplatform:packpack`).
+- **Goal in Ecosystem**:
+  - Owns all heavy lifting for Python packaging: Python distribution acquisition/management, dependency resolution (`uv`), cross-compilation environment (`crossenv`), C/C++/Rust extension compilation, bundling into resource/wheel formats.
+  - Serves as both a standalone CLI and an internal library for `toolchain`.
+- **Gap to Goal**:
+  - **Publish to Maven**: `packpack/build.gradle.kts` lacks `maven-publish` plugin and publication block. Nothing outside can resolve `pypackpack` until published.
+  - **Implement `bundle` stage**: All bundlers in `bundle/` (`BinaryBundler.kt`, `FatWheelBundler.kt`, `SingleWheelBundler.kt`, `WheelPatchBundler.kt`) are 2-4 line empty placeholders. Bundle type `resource` (needed by `PythonMultiplatform` and `toolchain`) must be implemented.
+  - **Fix destination disagreement**: `python install` downloads to `<project>/.venv` or `<project>/<target>`, while `python list`/`find`/`uninstall` search `~/.pypackpack/python/<version>`.
+  - **Auto-install build tools**: `Meson.installMeson()` exists but is never invoked before build execution.
+  - **CLI pass-through flags**: `add`/`remove`/`sync`/`tree` hardcode `extraArgs = null`.
+  - Non-Meson compiler backends (Clang, MSVC, NDK, XCode, Emscripten, Cargo) and compilation/minification middleware (Nuitka, Cython, Lpython) are empty placeholders.
+- **Dependency Direction**:
+  - `pypackpack` has no dependencies on `toolchain` or `pythonx-compose`.
+  - `toolchain` depends on `pypackpack` as a Maven library.
+- **Unverified**:
+  - Wheel patch generation (`WheelPatchBundler.kt`) and incremental upload logic (placeholder files only).
+
+---
 
 ### `pythonx-compose`
 
-- Delete the raw-AndroidX branch. A KSP-generated table cannot cover `androidx.compose.material3`,
-  because KSP only sees modules that apply the bindings plugin — a third-party binary artefact can
-  never have a fragment. The name-prefix scan has no table equivalent and must go, not be ported.
-- Adopt the PyREPL shape instead: a hand-written `pycomposeui` module of `@Composable` wrappers,
-  which *is* exactly what the table serves. Apply the bindings plugin to it and the wrappers
-  become importable — with the mangling gone, because KSP reads the source declaration name.
+- **Observed Current State**:
+  - Intended Python UI framework wrapping Kotlin Compose Multiplatform.
+  - Two unmerged legacy generations:
+    1. Chaquopy branch (`pythonx/compose/`): 37 files (28 empty placeholders), using `from java import jclass` and scanning mangled AndroidX Kotlin symbols (`TextKt.Text-fLXpl1I`) via `__dict__` reflection.
+    2. Desktop JVM branch (`pythonx/compose/lite/`): uses JPype with hand-written Kotlin wrappers.
+  - Demo notebook `UI.ipynb` target API works against PyREPL's `app/src/androidMain/python/` implementation (`main.App`, `App.update`, `DefaultIcons`, `Column`, `Row`, `Spacer`, `TextField`), NOT `pythonx-compose`'s current codebase.
+- **Language / Build System / Distribution**:
+  - Python (3.8+).
+  - `setuptools` (`pyproject.toml` building package `pycomposeui` version 0.0.1).
+  - PyPI / wheel package (`pycomposeui`).
+- **Goal in Ecosystem**:
+  - Provide Pythonic Compose wrappers (`pythonx.compose.*`) for writing UIs in Python.
+  - Adapt Kotlin Compose bindings generically via `__getattr__` and caching (mapping named arguments, threading composer, adapting `content=` lambdas) rather than hand-writing wrapper functions per widget.
+- **Gap to Goal**:
+  - Delete raw-AndroidX dynamic reflection branch (`TextKt.Text-fLXpl1I`) and JPype dependency.
+  - Migrate runtime to `PythonMultiplatform`'s static upcall table and Python proxy injection (`sys.modules`), replacing `jclass`.
+  - Port PyREPL's widget and runtime model (`app/src/androidMain/python/`) into `pythonx-compose`.
+  - Implement generic Python adapter (`__getattr__` on `pythonx.compose.material3` resolving underlying `androidx.compose.material3` bindings lazily).
+  - Replace string-based type name parsing in `remember_saveable` with `PythonMultiplatform`'s `PyValue` type tags.
+- **Dependency Direction**:
+  - `pythonx-compose` -> `PythonMultiplatform` (depends on `PythonMultiplatform`'s FFI binding surface and Python proxy module at runtime).
+  - Uses `.pyi` stubs emitted by `toolchain` / `PythonMultiplatform` plugin for editor autocompletion.
+- **Unverified**:
+  - Full hot-reload integration with Jupyter notebook server outside `UI.ipynb` static cells.
 
-  **The Python surface is an import statement, not a resolve call.** Exposing
-  `UpcallTable.resolve("SimpleTextWidget")` would repeat chaquopy's `jclass` mistake in a new
-  spelling. This repository already gets most of the way there: `PythonProxySource` injects each
-  generated module into `sys.modules` under its Kotlin fully-qualified name, so
-  `from fixture.library import greet` works with no import hook at all — CPython's import
-  machinery takes a `sys.modules` hit for the full dotted name before consulting any finder.
-  What is missing is the `pythonx` prefix, laziness, and stubs; see §5's entry for this
-  repository.
+---
 
-  **The explicit accessors still have to exist alongside it.** An import statement cannot cover a
-  name computed at runtime, and it cannot express which language a symbol comes from when that
-  matters. So the base import library also provides per-language class handles —
-  `JClass`/`JavaClass` for a JVM class, `KClass`/`KotlinClass` for a Kotlin declaration,
-  `ObjcClass` for an Objective-C class — with the import hook implemented on top of them rather
-  than beside them. (Naming note: `KClass` collides with `kotlin.reflect.KClass` in every
-  conversation about this, even though the Python name is its own namespace. Worth settling
-  early.)
-- Replace `remember_saveable`'s dispatch on `PyObject.toString()` of a type name with this
-  repository's `PyValue` type tags.
-- Decide whether the port target is `pythonx-compose` or PyREPL's `app/`. The notebook's API is
-  PyREPL's.
+### `toolchain-legacy`
+
+- **Observed Current State**:
+  - Legacy build toolchain source tree (`toolchain/` directory) derived from Kivy (`kivy-ios` and `python-for-android`), last worked on in February 2024.
+  - Python CLI entry points in `setup.py`: `toolchain`, `toolchain_targetver`, `toolchain_targetos`.
+  - Cross-compiles CPython 3.11 and native recipes (NumPy, OpenSSL, Kivy) for Android, iOS, macOS, Linux, and Windows (mingw).
+  - Depends on external forks: `thisisthepy/toolchain-ios` and `thisisthepy/toolchain-android`.
+- **Language / Build System / Distribution**:
+  - Pure Python (3.9+).
+  - `setup.py` (package name `toolchain`, version `3.11.0.1`).
+  - PyPI package / Python CLI tool (`pip install git+https://...`).
+- **Goal in Ecosystem**:
+  - **Legacy reference implementation only.**
+  - Kept for historical reference to understand pre-2024 CPython cross-compilation and recipe management.
+  - Replaced entirely by `pypackpack` (cross-compilation and packaging in Kotlin via `uv`/`crossenv`/`meson`) and `toolchain` (Gradle plugin interface).
+- **Gap to Goal**:
+  - Deprecated/superseded. No active development or gap to close — retained for historical reference only.
+- **Dependency Direction**:
+  - None. Independent legacy Python CLI tool.
+- **Unverified**:
+  - Modern Xcode 15+ / NDK 26+ compatibility of legacy recipes (untested).
 
 ---
 
