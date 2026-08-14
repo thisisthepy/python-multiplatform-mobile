@@ -183,12 +183,28 @@ Based on CPython's documented semantics, the following rules apply when classify
   - Leaving a leaf as Ordinary wastes ~45ns per call on API 26-31, but only ~2-4ns on modern API 34+. Safe promotions are therefore an optimization mostly relevant for older devices or high-volume loops, and should never override correctness.
 - **Unresolved Entries**: None. All 71 registrations were resolved confidently based on documented CPython semantics (e.g. GC thresholds on container allocation).
 
+  **This line is wrong, and it is the reason the audit is no longer the source of truth.** Header
+  prototypes can condemn a function and never clear one: `void Py_Initialize(void)` and
+  `int PyRun_SimpleString(const char*)` name no `PyObject *` and both run arbitrary Python. A
+  re-derivation over the table as it stands leaves **65 undecided**, and the confidence recorded
+  here is what put three re-entrant functions on the safe-to-promote list above.
+  `JniCallConventionClassificationTest` now derives the classification on every desktop build and
+  asserts that bucket stays non-empty, with those two functions named in it.
+
 ---
 
 # Resolution
 
 Written after checking section 2 against this repository's own measurements and against the
 registration table as it stands at 187 entries (the audit read 71).
+
+**The table holds 366 today**, so this resolution is itself a snapshot — roughly 180 registrations
+have never been classified by any hand-written pass. That is why the classification moved into
+`JniCallConventionClassificationTest`, which re-derives it from `bindings.kt`, `jni_onload.def` and
+the bundled CPython headers on every desktop build. Its re-derivation agrees with the judgement
+recorded here — the eight GC-blocking call sites reproduce exactly, no function was wrongly
+promoted, and all 366 prologues match their convention — so what was missing was never correctness,
+only a way for it to stay correct.
 
 ## The promotion to `@CriticalNative` is rejected
 

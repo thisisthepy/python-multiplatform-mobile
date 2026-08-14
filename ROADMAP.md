@@ -305,6 +305,14 @@ The 116 registrations added since the audit (71 → 187) are **all ordinary, wit
 or `@FastNative` twin registered for any of them**, so the crash this section warns about cannot be
 reached through the new surface.
 
+**The table is at 366 now, and that claim was re-derived rather than carried forward** — it still
+holds, and so does every other substantive claim in this section. What did not hold is the numbers:
+the audit classified 71 by hand, this section quoted 187, and roughly 180 registrations had never
+been classified by anything. `JniCallConventionClassificationTest` derives the classification on
+every desktop build, so the count stops being something a document has to remember. It also records
+what the audit could not: **65 registrations are undecided**, because a header prototype can condemn
+a function and never clear one.
+
 One change came out of it, in the opposite direction to the audit's: `PyList_GetItem` was pinned to
 `@CriticalNative` with no `preferFastNative` branch — the only binding ignoring the device axis, and
 the per-element call of bulk iteration, where §5 measured 50 ns per element on API 36 against a
