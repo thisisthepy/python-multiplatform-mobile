@@ -177,9 +177,38 @@ object BindingPolicy {
         if (hasPythonInternal(function)) return false
         if (Modifier.EXPECT in function.modifiers) return false
         if (function.extensionReceiver != null) return false
+        if (isComposable(function)) return false
         if (!hasRenderableSignature(function)) return false
         return true
     }
+
+    /**
+     * A `@Composable` in the consumer's **own source**, which KSP cannot bind and must not try to.
+     *
+     * `docs/ecosystem.md` §4 item 1 states the reason: a generated entry is a lambda over
+     * `Array<Any?>`, and a `@Composable` may only be invoked from a `@Composable` context, so the
+     * generated call does not compile. That is not hypothetical -- putting one hand-written
+     * composable in a module carrying this processor produced exactly
+     *
+     *     e: Fragment_....kt:20:50 @Composable invocations can only happen from the context of
+     *        a @Composable function
+     *
+     * and the module could not be built at all. Nothing had noticed because no fixture had ever put
+     * a composable in a processed source set.
+     *
+     * **Deliberately not the answer the artefact walker gives.** `ArtifactScanner` *does* bind a
+     * composable, by emitting its call site as bytecode (`ComposableThunks.kt`) with the
+     * `$composer`/`$changed`/`$default` parameters exposed as ordinary slots. That route needs the
+     * callee's compiled JVM signature, which for a declaration in the source set being compiled
+     * right now does not exist yet -- so it is genuinely unavailable here rather than merely
+     * unimplemented. Declining is the honest state, and it leaves the module compiling.
+     *
+     * Matched by simple name so that no dependency on the Compose runtime is introduced: a processor
+     * that had to resolve `androidx.compose.runtime.Composable` would need Compose on the classpath
+     * of every consumer, which is most of them do not have.
+     */
+    private fun isComposable(function: KSFunctionDeclaration): Boolean =
+        function.annotations.any { it.shortName.asString() == "Composable" }
 
     /**
      * Generic declarations are not exposed, whatever their visibility.

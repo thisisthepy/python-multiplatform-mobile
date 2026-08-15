@@ -325,10 +325,61 @@ class PythonBindingsPlugin : Plugin<Project> {
             outputDirectory.set(
                 project.layout.buildDirectory.dir("generated/pythonArtifactBindings/$sourceSetName"),
             )
+            thunkDirectory.set(
+                project.layout.buildDirectory.dir("generated/pythonComposableThunks/$sourceSetName"),
+            )
         }
 
         addKotlinSourceDirectory(project, sourceSetName, task)
+        addThunkClasspath(project, sourceSetName, task)
         configureStubGeneration(project, extension, resolved, includes, sourceSetName)
+    }
+
+    /**
+     * Puts the generated composable thunks on the compilation's classpath.
+     *
+     * ### Why not a dependency
+     *
+     * The obvious spelling -- `dependencies { desktopCompileOnly(files(thunkDir)) }` -- is a
+     * **circular task dependency**, and not a subtle one: the walker's own input is
+     * `desktopCompileClasspath` (whatever [PythonBindingsExtension.artifactConfiguration] names),
+     * both `compileOnly` and `implementation` feed that configuration, so the task would be waiting
+     * for its own output. A compile task's `libraries` is the one place a classpath entry can be
+     * added *past* the configuration the walker reads.
+     *
+     * The runtime half has no such problem -- a runtime classpath is not a compile classpath -- so it
+     * goes on `<target>RuntimeOnly` the ordinary way, and on the test one beside it, since a `Test`
+     * task resolves a classpath of its own.
+     *
+     * ### Reflection, for the same reason [addKotlinSourceDirectory] uses it
+     *
+     * This plugin never names a Kotlin Gradle Plugin type at compile time. `getLibraries()` on a
+     * Kotlin JVM compile task returns Gradle's own [org.gradle.api.file.ConfigurableFileCollection],
+     * so only the lookup is reflective and nothing about the value is.
+     *
+     * A source set called `<target>Main` compiles in `compileKotlin<Target>`, which is KGP's own
+     * convention for a target's main compilation. A name this cannot map is not an error: a build
+     * that binds no composable emits no thunk and never reads this classpath entry.
+     */
+    private fun addThunkClasspath(
+        project: Project,
+        sourceSetName: String,
+        task: org.gradle.api.tasks.TaskProvider<PythonArtifactBindingsTask>,
+    ) {
+        val thunks = project.files(task.map { it.thunkDirectory })
+        val targetName = sourceSetName.removeSuffix("Main")
+        val compileTaskName = "compileKotlin" + targetName.replaceFirstChar { it.uppercaseChar() }
+        project.tasks.matching { it.name == compileTaskName }.configureEach {
+            val libraries = javaClass.methods
+                .firstOrNull { it.name == "getLibraries" && it.parameterCount == 0 }
+                ?.also { it.isAccessible = true }
+                ?.invoke(this) as? org.gradle.api.file.ConfigurableFileCollection
+                ?: return@configureEach
+            libraries.from(thunks)
+        }
+        listOf("${targetName}RuntimeOnly", "${targetName}TestRuntimeOnly").forEach { name ->
+            if (project.configurations.findByName(name) != null) project.dependencies.add(name, thunks)
+        }
     }
 
     /**

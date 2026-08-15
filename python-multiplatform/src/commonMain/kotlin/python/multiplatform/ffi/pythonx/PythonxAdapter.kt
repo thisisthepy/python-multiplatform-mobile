@@ -140,6 +140,7 @@ object PythonxAdapter {
                 'kotlin_name', 'package', 'leaf', 'base', 'suffix', 'arity', 'kind', 'is_suspend',
                 'param_names', 'param_tags', 'param_type_names', 'return_tag', 'return_type_name',
                 'is_extension', 'receiver_type_name', 'param_has_default', 'handle',
+                'composer_index', 'changed_slots', 'default_slots',
             )
 
             def __init__(self, row):
@@ -155,13 +156,30 @@ object PythonxAdapter {
                 self.package, _, self.leaf = self.kotlin_name.rpartition('.')
                 self.base, _, self.suffix = self.leaf.partition('__')
                 self.handle = None
+                # A `@Composable`, recognised by the slot no ordinary declaration has. Nothing was
+                # added to `ExposedCallable` to say so: `${'$'}composer` is the Compose compiler's own
+                # spelling, a dollar is not a Python identifier character, and only `ArtifactScanner`'s
+                # composable path ever emits it -- so the name *is* the flag, and one that cannot
+                # drift out of step with the slot it describes.
+                names = self.param_names or ()
+                self.composer_index = names.index('${'$'}composer') if '${'$'}composer' in names else -1
+                self.changed_slots = tuple(i for i, n in enumerate(names) if n.startswith('${'$'}changed'))
+                self.default_slots = tuple(i for i, n in enumerate(names) if n.startswith('${'$'}default'))
+
+            def declared_arity(self):
+                '''The slots a Python caller writes: everything before `${'$'}composer`.
+
+                The synthetic ones are real parameters of the JVM method and real slots of the
+                binding -- that is the whole mechanism -- but they are never the caller's to fill.
+                '''
+                return self.arity if self.composer_index < 0 else self.composer_index
 
             def python_name(self):
                 return to_python_name(self.leaf)
 
             def signature(self):
                 parts = []
-                for index in range(self.arity):
+                for index in range(self.declared_arity()):
                     name = self.param_names[index] if self.param_names else 'a' + str(index)
                     if name == '<receiver>':
                         continue
@@ -659,6 +677,144 @@ object PythonxAdapter {
             return _NO_MATCH
 
 
+        # ------------------------------------------------------------------- @Composable (§5)
+
+        # One composer per composition, pushed by the single hand-written Kotlin entry point and
+        # popped when it returns. A list rather than a scalar because a composition can nest --
+        # a Python composable that calls another Kotlin container that calls back into Python --
+        # and the innermost is the one a call belongs to.
+        _COMPOSER = []
+
+
+        # Compose's own `BITS_PER_INT`: one `${'$'}default` bit per parameter, 31 to an `int`. Every
+        # composable measured (281 of them, `ComposableBindingTest`) fits one word, so the second
+        # word is written by the arithmetic and not by anything that has been observed.
+        _DEFAULT_BITS_PER_WORD = 31
+
+
+        def push_composer(handle):
+            '''Called from Kotlin, from inside a composition, with a handle to the live `Composer`.
+
+            This is the one value Python cannot invent: `${'$'}composer` exists only inside a composition,
+            which is why one hand-written `@Composable` entry point exists at all. Everything else
+            about calling a composable -- which arguments were written, what mask that implies -- is
+            arithmetic Python does here.
+
+            **The handle is the caller's to keep alive.** Nothing here retains it, so a caller that
+            pushes a proxy and drops its last reference has released the composer; the next call
+            through the boundary then fails with "stale or unknown Kotlin object handle". Kotlin's
+            entry point holds it for the composition's lifetime by construction, which is the only
+            caller this is written for.
+            '''
+            # Normalised to the raw boundary currency here rather than at every use: Kotlin pushes an
+            # integer handle, but a Python caller that got its composer out of a bound declaration
+            # holds a proxy wrapping one, and the `${'$'}composer` slot is filled without going through
+            # `_coerce` (there is nothing to decide about it).
+            _COMPOSER.append(getattr(handle, '_pm_handle', handle))
+            return len(_COMPOSER)
+
+
+        def pop_composer():
+            _COMPOSER.pop()
+            return len(_COMPOSER)
+
+
+        def current_composer():
+            if not _COMPOSER:
+                raise RuntimeError(
+                    'no composer is in scope: a @Composable can only run inside a composition, and '
+                    'nothing has pushed one. Call it from the body Kotlin passed to the composable '
+                    'entry point.'
+                )
+            return _COMPOSER[-1]
+
+
+        def _absent(tag):
+            '''What goes in a slot the `${'$'}default` mask says the callee will overwrite.
+
+            It is never read -- the generated prologue of every composable assigns over it before its
+            first use, which is what the mask *means* -- but it still has to survive the boundary and
+            the thunk's unboxing. A primitive slot therefore gets a zero of the right shape rather
+            than `None`, which would reach `Number.intValue()` and raise.
+            '''
+            if tag == 'INT':
+                return 0
+            if tag == 'FLOAT':
+                return 0.0
+            if tag == 'BOOLEAN':
+                return False
+            return None
+
+
+        def _bind_composable(decl, args, kwargs, strict):
+            '''`_bind` for a `@Composable`, where omission is a bitmask and not a sentinel.
+
+            ### The encoding, and how it was checked
+
+            `${'$'}default` bit *i* set means "parameter *i* was not passed, use its declared default".
+            Read out of the callee rather than assumed: `javap -c androidx/compose/material3/TextKt`
+            shows `Text-fLXpl1I` opening with
+
+                iload ${'$'}default; iconst_2; iand; ifeq +10
+                getstatic androidx/compose/ui/Modifier.Companion
+                astore_1
+
+            -- `${'$'}default & 2` guarding the assignment to parameter 1 (`modifier`), `& 4` guarding
+            parameter 2 (`color`), `& 8` parameter 3, and so on with no gaps. Bits are assigned to
+            *every* parameter in declaration order, including ones that declare no default (`text`
+            owns bit 0 and nothing ever sets it), so the bit index is the parameter index and needs
+            no correction.
+
+            `${'$'}changed` is passed as 0, which is the conservative value: it is a per-call-site claim
+            about which arguments the *caller* knows to be unchanged, and this caller knows nothing.
+            The callee then computes it with `composer.changed(...)` itself, which is the branch its
+            prologue takes when `${'$'}changed & mask == 0`.
+            '''
+            declared = decl.declared_arity()
+            if len(args) > declared:
+                return _refuse(strict, 'takes ' + str(declared) + ' arguments, got ' + str(len(args)))
+            slots = list(args) + [_NO_MATCH] * (decl.arity - len(args))
+            if kwargs:
+                for key, value in kwargs.items():
+                    index = -1
+                    for slot in range(declared):
+                        if to_python_name(decl.param_names[slot]) == key:
+                            index = slot
+                            break
+                    if index < 0:
+                        return _refuse(strict, 'has no parameter named ' + key)
+                    if slots[index] is not _NO_MATCH:
+                        return _refuse(strict, 'got two values for ' + key)
+                    slots[index] = value
+            mask = [0] * len(decl.default_slots)
+            omitted = 0
+            for index in range(declared):
+                value = slots[index]
+                if value is _NO_MATCH or value is None:
+                    if not decl.omittable(index):
+                        missing = decl.param_names[index] if decl.param_names else 'argument ' + str(index)
+                        return _refuse(strict, 'no value for ' + to_python_name(missing))
+                    word, bit = divmod(index, _DEFAULT_BITS_PER_WORD)
+                    if word >= len(mask):
+                        return _refuse(strict, 'no ${'$'}default word covers parameter ' + str(index))
+                    mask[word] |= 1 << bit
+                    slots[index] = _absent(decl.param_tags[index] if decl.param_tags else 'OBJECT')
+                    omitted += 1
+                    continue
+                tag = decl.param_tags[index] if decl.param_tags else 'OBJECT'
+                type_name = decl.param_type_names[index] if decl.param_type_names else None
+                coerced = _coerce(value, tag, type_name, decl, index, strict)
+                if coerced is _NO_MATCH:
+                    return _NO_MATCH
+                slots[index] = coerced
+            slots[decl.composer_index] = current_composer()
+            for index in decl.changed_slots:
+                slots[index] = 0
+            for position, index in enumerate(decl.default_slots):
+                slots[index] = mask[position]
+            return (tuple(slots), omitted)
+
+
         def _bind(decl, args, kwargs, strict):
             '''Maps a Python call onto [decl]'s positional slots.
 
@@ -668,6 +824,8 @@ object PythonxAdapter {
             `defaults_used` is how many slots this call left to Kotlin, and it exists for `_Overloads`
             -- see there. It is not a diagnostic.
             '''
+            if decl.composer_index >= 0:
+                return _bind_composable(decl, args, kwargs, strict)
             if len(args) > decl.arity:
                 return _refuse(strict, 'takes ' + str(decl.arity) + ' arguments, got ' + str(len(args)))
             slots = list(args) + [_NO_MATCH] * (decl.arity - len(args))

@@ -51,6 +51,11 @@ include(":ksp-fixtures:android")
 // reads the jars the build resolves rather than the source it compiles. `:library` and `:app` cover
 // KSP only, so nothing here exercised a third-party binary until this module existed.
 include(":ksp-fixtures:artifact")
+// The composable half of the same claim, and the one module in this build that applies the Compose
+// compiler plugin for a *test*: `:ksp-fixtures:artifact` deliberately has none (its own
+// `build.gradle.kts` says why), and a `Composer` cannot exist without one. See its
+// `PythonComposition.kt` -- one hand-written `@Composable`, for every composable in every artefact.
+include(":ksp-fixtures:compose")
 // A real, separately-compiled jar for the walker's value-class handling -- `kotlin.time.Duration`
 // cannot prove a positive round trip (its constructor is `internal`), so this stands in for it. See
 // its own `build.gradle.kts`.

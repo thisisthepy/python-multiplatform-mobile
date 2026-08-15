@@ -211,7 +211,7 @@ internal object ArtifactScanner {
         //
         // Defaults first: [disambiguateOverloads] renames entries, and the sibling test needs the
         // Kotlin name they still share.
-        return disambiguateOverloads(applyDefaultOmission(entries))
+        return assignThunkIndices(disambiguateOverloads(applyDefaultOmission(entries)))
     }
 
     /**
@@ -411,7 +411,12 @@ internal object ArtifactScanner {
      */
     private fun ArtifactCallable.overloadSuffix(includeReceiver: Boolean, qualified: Boolean): String {
         val skipReceiver = if (receiverTypeName != null && !includeReceiver) 1 else 0
-        val parts = paramTypeNames.drop(skipReceiver)
+        // A composable's synthetic slots are the same for every member of its overload set --
+        // `Composer_Int_Int_Int` on all of them -- so they separate nothing and would only make the
+        // Python name unreadable. Dropped, which leaves exactly the declared parameters the two
+        // overloads actually differ in.
+        val declaredEnd = paramNames.indexOf(COMPOSER_PARAMETER_NAME).takeIf { it >= 0 } ?: paramTypeNames.size
+        val parts = paramTypeNames.take(declaredEnd).drop(skipReceiver)
         // A zero-parameter member of a group -- there can be at most one, so this only ever has to
         // be distinct from the others, not descriptive.
         if (parts.isEmpty()) return "0"
@@ -464,8 +469,19 @@ internal object ArtifactScanner {
                 // `$composer`/`$changed`. There is no declared parameter to bind it to, so it is
                 // declined here rather than misread as one fewer parameter than the method actually
                 // takes. See this object's KDoc.
-                val (paramDescriptors, _) = splitMethodDescriptor(method.desc)
+                val (paramDescriptors, returnDescriptor) = splitMethodDescriptor(method.desc)
                 if (function.allParameterTypes.size != paramDescriptors.size) {
+                    // A composable's extra JVM parameters are not *unaccounted for* -- they are
+                    // `$composer`, the `$changed` masks and the `$default` mask, in that order, and
+                    // `ComposableShape` reads them off the descriptor. Bound as ordinary slots
+                    // Python fills; everything else with an arity mismatch is still an implicit
+                    // receiver nothing can supply, and still declined.
+                    if (isComposable(method)) {
+                        composableCandidate(
+                            owner, ownerIsClass, function, classpath, paramDescriptors, returnDescriptor, method.name,
+                            ownerNode.name,
+                        )?.let { return@mapNotNull it }
+                    }
                     return@mapNotNull declinedCandidate(
                         owner,
                         ownerIsClass,
@@ -480,13 +496,170 @@ internal object ArtifactScanner {
             }
     }
 
-    /** `@Composable` is `RUNTIME`-retained, so ASM sees it without any metadata decoding. Read here
-     * because the *name* rule depends on it -- `docs/pyi-generation-design.md` §3.6: composables stay
-     * PascalCase where every other function becomes snake_case. No composable is bindable today (the
-     * arity check above declines every one of them for its synthetic parameters), so this is carried
-     * for the model's sake and for the day that changes. */
+    /**
+     * Whether this JVM method is a `@Composable`.
+     *
+     * ### It is an *invisible* annotation, and reading the visible list found none, ever
+     *
+     * This used to read `MethodNode.visibleAnnotations` on the stated grounds that
+     * "`@Composable` is `RUNTIME`-retained, so ASM reads it as an ordinary visible annotation". That
+     * is wrong, and `javap -v androidx/compose/material3/TextKt.class` says so directly: every
+     * composable in the jar carries
+     *
+     *     RuntimeInvisibleAnnotations:
+     *       androidx.compose.runtime.Composable
+     *
+     * because `androidx.compose.runtime.Composable` is declared
+     * `@Retention(AnnotationRetention.BINARY)`. `RuntimeInvisible*` is exactly what ASM puts in
+     * `invisibleAnnotations`, so the old predicate answered `false` for **every real composable**,
+     * and `DeclarationModel.isComposable` -- which drives `docs/pyi-generation-design.md` §3.6's
+     * PascalCase rule -- was dead. Nothing caught it because the only composables reaching it were
+     * being declined anyway, and a declined entry's flag is not asserted anywhere.
+     *
+     * Both lists are read rather than just the invisible one: retention is the annotation author's
+     * choice and a future Compose could change it, whereas a method carrying the descriptor in
+     * either list means the same thing.
+     *
+     * ### Why not `@Metadata`
+     *
+     * `KmFunction` has an annotations list, but `kotlin-metadata-jvm` only populates it when the
+     * compiler was asked to keep annotations in metadata, which Compose's release build was not.
+     * The class file is the fact here; metadata is how the *parameters* are then interpreted.
+     *
+     * Two consumers: the name rule above, and [composableCandidate], which is what stops the arity
+     * check from declining every composable.
+     */
     private fun isComposable(method: org.objectweb.asm.tree.MethodNode): Boolean =
-        method.visibleAnnotations?.any { it.desc == "Landroidx/compose/runtime/Composable;" } == true
+        sequenceOf(method.visibleAnnotations, method.invisibleAnnotations)
+            .filterNotNull()
+            .any { list -> list.any { it.desc == ComposableShape.COMPOSABLE_ANNOTATION_DESCRIPTOR } }
+
+    /**
+     * A `@Composable`, bound as an ordinary function whose `$composer`, `$changed` and `$default`
+     * slots are Python's to fill.
+     *
+     * ### Why the synthetic parameters are exposed rather than hidden
+     *
+     * `docs/pythonx-adapter-design.md` §4.5 rejected every way of *hiding* them, and each rejection
+     * still stands: an arity-prefix entry cannot express "pass `text`, skip `modifier`", presence
+     * branching costs 2^15 call expressions for `Text`, `Text$default` does not exist, and a
+     * generated wrapper cannot restate defaults metadata never carries. What none of those noticed is
+     * that the mask is a **declared trailing parameter** (§5.2) -- so it does not have to be a
+     * compile-time constant at all. Compute it at run time and every one of those problems is
+     * somebody else's: `$default` bit *i* set means "parameter *i* was not passed, substitute its
+     * default", which is a fact about one integer rather than about 2^15 branches.
+     *
+     * Where that integer is computed matters and is not here. `pythonx` calls `androidx`, never the
+     * other way round, so the mask is Python's arithmetic over which arguments the caller wrote;
+     * this layer's job is to leave a slot for it. `$composer` is the one value Python cannot invent
+     * -- it exists only inside a composition -- and comes from the single hand-written entry point.
+     *
+     * ### What is declined here, and why
+     *
+     * - **An extension composable.** Compose's `$changed` slots count receivers and its `$default`
+     *   bits are assigned over value parameters, so a receiver shifts one numbering and not the
+     *   other. Nothing here has measured which, and `docs/kotlin-extensions-in-python.md` §2.6
+     *   counts exactly one `Modifier`-extension composable in 500 -- so this waits for a measurement
+     *   rather than guessing at a bit index that would silently substitute the wrong default.
+     * - **A shape [ComposableShape.of] does not recognise**, which then falls back to the decline
+     *   this method was reached from. A future lowering that adds a fourth kind of synthetic
+     *   parameter degrades to "not bound" rather than to a call with the wrong arguments.
+     * - **A `char` parameter**, for `boundaryTypeOf`'s reason: Python has no character type.
+     */
+    private fun composableCandidate(
+        owner: String,
+        ownerIsClass: Boolean,
+        function: ResolvedFunction,
+        classpath: ArtifactClasspath,
+        paramDescriptors: List<String>,
+        returnDescriptor: String,
+        jvmMethodName: String,
+        ownerInternalName: String,
+    ): Candidate? {
+        if (function.isExtension) return null
+        val declaredCount = function.allParameterTypes.size
+        val shape = ComposableShape.of(declaredCount, paramDescriptors) ?: return null
+        if (shape.totalCount != paramDescriptors.size) return null
+
+        val model = declarationModelOf(owner, ownerIsClass, function, classpath, isComposable = true) ?: return null
+        val paramTags = paramDescriptors.map { composableSlotTagOf(it) ?: return null }
+        val returnTag = if (returnDescriptor == "V") "UNIT" else composableSlotTagOf(returnDescriptor) ?: return null
+        val declaredTypeNames = function.allParameterTypes.map { kotlinClassifierNameOf(it) ?: return null }
+
+        val syntheticNames = shape.syntheticParameterNames()
+        val paramNames = (0 until declaredCount).map { function.allParameterNames.getOrNull(it) ?: "p$it" } + syntheticNames
+        val paramTypeNames = declaredTypeNames + syntheticNames.map {
+            if (it == COMPOSER_PARAMETER_NAME) COMPOSER_TYPE_NAME else "kotlin.Int"
+        }
+        val qualifiedName = "$owner.${function.kotlinName}"
+
+        return Candidate(
+            callable = ArtifactCallable(
+                name = qualifiedName,
+                arity = paramDescriptors.size,
+                paramTags = paramTags,
+                returnTag = returnTag,
+                // Filled by [assignThunkIndices], which is the only place that knows which `t<i>`
+                // this is -- and therefore the only place the `.kt` and the `.class` can agree.
+                lambdaBody = "",
+                receiverTypeName = null,
+                paramNames = paramNames,
+                paramTypeNames = paramTypeNames,
+                returnTypeName = kotlinClassifierNameOf(function.returnType),
+                // The declaration's own answer, unlike every other producer here -- and it is the
+                // honest one, because the mask reaches *every* default with no cap and no branch to
+                // decline. A synthetic slot is never omittable: `pythonx` always computes all three.
+                paramHasDefault = (0 until declaredCount).map { function.allParameterDefaults.getOrElse(it) { false } } +
+                    List(syntheticNames.size) { false },
+                thunk = ThunkSpec(ownerInternalName, jvmMethodName, "(${paramDescriptors.joinToString("")})$returnDescriptor"),
+            ),
+            declaration = model.copy(
+                bindingName = qualifiedName,
+                returnBoundaryTag = returnTag,
+                parameters = model.parameters.mapIndexed { index, parameter ->
+                    parameter.copy(boundaryTag = paramTags.getOrNull(index))
+                },
+            ),
+        )
+    }
+
+    /** The name of the slot the composer arrives in. Not a Kotlin identifier on purpose -- it is the
+     * compiler's own spelling, it is what `pythonx` matches on to recognise a composable, and no
+     * keyword argument can collide with it. */
+    internal const val COMPOSER_PARAMETER_NAME = "\$composer"
+    private const val COMPOSER_TYPE_NAME = "androidx.compose.runtime.Composer"
+
+    /** A boundary tag for one JVM slot of a composable, which is the **compiled** shape rather than
+     * the declared one: the thunk calls the erased signature, so a `Color` parameter is the `long`
+     * it erases to. `null` declines the whole declaration. */
+    private fun composableSlotTagOf(descriptor: String): String? = when {
+        descriptor == "C" || descriptor == "V" -> null
+        else -> boundaryTypeOf(descriptor)?.tag
+            ?: if (descriptor.startsWith("L") || descriptor.startsWith("[")) "OBJECT" else null
+    }
+
+    /**
+     * Numbers the thunks of one walk and writes each composable's body around its number.
+     *
+     * Deliberately the last pass and deliberately over the whole walk: [disambiguateOverloads] can
+     * turn a bound candidate into a declined one, and a thunk emitted for a declaration nothing calls
+     * would be a method in the generated class with no caller -- harmless, but it would also make
+     * [thunkSpecsOf]'s density check a lie.
+     */
+    private fun assignThunkIndices(candidates: List<Candidate>): List<Candidate> {
+        var next = 0
+        return candidates.map { candidate ->
+            val callable = candidate.callable ?: return@map candidate
+            if (callable.thunk == null) return@map candidate
+            val index = next++
+            candidate.copy(
+                callable = callable.copy(
+                    thunkIndex = index,
+                    lambdaBody = "{ args -> $THUNK_CLASS_TOKEN.${thunkMethodName(index)}(args) }",
+                ),
+            )
+        }
+    }
 
     /** The model for a declaration that will not be bound, with the reason. The Kotlin types are
      * still read: a stub generator has to be able to say *what* was declined. */

@@ -63,6 +63,19 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
     @get:OutputDirectory
     abstract val outputDirectory: DirectoryProperty
 
+    /**
+     * Where the `.class` files go, as opposed to the `.kt` files [outputDirectory] gets.
+     *
+     * A separate output because it is a separate *kind* of thing: [outputDirectory] is registered as
+     * a Kotlin source directory and compiled, this is put on the compilation's classpath as if it
+     * were a library. Only `@Composable` bindings need one -- see `ComposableThunks.kt` for the two
+     * measurements that show a composable's call site cannot be Kotlin source -- so a build that
+     * binds none leaves this directory empty rather than absent, because a Gradle output directory
+     * that does not exist is a task that never ran.
+     */
+    @get:OutputDirectory
+    abstract val thunkDirectory: DirectoryProperty
+
     @TaskAction
     fun generate() {
         val destination = outputDirectory.get().asFile.resolve(ARTIFACTS_PACKAGE.replace('.', '/'))
@@ -70,6 +83,10 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
         // matching, must take its fragment file with it or the next compilation still sees it.
         outputDirectory.get().asFile.deleteRecursively()
         destination.mkdirs()
+        val thunkRoot = thunkDirectory.get().asFile
+        thunkRoot.deleteRecursively()
+        val thunkDestination = thunkRoot.resolve(THUNK_PACKAGE.replace('.', '/'))
+        thunkDestination.mkdirs()
 
         val includes = includePrefixes.get()
         val coordinates = coordinatesByFileName.get()
@@ -106,6 +123,15 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
                 destination.resolve("$objectName.kt").writeText(
                     renderArtifactFragmentSource(ArtifactFragment(objectName, "artifact:$coordinate", entries)),
                 )
+                // The `.class` half of the same fragment, and emitted from the same `entries` list
+                // for the same reason `docs/pyi-generation-design.md` §2.2 gives for the declaration
+                // models: two walks that can disagree are worse than one walk with two outputs.
+                val thunks = thunkSpecsOf(entries)
+                if (thunks.isNotEmpty()) {
+                    thunkDestination.resolve("${objectName}Thunks.class")
+                        .writeBytes(generateThunkClass(objectName, thunks))
+                    logger.info("python-multiplatform: emitted ${thunks.size} composable thunk(s) for $coordinate")
+                }
                 objectNames += objectName
                 logger.info("python-multiplatform: bound ${entries.size} declaration(s) from $coordinate")
             }

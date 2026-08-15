@@ -493,6 +493,81 @@ adapter can treat them as two code paths with one shared name resolver and no ar
 them. The `Modifier`-extension composable (`ui.ExternalDrag_desktopKt.onExternalDrag`) is a single
 name and can be excluded by name if it is ever in the way.
 
+### 5.6 Closed — Python calls a real composable, and §5.4's candidate was not what did it
+
+**`Text('hi')` written in Python draws pixels through `androidx.compose.material3.Text`.**
+`:ksp-fixtures:compose`'s `ComposableRenderTest` renders a 200×60 `ImageComposeScene`: the Python
+body drew **71** non-background pixels, an empty body drew **0**, and `Text('hi hi hi hi hi')` drew
+**376**. Nothing is stubbed — `material3-desktop-1.6.11.jar` is walked, the composer is real, the
+composition is real.
+
+Four things had to be settled, and three of them contradict what was written above.
+
+**1. `@Composable` is not a runtime-visible annotation.** `ArtifactScanner.isComposable` read
+`MethodNode.visibleAnnotations` on the stated grounds that "`@Composable` is `RUNTIME`-retained".
+It is not: `androidx.compose.runtime.Composable` is `@Retention(AnnotationRetention.BINARY)`, and
+`javap -v androidx/compose/material3/TextKt.class` shows every composable carrying
+`RuntimeInvisibleAnnotations: androidx.compose.runtime.Composable`. So the predicate answered
+`false` for all 500 of them and `DeclarationModel.isComposable` — which drives §3.6's PascalCase
+rule — had never once been true. It reads both lists now.
+
+**2. The trailing shape is derivable, and was checked rather than assumed.** §5.2 measured nine
+signatures by hand; `ComposableBindingTest.everyComposableJvmSignatureIsKotlinParamsThenComposerThenInts`
+now checks **281** public top-level composables across three jars, of which **271** carry a
+`$default`. The rule: the parameter at index *n* is the `Composer`, everything after it is `int`,
+and there are `ceil(n/10)` `$changed` masks (Compose's `SLOTS_PER_INT`) followed by `ceil(n/31)`
+`$default` masks (`BITS_PER_INT`) exactly when the declaration defaults something. No composable
+contradicted it.
+
+**3. The mask encoding, read out of the callee.** `javap -c` on `Text-fLXpl1I` shows the prologue
+testing `$default & 2` before `modifier = Modifier.Companion`, `& 4` before
+`color = Color.Unspecified`, `& 8` before the next — so **bit *i* is parameter *i***, with a bit
+reserved for every parameter including ones that default nothing (`text` owns bit 0 and nothing sets
+it). `$changed` is passed as **0**, the conservative value: it is a claim about argument staticness
+that this caller cannot make, and the callee's own `composer.changed(...)` branch is what runs when
+it is zero.
+
+Load-bearing, and checked by breaking it: shifting the mask one bit left made the render fail with
+`Parameter specified as non-null is null: … graphicsLayer-Ap8cVGQ`, i.e. a default that was no
+longer substituted reached Compose as `null`.
+
+**4. §5.4's `composableLambdaInstance` route was not needed, and a plainer obstacle than the one
+§5.3 named is what decided it.** §5.3 says generated Kotlin cannot name `$composer`, which is true.
+But the *fallback* it assumes — call the JVM method directly — does not fail on the hyphen or on the
+synthetic parameters. It fails earlier:
+
+    probe.kt:2:35: error: unresolved reference 'TextKt'.
+
+A Kotlin file facade has **no Kotlin name at all** (measured with `kotlinc` 2.4.20-Beta2 against the
+real jar), so there is nothing to write. Java cannot spell `Text-fLXpl1I` either. What is emitted
+instead is **one `.class` per artefact fragment** (`ComposableThunks.kt`): a
+`public static Object t<i>(Object[])` that unboxes the boundary's argument array and does one
+`INVOKESTATIC` with the name and descriptor copied verbatim from the `MethodNode` being walked. That
+is not "looking a method up by name" in the sense agent-rules §12 retires — there is no runtime
+lookup, no reflection, and the JVM's own linker resolves it at class-load time exactly as `kotlinc`'s
+own `INVOKESTATIC` would.
+
+So §4.5's table gains a row it did not have: **pass the mask as a value.** It is available because
+§5.2's finding — the mask is a *declared* parameter — means it never had to be a compile-time
+constant. Which arguments a call wrote is something Python knows, so the arithmetic is one integer
+per call in `pythonx._bind_composable`, for a declaration of any width. `MAX_OMITTABLE_PARAMETERS`
+and its 2^n cost apply to the sentinel mechanism and are untouched; a composable uses neither.
+
+**The composer still needs one hand-written `@Composable`**, and exactly one:
+`:ksp-fixtures:compose`'s `PythonComposition`. It names no composable and takes no
+composable-specific parameter — it registers `currentComposer` as an ordinary object handle, pushes
+it onto `pythonx`'s stack and runs the Python body — so it is O(1) in the number of bound
+composables, unlike 2024's wrapper-per-widget. `docs/ecosystem.md` §5b's "the Python wrapper passes
+the composer as a value" survives intact; §4 item 1's "this is the smallest and most blocking item"
+is closed.
+
+**What is still open.** Recomposition and skipping (§5.4 item 4, §6) — the Python body is re-`exec`ed
+on every composition pass and nothing has measured it. Extension composables are declined: Compose
+counts receivers in `$changed`'s slots but assigns `$default` bits over value parameters, and which
+numbering a receiver shifts has not been measured (§2.6 counts one `Modifier`-extension composable in
+500, so the cost of waiting is one declaration). And a composable with more than 31 parameters would
+exercise the second `$default` word, which the arithmetic writes and nothing has observed.
+
 ---
 
 ## 6. Open — the lifetime of a Python callable across recomposition

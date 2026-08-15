@@ -70,6 +70,18 @@ internal data class ArtifactCallable(
      * enforced for both producers.
      */
     val paramHasDefault: List<Boolean> = emptyList(),
+    /**
+     * Set only for a `@Composable`: the JVM call [lambdaBody] delegates to, because Kotlin source
+     * cannot make it. See [ComposableThunks.kt] for the two measurements that close every other
+     * route.
+     *
+     * `null` for everything else, which is every binding that existed before composables did --
+     * their [lambdaBody] is a real Kotlin call expression and needs no `.class` beside it.
+     */
+    val thunk: ThunkSpec? = null,
+    /** Which `t<i>` of its fragment's thunk class [thunk] is, so that the generated `.kt` and the
+     * generated `.class` cannot disagree about the index. `-1` when [thunk] is `null`. */
+    val thunkIndex: Int = -1,
 ) : Serializable
 
 /** One artefact's worth of bindings: what becomes a single `FunctionTableFragment` object. */
@@ -79,7 +91,17 @@ internal data class ArtifactFragment(
     val entries: List<ArtifactCallable>,
 )
 
-private fun String.quoted(): String = "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+/**
+ * A Kotlin string literal for [this].
+ *
+ * The `$` escape is not decoration: a composable's synthetic parameter names are literally
+ * `$composer`, `$changed` and `$default` (`ComposableShape.syntheticParameterNames`), and an
+ * unescaped one in generated Kotlin is a *template expression* -- `"$composer"` compiles as a
+ * reference to a variable named `composer` and fails with "Unresolved reference", which is exactly
+ * how this was found.
+ */
+private fun String.quoted(): String =
+    "\"" + replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$") + "\""
 
 /**
  * A Kotlin identifier for a resolved artefact's coordinates.
@@ -105,9 +127,16 @@ internal fun artifactFragmentObjectName(coordinates: String): String =
  * Rather than trust two producers to agree, the flag is derived here from the one thing that cannot
  * lie about the body: whether the body tests for the sentinel at all. A klib entry therefore reaches
  * Python as "every argument required", which is what it is.
+ *
+ * **A `@Composable` omits by a second mechanism and so has a second piece of evidence.** Its body has
+ * no sentinel test and never will: the `$default` bitmask is a *declared trailing parameter* of the
+ * JVM method (`docs/pythonx-adapter-design.md` §5.2), so `pythonx` computes an integer instead of
+ * writing `None` into a slot, and there is no branch for the body to have. Carrying a [ThunkSpec] is
+ * that evidence -- it is set by exactly one path, the one that emits the mask parameter -- so the
+ * rule stays "derived from the body", with two bodies to derive from rather than one.
  */
 private fun omittableSlotsOf(entry: ArtifactCallable): List<Boolean> =
-    if ("== null" in entry.lambdaBody) entry.paramHasDefault else entry.paramHasDefault.map { false }
+    if ("== null" in entry.lambdaBody || entry.thunk != null) entry.paramHasDefault else entry.paramHasDefault.map { false }
 
 private fun renderEntry(entry: ArtifactCallable): String {
     val paramTags = entry.paramTags.joinToString(", ") { "$TYPE_TAG.$it" }
@@ -130,6 +159,26 @@ private fun renderEntry(entry: ArtifactCallable): String {
         |    callable = ${entry.lambdaBody},
         |)
     """.trimMargin()
+}
+
+/**
+ * The stand-in [ArtifactScanner] writes into a composable's body for the thunk class, resolved here
+ * because only the fragment knows its own name.
+ *
+ * A token rather than the real name because the walk that builds the body does not yet know which
+ * artefact's fragment it will land in -- and passing the name into `scanJar` would put a Gradle
+ * concern (what a coordinate is called) inside the walker. Substituted in exactly one place, so the
+ * `.kt` and the `.class` [generateThunkClass] emits cannot name different classes.
+ */
+internal const val THUNK_CLASS_TOKEN = "%THUNKS%"
+
+/** Every thunk one fragment needs, in the order [ArtifactCallable.thunkIndex] promises. */
+internal fun thunkSpecsOf(entries: List<ArtifactCallable>): List<ThunkSpec> {
+    val thunked = entries.filter { it.thunk != null }.sortedBy { it.thunkIndex }
+    require(thunked.mapIndexed { position, entry -> entry.thunkIndex == position }.all { it }) {
+        "thunk indices must be dense and start at 0: ${thunked.map { it.thunkIndex }}"
+    }
+    return thunked.map { it.thunk!! }
 }
 
 /**
@@ -171,7 +220,10 @@ internal fun renderArtifactFragmentSource(fragment: ArtifactFragment): String = 
     appendLine("    override val moduleName: String = ${fragment.moduleName.quoted()}")
     appendLine()
     appendLine("    override fun entries(): List<$EXPOSED_CALLABLE> = listOf(")
-    fragment.entries.forEach { appendLine(renderEntry(it).prependIndent("        ") + ",") }
+    val thunks = thunkClassQualifiedName(fragment.objectName)
+    fragment.entries.forEach {
+        appendLine(renderEntry(it).replace(THUNK_CLASS_TOKEN, thunks).prependIndent("        ") + ",")
+    }
     appendLine("    )")
     appendLine("}")
 }

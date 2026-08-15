@@ -171,6 +171,15 @@ handling at all. Every widget in `pycomposeui` is `@Composable`. Nothing in `pyt
 leave chaquopy until this is designed. *(read from source; not runtime-verified.)* This is the
 smallest and most blocking item, and it is entirely inside this repository.
 
+> **Closed — see `docs/pythonx-adapter-design.md` §5.6.** `Text('hi')` written in Python now draws
+> through the real `androidx.compose.material3.Text` (`:ksp-fixtures:compose`'s
+> `ComposableRenderTest`: 71 non-background pixels against 0 for an empty body). The paragraph above
+> is right that a *generated Kotlin* entry for a widget cannot compile, and that is not the route
+> taken: an artefact composable's call site is emitted as **bytecode**, with `$composer`, `$changed`
+> and `$default` exposed as ordinary slots, and `pythonx` computes the mask. `BindingPolicy` does now
+> have `@Composable` handling and what it does is **decline** — a composable in the consumer's *own
+> source* has no compiled signature to call yet, which is a different problem from one in a jar.
+
 **2. `packpack` must be publishable.** One file. Without it the stated architecture is
 unimplementable.
 
