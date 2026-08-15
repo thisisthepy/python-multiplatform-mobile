@@ -1,20 +1,37 @@
-import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-
 /**
- * The artefact walker end to end: a real third-party jar the build resolves, walked at build time,
- * installed into the same `UpcallTable` KSP's own fragments go into, and imported from Python.
+ * The artefact walker's klib half, end to end: a real third-party `.klib` the build resolves,
+ * walked at build time by `KlibScanner`, installed into the same `UpcallTable` KSP's own fragments
+ * go into.
  *
- * `docs/ecosystem.md` §5b names two producers of bindings and splits them by *what they look at* --
- * KSP the consumer's own source, the walker everything the build resolves. `:ksp-fixtures:app`
- * covers the first. Nothing covered the second, which is why `androidx.compose.material3` was
- * believed to be unreachable.
+ * `:ksp-fixtures:artifact` is `docs/ecosystem.md` §5b's second producer over a **jar** -- this is
+ * the same producer over a **klib**, ROADMAP §16e's "investigated, not implemented" half. One target
+ * only, and it is `androidNativeArm64` rather than `desktop`: a jar is what a JVM target resolves, a
+ * klib is what a Kotlin/Native target resolves, and `PythonArtifactBindingsTask
+ * .artifactConfiguration`/`.artifactSourceSet` are single-valued (ROADMAP §16f #1) -- one module can
+ * wire one walked configuration, so this fixture is the klib producer's own module rather than a
+ * second target bolted onto `:artifact`.
  *
- * Deliberately a module of its own rather than another target in `:ksp-fixtures:app`: that module's
- * `CommonInstallTest` asserts `UpcallTable.moduleNames` **exactly**, and a walked artefact appearing
- * there would be a change to what `FunctionTable` means rather than an addition beside it. Keeping
- * the two apart in the build is the same judgement `ArtifactTableRenderingTest` records for the
- * generated code.
+ * `kotlinx-coroutines-core` is the klib walked, for the same reason JUnit is `:artifact`'s: a real,
+ * independently-versioned third-party artefact nothing here controls or cooperates with.
+ *
+ * ### The suite is linked by the build and run by hand
+ *
+ * KGP gives `androidNativeArm64` a `linkDebugTestAndroidNativeArm64` and **no run task** -- it
+ * registers one only where it knows how to reach a host, and an Android device is neither the build
+ * machine nor `simctl`. `:python-multiplatform` solved that for itself with a hand-written
+ * `androidNativeArm64Test` task (device selection, `adb push --sync` of a 60 MB stdlib, a
+ * TeamCity-to-JUnit-XML parser) that is project-local. Until that is generalised, this module's
+ * suite runs like this, reusing the payload that task already stages on the device:
+ *
+ *     ./gradlew :python-multiplatform:androidNativeArm64Test   # once: stages lib/ and the stdlib
+ *     ./gradlew :ksp-fixtures:klib-artifact:linkDebugTestAndroidNativeArm64
+ *     D=/data/local/tmp/pmp-nativetest-arm64-v8a
+ *     adb push ksp-fixtures/klib-artifact/build/bin/androidNativeArm64/debugTest/test.kexe \
+ *       $D/klibtest.kexe
+ *     adb shell "chmod 755 $D/klibtest.kexe && cd $D && \
+ *       LD_LIBRARY_PATH=$D/lib PYTHONHOME=$D ./klibtest.kexe --ktest_logger=TEAMCITY"
+ *
+ * **A green ordinary build therefore says these tests compile and link, not that they pass.**
  */
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
@@ -22,16 +39,18 @@ plugins {
 }
 
 kotlin {
-    // One target. The walker reads jars, and jars are what a JVM target resolves; whether the same
-    // walk is possible over a `.klib` is `docs/ecosystem.md` §5b's open question and is not
-    // answered by adding a Native target that would silently bind nothing.
-    jvm("desktop") {
-        @OptIn(ExperimentalKotlinGradlePluginApi::class)
-        compilerOptions {
-            jvmTarget.set(JvmTarget.JVM_17)
-        }
+    androidNativeArm64 {
+        // Mirrors `:ksp-fixtures:app`'s own androidNativeArm64 linker config: the test binary needs
+        // the same CPython symbols resolved at final link time, since `python-multiplatform`'s klib
+        // only declares them via cinterop and does not itself embed a static libpython.
+        val downloadDir = project(":python-multiplatform").layout.buildDirectory.dir("python-standalone").get().asFile
+        val pyVersion = project.findProperty("pythonVersion")?.toString() ?: project.rootProject.version.toString()
+        val libVersion = pyVersion.split('.').subList(0, 2).joinToString(".")
+        val targetExtractDir = "$downloadDir/extracted/$pyVersion/android-aarch64/prefix"
+        binaries.getTest(org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType.DEBUG).linkerOpts.addAll(
+            listOf("-L$targetExtractDir/lib/", "-lpython$libVersion", "-Wl,--allow-shlib-undefined"),
+        )
     }
-    androidNativeArm64()
 
     sourceSets {
         val commonMain by getting {
@@ -39,22 +58,10 @@ kotlin {
                 implementation(projects.pythonMultiplatform)
             }
         }
-        val desktopMain by getting {
-            dependencies {
-                // A real dependency, declared the ordinary way. Nothing about it knows it is going
-                // to be walked, which is the whole claim: KSP cannot see inside it, and the walker
-                // does not need it to cooperate.
-                implementation(libs.junit)
-            }
-        }
-        val desktopTest by getting {
-            dependencies {
-                implementation(libs.kotlin.test)
-            }
-        }
         val androidNativeArm64Main by getting {
             dependencies {
-                // Coroutines is a good klib to scan
+                // A real, separately-published klib. Nothing about it knows it is going to be
+                // walked -- KlibScanner reads its ABI the same way it would read anyone else's.
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
             }
         }
@@ -67,32 +74,18 @@ kotlin {
 }
 
 pythonBindings {
-    // Neither `application` nor `com.android.application` is applied, so the aggregating role has to
-    // be stated -- this module needs a `FunctionTable` to install *beside* `ArtifactTable`.
     role.set("app")
     processor.set(projects.pythonMultiplatformKsp)
 
-    artifactConfiguration.set("desktopCompileClasspath")
-    artifactSourceSet.set("desktopMain")
-    // Narrow on purpose. `junit.runner.Version.id()` answers `"4.13.2"`, which is the artefact's own
-    // version and therefore cannot be produced by anything except the artefact's own code -- the
-    // end-to-end test reads exactly that string back out of Python.
-    artifactIncludePackages.set(listOf("junit.runner", "junit.framework"))
-}
-
-/**
- * The same JVM the library's own `desktopTest` needs: JDK 21 with the preview FFM API, and a
- * `java.library.path` for the `libpython` that `manager.loadLibPython` extracts out of
- * `python-multiplatform`'s desktop jar next to the working directory.
- *
- * `PYTHONHOME` is *not* set here -- the bindings plugin's `stagePythonHome` already points every
- * `Test` task at a staged CPython prefix, and this is the first fixture that actually exercises it.
- */
-tasks.named<Test>("desktopTest") {
-    javaLauncher.set(
-        javaToolchains.launcherFor {
-            languageVersion.set(JavaLanguageVersion.of(21))
-        },
-    )
-    jvmArgs("--enable-preview", "-Djava.library.path=.")
+    artifactConfiguration.set("androidNativeArm64CompileKlibraries")
+    artifactSourceSet.set("androidNativeArm64Main")
+    // Broad on purpose, unlike `:artifact`'s narrow `junit.runner`/`junit.framework`: coroutines'
+    // public surface is almost entirely `CoroutineScope`/`Job`/`Flow`-typed extensions, plus a couple
+    // of `@PublishedApi internal` declarations that are binary-visible but not source-visible outside
+    // the library that owns them -- none of those are bindable today, so the whole namespace yields
+    // **zero** declarations. `WalkedKlibArtifactTableTest` pins that as the correct number, not a gap:
+    // an earlier version bound the `@PublishedApi internal` one and failed to compile the first time
+    // its output was actually built rather than only unit-tested -- `KlibScanWorkAction`'s KDoc has
+    // the story. See that file's own KDoc for what the walker declines and why.
+    artifactIncludePackages.set(listOf("kotlinx.coroutines"))
 }

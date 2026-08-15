@@ -1,5 +1,7 @@
 package python.multiplatform.gradle.model
 
+import java.io.Serializable
+
 /**
  * `docs/pyi-generation-design.md` §2.2's declaration model: **one representation, produced by the
  * scanner, consumed by two renderers.**
@@ -35,6 +37,10 @@ package python.multiplatform.gradle.model
  * consumer's own source, and the artefact walker is where the third-party surface that motivates
  * stubs comes from. §2.3 records that KSP would need to read *nothing new* to supply it. The klib
  * producer does not exist at all (§0, §7).
+ *
+ * `Serializable`, along with [DeclaredParameter], [KotlinTypeModel] and [ValueClassModel]: this
+ * crosses the `WorkerExecutor` isolation boundary `KlibScanWorkAction` runs `KlibScanner` behind --
+ * see that file's KDoc for why the boundary exists at all.
  */
 internal data class DeclarationModel(
     /** The Kotlin declaration's own name -- `padding`, not `padding__Dp` and not the FQN. */
@@ -74,7 +80,7 @@ internal data class DeclarationModel(
     val parameterNamesKnown: Boolean = true,
     val isComposable: Boolean = false,
     val isSuspend: Boolean = false,
-)
+) : Serializable
 
 /** @param name `null` when the producer could not read one (§3.2); never a synthesised `arg0`. */
 internal data class DeclaredParameter(
@@ -83,7 +89,7 @@ internal data class DeclaredParameter(
     val declaresDefault: Boolean,
     /** `python.multiplatform.reflection.TypeTag`'s name, or `null` when the type was declined. */
     val boundaryTag: String? = null,
-)
+) : Serializable
 
 /**
  * A declared Kotlin type, as `@Metadata` spells it: qualified name, nullability, type arguments, and
@@ -97,7 +103,7 @@ internal data class KotlinTypeModel(
     val isNullable: Boolean = false,
     val arguments: List<KotlinTypeModel?> = emptyList(),
     val valueClass: ValueClassModel? = null,
-)
+) : Serializable
 
 /** The two booleans `python.multiplatform.gradle.artifact.ValueClassInfo` already computes, kept
  * rather than consumed inside a closure: §3.4's allowlist decision is not expressible without
@@ -106,4 +112,4 @@ internal data class ValueClassModel(
     val underlying: KotlinTypeModel,
     val constructorIsPublic: Boolean,
     val propertyIsPublic: Boolean,
-)
+) : Serializable

@@ -55,3 +55,7 @@ include(":ksp-fixtures:artifact")
 // cannot prove a positive round trip (its constructor is `internal`), so this stands in for it. See
 // its own `build.gradle.kts`.
 include(":ksp-fixtures:artifact-valueclass")
+// The same walker, pointed at a Kotlin/Native compile classpath instead of a JVM one --
+// ROADMAP §16e's "investigated, not implemented" half. `KlibScanner` reads `.klib` metadata with
+// `LibraryAbiReader` instead of ASM.
+include(":ksp-fixtures:klib-artifact")

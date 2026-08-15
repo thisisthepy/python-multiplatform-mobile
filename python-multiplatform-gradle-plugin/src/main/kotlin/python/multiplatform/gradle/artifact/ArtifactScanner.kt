@@ -110,6 +110,23 @@ import java.util.jar.JarFile
  * `suspend` is declined explicitly via `@Metadata` rather than relying on [boundaryTypeOf] rejecting
  * its `Continuation` parameter, per CLAUDE.md's "제외한 것을 조용히 빠뜨리지 마라".
  */
+/**
+ * One declaration, seen by both consumers of a walk at the moment it is read.
+ *
+ * [callable] is `null` exactly when the binder declined it, and [declaration] says why. Keeping them
+ * together up to the end of the walk is what makes `docs/pyi-generation-design.md` §2.2's "the two
+ * renderers cannot drift" a property of the code rather than a convention.
+ *
+ * **Top-level, not nested in [ArtifactScanner], because there are two producers.** [KlibScanner]
+ * builds these too and hands them to [ArtifactScanner.disambiguateOverloads], so that the `name__<types>`
+ * spelling has exactly one implementation: both producers' output lands in one
+ * `python.multiplatform.generated.artifacts.ArtifactTable`, and a consumer that had to learn two
+ * meanings for `__` depending on which walker found the declaration would be reading a table that is
+ * only accidentally consistent. It is also what gives a klib declaration a
+ * [DeclarationModel] and therefore a `.pyi` stub.
+ */
+internal data class Candidate(val callable: ArtifactCallable?, val declaration: DeclarationModel)
+
 internal object ArtifactScanner {
 
     /** `kotlin.Metadata` is `RUNTIME`-retained, so ASM reads it as an ordinary visible annotation --
@@ -177,15 +194,6 @@ internal object ArtifactScanner {
         // a per-class grouping cannot see and would have emitted twice under one table key.
         return disambiguateOverloads(entries)
     }
-
-    /**
-     * One declaration, seen by both consumers of this walk at the moment it is read.
-     *
-     * [callable] is `null` exactly when the binder declined it, and [declaration] says why. Keeping
-     * them together up to the end of the walk is what makes `docs/pyi-generation-design.md` §2.2's
-     * "the two renderers cannot drift" a property of the code rather than a convention.
-     */
-    private data class Candidate(val callable: ArtifactCallable?, val declaration: DeclarationModel)
 
     /**
      * The `k` of each named class's `kotlin.Metadata`, or absent from the map when the class carries
@@ -340,7 +348,7 @@ internal object ArtifactScanner {
      * `paramNames` and `paramTypeNames` for it to select on. This layer's job is to make the choice
      * *possible*, not to make it.
      */
-    private fun disambiguateOverloads(candidates: List<Candidate>): List<Candidate> {
+    internal fun disambiguateOverloads(candidates: List<Candidate>): List<Candidate> {
         val schemes: List<(ArtifactCallable) -> String> = listOf(
             { it.overloadSuffix(includeReceiver = false, qualified = false) },
             { it.overloadSuffix(includeReceiver = true, qualified = false) },

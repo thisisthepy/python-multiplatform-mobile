@@ -33,6 +33,74 @@ dependencies {
     // reach into Gradle's own copy.
     implementation("org.ow2.asm:asm:9.7.1")
     implementation("org.ow2.asm:asm-tree:9.7.1")
+
+    // `KlibScanner`'s reader: `org.jetbrains.kotlin.library.abi.LibraryAbiReader`, which decodes a
+    // `.klib`'s ABI protobuf into Kotlin-typed declarations. A klib is what a Kotlin/Native target
+    // resolves where a JVM target resolves a jar, so this is to `KlibScanner` exactly what ASM plus
+    // `kotlin-metadata-jvm` are to `ArtifactScanner` -- and a *plugin* dependency for the same
+    // reason both of those are: the walk happens once, at build time, and nothing this plugin emits
+    // into a consumer's build re-reads a klib at run time.
+    //
+    // **It is 55.6 MiB (58,251,465 bytes), by far the largest thing on this classpath, so where that
+    // lands was measured rather than assumed:**
+    //   - not in the library. `python-multiplatform` does not depend on this plugin;
+    //     `:python-multiplatform:dependencies` reports `kotlin-compiler-embeddable:2.0.20` in no
+    //     configuration at all, `desktopRuntimeClasspath` included.
+    //   - not on a consumer's *application* classpath. `:ksp-fixtures:app:dependencies` reports zero
+    //     occurrences of `2.0.20`. (It does report `kotlin-compiler-embeddable:2.4.0` and
+    //     `2.4.20-Beta2` under `kotlinCompilerPluginClasspath*` and the commonizer's configurations
+    //     -- KGP's own, present before this dependency existed.)
+    //   - it *is* on a consumer's **buildscript** classpath: `implementation` becomes `runtime` scope
+    //     in this plugin's published POM (checked in the generated `pom-default.xml`), so applying
+    //     the plugin downloads it into the Gradle cache and puts it on the plugin classloader.
+    //
+    // Gradle 8.11.1 ships a byte-identical copy in its own `lib/` (same SHA-256), but plugin
+    // classloaders see a filtered view of Gradle's runtime -- `org.gradle.*` API packages, not
+    // `org.jetbrains.kotlin.library.abi` -- so this is a real coordinate rather than a reach into
+    // Gradle's own copy, for the same reason the ASM lines above are.
+    //
+    // ### Does not survive a consumer's classloader hierarchy called directly -- fixed with isolation
+    //
+    // Called from `PythonArtifactBindingsTask`'s/`PythonStubsTask`'s own classloader,
+    // `KlibScanner.scanKlib` fails at execution with `NoSuchMethodError:
+    // KotlinLibraryImplKt.createKotlinLibrary$default(...)`. Not a version conflict Gradle could
+    // resolve -- `buildEnvironment` reports this coordinate at 2.0.20 on that project's plugin
+    // classpath, correctly. It is **class mixing across classloader scopes**, measured by printing
+    // each class's `CodeSource` from inside the task:
+    //
+    //     org.jetbrains.kotlin.library.abi.LibraryAbiReader                 <- 2.0.20, this jar
+    //     org.jetbrains.kotlin.library.ToolingSingleFileKlibResolveStrategy <- 2.0.20, this jar
+    //     org.jetbrains.kotlin.library.impl.KotlinLibraryImplKt             <- kotlin-util-klib 2.4.20-Beta2
+    //     org.jetbrains.kotlin.konan.file.ZipFileSystemAccessor             <- kotlin-util-io 2.4.20-Beta2
+    //
+    // The last two come from the **root project's** buildscript scope, which the Kotlin Gradle Plugin
+    // populates and which is a *parent* of every subproject's plugin classloader. Parent-first
+    // delegation hands out `kotlin-util-klib`'s half of `org.jetbrains.kotlin.library.*` at KGP's
+    // version and this jar's half at 2.0.20, and the halves do not fit. Any consumer that declares
+    // KGP in its root `plugins {}` block reproduces it.
+    //
+    // Aligning the version does not fix it -- tried both ways:
+    //   - `2.4.20-Beta2` alone does not compile: Gradle's embedded Kotlin is 2.0.20 and that jar's
+    //     modules carry metadata 2.2.0-2.4.0 ("expected version is 2.0.0").
+    //   - with `-Xskip-metadata-version-check` it compiles and gets further, then fails with
+    //     `NoClassDefFoundError: org/jetbrains/kotlin/protobuf/Internal$EnumLite` -- the parent's
+    //     `kotlin-util-klib` needs the protobuf runtime shaded *inside this jar*, in the child scope
+    //     it cannot see. The mixing is symmetric; neither version wins.
+    //
+    // **Fixed with real isolation**: `KlibScanWorkAction`
+    // (`python-multiplatform-gradle-plugin/src/main/kotlin/python/multiplatform/gradle/artifact
+    // /KlibScanWorkAction.kt`) runs every `KlibScanner` call behind a `WorkerExecutor`
+    // `classLoaderIsolation` whose explicit classpath is this plugin's own classloader's `.urLs` --
+    // the child scope only, none of the root buildscript scope above it. An isolated worker
+    // classloader's parent is Gradle's own minimal worker infrastructure, not that root scope, so
+    // `org.jetbrains.kotlin.library.*` has exactly one source inside the worker. Confirmed against a
+    // real consumer build, not only this plugin's own unit tests:
+    // `:ksp-fixtures:klib-artifact:generatePythonArtifactBindings` and `:generatePythonStubs` both
+    // pass and emit the walker's real output (`kotlinx.coroutines.flow.internal.checkIndexOverflow`).
+    //
+    // Pinned to 2.0.20 for the reason the `kotlin-metadata-jvm` comment below spells out, and that
+    // pin is also the version floor `KlibScanner`'s KDoc measures its extension-receiver decline
+    // against.
     implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.0.20")
 
     // Reads `@Metadata`'s `d1`/`d2` payload -- the facts ASM's view of a class file cannot reach:
@@ -72,6 +140,24 @@ val walkerFixtureJar: Configuration by configurations.creating {
 
 dependencies {
     walkerFixtureJar(libs.junit) { isTransitive = false }
+}
+
+/**
+ * A real third-party klib for [KlibScannerTest], the klib counterpart of [walkerFixtureJar].
+ *
+ * `kotlinx-coroutines-core-androidnativearm64` is Kotlin/Native's per-target leaf module -- an
+ * ordinary Maven artifact (a `.klib` file at a GAV coordinate, no Kotlin Gradle Plugin variant
+ * resolution involved) despite the platform in its name, so a plain resolvable configuration reaches
+ * it the same way [walkerFixtureJar] reaches a jar. `isTransitive = false` for the same reason too:
+ * the test wants one file, not `atomicfu` and `kotlin-stdlib` pulled in behind it.
+ */
+val walkerFixtureKlib: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+
+dependencies {
+    walkerFixtureKlib("org.jetbrains.kotlinx:kotlinx-coroutines-core-androidnativearm64:1.8.1") { isTransitive = false }
 }
 
 gradlePlugin {
@@ -166,4 +252,6 @@ tasks.test {
     // Resolved here rather than inside the test so the test never has to know a repository, a
     // coordinate or a cache layout -- it reads one system property holding one path.
     systemProperty("python.multiplatform.walkerFixtureJar", walkerFixtureJar.singleFile.absolutePath)
+    inputs.files(walkerFixtureKlib).withPropertyName("walkerFixtureKlib").withPathSensitivity(PathSensitivity.NAME_ONLY)
+    systemProperty("python.multiplatform.walkerFixtureKlib", walkerFixtureKlib.singleFile.absolutePath)
 }

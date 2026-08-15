@@ -13,7 +13,10 @@ import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
+import org.gradle.workers.WorkerExecutor
 import python.multiplatform.gradle.artifact.ArtifactScanner
+import python.multiplatform.gradle.artifact.scanKlibIsolated
+import javax.inject.Inject
 
 /**
  * `docs/pyi-generation-design.md`'s generator: `.pyi` stubs for the surface the bindings expose.
@@ -53,6 +56,9 @@ import python.multiplatform.gradle.artifact.ArtifactScanner
  */
 abstract class PythonStubsTask : DefaultTask() {
 
+    @get:Inject
+    abstract val workerExecutor: WorkerExecutor
+
     /** Every file the walked configuration resolved. */
     @get:InputFiles
     @get:PathSensitive(PathSensitivity.NAME_ONLY)
@@ -87,6 +93,15 @@ abstract class PythonStubsTask : DefaultTask() {
         val jars = artifacts.files.filter { it.isFile && it.name.endsWith(".jar") }
         val declarations = jars.sortedBy { it.name }.flatMap { jar ->
             ArtifactScanner.scanDeclarations(jar, includes, classpath = jars)
+        } + artifacts.files.filter { it.isFile && it.name.endsWith(".klib") }.sortedBy { it.name }.flatMap { klib ->
+            // A Kotlin/Native target resolves klibs where a JVM target resolves jars, and both
+            // producers now build the same `DeclarationModel` -- so a stub is not a JVM-only product.
+            // `KlibScanner`'s KDoc lists what a klib can and cannot fill; the fields it cannot are
+            // exactly the ones it declines on, and a declined declaration is not stubbed.
+            //
+            // Not a direct `KlibScanner.scanKlibDeclarations` call: same classloader-scope collision
+            // `PythonArtifactBindingsTask`'s KDoc documents, worked around the same way.
+            workerExecutor.scanKlibIsolated(klib, includes, temporaryDir).declarations
         }
 
         val manifestFile = manifest.orNull?.asFile
