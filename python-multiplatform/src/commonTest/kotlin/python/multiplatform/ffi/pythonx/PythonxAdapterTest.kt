@@ -283,6 +283,13 @@ class PythonxAdapterTest {
      * Nothing arbitrates: an argument list no overload accepts raises and **names the candidates**,
      * rather than picking the first that binds. The explicit `padding__Dp` spelling is always
      * available, which is the escape hatch that makes refusing safe.
+     *
+     * The unmatched call used to be `padding(m, 1, 2, 3)`, and it is not unmatched any more. That is
+     * the point of `PythonxDefaultsTest`: `Modifier.padding(1.dp, 2.dp, 3.dp)` compiles in Kotlin,
+     * leaving `bottom` to its default, so a dispatcher that refused it was refusing a call the
+     * language accepts. What is still unmatched is an argument of the wrong *type* -- a `str` fits no
+     * `Dp` slot and carries no handle for the `PaddingValues` one -- and defaults cannot rescue it,
+     * because omitting a parameter removes a slot rather than widening what one accepts.
      */
     @Test
     fun anUnmatchedOverloadCallNamesTheCandidatesAndTheExplicitSpellingStillWorks() = withAdapter {
@@ -292,7 +299,7 @@ class PythonxAdapterTest {
             from pythonx.compose.ui import empty_modifier, describe_modifier
             _px = {}
             try:
-                padding(empty_modifier(), 1, 2, 3)
+                padding(empty_modifier(), 'sixteen')
                 _px['miss'] = 'call succeeded'
             except TypeError as e:
                 _px['miss'] = str(e)

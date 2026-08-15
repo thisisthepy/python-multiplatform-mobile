@@ -125,7 +125,21 @@ import java.util.jar.JarFile
  * only accidentally consistent. It is also what gives a klib declaration a
  * [DeclarationModel] and therefore a `.pyi` stub.
  */
-internal data class Candidate(val callable: ArtifactCallable?, val declaration: DeclarationModel)
+internal data class Candidate(
+    val callable: ArtifactCallable?,
+    val declaration: DeclarationModel,
+    /**
+     * Set only by [ArtifactScanner]'s own Kotlin path, and only until
+     * [ArtifactScanner.applyDefaultOmission] has consumed it.
+     *
+     * Whether a defaulted argument may be left out of a generated call is not decidable where the
+     * call is built -- see [ArtifactScanner.DefaultOmissionPlan] -- so the body is built twice: once
+     * passing everything, and again once the whole walk is visible. A candidate that reaches
+     * [ArtifactScanner.disambiguateOverloads] still carrying one has not been through that pass;
+     * that constructor drops it, which is correct, because by then the body is settled.
+     */
+    val plan: ArtifactScanner.DefaultOmissionPlan? = null,
+)
 
 internal object ArtifactScanner {
 
@@ -188,11 +202,16 @@ internal object ArtifactScanner {
             val node = readClassNodeOrNull(bytes) ?: return@forEachClassEntry
             entries += scanClassNode(node, artifactClasspath)
         }
-        // Over the whole walk rather than per class: an overload set is a property of a *package*,
-        // and Kotlin lets one live in two files. `docs/kotlin-extensions-in-python.md` §2.5 counts 11
-        // such pairs in Compose alone -- two file facades, two `ClassNode`s, one Kotlin name -- which
-        // a per-class grouping cannot see and would have emitted twice under one table key.
-        return disambiguateOverloads(entries)
+        // Both passes are over the whole walk rather than per class, and for the same reason: an
+        // overload set is a property of a *package*, and Kotlin lets one live in two files.
+        // `docs/kotlin-extensions-in-python.md` §2.5 counts 11 such pairs in Compose alone -- two
+        // file facades, two `ClassNode`s, one Kotlin name -- which a per-class grouping cannot see.
+        // It would have emitted them twice under one table key, and it would have generated calls
+        // that do not compile (see [applyDefaultOmission]).
+        //
+        // Defaults first: [disambiguateOverloads] renames entries, and the sibling test needs the
+        // Kotlin name they still share.
+        return disambiguateOverloads(applyDefaultOmission(entries))
     }
 
     /**
@@ -545,36 +564,46 @@ internal object ArtifactScanner {
         val qualifiedName = "$owner.${function.kotlinName}"
         val argumentExpressions = resolvedParams.mapIndexed { index, type -> type.read("args[$index]") }
 
-        val (call, imports) = if (function.isExtension) {
-            // Kotlin has no syntax to call an extension function by fully qualifying it the way an
-            // ordinary top-level function or a Java static can be (`pkg.fn(args)`) -- the receiver
-            // can never be a positional argument, only `receiver.fn(args)`. An import is the only
-            // way to name it without writing the receiver's own type out, which this walker does not
-            // otherwise need to know.
-            val alias = "artifact_ext_" + qualifiedName.map { if (it.isLetterOrDigit()) it else '_' }.joinToString("")
-            val receiverExpression = argumentExpressions.first()
-            val remainingArguments = argumentExpressions.drop(1)
-            ("$receiverExpression.$alias(${remainingArguments.joinToString(", ")})") to
-                listOf("import $owner.${function.kotlinName} as $alias")
+        // Kotlin has no syntax to call an extension function by fully qualifying it the way an
+        // ordinary top-level function or a Java static can be (`pkg.fn(args)`) -- the receiver can
+        // never be a positional argument, only `receiver.fn(args)`. An import is the only way to
+        // name it without writing the receiver's own type out, which this walker does not otherwise
+        // need to know.
+        val alias = "artifact_ext_" + qualifiedName.map { if (it.isLetterOrDigit()) it else '_' }.joinToString("")
+        val imports =
+            if (function.isExtension) listOf("import $owner.${function.kotlinName} as $alias") else emptyList()
+
+        /** The call that passes everything, positionally -- byte for byte what this generator
+         * emitted before defaults existed, and still the `else`-less first branch below. */
+        val call = if (function.isExtension) {
+            "${argumentExpressions.first()}.$alias(${argumentExpressions.drop(1).joinToString(", ")})"
         } else {
-            ("$owner.${function.kotlinName}(${argumentExpressions.joinToString(", ")})") to emptyList()
+            "$owner.${function.kotlinName}(${argumentExpressions.joinToString(", ")})"
         }
 
-        val body = returnType.wrapReturn(call)
         val arity = resolvedParams.size
+        // The all-present body, and **only** that one, is decided here. Which arguments may be left
+        // out cannot be: it depends on what else carries this Kotlin name, and an overload set is a
+        // property of a package that one file does not see (this object's KDoc, and
+        // `docs/kotlin-extensions-in-python.md` §2.5's 11 split pairs). [applyDefaultOmission] runs
+        // over the finished walk and fills this in.
         val callable = ArtifactCallable(
             name = qualifiedName,
             arity = arity,
             paramTags = resolvedParams.map { it.tag },
             returnTag = returnType.tag,
-            lambdaBody = if (arity == 0) "{ $body }" else "{ args -> $body }",
+            lambdaBody = if (arity == 0) "{ ${returnType.wrapReturn(call)} }"
+            else "{ args -> ${returnType.wrapReturn(call)} }",
             imports = imports,
             receiverTypeName = function.receiverType?.let { kotlinClassifierNameOf(it) },
             paramNames = function.allParameterNames,
             paramTypeNames = paramTypeNames,
             returnTypeName = returnTypeName,
-            paramHasDefault = function.allParameterDefaults,
+            // Deliberately all `false` until [applyDefaultOmission] says otherwise: this column is a
+            // statement about **this body**, and this body passes everything.
+            paramHasDefault = List(resolvedParams.size) { false },
         )
+        val omittable = omittableParameterIndices(function, receiverIndex)
         return Candidate(
             callable = callable,
             declaration = model.copy(
@@ -585,8 +614,268 @@ internal object ArtifactScanner {
                     parameter.copy(boundaryTag = resolvedParams[index + receiverIndex].tag)
                 },
             ),
+            plan = if (omittable.isEmpty()) null else DefaultOmissionPlan(
+                omittable = omittable.sorted(),
+                valueIndices = (receiverIndex until resolvedParams.size).toList(),
+                declaredDefaults = function.allParameterDefaults,
+                buildBody = { allowed ->
+                    val branched = presenceBranchedCall(
+                        function, owner, alias, argumentExpressions, receiverIndex,
+                        qualifiedName, omittable.sorted(), call, allowed,
+                    )
+                    "{ args -> ${returnType.wrapReturn(branched)} }"
+                },
+            ),
         )
     }
+
+    /**
+     * What one bound declaration would need in order to offer default omission, held until the whole
+     * walk is visible.
+     *
+     * The decision cannot be local. Kotlin resolves `receiver.padding()` against **every** overload
+     * of `padding` that is applicable, so whether a branch that writes no argument compiles at all is
+     * a fact about the other members of the overload set -- and those may be in another file, another
+     * facade or another multi-file part. Building the body eagerly and pruning it afterwards was
+     * tried and is worse: the pruning would be textual.
+     *
+     * Measured, not anticipated. Emitting every subset unconditionally failed to compile
+     * `foundation-layout-desktop-1.6.11` in six places -- `WindowInsets(Dp×4)` against
+     * `WindowInsets(Int×4)`, `paddingFromBaseline(Dp,Dp)` against `(TextUnit,TextUnit)`, and
+     * `paddingFrom(AlignmentLine,Dp,Dp)` against its `TextUnit` twin -- each one the branch that
+     * writes nothing, each one *"Overload resolution ambiguity between candidates"*.
+     */
+    internal class DefaultOmissionPlan(
+        /** Indices into `allParameterTypes` that declare a default and that this generator is
+         * willing to write a call without. */
+        val omittable: List<Int>,
+        /** Every value-parameter index, the extension receiver excluded. */
+        val valueIndices: List<Int>,
+        /** What the *declaration* says, as opposed to what the binding will offer -- the sibling test
+         * needs Kotlin's own view, because Kotlin is what resolves the generated call. */
+        val declaredDefaults: List<Boolean>,
+        /** @param allowed the omission sets to generate a call for. Everything else becomes a branch
+         *   that refuses at run time; see [presenceBranchedCall]. */
+        val buildBody: (allowed: Set<Set<Int>>) -> String,
+    )
+
+    /**
+     * How many defaulted parameters one declaration may have before the generator stops offering
+     * omission at all.
+     *
+     * Presence branching costs **one generated call expression per subset** of the defaulted
+     * parameters, so the cost is 2^n and it is paid at build time, on every build, by whoever asked
+     * for the package. Measured over everything the walker binds today -- all of
+     * `foundation-layout-desktop-1.6.11`, `kotlin-stdlib`'s `kotlin.text` and the whole JUnit 4 jar
+     * -- the widest bound declaration declares **four** defaults (`padding(start, top, end, bottom)`
+     * and six others), so 64 is well clear of the corpus while bounding an artefact nobody has
+     * measured.
+     *
+     * `docs/pythonx-adapter-design.md` §4.5 rejects presence branching outright on "2^15 branches for
+     * `Text`". That objection is to an unbounded version of it and, separately, to a case that is not
+     * in the table: `Text` is a `@Composable`, and the arity check in [kotlinCandidates] declines
+     * every composable for the synthetic `$composer`/`$changed` parameters its JVM signature carries.
+     * If composables ever become bindable they will arrive with 15+ defaults and land past this cap
+     * -- which is the honest outcome, because the mechanism that suits them is the `$default` mask
+     * §5.2 found is a *declared* trailing parameter there, not this one.
+     */
+    internal const val MAX_OMITTABLE_PARAMETERS = 6
+
+    /**
+     * The slots the generated body will let Python leave out, as indices into `allParameterTypes`.
+     *
+     * Empty means "this declaration is bound exactly as it was before defaults existed". Four
+     * separate reasons produce that, and all four are deliberate:
+     *
+     * 1. nothing declares a default -- the common case, 43 of `foundation-layout`'s 70 entries;
+     * 2. more than [MAX_OMITTABLE_PARAMETERS] do (see there);
+     * 3. a parameter name is missing or is not one a named argument can be written from. Every
+     *    partial branch names what it passes, because an omission that is not a trailing one has no
+     *    positional spelling, so a nameless parameter makes the whole set unusable;
+     * 4. the receiver, always. It is positional in Kotlin and [RECEIVER_PARAMETER_NAME] is
+     *    deliberately not an identifier.
+     */
+    private fun omittableParameterIndices(function: ResolvedFunction, receiverIndex: Int): Set<Int> {
+        val names = function.allParameterNames
+        if (names.size != function.allParameterTypes.size) return emptySet()
+        val indices = function.allParameterDefaults.indices.filter { index ->
+            index >= receiverIndex &&
+                function.allParameterDefaults.getOrElse(index) { false } &&
+                names[index] != RECEIVER_PARAMETER_NAME
+        }
+        if (indices.isEmpty() || indices.size > MAX_OMITTABLE_PARAMETERS) return emptySet()
+        // Every *passed* argument in a partial branch is named, not only the defaulted ones, so a
+        // name this cannot write anywhere in the signature sinks the whole set rather than just its
+        // own slot.
+        if (names.drop(receiverIndex).any { !isWritableParameterName(it) }) return emptySet()
+        return indices.toSet()
+    }
+
+    /**
+     * Decides, over the finished walk, which omission sets each planned declaration may offer, and
+     * rewrites its body and its `paramHasDefault` accordingly.
+     *
+     * ### The rule
+     *
+     * A branch that writes the arguments *W* is refused when **any sibling overload of the same
+     * Kotlin name would also accept exactly *W***: same receiver, a parameter of the same name and
+     * declared type for every member of *W*, and a default on everything else it declares. That is
+     * the shape Kotlin reports as `Overload resolution ambiguity`, and the generated call has no way
+     * to break the tie -- there are no arguments left to type-annotate, which is exactly why the tie
+     * exists.
+     *
+     * Deliberately **not** a model of Kotlin's specificity rules. Kotlin does resolve some of these
+     * (it prefers the two-`Dp` `padding` over the four-`Dp` one when nothing is written, on parameter
+     * count), and reproducing that here would mean a generated call silently binding to a *different
+     * declaration* than the table entry names. Refusing the branch instead costs one spelling --
+     * `padding__Dp_Dp()` with no arguments -- and buys that every branch calls the declaration its
+     * entry is named after.
+     *
+     * ### What a refused branch becomes
+     *
+     * Not a missing branch: `pythonx` reads `paramHasDefault` per slot and cannot express "these two
+     * but not both at once", so the call is reachable and has to answer for itself. It throws, naming
+     * the declaration and saying what to write, which is the same answer
+     * [disambiguateOverloads] gives one level up for the same reason.
+     */
+    private fun applyDefaultOmission(candidates: List<Candidate>): List<Candidate> {
+        if (candidates.none { it.plan != null }) return candidates
+        val byName = candidates.filter { it.callable != null }.groupBy { it.callable!!.name }
+        return candidates.map { candidate ->
+            val plan = candidate.plan ?: return@map candidate
+            val callable = candidate.callable ?: return@map candidate
+            val siblings = byName[callable.name].orEmpty().filter { it !== candidate }
+            val allowed = plan.omittable.powerSet()
+                .filter { it.isNotEmpty() && !anySiblingAlsoAccepts(candidate, plan, siblings, it) }
+                .toSet()
+            if (allowed.isEmpty()) return@map candidate.copy(plan = null)
+            val omittableNow = plan.omittable.filter { index -> allowed.any { index in it } }.toSet()
+            Candidate(
+                callable = callable.copy(
+                    lambdaBody = plan.buildBody(allowed),
+                    // The binding's contract, not the declaration's: exactly the slots the rewritten
+                    // body has a call for that does not mention them. `pythonx._bind` fills the
+                    // sentinel from this, so it has to describe the body and not the Kotlin source.
+                    paramHasDefault = callable.paramHasDefault.indices.map { it in omittableNow },
+                ),
+                declaration = candidate.declaration.copy(
+                    // Kept in step one consumer further out: `PyiRendering` writes `= ...` from this
+                    // field, and a stub promising an omission the binding refuses would type-check at
+                    // the call site and fail at run time -- `docs/pyi-generation-design.md` §3.2's
+                    // rule about parameter names, applied to their defaults.
+                    parameters = candidate.declaration.parameters.mapIndexed { index, parameter ->
+                        parameter.copy(declaresDefault = plan.valueIndices[index] in omittableNow)
+                    },
+                ),
+            )
+        }
+    }
+
+    private fun anySiblingAlsoAccepts(
+        candidate: Candidate,
+        plan: DefaultOmissionPlan,
+        siblings: List<Candidate>,
+        omitted: Set<Int>,
+    ): Boolean {
+        val callable = candidate.callable ?: return false
+        val written = plan.valueIndices.filter { it !in omitted }
+            .map { callable.paramNames[it] to callable.paramTypeNames[it] }
+        return siblings.any { sibling ->
+            val other = sibling.callable ?: return@any false
+            if (other.receiverTypeName != callable.receiverTypeName) return@any false
+            val otherValues = other.paramNames.indices
+                .filter { other.paramNames[it] != RECEIVER_PARAMETER_NAME }
+                .map { Triple(other.paramNames[it], other.paramTypeNames.getOrNull(it), plan.siblingDeclares(sibling, it)) }
+            written.all { (name, type) -> otherValues.any { it.first == name && it.second == type } } &&
+                otherValues.filterNot { written.any { w -> w.first == it.first && w.second == it.second } }
+                    .all { it.third }
+        }
+    }
+
+    /** The sibling's *declared* defaults, which is Kotlin's view and therefore the one that decides
+     * applicability. `ArtifactCallable.paramHasDefault` is the binding's view and is not it -- at
+     * this point in the walk it is still all `false` for everyone. */
+    private fun DefaultOmissionPlan.siblingDeclares(sibling: Candidate, index: Int): Boolean {
+        val receiverIndex = if (sibling.callable?.receiverTypeName != null) 1 else 0
+        return sibling.declaration.parameters.getOrNull(index - receiverIndex)?.declaresDefault ?: false
+    }
+
+    private fun List<Int>.powerSet(): List<Set<Int>> =
+        (0 until (1 shl size)).map { mask -> filterIndexed { bit, _ -> (mask shr bit) and 1 == 1 }.toSet() }
+
+    /**
+     * One `when` over which defaulted slots arrived as `null`, with one call expression per subset.
+     *
+     * The subject is a bitmask built from the sentinel tests themselves rather than a chain of
+     * `if`s, so the generated text is 2^n *branches* but only n null tests, and reads as a table of
+     * the omission sets rather than as nested conditionals. Mask bit `j` is set when the `j`-th
+     * omittable slot was **left out**, so mask `0` is [allPresentCall] -- unchanged from what this
+     * generator emitted before -- and the all-omitted mask becomes the `else` Kotlin requires.
+     *
+     * A mask outside [allowed] is a call [applyDefaultOmission] refused to generate. It becomes a
+     * `throw` rather than a silent fallback to the all-present call, which would pass a `null` into
+     * a cast and fail somewhere else entirely.
+     */
+    private fun presenceBranchedCall(
+        function: ResolvedFunction,
+        owner: String,
+        alias: String,
+        argumentExpressions: List<String>,
+        receiverIndex: Int,
+        qualifiedName: String,
+        ordered: List<Int>,
+        allPresentCall: String,
+        allowed: Set<Set<Int>>,
+    ): String {
+        val names = function.allParameterNames
+        val subject = ordered.mapIndexed { bit, index ->
+            "(if (args[$index] == null) ${1 shl bit} else 0)"
+        }.joinToString(" + ")
+
+        fun callOmitting(omitted: Set<Int>): String {
+            val arguments = argumentExpressions.indices
+                .filter { it >= receiverIndex && it !in omitted }
+                .joinToString(", ") { "${writeParameterName(names[it])} = ${argumentExpressions[it]}" }
+            return if (function.isExtension) "${argumentExpressions.first()}.$alias($arguments)"
+            else "$owner.${function.kotlinName}($arguments)"
+        }
+
+        val last = (1 shl ordered.size) - 1
+        return buildString {
+            appendLine("when ($subject) {")
+            for (mask in 0..last) {
+                val omitted = ordered.filterIndexed { bit, _ -> (mask shr bit) and 1 == 1 }.toSet()
+                val label = if (mask == last) "else" else "$mask"
+                val branch = when {
+                    mask == 0 -> allPresentCall
+                    omitted in allowed -> callOmitting(omitted)
+                    else -> "throw IllegalArgumentException(" +
+                        "\"$qualifiedName: leaving out " +
+                        omitted.joinToString(" and ") { names[it] } +
+                        " is ambiguous with another overload of the same name; write ${
+                            if (omitted.size == 1) "it" else "at least one of them"
+                        }\")"
+                }
+                appendLine("    $label -> $branch")
+            }
+            append("}")
+        }
+    }
+
+    /** Kotlin's hard keywords: a parameter declared with one carries backticks in source and none in
+     * `@Metadata`, so a named argument written from the metadata name alone would not parse. */
+    private val KOTLIN_HARD_KEYWORDS = setOf(
+        "as", "break", "class", "continue", "do", "else", "false", "for", "fun", "if", "in",
+        "interface", "is", "null", "object", "package", "return", "super", "this", "throw", "true",
+        "try", "typealias", "typeof", "val", "var", "when", "while",
+    )
+
+    private fun isWritableParameterName(name: String): Boolean =
+        name.isNotEmpty() && name.first().let { it.isLetter() || it == '_' } &&
+            name.all { it.isLetterOrDigit() || it == '_' }
+
+    private fun writeParameterName(name: String): String =
+        if (name in KOTLIN_HARD_KEYWORDS) "`$name`" else name
 
     private fun candidateFromDescriptor(owner: String, methodName: String, descriptor: String): Candidate? {
         val (paramDescriptors, returnDescriptor) = splitMethodDescriptor(descriptor)

@@ -1,7 +1,10 @@
 package fixture.artifact
 
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
@@ -49,3 +52,35 @@ fun modifierElementCount(modifier: Modifier): Int = modifier.foldIn(0) { count, 
 /** Whether [modifier] is structurally `Modifier.padding(pad.dp).size(size.dp)`. */
 fun equalsPaddingThenSize(modifier: Modifier, pad: Double, size: Double): Boolean =
     modifier == Modifier.padding(pad.dp).size(size.dp)
+
+/**
+ * The comparisons `WalkedArtifactDefaultOmissionTest` needs, and why each is written the way it is.
+ *
+ * A default is only *observable* where the value it supplies differs from what a caller could have
+ * accidentally passed. Compose's `padding` defaults are all `0.dp`, so "omitted" and "passed zero"
+ * produce equal modifiers and would prove nothing. These three do not have that problem:
+ *
+ * | comparison | the default it reaches | why Python could not have faked it |
+ * |---|---|---|
+ * | [equalsFillMaxWidth] | `fraction = 1f` | a body that passed `0f` into the omitted slot builds a different `FillElement`, and [equalsFillMaxWidthFraction] is the control that says so |
+ * | [equalsWrapContentSize] | `align = Alignment.Center` | `Alignment` crosses as a `TypeTag.OBJECT` handle and **no bound declaration anywhere produces one**, so if the default were not reached there would be nothing to put in the slot at all. This is `docs/pythonx-adapter-design.md` §4.5's argument in a single function |
+ * | [equalsVerticalPadding] | `start`, `top` and `end` | the argument that *is* written sits in the middle of the list, which §4.5's arity-prefix candidate cannot express |
+ */
+fun equalsFillMaxWidth(modifier: Modifier): Boolean = modifier == Modifier.fillMaxWidth()
+
+/** The negative control for [equalsFillMaxWidth]: the same call with the fraction written out. */
+fun equalsFillMaxWidthFraction(modifier: Modifier, fraction: Double): Boolean =
+    modifier == Modifier.fillMaxWidth(fraction.toFloat())
+
+fun equalsWrapContentSize(modifier: Modifier): Boolean = modifier == Modifier.wrapContentSize()
+
+/** The negative control for [equalsWrapContentSize]: an alignment that is not the default. */
+fun equalsWrapContentSizeTopStart(modifier: Modifier): Boolean =
+    modifier == Modifier.wrapContentSize(Alignment.TopStart)
+
+fun equalsVerticalPadding(modifier: Modifier, vertical: Double): Boolean =
+    modifier == Modifier.padding(vertical = vertical.dp)
+
+/** The negative control for [equalsVerticalPadding]: the same number in the *horizontal* slot. */
+fun equalsHorizontalPadding(modifier: Modifier, horizontal: Double): Boolean =
+    modifier == Modifier.padding(horizontal = horizontal.dp)

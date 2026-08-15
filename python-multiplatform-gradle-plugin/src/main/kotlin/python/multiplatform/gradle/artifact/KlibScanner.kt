@@ -277,7 +277,21 @@ internal object KlibScanner {
             // supplied"; `DeclarationModel.parameterNamesKnown` says the same thing to the stub side.
             paramTypeNames = model.parameters.map { it.type.qualifiedName },
             returnTypeName = model.returnType.qualifiedName,
-            paramHasDefault = model.parameters.map { it.declaresDefault },
+            // Deliberately all `false`, not `model.parameters.map { it.declaresDefault }`.
+            // `ArtifactCallable.paramHasDefault`'s contract (see its KDoc) is a statement about
+            // [lambdaBody] -- exactly the slots the generated call may omit -- and never about the
+            // declaration. `lambdaBody` above passes every argument unconditionally; this scanner has
+            // no `ArtifactScanner.applyDefaultOmission` pass to earn a narrower answer, because a
+            // klib walk runs on its own in [KlibScanWorkAction] and never sees the whole-artifact
+            // overload picture that pass needs. Reporting `declaresDefault` here was the old, now-
+            // wrong pairing: `pythonx._bind` would have filled a slot with `null` that this body has
+            // no branch for, and the generated call would have cast a `null` where the declaration
+            // requires a value. `ArtifactRendering.omittableSlotsOf` already guarded against exactly
+            // that by reading whether the body branches on the sentinel at all -- true for every klib
+            // entry, since none of them do -- so this is the same answer moved to where it belongs,
+            // and that render-time guard stays as the second line of defence for any producer that
+            // repeats this mistake.
+            paramHasDefault = List(arity) { false },
         )
         return Candidate(
             callable = callable,

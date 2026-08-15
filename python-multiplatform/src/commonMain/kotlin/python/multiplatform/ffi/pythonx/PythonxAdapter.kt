@@ -166,8 +166,29 @@ object PythonxAdapter {
                     if name == '<receiver>':
                         continue
                     type_name = self.param_type_names[index] if self.param_type_names else self.param_tags[index]
-                    parts.append(to_python_name(name) + ': ' + _simple_name(type_name))
+                    part = to_python_name(name) + ': ' + _simple_name(type_name)
+                    if self.omittable(index):
+                        # The same `= ...` a `.pyi` writes, and for the same reason: a refusal that
+                        # listed an optional parameter as if it were required would send the caller
+                        # looking for a value they never had to supply.
+                        part += ' = ...'
+                    parts.append(part)
                 return to_python_name(self.leaf) + '(' + ', '.join(parts) + ')'
+
+            def omittable(self, index):
+                '''Whether slot [index] may be left out of a call.
+
+                Read from `ExposedCallable.paramHasDefault`, which is a statement about the **binding**
+                and not quite about the Kotlin declaration: it marks the slots the generated Kotlin
+                body has a call expression for that does not mention them. Those are the same set for
+                everything the walker binds today, and they part company where the generator declined
+                to enumerate the omission sets -- see `ArtifactScanner.MAX_OMITTABLE_PARAMETERS`. The
+                binding's answer is the one that matters here, because it is the one that decides
+                whether Kotlin will actually reach a default.
+                '''
+                if not self.param_has_default or index >= len(self.param_has_default):
+                    return False
+                return bool(self.param_has_default[index])
 
             def bound_handle(self):
                 if self.handle is None:
@@ -318,6 +339,34 @@ object PythonxAdapter {
 
         def _simple_name(qualified):
             return qualified.rpartition('.')[2] if qualified else '?'
+
+
+        def _declared_type_name(value):
+            '''The Kotlin type name an owned OBJECT value declares, from whichever owner produced it.
+
+            Two owners exist, and neither's shape is optional, so this does not assume either one.
+
+            `PythonProxySource`'s `_PmObject` -- the owner a *walked* or KSP-rendered function result
+            comes back wrapped in -- is deliberately **one shared class for every handle it owns**;
+            its own KDoc's cost table is why (a per-type subclass was ~2--9x more expensive to
+            construct and destruct, measured). Being shared, it cannot carry the type name on the
+            *class*, so `_pm_own` stamps it on the *instance* instead (`_pm_type`).
+
+            A `pythonx` proxy (`_proxy_type`) is the opposite on purpose: it is one class **per**
+            Kotlin type, because `_attach` needs a distinct class to hang each receiver's extension
+            methods off (`_BY_RECEIVER` is keyed on it). That is already known at class-definition
+            time, so it is a *class* attribute (`_pythonx_type_name`), not an instance one.
+
+            Before this, `_coerce` read `type(value)._pythonx_type_name` unconditionally and crashed
+            -- `AttributeError: type object '_PmObject' has no attribute '_pythonx_type_name'` --
+            the first time a walked result (an `_PmObject`) was passed into a `pythonx`-adapted
+            call, because `_PmObject` never had that attribute and was never going to: giving it one
+            would mean a class per type, which is the cost `_PmObject` exists to avoid.
+            '''
+            declared = getattr(type(value), '_pythonx_type_name', None)
+            if declared is not None:
+                return declared
+            return getattr(value, '_pm_type', None)
 
 
         # --------------------------------------------------------------------------- packages (§5b)
@@ -545,8 +594,14 @@ object PythonxAdapter {
             if tag == 'OBJECT':
                 handle = getattr(value, '_pm_handle', None)
                 if handle is not None:
-                    declared = type(value)._pythonx_type_name
-                    if type_name is not None and declared != type_name:
+                    declared = _declared_type_name(value)
+                    # `declared is None` means the owner could not say what it holds -- an `_PmObject`
+                    # built by a rendered *class*'s `__init__` (no `_pm_own` call, so no `_pm_type`)
+                    # rather than by a function's owned result. That is not a refusal: a bare `int`
+                    # handle a few lines below is already trusted with no type check at all in strict
+                    # mode, so an owned-but-untyped value gets the same trust rather than a stricter
+                    # rule than the boundary's own currency.
+                    if type_name is not None and declared is not None and declared != type_name:
                         return _refuse(
                             strict,
                             'expected ' + _simple_name(type_name) + ' but got ' + _simple_name(declared),
@@ -605,7 +660,14 @@ object PythonxAdapter {
 
 
         def _bind(decl, args, kwargs, strict):
-            '''Maps a Python call onto [decl]'s positional slots, or raises `_Mismatch`.'''
+            '''Maps a Python call onto [decl]'s positional slots.
+
+            Returns `(slots, defaults_used)`, or `_NO_MATCH` when not `strict`; raises `_Mismatch`
+            when `strict`.
+
+            `defaults_used` is how many slots this call left to Kotlin, and it exists for `_Overloads`
+            -- see there. It is not a diagnostic.
+            '''
             if len(args) > decl.arity:
                 return _refuse(strict, 'takes ' + str(decl.arity) + ' arguments, got ' + str(len(args)))
             slots = list(args) + [_NO_MATCH] * (decl.arity - len(args))
@@ -623,20 +685,34 @@ object PythonxAdapter {
                     if slots[index] is not _NO_MATCH:
                         return _refuse(strict, 'got two values for ' + key)
                     slots[index] = value
+            defaults_used = 0
             for index, value in enumerate(slots):
-                if value is _NO_MATCH:
-                    missing = decl.param_names[index] if decl.param_names else 'argument ' + str(index)
-                    # Defaults are carried in the table and nothing can act on them:
-                    # `docs/pythonx-adapter-design.md` §4.5 is open, and every generated Kotlin body passes
-                    # every argument. So a defaulted parameter is still required here.
-                    return _refuse(strict, 'no value for ' + to_python_name(missing))
+                omittable = decl.omittable(index)
+                if value is _NO_MATCH or (value is None and omittable):
+                    if not omittable:
+                        missing = decl.param_names[index] if decl.param_names else 'argument ' + str(index)
+                        return _refuse(strict, 'no value for ' + to_python_name(missing))
+                    # `None` is the whole mechanism, and it is not a value being passed: the generated
+                    # Kotlin body tests `args[i] == null` and takes a branch whose call expression does
+                    # not mention this parameter at all, so the *compiler* supplies the default.
+                    # `docs/pythonx-adapter-design.md` §4.5 -- metadata carries the flag and never the
+                    # expression, so this is the only place the default value can come from.
+                    #
+                    # It costs nothing that was previously possible. `UpcallTrampoline.toKotlin` maps
+                    # `None` to `null` before it looks at the tag, `resolveKotlinType` declines a
+                    # nullable primitive and a nullable value class outright, and `_coerce` below
+                    # refuses `None` for an OBJECT slot -- so no call that used to reach Kotlin passed
+                    # a `None` in a slot this now reads as an omission.
+                    slots[index] = None
+                    defaults_used += 1
+                    continue
                 tag = decl.param_tags[index] if decl.param_tags else 'OBJECT'
                 type_name = decl.param_type_names[index] if decl.param_type_names else None
                 coerced = _coerce(value, tag, type_name, decl, index, strict)
                 if coerced is _NO_MATCH:
                     return _NO_MATCH
                 slots[index] = coerced
-            return tuple(slots)
+            return (tuple(slots), defaults_used)
 
 
         class _Binding:
@@ -652,7 +728,7 @@ object PythonxAdapter {
             def __call__(self, *args, **kwargs):
                 decl = self._decl
                 try:
-                    bound = _bind(decl, args, kwargs, True)
+                    bound, _ = _bind(decl, args, kwargs, True)
                 except _Mismatch as mismatch:
                     raise TypeError(decl.signature() + ': ' + str(mismatch)) from None
                 return _wrap(
@@ -668,6 +744,20 @@ object PythonxAdapter {
             has the arguments. Selection is on argument count, on keyword names, and on declared type --
             and when that still does not separate them, this refuses and names the candidates rather than
             picking one, which is the same rule the walker applies for the same reason.
+
+            **Defaults made almost every call ambiguous, so there is one more rule.** Once
+            `padding(horizontal =, vertical =)` accepts a single argument, `padding(m, 16)` binds against
+            it, against `padding(all =)` and against `padding(start =, top =, end =, bottom =)` -- three
+            candidates for a call that has exactly one obvious meaning. The tie-break is Kotlin's own and
+            not an invention here: **a candidate that fills no default beats one that does**, and the
+            comparison extends to a count so that it is a total order. `Modifier.padding(16.dp)` resolves
+            to `padding(all:)` in Kotlin for the same reason it does here.
+
+            Where the fewest-defaults score is *equal*, nothing has changed: this still refuses and names
+            the candidates. It also parts company with `kotlinc` in one direction and does so knowingly --
+            Kotlin reports `padding()` with no arguments as ambiguous between the two- and four-`Dp`
+            overloads, where this picks the two-`Dp` one because it fills fewer. Both reach
+            `padding(0.dp, 0.dp)`; refusing a call every candidate agrees about would be the worse answer.
             '''
 
             __slots__ = ('_decls', '__name__')
@@ -681,9 +771,12 @@ object PythonxAdapter {
                 for decl in self._decls:
                     bound = _bind(decl, args, kwargs, False)
                     if bound is not _NO_MATCH:
-                        matched.append((decl, bound))
+                        matched.append((decl, bound[0], bound[1]))
+                if matched:
+                    fewest = min(entry[2] for entry in matched)
+                    matched = [entry for entry in matched if entry[2] == fewest]
                 if len(matched) == 1:
-                    decl, bound = matched[0]
+                    decl, bound, _ = matched[0]
                     return _wrap(
                         _boundary()['invoke'](decl.bound_handle(), bound),
                         decl.return_type_name if decl.return_tag == 'OBJECT' else None,
@@ -697,7 +790,7 @@ object PythonxAdapter {
                     )
                 raise TypeError(
                     'the arguments to ' + self.__name__ + ' match more than one overload (' +
-                    ', '.join(decl.signature() for decl, _ in matched) +
+                    ', '.join(entry[0].signature() for entry in matched) +
                     '). Nothing arbitrates -- call one by name: ' + spellings
                 )
 
@@ -871,10 +964,12 @@ object PythonxAdapter {
      * A third entry point (`_pm_describe`) on all five bootstraps would have been the alternative.
      * This costs no platform code and cannot disagree with the table, because it *is* the table.
      *
-     * `paramHasDefault` is carried and unused, for the reason [ExposedCallable.paramHasDefault]
-     * gives: §4.5 is open, every generated Kotlin body passes every argument, so a defaulted
-     * parameter is still required. Carrying it now means the row shape does not change when it is
-     * not.
+     * 4. `paramHasDefault` is what closes §4.5. It was carried and unused while every generated
+     *    Kotlin body passed every argument; a walked body now carries one call expression per subset
+     *    of its defaulted parameters and picks between them on `args[i] == null`
+     *    (`ArtifactScanner.presenceBranchedCall`), so this column is the list of slots `_bind` may
+     *    fill with that sentinel. Nothing about the row *shape* changed to do it, which is why it
+     *    was worth carrying before anything read it.
      */
     fun renderTable(entries: List<ExposedCallable>): String = buildString {
         appendLine("import pythonx as _px_pythonx")

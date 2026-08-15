@@ -29,6 +29,8 @@ import python.multiplatform.reflection.TypeTag
  * | entry | what it exists for |
  * |---|---|
  * | `padding__Dp` / `__Dp_Dp` / `__Dp_Dp_Dp_Dp` / `__PaddingValues` | overload dispatch on count, on keyword names, and on argument type |
+ * | `padding__Dp_Dp` / `__Dp_Dp_Dp_Dp` again | omitting a defaulted argument, including one in the *middle* of the list |
+ * | `fillMaxHeight` | the same, under a name with no overload set: omission with no dispatcher involved |
  * | `size__Dp` | the second link of a chain, so the return really is a receiver again |
  * | `fillMaxWidth` | a receiver-only extension, and a `fill_max_width` reverse-name case |
  * | `zIndex` | `z_index`, the case where a one-letter first segment must not be swallowed |
@@ -98,6 +100,12 @@ object ComposeShapedFragment : FunctionTableFragment {
             calls += "padding__Dp"
             receiver.plus("padding(${dp(args[0])})")
         },
+        // The two `padding` overloads that declare defaults. Their bodies are written the way the
+        // walker writes a defaulted body (`ArtifactScanner.presenceBranchedCall`): a `null` in a
+        // defaulted slot means the argument was **not written at the call site**, and the branch
+        // taken is a different Kotlin call rather than the same call with a substituted value. The
+        // label records which arguments were actually passed, so a test can tell "omitted" from
+        // "passed something that happens to equal the default" -- which is the whole claim.
         extension(
             name = "androidx.compose.foundation.layout.padding__Dp_Dp",
             paramNames = listOf("horizontal", "vertical"),
@@ -106,7 +114,8 @@ object ComposeShapedFragment : FunctionTableFragment {
             paramHasDefault = listOf(true, true),
         ) { receiver, args ->
             calls += "padding__Dp_Dp"
-            receiver.plus("padding(h=${dp(args[0])}, v=${dp(args[1])})")
+            refuseIfNothingWritten("androidx.compose.foundation.layout.padding", args)
+            receiver.plus("padding(${passed("h" to args[0], "v" to args[1])})")
         },
         extension(
             name = "androidx.compose.foundation.layout.padding__Dp_Dp_Dp_Dp",
@@ -116,9 +125,25 @@ object ComposeShapedFragment : FunctionTableFragment {
             paramHasDefault = listOf(true, true, true, true),
         ) { receiver, args ->
             calls += "padding__Dp_Dp_Dp_Dp"
+            refuseIfNothingWritten("androidx.compose.foundation.layout.padding", args)
             receiver.plus(
-                "padding(s=${dp(args[0])}, t=${dp(args[1])}, e=${dp(args[2])}, b=${dp(args[3])})",
+                "padding(${passed("s" to args[0], "t" to args[1], "e" to args[2], "b" to args[3])})",
             )
+        },
+        // A defaulted declaration under a name that carries **no** overload set, which is the case
+        // where omission has to work without any dispatcher being involved: `Modifier.fillMaxHeight`
+        // is one declaration, so `fill_max_height()` reaches a `_Binding` and not an `_Overloads`.
+        // The real `foundation-layout` declares it exactly this way (`fraction: Float = 1f`), and
+        // the default being 1 rather than 0 is what makes omitting it observable at all.
+        extension(
+            name = "androidx.compose.foundation.layout.fillMaxHeight",
+            paramNames = listOf("fraction"),
+            paramTypes = listOf(TypeTag.FLOAT),
+            paramTypeNames = listOf("kotlin.Float"),
+            paramHasDefault = listOf(true),
+        ) { receiver, args ->
+            calls += "fillMaxHeight"
+            receiver.plus("fillMaxHeight(${passed("f" to args[0])})")
         },
         extension(
             name = "androidx.compose.foundation.layout.padding__PaddingValues",
@@ -199,6 +224,43 @@ object ComposeShapedFragment : FunctionTableFragment {
     )
 
     private fun dp(value: Any?): String = (value as Double).toString()
+
+    /**
+     * The arguments a call **wrote**, in order, skipping the ones it left out.
+     *
+     * The stand-in for `ArtifactScanner.presenceBranchedCall`'s `when`: there, a `null` slot selects
+     * a Kotlin call expression that does not mention the parameter at all, and the compiler supplies
+     * the declared default. Here there is no declaration to take a default from, so what the fixture
+     * records instead is *which arguments were written* -- `padding(h=8.0)` rather than
+     * `padding(h=8.0, v=0.0)`. A test asserting on that cannot be satisfied by a body that passed
+     * something equal to the default, which is the failure mode this whole change is about.
+     */
+    private fun passed(vararg arguments: Pair<String, Any?>): String = arguments
+        .filter { it.second != null }
+        .joinToString(", ") { "${it.first}=${dp(it.second)}" }
+
+    /**
+     * The branch a walked body has where writing *nothing* would not have compiled.
+     *
+     * `ArtifactScanner.applyDefaultOmission` refuses to generate a call for an omission set a
+     * sibling overload would also accept, because Kotlin reports it as `Overload resolution
+     * ambiguity` and a generated call has no argument left to disambiguate with. The refusal has to
+     * be reachable rather than absent: `paramHasDefault` is per slot and cannot say "these two but
+     * not both at once", so Python will happily send both sentinels and the body answers for it.
+     *
+     * Measured on the real jars: 14 of 401 generated branches, all of them the write-nothing one --
+     * `padding`, `PaddingValues`, `WindowInsets`, `paddingFrom`, `paddingFromBaseline`,
+     * `decodeToString`, `encodeToByteArray`, `toHexString`. `fillMaxHeight` below has no sibling and
+     * therefore no such branch, which is why it is the fixture's witness for omitting everything.
+     */
+    private fun refuseIfNothingWritten(name: String, args: List<Any?>) {
+        if (args.all { it == null }) {
+            throw IllegalArgumentException(
+                "$name: leaving out every argument is ambiguous with another overload of the same " +
+                    "name; write at least one of them",
+            )
+        }
+    }
 
     /**
      * One extension entry, with slot 0 spelled the way the walker spells it: counted in `arity`,

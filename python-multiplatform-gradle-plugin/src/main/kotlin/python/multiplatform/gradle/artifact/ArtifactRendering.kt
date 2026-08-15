@@ -58,8 +58,17 @@ internal data class ArtifactCallable(
     val paramTypeNames: List<String> = emptyList(),
     /** The declared Kotlin return type. */
     val returnTypeName: String? = null,
-    /** Whether each parameter declares a default value. Carried, never acted on: every generated
-     * body passes every argument. See `ExposedCallable.paramHasDefault`. */
+    /**
+     * Whether each parameter may be **left out of a call**, which is a statement about [lambdaBody]
+     * and not quite about the declaration.
+     *
+     * `ArtifactScanner.applyDefaultOmission` sets it from the omission sets it actually generated a
+     * call for; the two answers differ where it declined to (a declaration past
+     * `ArtifactScanner.MAX_OMITTABLE_PARAMETERS`, or one whose parameters have no writable names).
+     * `pythonx._bind` fills a slot this marks with the `null` sentinel [lambdaBody] branches on, so
+     * the body's answer is the one that has to be told. [omittableSlotsOf] is where that invariant is
+     * enforced for both producers.
+     */
     val paramHasDefault: List<Boolean> = emptyList(),
 ) : Serializable
 
@@ -82,11 +91,29 @@ private fun String.quoted(): String = "\"" + replace("\\", "\\\\").replace("\"",
 internal fun artifactFragmentObjectName(coordinates: String): String =
     "ArtifactFragment_" + coordinates.map { if (it.isLetterOrDigit()) it else '_' }.joinToString("")
 
+/**
+ * `paramHasDefault` is a statement about [ArtifactCallable.lambdaBody], and this is where that is
+ * enforced rather than assumed.
+ *
+ * The column used to be inert -- carried into the table and read by nothing -- so a producer could
+ * fill it from the *declaration* and be right enough. It is not inert any more: `pythonx._bind`
+ * fills a slot it marks with `null`, and a body that has no branch for that `null` casts it and
+ * throws. `ArtifactScanner` sets the column from what it generated; [KlibScanner] still sets it from
+ * `AbiValueParameter.hasDefaultArg` while emitting a body that passes every argument, which is the
+ * old, now-wrong pairing.
+ *
+ * Rather than trust two producers to agree, the flag is derived here from the one thing that cannot
+ * lie about the body: whether the body tests for the sentinel at all. A klib entry therefore reaches
+ * Python as "every argument required", which is what it is.
+ */
+private fun omittableSlotsOf(entry: ArtifactCallable): List<Boolean> =
+    if ("== null" in entry.lambdaBody) entry.paramHasDefault else entry.paramHasDefault.map { false }
+
 private fun renderEntry(entry: ArtifactCallable): String {
     val paramTags = entry.paramTags.joinToString(", ") { "$TYPE_TAG.$it" }
     val paramNames = entry.paramNames.joinToString(", ") { it.quoted() }
     val paramTypeNames = entry.paramTypeNames.joinToString(", ") { it.quoted() }
-    val paramHasDefault = entry.paramHasDefault.joinToString(", ")
+    val paramHasDefault = omittableSlotsOf(entry).joinToString(", ")
     return """
         |$EXPOSED_CALLABLE(
         |    name = ${entry.name.quoted()},
