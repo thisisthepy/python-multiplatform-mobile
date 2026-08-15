@@ -456,7 +456,13 @@ nothing, and did for months.
 `bindings.kt` changes — it is a second or two and it turns "0 tests ran, `LinkError`" into a line
 naming the function.
 
-Current state: **214 tests, 3 failed** — the three `GCLeakTest` cases below, and nothing else.
+Current state, re-measured rather than carried over from the paragraph above: **403 tests, 0
+failed, 0 skipped** (`wasmJsNodeTest`), including the three `GCLeakTest` cases and the four
+`WasmFinalizationTest` cases — see "Reclamation is automatic, through JS" above for how those pass.
+The "214 tests, 3 failed" this line used to read was the state before that section's fix landed and
+had drifted out of step with the "344/0/0" already recorded a few paragraphs up; both are stale now
+that the suite has grown further, which is expected — re-run `wasmJsNodeTest` rather than trusting
+either number.
 
 `emsdk` is pinned to **5.0.3**, which is what `pyemscripten_2026_0` specifies. Installing another
 version replaces `~/emsdk/upstream` **in place** — it is a global setting, not per-project.
