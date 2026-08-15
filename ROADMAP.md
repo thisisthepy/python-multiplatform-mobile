@@ -1588,8 +1588,14 @@ bounded by observation rather than by argument.
 
 ### What is still open
 
-- **The wiring is not in `python-multiplatform-gradle-plugin`, so an external consumer still meets
-  the hole.** `:sample` carries ~50 lines that are a copy of `patchKotlinWasmOutputForCPython`,
+- ~~**The wiring is not in `python-multiplatform-gradle-plugin`, so an external consumer still meets
+  the hole.**~~ **Closed, and this bullet outlived it.** `WasmBrowserRuntimeStaging.kt` is in the
+  plugin and compiled, and "The plugin wiring is closed, and it needed the runtime to become a Maven
+  artefact first" below records the verification against an external consumer. The bullet was never
+  struck when that landed — the same failure this document keeps finding elsewhere, an item read as
+  open because nobody went back to close it. The original text follows for the history.
+
+  `:sample` carries ~50 lines that are a copy of `patchKotlinWasmOutputForCPython`,
   because one Gradle build script's functions are not visible to another project's build script.
   Moving it into the plugin needs the staged runtime to be a *published artefact* first, and the
   wasm CPython build is published nowhere — it is a local directory named by `-PwasmPythonDir`. That
