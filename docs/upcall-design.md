@@ -393,13 +393,21 @@ runs on every target.
 
 | Platform | upcall | downcall, same shape | trampoline alone | upcall / downcall | upcall / trampoline |
 |---|---|---|---|---|---|
-| **desktop** (JVM 21.0.12, macOS arm64) | 510–560 ns | 132–144 ns | 76–91 ns ‡ | 3.71–4.14x | 5.62–7.02x ‡ |
-| **wasmJs** (Node) | 290–304 ns ‡ | 95–109 ns | 122–129 ns | 2.67–3.21x | 2.33–2.47x ‡ |
-| **iOS simulator** (iOS 26.2, arm64) | 2266–2301 ns | 1599–1610 ns | 1962–1990 ns | 1.41–1.43x | 1.13–1.17x |
-| **androidNative** (`pmp_api36`, arm64) | 3228–3275 ns | 2155–2229 ns | 2699–2760 ns | 1.45–1.51x | 1.17–1.20x |
-| **androidNative** (`pmp_api26`, arm64) | 3234–3310 ns | 2470–2554 ns | 2731–3228 ns ※ | 1.28–1.32x | 1.02–1.20x ※ |
-| **Android ART** (`pmp_api36`, arm64) | 944–1063 ns | 692–818 ns | 793–907 ns | 1.20–1.45x | 1.04–1.23x |
-| **Android ART** (`pmp_api26`, arm64) | 1146–1233 ns | 1185–1293 ns | 1012–1087 ns | 0.91–1.04x | 1.12–1.18x |
+| **desktop** (JVM 21.0.12, macOS arm64) | 542.84–576.45 ns | 260.27–265.81 ns | 170.44–247.42 ns | 2.04–2.20x | 5.54–6.46x |
+| **wasmJs** (Node) | 302.41–310.72 ns | 96.53–100.95 ns | 149.50–164.88 ns | 3.07–3.14x | 2.39–2.46x |
+| **iOS simulator** (iOS 26.2, arm64) | 2253.20–2312.97 ns | 1585.46–1655.40 ns | 2794.42–2843.16 ns | 1.39–1.42x | 1.14–1.15x |
+| **androidNative** (`pmp_api36`, arm64) | 3348.75–3443.23 ns | 2194.26–2365.61 ns | 3957.01–4069.40 ns | 1.45–1.54x | 1.19–1.20x |
+| **androidNative** (`pmp_api26`, arm64) | 3234–3310 ns † | 2470–2554 ns | 2731–3228 ns | 1.28–1.32x | 1.02–1.20x |
+| **Android ART** (`pmp_api36`, arm64) | 995.61–1154.10 ns ‡ | 804.27–838.60 ns | 1100.87–1167.17 ns | 1.18–1.43x | 1.10–1.29x |
+| **Android ART** (`pmp_api26`, arm64) | 1196.52–1272.28 ns ‡ | 1253.41–1295.79 ns | 1800.86–1863.97 ns | 0.92–1.01x | 1.05–1.18x |
+
+_For rows 1–4 and 6–7: Source is `docs/cost-table.md` (commit `958c0082b294`), `UpcallBoundaryCostTest` with warmup 100,000, min–max over 3 runs per target (except desktop, wasmJs, iosSimulatorArm64 and androidNativeArm64 cut from cut-hostless, artApi36 from cut-api36, artApi26 from cut-api26 — see that document's "Conditions" table for per-cut details)._
+
+**Prior values (warmup 3,000):** desktop 510–560 ns, wasmJs 290–304 ns, iOS simulator 2266–2301 ns, androidNative pmp_api36 3228–3275 ns, androidNative pmp_api26 3234–3310 ns, ART pmp_api36 944–1063 ns, ART pmp_api26 1146–1233 ns.
+
+† androidNative `pmp_api26`: This row was re-measured to 100,000 warmup but does not appear in `cost-table.md` (only `androidNativeArm64` on `pmp_api36` is there). **Still awaiting re-measurement** under the same conditions as the cost-table harness.
+
+‡ **Android ART rows (`artApi26`, `artApi36`):** Marked "failed" in cost-table.md. Those failures are in `PhantomCleanerRegistryTest` (reference-release path), not the benchmark rows themselves. The benchmark measurements of boundary cost are valid. Failures were fixed in `c180c46f`.
 
 **Every row is now measured at a warmup large enough to mean anything; getting there is why the table
 was re-cut twice.** `UpcallBoundaryCostTest` warmed 3 000 calls per row

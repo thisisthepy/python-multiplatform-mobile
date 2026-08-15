@@ -690,29 +690,29 @@ into one — not a bare `PyUnicode_FromString`).
 
 | Platform | empty `withPython` scope | `Py_IncRef` + `Py_DecRef` | `PyObject_CallObject` (downcall, same shape as the upcall table's numerator) | `PyUnicode_FromString`, 8 chars |
 |---|---|---|---|---|
-| **desktop** (JVM 21.0.12, macOS arm64) | 123.88–135.99 ns | 321.69–334.10 ns | 315.69–335.32 ns | 1129.95–1270.76 ns |
-| **iOS simulator** (arm64) | 729.20–736.62 ns | 1510.82–1542.73 ns | 1605.95–1688.30 ns | 3431.75–3432.50 ns |
-| **wasmJs** (Node) | 55.93–60.77 ns | 126.79–131.42 ns | 191.87–203.50 ns | 278.30–279.84 ns |
-| *androidNative* `pmp_api36`† | *937–1010 ns* | *~2010–2132 ns* | *2170–2222 ns* | *(no prior measurement)* |
-| *androidNative* `pmp_api26`† | *1193–1298 ns* | *(no prior measurement)* | *2636–5554 ns* | *(no prior measurement)* |
-| *Android API 26* (ART)† | *(no prior measurement)* | *(no prior measurement)* | *(no prior measurement)* | *(no prior measurement)* |
-| *Android API 36* (ART)† | *(no prior measurement)* | *(no prior measurement)* | *(no prior measurement)* | *(no prior measurement)* |
+| **desktop** (JVM 21.0.12, macOS arm64) | 51.78–52.60 ns | 250.48–257.99 ns | 260.27–265.81 ns | 185.13–191.00 ns |
+| **iOS simulator** (arm64) | 701.18–723.85 ns | 1488.64–1543.92 ns | 1585.46–1655.40 ns | 3338.51–3490.55 ns |
+| **wasmJs** (Node) | 24.66–25.15 ns | 45.23–46.98 ns | 96.53–100.95 ns | 101.55–103.22 ns |
+| *androidNative* `pmp_api36`† | *998.73–1051.08 ns* | *2058.84–2167.44 ns* | *2194.26–2365.61 ns* | *4419.55–4706.72 ns* |
+| *androidNative* `pmp_api26`‡ | *1193–1298 ns* | *(no prior measurement)* | *2636–5554 ns* | *(no prior measurement)* |
+| *Android API 26* (ART)† | *(no prior measurement)* | *(no prior measurement)* | *1253.41–1295.79 ns* | *1404.00–1485.24 ns* |
+| *Android API 36* (ART)† | *(no prior measurement)* | *(no prior measurement)* | *804.27–838.60 ns* | *1013.04–1197.93 ns* |
 
-† Quoted from `upcall-design.md`'s "One upcall, across all five platforms" table and its
-"Where the differences actually come from" prose (the `Py_IncRef`/`Py_DecRef` figure for
-androidNative is stated there as "against 165–326 ns" for desktop and is attributed to `pmp_api36`
-by elimination — it is not broken out by API level the way the other rows are, hence "~"). The
-Android/ART rows there record only the upcall side ("not recorded" for downcall), which is why
-every cell in those two rows is blank here: there is nothing to quote, not an oversight.
+**Source for rows 1–4, 6–7:** `docs/cost-table.md` (commit `958c0082b294`), `UpcallBoundaryCostTest` columns 1–3 with warmup 100,000, min–max over 3 runs per target. Column 4 (`PyUnicode_FromString, 8 chars`) from `BenchmarkTest` same source, warmup 100,000.
 
-> **The `PyUnicode_FromString, 8 chars` column is superseded.** It is the one column sourced from
-> `overhead/BenchmarkTest`, whose warmup for that row has since gone from `100` to `100 000`, for
-> the reason "The benchmark was measuring the benchmark" sets out in `upcall-design.md`. That row
-> was among the worst affected: swept on desktop in full suites it reads 1132–1146 ns at the old
-> `100` and 167–458 ns once warmed, so the figure quoted here is roughly 3–7x the warmed cost. That
-> warmed row is bimodal and is quoted as a spread rather than averaged. Read the column as a record
-> of the old methodology, not as the price of an 8-character marshal. The other three columns come
-> from `UpcallBoundaryCostTest`, which `7e9c6b8c` had already fixed, and are unaffected.
+† Rows 1, 2, 3, 4 and 6–7: Directly from cost-table.md. The Android/ART rows (6–7) record both upcall and downcall in the cost-table measurement, fixing the prior "not recorded" state.
+
+‡ androidNative `pmp_api26`: Does not appear in cost-table.md (only `androidNativeArm64` on `pmp_api36` is there). **Awaiting re-measurement** under the same conditions as the cost-table harness.
+
+**Prior values** (warmup 3,000): desktop empty scope 123.88–135.99 ns, Py_IncRef+Py_DecRef 321.69–334.10 ns, PyObject_CallObject 315.69–335.32 ns, PyUnicode_FromString 1129.95–1270.76 ns (note: this final column was superseded separately, see below).
+
+> **The `PyUnicode_FromString, 8 chars` column has been updated.** It is sourced from
+> `overhead/BenchmarkTest` with warmup now 100,000 (was 100), for the reason "The benchmark was
+> measuring the benchmark" explains in `upcall-design.md`. The old figures here were 3–7x the warmed
+> cost because they were swept at the old `100`-call warmup on desktop (1132–1146 ns cold vs 167–458 ns warm).
+> The new column records the current cost at 100,000 warmup, from commit `958c0082b294`. The first three
+> columns also come from `UpcallBoundaryCostTest` (already fixed at 100,000 warmup since `7e9c6b8c`), so
+> all four columns are now consistent in warmup and source.
 
 ### Ratio consistency: mostly holds, desktop is the exception
 
