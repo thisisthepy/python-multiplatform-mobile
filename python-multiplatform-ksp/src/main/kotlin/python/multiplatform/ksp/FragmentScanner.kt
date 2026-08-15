@@ -9,6 +9,7 @@ import com.google.devtools.ksp.symbol.KSFile
 import com.google.devtools.ksp.symbol.KSFunctionDeclaration
 import com.google.devtools.ksp.symbol.KSNode
 import com.google.devtools.ksp.symbol.KSPropertyDeclaration
+import com.google.devtools.ksp.symbol.KSValueParameter
 import com.google.devtools.ksp.symbol.Visibility
 
 /** What one module's worth of scanning produced, plus the files it came from -- the latter is
@@ -37,6 +38,23 @@ private const val PENDING_CALL = "python.multiplatform.ffi.upcall.PendingCall"
 private fun functionBody(function: KSFunctionDeclaration, resultExpr: String): String =
     if (BindingPolicy.isSuspending(function)) "{ args -> $PENDING_CALL.start { $resultExpr } }"
     else "{ args -> $resultExpr }"
+
+/**
+ * [CallableEntryModel.paramNames] for a declared parameter list, in declaration order.
+ *
+ * Unlike the artefact walker's ASM path over a compiled jar -- which carries no name at all for a
+ * classfile with no debug info, and says so in its own `paramNames` doc -- every parameter KSP
+ * sees came from Kotlin source, where a name is mandatory syntax. `it.name` is nullable only
+ * because [KSValueParameter] is shared with a lambda parameter's synthetic node; a function's own
+ * declared parameter always resolves one, and the `?:` fallback exists so a producer bug here is a
+ * blank string in generated source rather than a `NullPointerException` during the scan.
+ */
+private fun paramNamesOf(params: List<KSValueParameter>): List<String> =
+    params.map { it.name?.asString() ?: "" }
+
+/** [CallableEntryModel.paramHasDefault] for a declared parameter list, in declaration order. */
+private fun paramHasDefaultOf(params: List<KSValueParameter>): List<Boolean> =
+    params.map { it.hasDefault }
 
 /**
  * Walks every file KSP knows about in this compilation and turns the exposed surface
@@ -175,6 +193,10 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             kind = "FUNCTION",
             lambdaBody = functionBody(function, wrapReturnExpression(returnShape, callExpr)),
             isSuspend = BindingPolicy.isSuspending(function),
+            paramNames = paramNamesOf(function.parameters),
+            paramTypeNames = paramShapes.map { it.rendered },
+            returnTypeName = returnShape.rendered,
+            paramHasDefault = paramHasDefaultOf(function.parameters),
         )
     }
 
@@ -271,6 +293,15 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
      * reached through the enum class's own `METHOD` entry.
      */
     private fun enumEntries(classDeclaration: KSClassDeclaration, qualifiedName: String): List<CallableEntryModel> {
+        // Every one of these has a statically known Kotlin type -- an enum entry's STATIC_GETTER
+        // and `valueOf` both hand back `$qualifiedName` itself, and `name`/`ordinal` are
+        // `kotlin.Enum`'s own fixed shape -- so `returnTypeName` is filled here exactly as it is
+        // at every other call site in this file, for the same reason: this is data the processor
+        // has, not a guess. It currently has no effect on ownership for these specific entries --
+        // `PythonProxySource.render` puts every `STATIC_GETTER`/`FUNCTION` an `ENUM` produces on
+        // the module-attribute path (`renderModuleStatic`/`_pm_static_property`), which does not
+        // consult `returnTypeName` at all (see that file's "What is still not rendered" table) --
+        // but leaving it blank here would read as "KSP could not name this", which is not true.
         val entries = enumEntryNames(classDeclaration).map { entryName ->
             CallableEntryModel(
                 name = "$qualifiedName.$entryName",
@@ -279,6 +310,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
                 returnTag = Tag.OBJECT,
                 kind = "STATIC_GETTER",
                 lambdaBody = "{ $qualifiedName.$entryName }",
+                returnTypeName = qualifiedName,
             )
         }
         return entries + listOf(
@@ -289,6 +321,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
                 returnTag = Tag.STRING,
                 kind = "GETTER",
                 lambdaBody = "{ args -> (args[0] as $qualifiedName).name }",
+                returnTypeName = "kotlin.String",
             ),
             CallableEntryModel(
                 name = "$qualifiedName.ordinal",
@@ -297,6 +330,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
                 returnTag = Tag.INT,
                 kind = "GETTER",
                 lambdaBody = "{ args -> ((args[0] as $qualifiedName).ordinal).toLong() }",
+                returnTypeName = "kotlin.Int",
             ),
             CallableEntryModel(
                 name = "$qualifiedName.valueOf",
@@ -305,6 +339,9 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
                 returnTag = Tag.OBJECT,
                 kind = "FUNCTION",
                 lambdaBody = "{ args -> $qualifiedName.valueOf(args[0] as String) }",
+                paramNames = listOf("value"),
+                paramTypeNames = listOf("kotlin.String"),
+                returnTypeName = qualifiedName,
             ),
         )
     }
@@ -347,6 +384,16 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             returnTag = Tag.OBJECT,
             kind = "CONSTRUCTOR",
             lambdaBody = "{ args -> $classQualifiedName(${argExprs.joinToString(", ")}) }",
+            paramNames = paramNamesOf(ctor.parameters),
+            paramTypeNames = paramShapes.map { it.rendered },
+            // The class being built, not a `TypeShape` -- there is no return-type usage to derive
+            // one from. `PythonProxySource.renderClass`'s own comment records that a CONSTRUCTOR
+            // result is never wrapped by this gate anyway (`self._pm_handle` is set directly), so
+            // this specific name never reaches `ownedTypeOf`; it is filled regardless for the same
+            // reason every other site here is -- consistency for a `.pyi` reader, and because
+            // leaving it `null` would read as "KSP could not name this", which is not true.
+            returnTypeName = classQualifiedName,
+            paramHasDefault = paramHasDefaultOf(ctor.parameters),
         )
     }
 
@@ -365,6 +412,14 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             kind = "METHOD",
             lambdaBody = functionBody(function, wrapReturnExpression(returnShape, callExpr)),
             isSuspend = BindingPolicy.isSuspending(function),
+            // The receiver is `args[0]` but is not one of `function.parameters` -- KSP never
+            // counts it there for a METHOD, the same way `arity` does not -- so nothing here needs
+            // a `<receiver>` slot the way an [python.multiplatform.reflection.ExposedCallable
+            // .isExtension] entry would.
+            paramNames = paramNamesOf(function.parameters),
+            paramTypeNames = paramShapes.map { it.rendered },
+            returnTypeName = returnShape.rendered,
+            paramHasDefault = paramHasDefaultOf(function.parameters),
         )
     }
 
@@ -390,6 +445,10 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             kind = "FUNCTION",
             lambdaBody = functionBody(function, wrapReturnExpression(returnShape, callExpr)),
             isSuspend = BindingPolicy.isSuspending(function),
+            paramNames = paramNamesOf(function.parameters),
+            paramTypeNames = paramShapes.map { it.rendered },
+            returnTypeName = returnShape.rendered,
+            paramHasDefault = paramHasDefaultOf(function.parameters),
         )
     }
 
@@ -408,6 +467,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             returnTag = propTag,
             kind = "GETTER",
             lambdaBody = "{ args -> ${wrapReturnExpression(propShape, "$receiver.$propName")} }",
+            returnTypeName = propShape.rendered,
         )
         if (!BindingPolicy.isExposedSetter(property)) return listOf(getter)
         val setter = CallableEntryModel(
@@ -417,6 +477,12 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             returnTag = Tag.UNIT,
             kind = "SETTER",
             lambdaBody = "{ args -> $receiver.$propName = ${castExpression(propShape, "args[1]")} }",
+            // KSP synthesises a setter node even for a `var` with no written accessor body, and
+            // its parameter's name is "value" in that case -- but a caller who wrote `set(newValue)
+            // { ... }` gets to keep that name here rather than a hardcoded "value" that would be
+            // wrong for exactly the property that bothered to say otherwise.
+            paramNames = listOf(property.setter?.parameter?.name?.asString() ?: "value"),
+            paramTypeNames = listOf(propShape.rendered),
         )
         return listOf(getter, setter)
     }
@@ -438,6 +504,7 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             returnTag = propTag,
             kind = "STATIC_GETTER",
             lambdaBody = "{ ${wrapReturnExpression(propShape, "$callPrefix.$propName")} }",
+            returnTypeName = propShape.rendered,
         )
         if (!BindingPolicy.isExposedSetter(property)) return listOf(getter)
         val setter = CallableEntryModel(
@@ -447,6 +514,8 @@ class FragmentScanner(private val excludePackages: List<String>, private val log
             returnTag = Tag.UNIT,
             kind = "STATIC_SETTER",
             lambdaBody = "{ args -> $callPrefix.$propName = ${castExpression(propShape, "args[0]")} }",
+            paramNames = listOf(property.setter?.parameter?.name?.asString() ?: "value"),
+            paramTypeNames = listOf(propShape.rendered),
         )
         return listOf(getter, setter)
     }

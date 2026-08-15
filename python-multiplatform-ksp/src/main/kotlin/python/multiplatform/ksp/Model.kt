@@ -21,6 +21,42 @@ data class CallableEntryModel(
      * boundary marshals once the coroutine finishes.
      */
     val isSuspend: Boolean = false,
+    /**
+     * Mirrors `ExposedCallable.paramNames`: the declared parameter names, in [paramTags] order.
+     * Always fillable here -- unlike the artefact walker's ASM path over a jar with no debug
+     * info, KSP reads Kotlin source, where every parameter has a name. Empty only for a shape
+     * with no parameters to name (arity 0), which is indistinguishable from "not supplied" and is
+     * why [python.multiplatform.reflection.ExposedCallable]'s own `init` treats an empty list as
+     * either.
+     */
+    val paramNames: List<String> = emptyList(),
+    /**
+     * Mirrors `ExposedCallable.paramTypeNames`: the declared Kotlin type of each parameter --
+     * [TypeShape.rendered], not [paramTags] -- so a `Dp`-typed parameter (were one ever visible to
+     * KSP; this repository's only source of one is the artefact walker) would read `Dp` here and
+     * `FLOAT` there. Filled from the same [TypeShape] [paramTags] is already computed from, so
+     * this costs no extra type resolution.
+     */
+    val paramTypeNames: List<String> = emptyList(),
+    /**
+     * Mirrors `ExposedCallable.returnTypeName`. This is the field `fbab1a68` gates ownership of a
+     * `TypeTag.OBJECT` result on: [python.multiplatform.ffi.upcall.PythonProxySource] will not
+     * wrap a result in a finaliser-bearing owner unless the producer names the Kotlin type it
+     * came back as, because `OBJECT` also covers a `PyObject` that happens to be an `int`, and
+     * owning that would release a handle nobody issued. Leaving this `null` was the whole reason
+     * every KSP-generated entry kept leaking a handle per `TypeTag.OBJECT` result --
+     * `WalkedArtifactComposeModifierTest`'s `emptyModifier()` measured one per run. Filled from
+     * [TypeShape.rendered] wherever a declared return type is known; `null` only where none is
+     * (there is no such case among the [CallableEntryModel]-producing call sites in
+     * `FragmentScanner` today).
+     */
+    val returnTypeName: String? = null,
+    /**
+     * Mirrors `ExposedCallable.paramHasDefault`. A flag nothing acts on yet -- see the runtime
+     * field's own doc -- carried because [com.google.devtools.ksp.symbol.KSValueParameter
+     * .hasDefault] is a direct read, not a derived fact, so there is no reason to withhold it.
+     */
+    val paramHasDefault: List<Boolean> = emptyList(),
 )
 
 data class ClassModel(

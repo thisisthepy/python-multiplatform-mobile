@@ -11,16 +11,37 @@ private fun String.quoted(): String = "\"" + replace("\\", "\\\\").replace("\"",
 
 private fun renderEntry(entry: CallableEntryModel): String {
     val paramTags = entry.paramTags.joinToString(", ") { "$TYPE_TAG.$it" }
-    // Omitted rather than rendered as `false`: the runtime default already says so, and every
-    // entry in every fragment would otherwise carry a line that means nothing.
+    // Every one of these is omitted rather than rendered at its default (`false`/`null`/empty):
+    // the runtime default already says so, and every entry in every fragment would otherwise
+    // carry a line that means nothing. `isExtension`/`receiverTypeName` are not rendered at all
+    // -- not merely omitted -- because no KSP-produced entry is ever an extension
+    // (`BindingPolicy.isExposedFunctionShape` rejects `extensionReceiver != null` before a
+    // `CallableEntryModel` is built for it), so the runtime's own `false`/`null` defaults are
+    // never wrong here and there is nothing for this producer to say.
     val suspendArg = if (entry.isSuspend) "\n|    isSuspend = true," else ""
+    val paramNamesArg = if (entry.paramNames.isEmpty()) {
+        ""
+    } else {
+        "\n|    paramNames = listOf(${entry.paramNames.joinToString(", ") { it.quoted() }}),"
+    }
+    val paramTypeNamesArg = if (entry.paramTypeNames.isEmpty()) {
+        ""
+    } else {
+        "\n|    paramTypeNames = listOf(${entry.paramTypeNames.joinToString(", ") { it.quoted() }}),"
+    }
+    val returnTypeNameArg = if (entry.returnTypeName == null) "" else "\n|    returnTypeName = ${entry.returnTypeName.quoted()},"
+    val paramHasDefaultArg = if (entry.paramHasDefault.isEmpty()) {
+        ""
+    } else {
+        "\n|    paramHasDefault = listOf(${entry.paramHasDefault.joinToString(", ")}),"
+    }
     return """
         |$EXPOSED_CALLABLE(
         |    name = ${entry.name.quoted()},
         |    arity = ${entry.arity},
         |    paramTypes = listOf($paramTags),
         |    returnType = $TYPE_TAG.${entry.returnTag},
-        |    kind = $CALLABLE_KIND.${entry.kind},$suspendArg
+        |    kind = $CALLABLE_KIND.${entry.kind},$suspendArg$paramNamesArg$paramTypeNamesArg$returnTypeNameArg$paramHasDefaultArg
         |    callable = ${entry.lambdaBody},
         |)
     """.trimMargin()
