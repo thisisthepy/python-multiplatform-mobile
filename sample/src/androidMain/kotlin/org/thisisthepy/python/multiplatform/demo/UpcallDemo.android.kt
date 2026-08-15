@@ -13,7 +13,9 @@ import org.thisisthepy.python.multiplatform.demo.bindings.upcallTableSummary
  * This used to be a stub whose every member returned "unavailable on Android", because the
  * bindings plugin could not be applied to a module carrying an Android plugin at the AGP this
  * build pinned. ROADMAP §13 moved AGP past KSP's minimum and the stub is gone. The call itself is
- * still made from Kotlin rather than from Python, because the boundary shim is desktop-only.
+ * made from Python now too: ART's boundary shim closed the two C gaps it had, and
+ * `bindings/UpcallDemo.android.kt`'s [callFromPython] resolves and invokes through
+ * `_pm_resolve`/`_pm_invoke` the same way desktop's `ctypes` bridge does.
  */
 actual object UpcallDemo {
     actual val available: Boolean = true
