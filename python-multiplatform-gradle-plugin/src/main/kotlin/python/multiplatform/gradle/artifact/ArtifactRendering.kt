@@ -1,5 +1,7 @@
 package python.multiplatform.gradle.artifact
 
+import java.io.Serializable
+
 /** The package walked artefacts' fragments land in. Deliberately **not**
  * `python.multiplatform.generated.fragments`, which `PackageScanFragmentDiscovery` sweeps into
  * KSP's `FunctionTable` -- see [renderArtifactTableSource]. It is still under
@@ -22,6 +24,9 @@ private const val UPCALL_TABLE = "python.multiplatform.reflection.UpcallTable"
  * [boundaryTypeOf] declines, so no suspending declaration ever reaches here) and no `kind` (every
  * entry is a `FUNCTION`, because only statics are bound -- an instance method would need a
  * `ReflectedClass` and a receiver handle, which is the next step and not this one).
+ *
+ * `Serializable`: [KlibScanWorkAction] hands one of these back across the `WorkerExecutor` isolation
+ * boundary it runs [KlibScanner] behind.
  */
 internal data class ArtifactCallable(
     val name: String,
@@ -56,7 +61,7 @@ internal data class ArtifactCallable(
     /** Whether each parameter declares a default value. Carried, never acted on: every generated
      * body passes every argument. See `ExposedCallable.paramHasDefault`. */
     val paramHasDefault: List<Boolean> = emptyList(),
-)
+) : Serializable
 
 /** One artefact's worth of bindings: what becomes a single `FunctionTableFragment` object. */
 internal data class ArtifactFragment(
