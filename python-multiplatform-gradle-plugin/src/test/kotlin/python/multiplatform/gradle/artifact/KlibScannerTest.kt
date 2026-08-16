@@ -1,5 +1,18 @@
 package python.multiplatform.gradle.artifact
 
+import org.jetbrains.kotlin.library.abi.AbiClassifierReference
+import org.jetbrains.kotlin.library.abi.AbiCompoundName
+import org.jetbrains.kotlin.library.abi.AbiFunction
+import org.jetbrains.kotlin.library.abi.AbiModality
+import org.jetbrains.kotlin.library.abi.AbiQualifiedName
+import org.jetbrains.kotlin.library.abi.AbiSignatureVersion
+import org.jetbrains.kotlin.library.abi.AbiSignatures
+import org.jetbrains.kotlin.library.abi.AbiType
+import org.jetbrains.kotlin.library.abi.AbiTypeArgument
+import org.jetbrains.kotlin.library.abi.AbiTypeNullability
+import org.jetbrains.kotlin.library.abi.AbiTypeParameter
+import org.jetbrains.kotlin.library.abi.AbiValueParameter
+import org.jetbrains.kotlin.library.abi.ExperimentalLibraryAbiReader
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -298,6 +311,90 @@ class KlibScannerTest {
         )
     }
 
+    /**
+     * What confirms `declaresDefault`'s bug is real rather than theoretical, and what rules out
+     * "reproduce it end-to-end with a real klib" as the way to pin it: neither real klib this
+     * module's tests can reach (`kotlin-stdlib`, unscoped -- every include prefix matches) binds a
+     * single declaration that also declares a default. `kotlin-stdlib` has 183 declarations with at
+     * least one defaulted parameter; every one of them is declined, overwhelmingly (141 of 183) for
+     * "an extension receiver whose type ... does not expose" -- unrelated to the default itself, but
+     * enough on its own to keep this combination from ever reaching [KlibScanner]'s bound path here.
+     *
+     * That absence is why `declaresDefaultIsFalseForABoundDeclarationEvenWhenTheAbiDeclaresADefault`
+     * below has to construct its own [AbiFunction]: this test is the record of a real one not being
+     * available, not a substitute for the synthetic one. It stays as a regression guard against that
+     * going stale silently -- a future compiler bump that lets extension receivers bind (this file's
+     * own KDoc names `2.2.20` as the version that would) would make a real klib exercise the bug this
+     * test currently cannot observe, and this assertion would be the one to fail and say so.
+     */
+    @Test
+    fun boundDeclarationWithADefaultDoesNotOccurInAvailableRealKlibs() {
+        if (!konanStdlibKlib.isDirectory) {
+            println("skipped: no .konan cache at $konanStdlibKlib")
+            return
+        }
+        val declarations = KlibScanner.scanKlibDeclarations(konanStdlibKlib, includePrefixes = emptyList())
+        val boundWithDefault = declarations.filter { it.bindingName != null && it.parameters.any { p -> p.declaresDefault } }
+        assertTrue(
+            boundWithDefault.isEmpty(),
+            "expected no bound declaration to declare a default in the available real klibs, found: " +
+                boundWithDefault.map { it.bindingName },
+        )
+    }
+
+    /**
+     * The bug this pins: `DeclarationModel.parameters[].declaresDefault` used to copy
+     * `AbiValueParameter.hasDefaultArg` straight through for a *bound* declaration too -- the Kotlin
+     * declaration's own truth, not the generated binding's. `KlibScanner.candidateOrNull`'s own KDoc
+     * on [ArtifactCallable.paramHasDefault] (the "Deliberately all `false`" comment) already settles
+     * what the binding's truth is: a klib walk has no `ArtifactScanner.applyDefaultOmission`
+     * counterpart, so every generated call passes every argument, always. Before the fix in this
+     * commit, a bound klib parameter with `hasDefaultArg == true` still reported
+     * `declaresDefault == true`, so `PyiRendering`'s `if (parameter.declaresDefault) " = ..."` would
+     * write a default the runtime binding cannot honour -- a parameter the `.pyi` says is optional
+     * but that `pythonx._bind` never receives a `null` sentinel for, because [candidateOrNull]'s
+     * `lambdaBody` has no branch that omits it.
+     *
+     * Since [boundDeclarationWithADefaultDoesNotOccurInAvailableRealKlibs] just established that no
+     * real klib available here exercises this combination, this test constructs the minimal
+     * [AbiFunction] the bug needs by hand: a top-level, non-extension, non-suspend, two-`Int`-
+     * parameter function whose second parameter declares a default. [KlibScanner.candidateOrNull] is
+     * `internal` rather than `private` for exactly this call -- `scanKlib`/`scanKlibDeclarations` have
+     * no seam to inject a declaration that was not read from a real file on disk.
+     */
+    @Test
+    @OptIn(ExperimentalLibraryAbiReader::class)
+    fun declaresDefaultIsFalseForABoundDeclarationEvenWhenTheAbiDeclaresADefault() {
+        val function = FakeTopLevelFunction(
+            simpleName = "topLevelWithDefault",
+            valueParameters = listOf(
+                FakeValueParameter(FakePrimitiveType("Int"), hasDefaultArg = false),
+                FakeValueParameter(FakePrimitiveType("Int"), hasDefaultArg = true),
+            ),
+            returnType = FakePrimitiveType("Int"),
+        )
+
+        val candidate = KlibScanner.candidateOrNull(function)
+
+        assertNotNull(candidate, "expected the fake declaration to produce a candidate at all")
+        assertNotNull(
+            candidate.declaration.bindingName,
+            "expected the fake declaration to bind, not decline: ${candidate.declaration.declineReason}",
+        )
+        assertNotNull(candidate.callable, "a bound declaration must carry a callable")
+        assertEquals(
+            listOf(false, false),
+            candidate.callable.paramHasDefault,
+            "the binding's own contract: a klib walk never omits an argument",
+        )
+        assertEquals(
+            listOf(false, false),
+            candidate.declaration.parameters.map { it.declaresDefault },
+            "a bound klib parameter must never advertise a default the generated call cannot omit " +
+                "-- see this test's KDoc for what regresses when this reads [false, true] instead",
+        )
+    }
+
     private companion object {
         /** Packages searched for a real nullable-primitive parameter; see the test that uses them. */
         val NULLABLE_PROBE_PACKAGES = listOf("kotlin.text", "kotlin.collections", "kotlin.io", "kotlin")
@@ -307,4 +404,59 @@ class KlibScannerTest {
             "kotlin.Long", "kotlin.Float", "kotlin.Double", "kotlin.String", "kotlin.ByteArray",
         )
     }
+}
+
+/**
+ * A `kotlin.<name>` primitive type, minimally -- exactly the shape
+ * [KlibScanner]'s private `typeModelOf`/`klibBoundaryTypeOf` need to accept it as a boundary type:
+ * an [AbiClassifierReference.ClassReference] classifier, no type arguments, unmarked nullability.
+ */
+@OptIn(ExperimentalLibraryAbiReader::class)
+private class FakePrimitiveType(name: String) : AbiType.Simple {
+    override val classifierReference: AbiClassifierReference = object : AbiClassifierReference.ClassReference {
+        override val className: AbiQualifiedName = AbiQualifiedName(AbiCompoundName("kotlin"), AbiCompoundName(name))
+    }
+    override val arguments: List<AbiTypeArgument> = emptyList()
+    override val nullability: AbiTypeNullability = AbiTypeNullability.NOT_SPECIFIED
+}
+
+/** A plain value parameter: not vararg, not `noinline`/`crossinline`, with [hasDefaultArg] the one
+ * property [declaresDefaultIsFalseForABoundDeclarationEvenWhenTheAbiDeclaresADefault] varies. */
+@OptIn(ExperimentalLibraryAbiReader::class)
+private class FakeValueParameter(
+    override val type: AbiType,
+    override val hasDefaultArg: Boolean,
+) : AbiValueParameter {
+    override val isVararg: Boolean = false
+    override val isNoinline: Boolean = false
+    override val isCrossinline: Boolean = false
+}
+
+/**
+ * The minimal [AbiFunction] `KlibScanner.candidateOrNull` needs to bind: top-level (package
+ * `fixture.klib`), no extension receiver, no context receivers, not `suspend`, not a constructor, no
+ * annotations (so never declined as `@PublishedApi internal`) -- every one of
+ * `candidateOrNull`/`declarationModelOf`'s early `return declined(...)` checks reads a property this
+ * class answers "no" to, so the only thing left deciding bound-vs-declined is [valueParameters] and
+ * [returnType], which the test sets up to be bindable primitives.
+ */
+@OptIn(ExperimentalLibraryAbiReader::class)
+private class FakeTopLevelFunction(
+    simpleName: String,
+    override val valueParameters: List<AbiValueParameter>,
+    override val returnType: AbiType,
+) : AbiFunction {
+    override val qualifiedName: AbiQualifiedName =
+        AbiQualifiedName(AbiCompoundName("fixture.klib"), AbiCompoundName(simpleName))
+    override val signatures: AbiSignatures = object : AbiSignatures {
+        override fun get(version: AbiSignatureVersion): String? = null
+    }
+    override fun hasAnnotation(name: AbiQualifiedName): Boolean = false
+    override val modality: AbiModality = AbiModality.FINAL
+    override val typeParameters: List<AbiTypeParameter> = emptyList()
+    override val isConstructor: Boolean = false
+    override val isInline: Boolean = false
+    override val isSuspend: Boolean = false
+    override val hasExtensionReceiverParameter: Boolean = false
+    override val contextReceiverParametersCount: Int = 0
 }

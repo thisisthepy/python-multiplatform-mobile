@@ -222,8 +222,17 @@ internal object KlibScanner {
      * error type. That is [ArtifactScanner.declarationModelOf]'s own rule and
      * `docs/pyi-generation-design.md` §3.1's last row: `BindingPolicy` rejects generic declarations
      * and stubbing what cannot even be spelled would be a lie, so there is nothing to record.
+     *
+     * `internal`, not `private`: no real klib available to this module's tests binds a declaration
+     * that also declares a default (every one found in `kotlin-stdlib`/`kotlinx-coroutines-core` is
+     * declined first, for an unrelated reason -- see `KlibScannerTest`'s
+     * `declaresDefaultIsFalseForABoundDeclarationEvenWhenTheAbiDeclaresADefault`). Proving the
+     * `declaresDefault`/`paramHasDefault` pairing therefore has to construct the `AbiFunction` by hand
+     * rather than find one, which means calling this directly with a test double -- `scanKlib`/
+     * `scanKlibDeclarations` only ever call `LibraryAbiReader.readAbiInfo` on a real file and have no
+     * seam to inject one.
      */
-    private fun candidateOrNull(function: AbiFunction): Candidate? {
+    internal fun candidateOrNull(function: AbiFunction): Candidate? {
         val model = declarationModelOf(function) ?: return null
         val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
 
@@ -299,7 +308,23 @@ internal object KlibScanner {
                 bindingName = qualifiedName,
                 returnBoundaryTag = returnType.tag,
                 parameters = model.parameters.mapIndexed { index, parameter ->
-                    parameter.copy(boundaryTag = boundaryTypes[index].tag)
+                    parameter.copy(
+                        boundaryTag = boundaryTypes[index].tag,
+                        // Mirrors `paramHasDefault` just above, and for the identical reason: this is
+                        // `ArtifactScanner.applyDefaultOmission`'s rewrite of `declaration.parameters
+                        // [].declaresDefault` (see that function's KDoc), done here instead because a
+                        // klib walk has no separate omission pass to do it in a second step. Left at
+                        // `parameter.declaresDefault` -- the raw `AbiValueParameter.hasDefaultArg` --
+                        // a bound declaration would describe the Kotlin source's defaults rather than
+                        // the generated binding's, and `PyiRendering`'s `if (parameter.declaresDefault)
+                        // " = ..."` would advertise an omission `lambdaBody` never implements: the
+                        // `.pyi` would type-check a call the runtime binding then rejects.
+                        // `KlibScannerTest.declaresDefaultIsFalseForABoundDeclarationEvenWhenTheAbi
+                        // DeclaresADefault` pins this; `boundDeclarationWithADefaultDoesNotOccurIn
+                        // AvailableRealKlibs` records why that test constructs its own `AbiFunction`
+                        // instead of finding one.
+                        declaresDefault = false,
+                    )
                 },
             ),
         )
