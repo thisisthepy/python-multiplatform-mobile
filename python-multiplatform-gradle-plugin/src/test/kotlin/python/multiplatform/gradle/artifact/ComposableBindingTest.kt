@@ -269,18 +269,133 @@ class ComposableBindingTest {
                 val descriptor = descriptors.getOrNull(index) ?: return@forEachIndexed
                 val jvmArity = ArtifactScanner.jvmFunctionArityOf(descriptor) ?: return@forEachIndexed
                 val declared = kotlinClassifierNameOf(type)
-                val reported = declared?.let { ArtifactScanner.functionSlotTypeName(it, descriptor) }
+                val declaredArity = declared?.removePrefix("kotlin.Function")?.toIntOrNull()
                 when {
-                    reported == null ->
+                    declaredArity == null ->
                         wrong += "$owner.${function.kotlinName} slot $index: declared=$declared jvm=Function$jvmArity"
-                    reported.endsWith(ArtifactScanner.COMPOSABLE_TYPE_MARK) -> lowered++
-                    else -> plain++
+                    jvmArity == declaredArity -> plain++
+                    jvmArity == declaredArity + 2 -> lowered++
+                    else ->
+                        wrong += "$owner.${function.kotlinName} slot $index: declared=$declaredArity jvm=$jvmArity"
                 }
             }
         }
         println("function-typed composable slots: $plain plain, $lowered lowered by two")
         assertTrue(plain + lowered > 100, "expected the jars to declare function-typed slots; saw ${plain + lowered}")
         assertEquals(emptyList(), wrong, "function-typed slots whose declared and compiled arities are unrelated")
+    }
+
+    /**
+     * The second half of what a slot's name has to say, measured the same way: **what the lambda is
+     * invoked with and what it has to give back.**
+     *
+     * The arity relation above decides which `FunctionN` to implement and whether a composer is
+     * threaded. It cannot decide what to do with the arguments, and until it did, everything with an
+     * argument was refused -- which is every interactive control (`onValueChange`,
+     * `onCheckedChange`) and every scoped container (`ColumnScope`, `RowScope`, `BoxScope`).
+     *
+     * Three counts come out of this walk and each one is a decision:
+     *
+     * | count | what it decides |
+     * |---|---|
+     * | slots forwarding no argument | the case that already worked |
+     * | slots forwarding at least one | what [ArtifactScanner.functionSlotTypeName] now has to describe |
+     * | slots returning something other than `kotlin.Unit` | what has to keep being refused, because `TypeTag` cannot say which boxed numeric type the caller will cast to |
+     *
+     * Printed rather than pinned to a literal, because they are facts about a Compose version.
+     */
+    @Test
+    fun functionTypedSlotsCarryTheirArgumentAndReturnTypes() {
+        val jars = listOfNotNull(
+            jarUnder("org.jetbrains.compose.material3", "material3-desktop"),
+            jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop"),
+            jarUnder("org.jetbrains.compose.material", "material-desktop"),
+        )
+        if (jars.isEmpty()) return
+        var described = 0
+        var undescribed = 0
+        var withArguments = 0
+        var nonUnitReturn = 0
+        val malformed = mutableListOf<String>()
+        forEachPublicComposable(jars, composeClasspath()) { owner, function, method ->
+            val (descriptors, _) = splitMethodDescriptor(method.desc)
+            function.allParameterTypes.forEachIndexed { index, type ->
+                val descriptor = descriptors.getOrNull(index) ?: return@forEachIndexed
+                val jvmArity = ArtifactScanner.jvmFunctionArityOf(descriptor) ?: return@forEachIndexed
+                val declared = kotlinClassifierNameOf(type) ?: return@forEachIndexed
+                val reported = ArtifactScanner.functionSlotTypeName(type, declared, descriptor)
+                if (reported == null) {
+                    undescribed++
+                    return@forEachIndexed
+                }
+                described++
+                // The grammar, parsed the way `pythonx._function_slot` parses it, so a name this
+                // walker can emit and that reader cannot understand fails here rather than at a call.
+                val open = reported.indexOf('(')
+                val close = reported.indexOf(')', open)
+                val arrow = reported.indexOf(ArtifactScanner.FUNCTION_RETURNS, close)
+                if (open < 0 || close < 0 || arrow != close + 1) {
+                    malformed += "$owner.${function.kotlinName} slot $index: $reported"
+                    return@forEachIndexed
+                }
+                val head = reported.substring(0, open)
+                val composable = head.endsWith(ArtifactScanner.COMPOSABLE_TYPE_MARK)
+                val arity = head.removeSuffix(ArtifactScanner.COMPOSABLE_TYPE_MARK)
+                    .removePrefix("kotlin.Function").toIntOrNull()
+                val args = reported.substring(open + 1, close).split(',').filter { it.isNotEmpty() }
+                val returns = reported.substring(arrow + ArtifactScanner.FUNCTION_RETURNS.length)
+                if (arity != jvmArity) {
+                    malformed += "$owner.${function.kotlinName} slot $index: $reported is not Function$jvmArity"
+                }
+                // A lowered lambda's two appended slots are not declared arguments, so the forwarded
+                // count is the compiled arity less those two -- which is what the wrapper relies on
+                // to know how many of the values it is invoked with belong to Python.
+                val forwarded = jvmArity - if (composable) 2 else 0
+                if (args.size != forwarded) {
+                    malformed += "$owner.${function.kotlinName} slot $index: $reported forwards ${args.size} of $forwarded"
+                }
+                if (args.isNotEmpty()) withArguments++
+                if (returns != ArtifactScanner.UNIT_TYPE_NAME) nonUnitReturn++
+            }
+        }
+        println(
+            "function-typed slot signatures: $described described ($withArguments forward an argument, " +
+                "$nonUnitReturn return something other than Unit), $undescribed not describable",
+        )
+        assertEquals(emptyList(), malformed, "slot names pythonx's grammar cannot read back")
+        assertTrue(described > 100, "expected the jars to declare function-typed slots; saw $described")
+        assertTrue(withArguments > 50, "expected scoped containers and value callbacks; saw $withArguments")
+        assertTrue(nonUnitReturn > 0, "expected some slot to return a value, so the refusal is not vacuous")
+    }
+
+    /**
+     * The four rows that decide whether an interactive UI is expressible, named individually.
+     *
+     * `Column.content` is a scope receiver, `Button.onClick` takes nothing, and
+     * `Slider.onValueChange` / `Checkbox.onCheckedChange` are the value callbacks -- one `Float`, one
+     * `Boolean` -- that were refused outright before the argument types were carried. A rule that
+     * described the arity but not the arguments would still pass
+     * [everyFunctionTypedSlotOfAComposableIsEitherPlainOrLoweredByTwo] and fail here.
+     */
+    @Test
+    fun aValueCallbackSlotNamesTheTypeItsArgumentArrivesAs() {
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val entries = ArtifactScanner.scanJar(material3, listOf("androidx.compose.material3"), composeClasspath())
+
+        fun slotOf(declaration: String, parameter: String): String? = entries
+            .filter { it.name.substringAfterLast('.').substringBefore("__") == declaration }
+            .firstNotNullOfOrNull { entry ->
+                entry.paramNames.indexOf(parameter).takeIf { it >= 0 }?.let { entry.paramTypeNames[it] }
+            }
+
+        assertEquals("kotlin.Function1(kotlin.Float)->kotlin.Unit", slotOf("Slider", "onValueChange"))
+        assertEquals("kotlin.Function1(kotlin.Boolean)->kotlin.Unit", slotOf("Checkbox", "onCheckedChange"))
+        // The one that is an *object* rather than a value, and reached through a real composable
+        // rather than a scope: `Text`'s layout callback is handed a `TextLayoutResult`.
+        assertEquals(
+            "kotlin.Function1(androidx.compose.ui.text.TextLayoutResult)->kotlin.Unit",
+            slotOf("Text", "onTextLayout"),
+        )
     }
 
     /**
@@ -304,18 +419,149 @@ class ComposableBindingTest {
             listOf("modifier", "verticalArrangement", "horizontalAlignment", "content"),
             column.paramNames.take(4),
         )
-        assertEquals("kotlin.Function3@Composable", column.paramTypeNames[3], "Column.content")
+        assertEquals(
+            "kotlin.Function3@Composable(androidx.compose.foundation.layout.ColumnScope)->kotlin.Unit",
+            column.paramTypeNames[3],
+            "Column.content",
+        )
         assertEquals(false, column.paramHasDefault[3], "content declares no default, so it must be fillable")
 
         val button = ArtifactScanner.scanJar(material3, listOf("androidx.compose.material3"), classpath)
             .single { it.name.substringAfterLast('.') == "Button" }
         assertEquals("onClick", button.paramNames.first())
-        assertEquals("kotlin.Function0", button.paramTypeNames[0], "Button.onClick is not lowered")
+        assertEquals("kotlin.Function0()->kotlin.Unit", button.paramTypeNames[0], "Button.onClick is not lowered")
         assertEquals(
-            "kotlin.Function3@Composable",
+            "kotlin.Function3@Composable(androidx.compose.foundation.layout.RowScope)->kotlin.Unit",
             button.paramTypeNames[button.paramNames.indexOf("content")],
             "Button.content is",
         )
+    }
+
+    /**
+     * **Which numbering a receiver shifts**, read out of the callee rather than guessed at.
+     *
+     * `composableCandidate` declined every extension composable for exactly one reason, quoted from
+     * its own KDoc: *"Compose's `$changed` slots count receivers and its `$default` bits are assigned
+     * over value parameters, so a receiver shifts one numbering and not the other. Nothing here has
+     * measured which."* This is that measurement, and it is a test rather than a `javap` transcript
+     * so that a Compose version that changed the encoding fails here instead of in a frame.
+     *
+     * ### How the bit is attributed to a parameter
+     *
+     * Not by pattern-matching a disassembly. Every composable that defaults anything opens a
+     * `Composer.startDefaults()` … `endDefaults()` region containing one branch per defaulted
+     * parameter, of the shape
+     *
+     *     ILOAD $default ; push 1 << bit ; IAND ; IFEQ past
+     *     …the default expression…
+     *     xSTORE <the parameter's own JVM local>
+     *     past:
+     *
+     * so reading the guard's constant and the local the branch assigns pairs a **bit** with a
+     * **parameter**, with no assumption about which is which. Stores to a local at or above the first
+     * synthetic parameter are skipped: the same region clears bits of the `$dirty` accumulator.
+     *
+     * The two rows are asserted against each other, because either alone is consistent with the
+     * wrong rule: `Text` has no receiver and its bit *i* is parameter *i*; `RowScope.NavigationBarItem`
+     * has one and its bit *i* is parameter *i* + 1, which is value parameter *i*.
+     */
+    @Test
+    fun theDefaultBitOfAnExtensionComposableNumbersValueParametersAndNotSlots() {
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+
+        // No receiver: the case the existing arithmetic was measured on.
+        val text = defaultBitsOf(material3, "androidx/compose/material3/TextKt") { it.startsWith("Text") }
+        assertTrue(text.isNotEmpty(), "no defaulted parameter found in Text's prologue")
+        assertEquals(
+            text.keys.associateWith { it },
+            text,
+            "a composable with no receiver must number its \$default bits by parameter index",
+        )
+
+        // A receiver, and it does **not** take bit 0: `selected` does, and `modifier` -- parameter 4
+        // of the JVM method and value parameter 3 -- is guarded by `& 8`.
+        val item = defaultBitsOf(material3, "androidx/compose/material3/NavigationBarKt") {
+            it == "NavigationBarItem"
+        }
+        assertTrue(item.isNotEmpty(), "no defaulted parameter found in NavigationBarItem's prologue")
+        assertEquals(
+            item.keys.associateWith { it + 1 },
+            item,
+            "an extension composable's \$default bit i must be its value parameter i, not its slot i",
+        )
+        assertEquals(3, item.keys.min(), "expected NavigationBarItem's first default to be `modifier`")
+        assertTrue(31 !in item.keys, "bit 31 is the receiver's and nothing may assign a default over it")
+    }
+
+    /**
+     * `$default` bit -> the index in `allParameterTypes` of the parameter that bit defaults, for one
+     * method of [ownerInternalName] whose name [nameMatches].
+     */
+    private fun defaultBitsOf(jar: File, ownerInternalName: String, nameMatches: (String) -> Boolean): Map<Int, Int> {
+        // Read with the code kept, unlike [readClassNodeOrNull], which skips it: the walker never
+        // needs an instruction and this is the one measurement that is *about* them.
+        val node = java.util.jar.JarFile(jar).use { file ->
+            val entry = file.getEntry("$ownerInternalName.class") ?: return emptyMap()
+            file.getInputStream(entry).use { stream ->
+                org.objectweb.asm.tree.ClassNode().also {
+                    org.objectweb.asm.ClassReader(stream.readBytes()).accept(it, org.objectweb.asm.ClassReader.SKIP_DEBUG)
+                }
+            }
+        }
+        val method = node.methods.firstOrNull {
+            nameMatches(it.name) && ComposableShape.COMPOSER_DESCRIPTOR in it.desc && it.desc.endsWith(")V")
+        } ?: return emptyMap()
+
+        val (descriptors, _) = splitMethodDescriptor(method.desc)
+        // A static method's locals are its parameters, `long` and `double` taking two each. The map
+        // is inverted so a store instruction can name the parameter it wrote.
+        val parameterOfLocal = HashMap<Int, Int>()
+        var local = 0
+        descriptors.forEachIndexed { index, descriptor ->
+            parameterOfLocal[local] = index
+            local += if (descriptor == "J" || descriptor == "D") 2 else 1
+        }
+        // Everything from the `Composer` on is the compiler's; a store into one of those is the
+        // `$dirty` accumulator rather than a defaulted parameter.
+        val firstSynthetic = descriptors.indexOfFirst { it == ComposableShape.COMPOSER_DESCRIPTOR }
+        val defaultLocal = parameterOfLocal.entries.first { it.value == descriptors.size - 1 }.key
+
+        val bits = HashMap<Int, Int>()
+        val instructions = method.instructions.toArray()
+        var i = 0
+        while (i < instructions.size - 3) {
+            val load = instructions[i] as? org.objectweb.asm.tree.VarInsnNode
+            if (load == null || load.opcode != Opcodes.ILOAD || load.`var` != defaultLocal) { i++; continue }
+            val constant = constantOf(instructions[i + 1])
+            if (constant == null || instructions[i + 2].opcode != Opcodes.IAND ||
+                instructions[i + 3].opcode != Opcodes.IFEQ
+            ) { i++; continue }
+            val past = (instructions[i + 3] as org.objectweb.asm.tree.JumpInsnNode).label
+            var j = i + 4
+            while (j < instructions.size && instructions[j] !== past) {
+                val store = instructions[j] as? org.objectweb.asm.tree.VarInsnNode
+                if (store != null && store.opcode in STORE_OPCODES) {
+                    val parameter = parameterOfLocal[store.`var`]
+                    if (parameter != null && parameter < firstSynthetic) {
+                        bits[Integer.numberOfTrailingZeros(constant)] = parameter
+                    }
+                }
+                j++
+            }
+            i++
+        }
+        return bits
+    }
+
+    private fun constantOf(instruction: org.objectweb.asm.tree.AbstractInsnNode): Int? = when {
+        instruction.opcode in Opcodes.ICONST_0..Opcodes.ICONST_5 -> instruction.opcode - Opcodes.ICONST_0
+        instruction is org.objectweb.asm.tree.IntInsnNode -> instruction.operand
+        instruction is org.objectweb.asm.tree.LdcInsnNode -> instruction.cst as? Int
+        else -> null
+    }
+
+    private companion object {
+        val STORE_OPCODES = setOf(Opcodes.ISTORE, Opcodes.LSTORE, Opcodes.FSTORE, Opcodes.DSTORE, Opcodes.ASTORE)
     }
 
     private fun forEachPublicComposable(

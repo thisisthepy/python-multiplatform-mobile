@@ -85,6 +85,10 @@ object PythonxAdapter {
         # data and both of which a consumer can extend at run time.
 
         import importlib.machinery as _machinery
+        # Read once per crossing, never per invocation: `_positional_capacity` asks it how many
+        # arguments a callable takes at the moment the callable becomes a Kotlin `FunctionN`, and the
+        # answer is closed over by the thunk.
+        import inspect as _inspect
         import sys as _sys
         import types as _types
 
@@ -356,7 +360,20 @@ object PythonxAdapter {
 
 
         def _simple_name(qualified):
-            return qualified.rpartition('.')[2] if qualified else '?'
+            if not qualified:
+                return '?'
+            # A function-typed slot's name is a signature rather than a classifier, so its last
+            # dotted component is the *return* type: `kotlin.Function3@Composable(…)->kotlin.Unit`
+            # would print as `Unit`, which names the one part of it a reader does not need. Rendered
+            # as Kotlin instead, because every message this appears in is telling somebody what they
+            # should have passed. (`_function_slot` is defined below; the name is resolved when this
+            # runs, which is after the module is built.)
+            slot = _function_slot(qualified)
+            if slot is not None:
+                composable, args, returns = slot[1], slot[2], slot[3]
+                return ('@Composable ' if composable else '') + '(' + \
+                    ', '.join(_simple_name(arg) for arg in args) + ') -> ' + _simple_name(returns)
+            return qualified.rpartition('.')[2]
 
 
         def _declared_type_name(value):
@@ -435,23 +452,43 @@ object PythonxAdapter {
         _COMPOSABLE_MARK = '@Composable'
 
 
+        # `kotlin.Function3@Composable(androidx.compose.foundation.layout.ColumnScope)->kotlin.Unit`:
+        # what separates the types the lambda is *invoked with* from the one it has to give back.
+        # Neither character can occur in a Kotlin fully-qualified name, so the grammar is unambiguous
+        # for the same reason `@Composable` is. `ArtifactScanner.FUNCTION_RETURNS` is the writer.
+        _FUNCTION_RETURNS = '->'
+
+
         def _function_slot(type_name):
-            '''`(jvm_arity, composable)` for a Kotlin function-typed slot, or `None`.
+            '''`(jvm_arity, composable, arg_type_names, return_type_name)`, or `None`.
 
             The arity is the **compiled** one -- what the object will be invoked with -- because that
             is what decides which `FunctionN` interface Kotlin has to hand back. For a lowered
             composable lambda the last two of those are the `${'$'}composer` and the `${'$'}changed` Compose
-            appends to a function *type* exactly as it appends them to a function.
+            appends to a function *type* exactly as it appends them to a function, and are not among
+            [arg_type_names]: those are the declaration's own, the ones Python is given.
+
+            `None` for anything without a signature payload, which is how the walker spells a slot it
+            could not fully describe -- a type argument that is a type *parameter* has no name a proxy
+            could be built over, so the slot stays an ordinary object handle nothing can fill.
             '''
             if not type_name or not type_name.startswith(_FUNCTION_PREFIX):
                 return None
-            composable = type_name.endswith(_COMPOSABLE_MARK)
-            tail = type_name[len(_FUNCTION_PREFIX):]
-            if composable:
-                tail = tail[:-len(_COMPOSABLE_MARK)]
-            if not tail.isdigit():
+            open_at = type_name.find('(')
+            close_at = type_name.find(')', open_at + 1) if open_at >= 0 else -1
+            if open_at < 0 or close_at < 0:
                 return None
-            return (int(tail), composable)
+            if type_name[close_at + 1:close_at + 1 + len(_FUNCTION_RETURNS)] != _FUNCTION_RETURNS:
+                return None
+            head = type_name[len(_FUNCTION_PREFIX):open_at]
+            composable = head.endswith(_COMPOSABLE_MARK)
+            if composable:
+                head = head[:-len(_COMPOSABLE_MARK)]
+            if not head.isdigit():
+                return None
+            inner = type_name[open_at + 1:close_at]
+            args = tuple(inner.split(',')) if inner else ()
+            return (int(head), composable, args, type_name[close_at + 1 + len(_FUNCTION_RETURNS):])
 
 
         def _is_python_callable(value):
@@ -468,26 +505,103 @@ object PythonxAdapter {
             return callable(value)
 
 
-        def _content_thunk(fn):
-            '''Wraps a Python callable so that Kotlin can hand it the composer of the invocation.
+        # How a Kotlin type named in a function slot's signature is marshalled into the invocation.
+        # The tags are `python.multiplatform.reflection.TypeTag`'s own names, and this list is sent to
+        # Kotlin so that both sides marshal from one decision rather than two -- see
+        # `PythonFunction.marshalAn`.
+        _ARG_TAGS = {
+            'kotlin.Byte': 'INT', 'kotlin.Short': 'INT', 'kotlin.Int': 'INT', 'kotlin.Long': 'INT',
+            'kotlin.Float': 'FLOAT', 'kotlin.Double': 'FLOAT',
+            'kotlin.Boolean': 'BOOLEAN', 'kotlin.String': 'STRING',
+        }
 
-            The push and the pop are here rather than on the Kotlin side because the composer stack
-            is this module's, and reaching it from Kotlin would be two more boundary crossings per
-            invocation -- one to resolve `push_composer` and one to call it -- for a `try/finally`
-            Python can write directly.
+
+        def _arg_tag(kotlin_type_name):
+            '''How one forwarded argument crosses. Anything not a primitive is a handle.
+
+            Deliberately **not** `_KOTLIN_PRIMITIVES`: that set contains `kotlin.Any` and
+            `kotlin.Unit`, neither of which has a marshalling rule -- an `Any` argument is whatever
+            Kotlin put in it and can only travel as a handle, which is what OBJECT means.
+            '''
+            return _ARG_TAGS.get(kotlin_type_name, 'OBJECT')
+
+
+        def _positional_capacity(fn, available):
+            '''How many of [available] positional arguments [fn] will take, or `None` for "not any".
+
+            A Kotlin `ColumnScope.() -> Unit` is written `{ Text(...) }` as often as `{ scope -> }`,
+            and a `(Float) -> Unit` is written `{ }` when the value is not wanted; a Python author
+            writing `lambda: Text('hi')` is making the same statement, and it was the *only* thing
+            they could write until this slot forwarded anything. So the arguments a callable does not
+            declare are dropped rather than forced on it, and a callable that wants **more** than the
+            slot supplies is refused -- there is no value to give it, and the failure would otherwise
+            arrive from inside Compose on a later recomposition.
+
+            Measured by binding rather than by counting `__code__.co_argcount`: a bound method, a
+            `functools.partial` and a callable object all answer correctly through `signature` and
+            none of them through the code object. A callable `signature` cannot describe at all (a C
+            builtin) is handed everything, which is what it would have got before this existed.
+            '''
+            try:
+                sig = _inspect.signature(fn)
+            except (TypeError, ValueError):
+                return available
+            probe = (None,) * available
+            for count in range(available, -1, -1):
+                try:
+                    sig.bind(*probe[:count])
+                except TypeError:
+                    continue
+                return count
+            return None
+
+
+        def _adapt_arguments(values, owners, wanted):
+            '''The values Kotlin sent, given owners, and cut down to what the callable asked for.
+
+            **Every** value is wrapped before any is dropped, and that order is the whole of the
+            lifetime rule for a forwarded object: Kotlin roots it in `HandleTable` and does not
+            release it, because a callback is allowed to keep what it was handed. The proxy's
+            `__del__` is what gives it back -- so an argument the callable did not declare must still
+            be given a proxy, which then dies here at the end of this call. Truncating first would
+            leak one `HandleTable` entry per invocation, and a composition invokes its content again
+            on every recomposition.
+            '''
+            adapted = [_wrap(value, owner) for value, owner in zip(values, owners)]
+            return adapted[:wanted]
+
+
+        def _callable_thunk(fn, composable, arg_types, wanted):
+            '''Wraps a Python callable in whatever its slot's invocation convention needs.
+
+            For a **composable** slot that is the composer: the push and the pop are here rather than
+            on the Kotlin side because the composer stack is this module's, and reaching it from
+            Kotlin would be two more boundary crossings per invocation -- one to resolve
+            `push_composer` and one to call it -- for a `try/finally` Python can write directly.
 
             **The composer is the one this invocation was given**, not the one that was current when
             the lambda crossed. Compose invokes a stored content lambda again on later
             recompositions, with whatever composer is current then; a thunk that closed over the
             creating composer would be pushing a position that no longer exists.
+
+            For a **plain** slot with nothing to adapt -- no arguments, or none that is an object and
+            none to drop -- the callable is handed over as it is, so the case that already worked
+            keeps costing exactly what it did.
             '''
-            def _thunk(composer):
-                _COMPOSER.append(composer)
-                try:
-                    return fn()
-                finally:
-                    _COMPOSER.pop()
-            return _thunk
+            owners = tuple(t if _arg_tag(t) == 'OBJECT' else None for t in arg_types)
+            if composable:
+                def _thunk(composer, *values):
+                    _COMPOSER.append(composer)
+                    try:
+                        return fn(*_adapt_arguments(values, owners, wanted))
+                    finally:
+                        _COMPOSER.pop()
+                return _thunk
+            if not any(owners) and wanted == len(arg_types):
+                return fn
+            def _plain(*values):
+                return fn(*_adapt_arguments(values, owners, wanted))
+            return _plain
 
 
         # Returned by `_coerce` for a callable during a *trial* bind. `_Overloads` binds every
@@ -498,7 +612,7 @@ object PythonxAdapter {
         _CALLABLE_PENDING = object()
 
 
-        def _make_function(value, jvm_arity, composable):
+        def _make_function(value, slot):
             '''Hands [value] to Kotlin as a `FunctionN`, and returns the handle of the wrapper.
 
             The wrapper belongs to the enclosing `PythonCallables` scope, which is the composition's:
@@ -506,9 +620,18 @@ object PythonxAdapter {
             after the statement that wrote `content=lambda: ...` dropped Python's last reference to
             it. A bare handle is what comes back, which is exactly what an OBJECT slot takes.
             '''
-            body = _content_thunk(value) if composable else value
+            jvm_arity, composable, arg_types, _return_type = slot
+            wanted = _positional_capacity(value, len(arg_types))
+            if wanted is None:
+                raise TypeError(
+                    'this slot invokes its callable with ' + str(len(arg_types)) + ' argument(s) (' +
+                    ', '.join(_simple_name(t) for t in arg_types) + '), which ' +
+                    getattr(value, '__name__', repr(value)) + ' does not accept'
+                )
+            body = _callable_thunk(value, composable, arg_types, wanted)
             return _boundary()['invoke'](
-                _resolve('pythonx.runtime.newFunction'), (body, jvm_arity, composable)
+                _resolve('pythonx.runtime.newFunction'),
+                (body, jvm_arity, composable, ','.join(_arg_tag(t) for t in arg_types)),
             )
 
 
@@ -704,9 +827,28 @@ object PythonxAdapter {
                 # because Kotlin can be given one that calls back.
                 slot = _function_slot(type_name)
                 if slot is not None and _is_python_callable(value):
+                    # A Python callable cannot stand in for a lambda that has to give something back.
+                    # `kotlin.Function1` is the spelling of both `(Float) -> Unit` and
+                    # `(Float) -> Boolean`, and only the return type in the name tells them apart:
+                    # `TypeTag` has one INT for `Byte` through `Long`, so nothing on either side can
+                    # say which boxed type Kotlin will cast the answer to, and guessing would be a
+                    # `ClassCastException` inside Compose rather than a refusal here.
+                    if slot[3] != 'kotlin.Unit':
+                        return _refuse(
+                            strict,
+                            'a Kotlin lambda returning ' + _simple_name(slot[3]) + ' cannot be '
+                            'written in Python yet: the boundary carries one INT for every integral '
+                            'width, so the type Kotlin would cast the result to is not recoverable',
+                        )
                     if not strict:
                         return _CALLABLE_PENDING
-                    return _make_function(value, slot[0], slot[1])
+                    return _make_function(value, slot)
+                if slot is not None and getattr(value, '_pm_handle', None) is None:
+                    # A function slot and something that is not callable. Refused with the signature
+                    # rather than falling through to "expected a handle": Kotlin will never hand a
+                    # `FunctionN` back out for Python to pass in again, so a handle is not the answer
+                    # here and saying so would send the caller looking for one.
+                    return _refuse(strict, 'expected a callable of ' + _simple_name(type_name))
                 handle = getattr(value, '_pm_handle', None)
                 if handle is not None:
                     declared = _declared_type_name(value)
@@ -862,19 +1004,37 @@ object PythonxAdapter {
             owns bit 0 and nothing ever sets it), so the bit index is the parameter index and needs
             no correction.
 
-            `${'$'}changed` is passed as 0, which is the conservative value: it is a per-call-site claim
-            about which arguments the *caller* knows to be unchanged, and this caller knows nothing.
-            The callee then computes it with `composer.changed(...)` itself, which is the branch its
-            prologue takes when `${'$'}changed & mask == 0`.
+            ### Except for a receiver, which is the one correction
+
+            `${'$'}default` bits are assigned over **value** parameters, and an extension composable's
+            receiver is not one. Measured the same way, on `androidx/compose/material3/NavigationBarKt`
+            -- `RowScope.NavigationBarItem(selected, onClick, icon, modifier = …)` guards its
+            `modifier` with `${'$'}default & 8`, the **4th** value parameter's bit, although `modifier`
+            is slot 4 of the binding once the receiver is counted. The receiver is given bit **31**
+            instead (`& -2147483648` in the prologue), which nothing here ever sets because a receiver
+            cannot be omitted.
+
+            `${'$'}changed` numbers the other way -- the receiver *is* slot 0 there -- and it does not
+            matter, because `${'$'}changed` is passed as 0. That is the conservative value: it is a
+            per-call-site claim about which arguments the *caller* knows to be unchanged, and this
+            caller knows nothing. The callee then computes it with `composer.changed(...)` itself,
+            which is the branch its prologue takes when `${'$'}changed & mask == 0`.
             '''
             declared = decl.declared_arity()
             if len(args) > declared:
                 return _refuse(strict, 'takes ' + str(declared) + ' arguments, got ' + str(len(args)))
             slots = list(args) + [_NO_MATCH] * (decl.arity - len(args))
+            # How far a `${'$'}default` bit index sits behind its slot index. See the docstring: 1 for an
+            # extension composable, 0 otherwise.
+            bit_offset = 1 if decl.is_extension else 0
             if kwargs:
                 for key, value in kwargs.items():
                     index = -1
                     for slot in range(declared):
+                        # `<receiver>` is deliberately not a Python identifier, so no keyword can name
+                        # it -- but `to_python_name` is not asked to make sense of one either.
+                        if decl.param_names[slot] == '<receiver>':
+                            continue
                         if to_python_name(decl.param_names[slot]) == key:
                             index = slot
                             break
@@ -891,7 +1051,7 @@ object PythonxAdapter {
                     if not decl.omittable(index):
                         missing = decl.param_names[index] if decl.param_names else 'argument ' + str(index)
                         return _refuse(strict, 'no value for ' + to_python_name(missing))
-                    word, bit = divmod(index, _DEFAULT_BITS_PER_WORD)
+                    word, bit = divmod(index - bit_offset, _DEFAULT_BITS_PER_WORD)
                     if word >= len(mask):
                         return _refuse(strict, 'no ${'$'}default word covers parameter ' + str(index))
                     mask[word] |= 1 << bit

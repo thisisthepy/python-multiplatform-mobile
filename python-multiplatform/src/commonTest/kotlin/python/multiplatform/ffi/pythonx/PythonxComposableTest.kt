@@ -124,6 +124,57 @@ class PythonxComposableTest {
     }
 
     /**
+     * **An extension composable's mask counts value parameters, not slots**, on every target.
+     *
+     * `RowScope.NavigationBarItem(selected, onClick, modifier = …, enabled = …)` reached as a method
+     * on the scope's proxy, which is the only spelling there is -- a receiver is positional in Kotlin
+     * and `<receiver>` is deliberately not a Python identifier, so nothing can name it.
+     *
+     * The receiver occupies slot 0 of the binding and **no** `$default` bit: bit 0 is `selected`, so
+     * `modifier` is bit 2 and `enabled` is bit 3. Under the arithmetic this replaced -- bit index =
+     * slot index -- they would be bits 3 and 4, and the two masks differ in every bit, which is what
+     * makes this test not vacuous. The numbering is read out of the real `NavigationBarKt`'s
+     * bytecode by `ComposableBindingTest`; this is where it is checked on the four targets that
+     * cannot open a jar, and `ComposableRenderTest` is where a wrong bit is shown to raise inside
+     * Compose rather than to draw something slightly wrong.
+     */
+    @Test
+    fun anExtensionComposableNumbersItsMaskOverValueParametersOnly() = withComposer {
+        // `onClick` declares no default, so the call cannot avoid handing Kotlin a callable -- which
+        // needs somewhere to live. The scope is the composition's; here it is this block's.
+        val scope = PythonCallables.newScope()
+        try {
+            PythonCallables.withScope(scope) {
+                Python3.exec(
+                    """
+                    from pythonx.compose.foundation.layout import stub_row_scope
+                    _row = stub_row_scope()
+                    _row.NavigationBarItem(selected=True, on_click=lambda: None)
+                    _row.NavigationBarItem(selected=True, on_click=lambda: None, enabled=False)
+                    """.trimIndent(),
+                )
+            }
+        } finally {
+            scope.close()
+        }
+
+        val calls = ComposableShapedFragment.calls
+        assertEquals(2, calls.size, "the extension composable was not reachable as a method on its scope")
+        assertEquals(ComposableShapedFragment.StubRowScope, calls[0][0], "slot 0 is the receiver")
+        assertEquals(true, calls[0][1], "slot 1 is `selected`")
+        assertEquals(
+            listOf(0b1100L, 0b0100L),
+            calls.map { it[7] },
+            "\$default bit i must be value parameter i: modifier is bit 2 and enabled bit 3, " +
+                "not bits 3 and 4",
+        )
+        // The omitted slots still have to survive the boundary as the callee's prologue expects.
+        assertEquals(null, calls[0][3], "an omitted reference slot is null")
+        assertEquals(false, calls[0][4], "an omitted BOOLEAN slot is False, not None")
+        assertEquals(false, calls[1][4], "`enabled=False` is a written value, not an omission")
+    }
+
+    /**
      * A required parameter is still required: the mask reaches defaults, and `text` has none.
      *
      * This is what stops the mask from becoming "every argument is optional". `paramHasDefault` is

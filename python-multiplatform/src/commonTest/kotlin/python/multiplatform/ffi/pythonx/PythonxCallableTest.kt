@@ -51,6 +51,8 @@ class PythonxCallableTest {
         UpcallTable.install(listOf(ComposableShapedFragment))
         ComposableShapedFragment.calls.clear()
         ComposableShapedFragment.clicks.clear()
+        ComposableShapedFragment.valueChanges.clear()
+        ComposableShapedFragment.contents.clear()
         ComposableShapedFragment.contentInvocations = 0
     }
 
@@ -283,6 +285,307 @@ class PythonxCallableTest {
             assertEquals(REPETITIONS, scope.liveCount, "one wrapper per crossing, none reused")
         }
         scope.close()
+    }
+
+    /**
+     * **①: a value reaches the Python callable.** `Slider(on_value_change=lambda v: ...)`.
+     *
+     * The claim is deliberately not "the callback fired" -- a wrapper that dropped its argument and
+     * called `fn()` would fire too, and a slider that never moves is exactly what that renders as.
+     * So the fixture's `Slider` invokes its callback with a value no default produces, and the
+     * assertion is on **what Python was told**, recorded in a Python list rather than marshalled back
+     * out so that the check costs no crossing of its own that could be the thing that worked.
+     *
+     * A `float` and not an `int`: `TypeTag.FLOAT` carries a `Double` and the slot declares a Kotlin
+     * `Float`, so a rule that widened through the integral tag would arrive as `0` here.
+     */
+    @Test
+    fun aValueCallbackIsToldWhatKotlinPassedIt() = withComposer {
+        Python3.exec(
+            """
+            from pythonx.compose.material3 import Slider
+            _px_seen = []
+            Slider(on_value_change=lambda v: _px_seen.append(v))
+            """.trimIndent(),
+        )
+
+        assertEquals("1", eval("len(_px_seen)"), "the callback never ran")
+        assertEquals("0.25", eval("round(_px_seen[0], 6)"), "the callback was not told the value Kotlin passed")
+        assertEquals("<class 'float'>", eval("type(_px_seen[0])"), "a Float slot must not arrive as an int")
+    }
+
+    /**
+     * **②: the scope receiver reaches the callable, as its own Kotlin type.**
+     *
+     * `Column`'s `content` is `@Composable ColumnScope.() -> Unit`, so Compose invokes it with the
+     * scope, a composer and a `$changed`. The scope was dropped before this; forwarding it is the
+     * *same* marshalling problem as the `Float` above and not a different one -- the only thing that
+     * differs is which side of `TypeTag.OBJECT` the declared type falls on.
+     *
+     * Two assertions, because arriving is not enough. The value has to be a proxy over the scope
+     * Kotlin actually passed -- `_pm_handle` resolves to it -- and its **type name** has to be
+     * `ColumnScope`, because that name is the key `_BY_RECEIVER` hangs the scope's extensions off. A
+     * proxy of the wrong type would carry the right object and still have no `weight` on it.
+     */
+    @Test
+    fun aScopedContentIsHandedItsReceiverAsAProxyOfTheDeclaredType() = withComposer {
+        Python3.exec(
+            """
+            from pythonx.compose.foundation.layout import Column
+            from pythonx.compose.material3 import Text
+            _px_scope = []
+
+            def _px_content(scope):
+                _px_scope.append(scope)
+                Text('hi')
+
+            Column(content=_px_content)
+            """.trimIndent(),
+        )
+
+        assertEquals(1, ComposableShapedFragment.contentInvocations, "the container never called its content")
+        assertEquals("1", eval("len(_px_scope)"), "the content ran without being handed its scope")
+        assertEquals(
+            "ColumnScope",
+            eval("type(_px_scope[0]).__name__"),
+            "the receiver arrived under some other type, so ColumnScope's extensions cannot attach",
+        )
+        val handle = eval("_px_scope[0]._pm_handle").toLong()
+        assertEquals(
+            ComposableShapedFragment.StubScope,
+            HandleTable.resolveRaw(handle),
+            "the proxy is over some other object than the scope the container passed",
+        )
+    }
+
+    /**
+     * A callable that declares no parameter for the receiver still works, and that is a decision
+     * rather than an accident.
+     *
+     * Kotlin writes `Column { Text("hi") }` far more often than `Column { scope -> ... }`, and a
+     * Python author writing `lambda: Text('hi')` is saying the same thing -- it was also the *only*
+     * spelling that existed before this slot forwarded anything, so every test above and the whole of
+     * `ComposableRenderTest` is written that way. Dropping what the callable did not ask for is
+     * therefore both the compatible answer and the idiomatic one.
+     *
+     * The other direction is **not** symmetric: a callable that wants more than the slot supplies is
+     * refused where it crosses, because there is no value to give it and the alternative is a
+     * `TypeError` raised inside Compose on some later recomposition.
+     */
+    @Test
+    fun aCallableThatDeclaresNoReceiverStillRunsAndOneThatWantsTooManyIsRefused() = withComposer {
+        Python3.exec(
+            """
+            from pythonx.compose.foundation.layout import Column
+            from pythonx.compose.material3 import Text
+            Column(content=lambda: Text('hi'))
+            """.trimIndent(),
+        )
+        assertEquals(1, ComposableShapedFragment.contentInvocations, "a zero-argument content did not run")
+        assertEquals(2, ComposableShapedFragment.calls.size, "expected the Column and the Text it contains")
+
+        val refusal = assertFails {
+            Python3.exec(
+                """
+                from pythonx.compose.foundation.layout import Column
+                Column(content=lambda a, b, c: None)
+                """.trimIndent(),
+            )
+        }
+        assertTrue(
+            refusal.message?.contains("does not accept") == true,
+            "expected a refusal naming the arity mismatch, got: ${refusal.message}",
+        )
+    }
+
+    /**
+     * A forwarded object is rooted by Kotlin and released by **Python**, exactly once, including the
+     * one the callable never asked for.
+     *
+     * This is the lifetime question ① newly creates: the argument crosses too, so somebody owns it.
+     * `HandleTable`'s contract says a handle that reaches Python is given back by the proxy's
+     * `__del__`, and that is what happens here -- Kotlin does not release it, because a callback is
+     * allowed to keep what it was handed.
+     *
+     * The **dropped** case is the one that fails silently and is asserted separately: a thunk that
+     * truncated the argument list before wrapping would never build an owner for the receiver, and
+     * the handle would leak once per invocation. Two hundred invocations of a content that ignores
+     * its scope therefore has to end with the table exactly where it started, and a wrapper that
+     * released it *as well* would show as a `liveCount` that went below the baseline.
+     */
+    @Test
+    fun aForwardedObjectIsReleasedOnceByThePythonProxyEvenWhenTheCallableDropsIt() = withAdapter {
+        val scope = PythonCallables.newScope()
+        val baseline = HandleTable.liveCount
+        PythonCallables.withScope(scope) {
+            pushComposer()
+            try {
+                Python3.exec(
+                    """
+                    from pythonx.compose.foundation.layout import Column
+                    _px_kept = []
+                    for _ in range(REPS):
+                        Column(content=lambda: None)
+                    Column(content=lambda s: _px_kept.append(s))
+                    """.trimIndent().replace("REPS", REPETITIONS.toString()),
+                )
+            } finally {
+                popComposer()
+            }
+        }
+        // The wrappers themselves are roots too -- one per crossing, released together by the scope
+        // (`everyCrossingBuildsItsOwnWrapperAndTheScopeHoldsThemAll`). Closing first leaves only what
+        // this test is about: what the *invocations* rooted.
+        assertEquals(REPETITIONS + 1, scope.close(), "the scope did not hold one wrapper per crossing")
+
+        // One live handle above the baseline: the receiver the last content kept. Everything the
+        // dropping contents were handed has been given back, which a thunk that truncated before
+        // wrapping could not do -- it would leave $REPETITIONS of them rooted with no Python object
+        // anywhere that could release one.
+        assertEquals(
+            baseline + 1,
+            HandleTable.liveCount,
+            "expected exactly the kept receiver to still be rooted after $REPETITIONS dropped ones",
+        )
+        assertEquals(
+            ComposableShapedFragment.StubScope,
+            HandleTable.resolveRaw(eval("_px_kept[0]._pm_handle").toLong()),
+            "the kept proxy no longer resolves, so something released it early",
+        )
+
+        Python3.exec("del _px_kept")
+        assertEquals(baseline, HandleTable.liveCount, "the kept receiver was never given back")
+    }
+
+    /**
+     * **What one *invocation* costs**, as distinct from what one crossing costs, which is the part
+     * of it a clock is not needed for.
+     *
+     * `everyCrossingBuildsItsOwnWrapperAndTheScopeHoldsThemAll` measures the crossing: one wrapper
+     * and one root per `content=` written, all held until the scope closes. This measures the other
+     * axis, which forwarding an argument newly created -- **one wrapper, invoked many times**, the
+     * shape a recomposing composition really has.
+     *
+     * The claim is that a forwarded object's root does not accumulate. `HandleTable`'s array is
+     * bounded by peak live entries rather than by total issued, so a root registered and released
+     * inside one invocation returns its slot; if the release were missing, [HandleTable.slotCount]
+     * would grow once per invocation and this would say so at $REPETITIONS.
+     *
+     * What is **not** free is stated rather than asserted: each invocation pays one
+     * `HandleTable.register`/`release` pair, one `PyInt` for the handle, and one Python proxy object
+     * whose `__del__` runs at the end of the call. Nothing is interned, so a `content` invoked on
+     * every recomposition pays all three every time. No wall-clock figure is claimed
+     * (`agent-rules` §11).
+     */
+    @Test
+    fun invokingOneWrapperManyTimesDoesNotAccumulateRootsForItsArguments() = withAdapter {
+        val scope = PythonCallables.newScope()
+        val baseline = HandleTable.liveCount
+        try {
+            PythonCallables.withScope(scope) {
+                pushComposer()
+                try {
+                    Python3.exec(
+                        """
+                        from pythonx.compose.foundation.layout import Column
+                        _px_last = []
+                        Column(content=lambda s: _px_last.append(type(s).__name__))
+                        """.trimIndent(),
+                    )
+                } finally {
+                    popComposer()
+                }
+            }
+            val content = ComposableShapedFragment.contents.single()
+            val slotsAfterCrossing = HandleTable.slotCount
+            repeat(REPETITIONS) {
+                content(ComposableShapedFragment.StubScope, ComposableShapedFragment.InnerComposer, 0L)
+            }
+
+            println(
+                "forwarded-argument churn: ${REPETITIONS + 1} invocations of one wrapper, " +
+                    "HandleTable slots $slotsAfterCrossing -> ${HandleTable.slotCount}, " +
+                    "live ${HandleTable.liveCount} against a baseline of $baseline",
+            )
+            assertEquals("${REPETITIONS + 1}", eval("len(_px_last)"), "not every invocation reached Python")
+            assertEquals("ColumnScope", eval("_px_last[-1]"), "a later invocation stopped forwarding its receiver")
+            assertEquals(
+                slotsAfterCrossing,
+                HandleTable.slotCount,
+                "a forwarded argument's root must be released within its invocation, not accumulated",
+            )
+        } finally {
+            scope.close()
+        }
+        assertEquals(baseline, HandleTable.liveCount, "closing the scope did not return the table to where it was")
+    }
+
+    /**
+     * A lambda that has to **give something back** is refused, and refused at the call.
+     *
+     * `kotlin.Function1` is the compiled spelling of both `(Float) -> Unit` and `(Float) -> Boolean`,
+     * so without the return type in the slot's name the two are indistinguishable -- and the second
+     * cannot be bound, because `TypeTag` carries one `INT` for `Byte` through `Long` and one `FLOAT`
+     * for both floating widths, so nothing on either side can say which boxed type Compose will cast
+     * the answer to. 18 of the 560 function-typed slots three Compose jars declare are this shape.
+     *
+     * The alternative is not a wrong picture; it is a `ClassCastException` raised inside Compose,
+     * from a frame that names neither the slot nor the Python callable.
+     */
+    @Test
+    fun aLambdaThatHasToReturnAValueIsRefusedRatherThanCoerced() = withComposer {
+        val refusal = assertFails {
+            Python3.exec(
+                """
+                from pythonx.compose.material3 import remember_sheet_state
+                remember_sheet_state(confirm_value_change=lambda v: True)
+                """.trimIndent(),
+            )
+        }
+        assertTrue(
+            refusal.message?.contains("returning Boolean") == true,
+            "expected the refusal to name the return type, got: ${refusal.message}",
+        )
+        assertEquals(0, ComposableShapedFragment.calls.size, "the refused call still reached Kotlin")
+    }
+
+    /**
+     * The plain-with-arguments case has the same lifetime rule as the plain zero-argument one: a
+     * callback fired after its scope closed **refuses** rather than calling through a released
+     * `PyObject`.
+     *
+     * Stated separately from [aFunctionInvokedAfterItsScopeClosedRefuses] because the argument path
+     * is new code between the check and the call -- a wrapper that marshalled first and checked after
+     * would have already registered a `HandleTable` root and built Python objects against a freed
+     * callable by the time it refused.
+     */
+    @Test
+    fun aValueCallbackInvokedAfterItsScopeClosedRefuses() = withAdapter {
+        val scope = PythonCallables.newScope()
+        PythonCallables.withScope(scope) {
+            pushComposer()
+            try {
+                Python3.exec(
+                    """
+                    from pythonx.compose.material3 import Slider
+                    _px_moves = []
+                    Slider(on_value_change=lambda v: _px_moves.append(v))
+                    """.trimIndent(),
+                )
+            } finally {
+                popComposer()
+            }
+        }
+        assertEquals("1", eval("len(_px_moves)"), "the fixture never fired the callback")
+        val onValueChange = ComposableShapedFragment.valueChanges.single()
+
+        scope.close()
+        val refusal = assertFails { onValueChange(1.0f) }
+        assertTrue(
+            refusal.message?.contains("released") == true,
+            "expected a refusal naming the released scope, got: ${refusal.message}",
+        )
+        assertEquals("1", eval("len(_px_moves)"), "a released callback still ran")
     }
 
     private fun pushComposer() = Python3.exec(

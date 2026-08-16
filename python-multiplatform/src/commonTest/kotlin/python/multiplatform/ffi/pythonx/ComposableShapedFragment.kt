@@ -108,6 +108,7 @@ object ComposableShapedFragment : FunctionTableFragment {
                 // slot 1 is not a `Function3` this is where it fails, which is the point.
                 @Suppress("UNCHECKED_CAST")
                 val content = args[1] as Function3<Any?, Any?, Any?, Unit>
+                contents += content
                 contentInvocations++
                 // Deliberately **not** `args[2]`. Compose hands a content lambda the composer that
                 // is current where the content runs, and a wrapper that ignored its own argument and
@@ -128,7 +129,7 @@ object ComposableShapedFragment : FunctionTableFragment {
             returnType = TypeTag.UNIT,
             kind = CallableKind.FUNCTION,
             paramNames = listOf("onClick", "\$composer", "\$changed", "\$default"),
-            paramTypeNames = listOf("kotlin.Function0", COMPOSER, "kotlin.Int", "kotlin.Int"),
+            paramTypeNames = listOf(PLAIN_FUNCTION0, COMPOSER, "kotlin.Int", "kotlin.Int"),
             returnTypeName = null,
             paramHasDefault = listOf(false, false, false, false),
             callable = { args ->
@@ -138,15 +139,145 @@ object ComposableShapedFragment : FunctionTableFragment {
                 Unit
             },
         ),
+        // A **value callback**: `Slider`'s `onValueChange`, `(Float) -> Unit`. Plain like `onClick`
+        // -- nothing is lowered, so no composer is threaded -- and unlike it in the one way that was
+        // refused outright until now: the lambda is invoked *with something*, which has to reach
+        // Python as a number rather than as a handle to a boxed one.
+        //
+        // Fired here rather than stored, with a value no default could produce, because "the
+        // callback was received" and "the callback was told 0.25" are different claims and only the
+        // second one is what makes an interactive control work.
+        ExposedCallable(
+            name = "androidx.compose.material3.Slider",
+            arity = 5,
+            paramTypes = listOf(TypeTag.FLOAT, TypeTag.OBJECT, TypeTag.OBJECT, TypeTag.INT, TypeTag.INT),
+            returnType = TypeTag.UNIT,
+            kind = CallableKind.FUNCTION,
+            paramNames = listOf("value", "onValueChange", "\$composer", "\$changed", "\$default"),
+            paramTypeNames = listOf(
+                "kotlin.Float", FLOAT_CALLBACK, COMPOSER, "kotlin.Int", "kotlin.Int",
+            ),
+            returnTypeName = null,
+            paramHasDefault = listOf(true, false, false, false, false),
+            callable = { args ->
+                calls += args.toList()
+                @Suppress("UNCHECKED_CAST")
+                val onValueChange = args[1] as Function1<Any?, Unit>
+                valueChanges += onValueChange
+                onValueChange(DRAGGED_TO)
+                Unit
+            },
+        ),
+        // A **predicate**: `(SheetValue) -> Boolean`, which `rememberModalBottomSheetState` really
+        // declares (`confirmValueChange`). Bound as a slot and refused as a callable -- 18 of the 560
+        // function-typed slots three Compose jars declare return something other than `Unit`
+        // (`ComposableBindingTest.functionTypedSlotsCarryTheirArgumentAndReturnTypes`), and the
+        // refusal has to be at the call rather than as a `ClassCastException` inside Compose.
+        ExposedCallable(
+            name = "androidx.compose.material3.rememberSheetState",
+            arity = 4,
+            paramTypes = listOf(TypeTag.OBJECT, TypeTag.OBJECT, TypeTag.INT, TypeTag.INT),
+            returnType = TypeTag.UNIT,
+            kind = CallableKind.FUNCTION,
+            paramNames = listOf("confirmValueChange", "\$composer", "\$changed", "\$default"),
+            paramTypeNames = listOf(PREDICATE_CALLBACK, COMPOSER, "kotlin.Int", "kotlin.Int"),
+            returnTypeName = null,
+            paramHasDefault = listOf(false, false, false, false),
+            callable = { args ->
+                calls += args.toList()
+                Unit
+            },
+        ),
+        // An **extension** composable, shaped the way `androidx.compose.material3.NavigationBarItem`
+        // really is: `RowScope.NavigationBarItem(selected, onClick, modifier = …, enabled = …)`.
+        //
+        // The receiver is slot 0 of the binding and is **not** numbered by `$default` -- bit 0 is
+        // `selected`, so `modifier` (slot 3, value parameter 2) is bit 2 and not bit 3. Measured out
+        // of the real jar's bytecode by
+        // `ComposableBindingTest.theDefaultBitOfAnExtensionComposableNumbersValueParametersAndNotSlots`;
+        // this entry is where that measurement is checked on the four targets that have no jar.
+        ExposedCallable(
+            name = "androidx.compose.material3.NavigationBarItem",
+            arity = 8,
+            paramTypes = listOf(
+                TypeTag.OBJECT, TypeTag.BOOLEAN, TypeTag.OBJECT, TypeTag.OBJECT, TypeTag.BOOLEAN,
+                TypeTag.OBJECT, TypeTag.INT, TypeTag.INT,
+            ),
+            returnType = TypeTag.UNIT,
+            kind = CallableKind.FUNCTION,
+            isExtension = true,
+            receiverTypeName = ROW_SCOPE,
+            paramNames = listOf(
+                "<receiver>", "selected", "onClick", "modifier", "enabled",
+                "\$composer", "\$changed", "\$default",
+            ),
+            paramTypeNames = listOf(
+                ROW_SCOPE, "kotlin.Boolean", PLAIN_FUNCTION0, "androidx.compose.ui.Modifier",
+                "kotlin.Boolean", COMPOSER, "kotlin.Int", "kotlin.Int",
+            ),
+            returnTypeName = null,
+            paramHasDefault = listOf(false, false, false, true, true, false, false, false),
+            callable = { args ->
+                calls += args.toList()
+                Unit
+            },
+        ),
+        // Where a `RowScope` comes from in a test, the same way [StubComposer] arrives: out of
+        // Kotlin, because there is no other legitimate way for Python to hold one. A real one comes
+        // from a real `Row`'s forwarded receiver, which is `ComposableRenderTest`'s to show.
+        ExposedCallable(
+            name = "androidx.compose.foundation.layout.stubRowScope",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.OBJECT,
+            kind = CallableKind.FUNCTION,
+            returnTypeName = ROW_SCOPE,
+            callable = { StubRowScope },
+        ),
     )
 
-    /** What the walker emits for a slot whose declared `kotlin.Function1` was lowered to a JVM
-     * `Function3` -- see `ArtifactScanner.functionSlotTypeName`. */
-    const val COMPOSABLE_FUNCTION3: String = "kotlin.Function3@Composable"
+    /** Stands in for a live `RowScope`. */
+    object StubRowScope
 
-    /** Stands in for `ColumnScope`: the receiver Compose threads into a lowered content lambda, and
-     * the argument `PythonCallables` must **drop** rather than forward, because Python has no way to
-     * be handed one. */
+    /** The scope `NavigationBarItem` is declared on, and the key its binding is indexed under. */
+    const val ROW_SCOPE: String = "androidx.compose.foundation.layout.RowScope"
+
+    /** `Button.onClick`: `() -> Unit`, plain, nothing forwarded. */
+    const val PLAIN_FUNCTION0: String = "kotlin.Function0()->kotlin.Unit"
+
+    /** `Slider.onValueChange`: `(Float) -> Unit`, plain, one value forwarded. */
+    const val FLOAT_CALLBACK: String = "kotlin.Function1(kotlin.Float)->kotlin.Unit"
+
+    /** A slot whose lambda has to give something back, which is what cannot be written in Python. */
+    const val PREDICATE_CALLBACK: String = "kotlin.Function1(kotlin.Boolean)->kotlin.Boolean"
+
+    /** What [entries]'s `Slider` tells its `onValueChange`. Not a value any default produces, and
+     * not one a float/double confusion would round to the same thing. */
+    const val DRAGGED_TO: Float = 0.25f
+
+    /** Every `onValueChange` Kotlin was handed, so a test can fire one after its scope closed. */
+    val valueChanges: MutableList<Function1<Any?, Unit>> = mutableListOf()
+
+    /** Every `content` Kotlin was handed, so a test can invoke **one** of them many times -- which is
+     * the shape a recomposing composition really has, and the only way to separate what a crossing
+     * costs from what an invocation costs. */
+    val contents: MutableList<Function3<Any?, Any?, Any?, Unit>> = mutableListOf()
+
+    /** The Kotlin type a `Column`'s content is scoped to, which is also the key `_BY_RECEIVER` hangs
+     * `ColumnScope`'s extensions off -- so the *name* is what decides whether `Modifier.weight` is
+     * reachable from the value the content is handed, not merely whether a value arrives. */
+    const val COLUMN_SCOPE: String = "androidx.compose.foundation.layout.ColumnScope"
+
+    /** What the walker emits for a slot whose declared `kotlin.Function1<ColumnScope, Unit>` was
+     * lowered to a JVM `Function3` -- see `ArtifactScanner.functionSlotTypeName`. Measured against
+     * the real `androidx.compose.foundation.layout.Column` by
+     * `ComposableBindingTest.theContentSlotIsMarkedComposableAndAnOnClickIsNot`. */
+    const val COMPOSABLE_FUNCTION3: String =
+        "kotlin.Function3@Composable($COLUMN_SCOPE)->kotlin.Unit"
+
+    /** Stands in for a `ColumnScope` instance: the receiver Compose threads into a lowered content
+     * lambda as its first argument. Forwarded to Python as a proxy over a `HandleTable` handle, and
+     * dropped by the thunk when the Python callable declares no parameter for it. */
     object StubScope
 
     /** The composer a container hands its content, distinct from [StubComposer] on purpose. */

@@ -554,17 +554,52 @@ internal object ArtifactScanner {
      * this layer's job is to leave a slot for it. `$composer` is the one value Python cannot invent
      * -- it exists only inside a composition -- and comes from the single hand-written entry point.
      *
-     * ### What is declined here, and why
+     * ### An extension composable, and the numbering that used to be guessed at
      *
-     * - **An extension composable.** Compose's `$changed` slots count receivers and its `$default`
-     *   bits are assigned over value parameters, so a receiver shifts one numbering and not the
-     *   other. Nothing here has measured which, and `docs/kotlin-extensions-in-python.md` §2.6
-     *   counts exactly one `Modifier`-extension composable in 500 -- so this waits for a measurement
-     *   rather than guessing at a bit index that would silently substitute the wrong default.
+     * This used to decline one outright, on the stated grounds that "Compose's `$changed` slots count
+     * receivers and its `$default` bits are assigned over value parameters, so a receiver shifts one
+     * numbering and not the other. Nothing here has measured which." It is measured now, out of the
+     * callee, the way `docs/pythonx-adapter-design.md` §5.2 measured the mask in the first place --
+     * `javap -c androidx/compose/material3/NavigationBarKt`, whose `NavigationBarItem` is
+     * `RowScope.NavigationBarItem(selected, onClick, icon, modifier = …, …)`:
+     *
+     *     iload $default; ldc -2147483648; iand; ifeq …   ; aload_0 -- the RowScope
+     *     iload $default; iconst_1;         iand; ifeq …  ; iload_1 -- `selected`
+     *     …
+     *     iload $default; bipush 8; iand; ifeq +11
+     *     getstatic androidx/compose/ui/Modifier.Companion
+     *     astore 4                                        ; `modifier`, JVM local 4
+     *
+     * Both halves of the guess are answered, and they answer differently:
+     *
+     * | | does the receiver shift it |
+     * |---|---|
+     * | `$changed` | **yes** -- the receiver is slot 0, so value parameter *i* occupies bits `3(i+1)`…`3(i+1)+2` |
+     * | `$default` | **no** -- bit *i* is value parameter *i*; `modifier` is the 4th value parameter and is guarded by `& 8` |
+     *
+     * The receiver is not left out of `$default` altogether: it is given **bit 31**, the top bit of
+     * the first word, which is what `& -2147483648` above is. It is never set by a caller -- a
+     * receiver cannot be omitted -- so it costs this binding nothing, and the same encoding appears
+     * on `SegmentedButton` (two `$changed` words, `MultiChoiceSegmentedButtonRowScope` receiver).
+     *
+     * Only the `$default` answer is load-bearing here, because `pythonx` passes `$changed` as `0`
+     * unconditionally (it is a claim about staticness that this caller cannot make); so the whole of
+     * what an extension composable needed was for the mask arithmetic to count value parameters
+     * rather than slots. `ComposableShape` was already right: `changedCountFor` is computed from
+     * `allParameterTypes.size`, which **includes** the receiver, which is what the `$changed`
+     * numbering does.
+     *
+     * ### What is still declined here, and why
+     *
      * - **A shape [ComposableShape.of] does not recognise**, which then falls back to the decline
      *   this method was reached from. A future lowering that adds a fourth kind of synthetic
      *   parameter degrades to "not bound" rather than to a call with the wrong arguments.
      * - **A `char` parameter**, for `boundaryTypeOf`'s reason: Python has no character type.
+     * - **A composable with more than 31 value parameters *and* a receiver**, which would need the
+     *   receiver's bit 31 and a 32nd value parameter's bit 31 at once. `ComposableShape` predicts two
+     *   `$default` words there and Compose would emit one, so the shape check declines it rather than
+     *   writing a mask into a slot that does not exist. Nothing measured declares one -- the widest
+     *   composable in three jars takes 17.
      */
     private fun composableCandidate(
         owner: String,
@@ -576,7 +611,6 @@ internal object ArtifactScanner {
         jvmMethodName: String,
         ownerInternalName: String,
     ): Candidate? {
-        if (function.isExtension) return null
         val declaredCount = function.allParameterTypes.size
         val shape = ComposableShape.of(declaredCount, paramDescriptors) ?: return null
         if (shape.totalCount != paramDescriptors.size) return null
@@ -586,7 +620,7 @@ internal object ArtifactScanner {
         val returnTag = if (returnDescriptor == "V") "UNIT" else composableSlotTagOf(returnDescriptor) ?: return null
         val declaredTypeNames = function.allParameterTypes.mapIndexed { index, type ->
             val declared = kotlinClassifierNameOf(type) ?: return null
-            functionSlotTypeName(declared, paramDescriptors[index]) ?: declared
+            functionSlotTypeName(type, declared, paramDescriptors[index]) ?: declared
         }
 
         val syntheticNames = shape.syntheticParameterNames()
@@ -605,7 +639,11 @@ internal object ArtifactScanner {
                 // Filled by [assignThunkIndices], which is the only place that knows which `t<i>`
                 // this is -- and therefore the only place the `.kt` and the `.class` can agree.
                 lambdaBody = "",
-                receiverTypeName = null,
+                // Slot 0 when there is one, exactly as for a plain extension: that is what puts the
+                // declaration on `_BY_RECEIVER` and makes it a method on the scope's proxy, which is
+                // the only spelling that can reach it -- a Python caller has no other way to produce
+                // a `RowScope`.
+                receiverTypeName = function.receiverType?.let { kotlinClassifierNameOf(it) },
                 paramNames = paramNames,
                 paramTypeNames = paramTypeNames,
                 returnTypeName = kotlinClassifierNameOf(function.returnType),
@@ -653,31 +691,75 @@ internal object ArtifactScanner {
      *
      * | | declared | compiled | reported |
      * |---|---|---|---|
-     * | `Button.onClick` | `Function0` | `Function0` | `kotlin.Function0` |
-     * | `Column.content` | `Function1` | `Function3` | `kotlin.Function3@Composable` |
+     * | `Button.onClick` | `Function0` | `Function0` | `kotlin.Function0()->kotlin.Unit` |
+     * | `Column.content` | `Function1` | `Function3` | `kotlin.Function3@Composable(…ColumnScope)->kotlin.Unit` |
+     * | `Slider.onValueChange` | `Function1` | `Function1` | `kotlin.Function1(kotlin.Float)->kotlin.Unit` |
+     *
+     * ### Why the compiled arity is not the whole answer
+     *
+     * It was, for as long as the only thing a Python callable could be was a `content` that takes
+     * nothing. Two arities say *which interface* to implement and *whether a composer is threaded*,
+     * and say nothing at all about **what to do with the arguments that interface is invoked with**.
+     * `Column.content`'s `Function3` and `Slider.onValueChange`'s `Function1` both have arguments to
+     * forward, and forwarding one needs two facts the arity cannot carry:
+     *
+     * - **whether it is a value or a Kotlin object.** A `Float` reaches Python as a number and a
+     *   `ColumnScope` as a proxy over a handle; the erased `invoke(Object)` makes them the same
+     *   thing at the call site, and only the declared type argument tells them apart. This is why
+     *   the receiver of a scoped content could not be forwarded before -- not a different problem
+     *   from `(Float) -> Unit`, the *same* one.
+     * - **what Kotlin type the proxy is over**, which is what `_BY_RECEIVER` is keyed on and
+     *   therefore the whole of whether `ColumnScope`'s extensions are reachable from the value.
+     *
+     * The **return** type is here for the opposite reason: so that a slot whose lambda has to give
+     * something back keeps being refused. `Function1` is the spelling of both `(Float) -> Unit` and
+     * `(Float) -> Boolean`, and the second cannot be bound -- `TypeTag` has one `INT` for `Byte`
+     * through `Long` and one `FLOAT` for both floating widths, so nothing here can say which boxed
+     * type the caller will cast the answer to. 19 of the 560 function-typed slots three Compose jars
+     * declare return something other than `Unit` (`ComposableBindingTest.functionTypedSlotsCarry…`);
+     * without the return type in the name they would be indistinguishable from the 541 that do, and
+     * would fail as a `ClassCastException` inside Compose rather than as a refusal at the call.
      *
      * ### Why the answer travels in the type name
      *
      * The same reason `$composer` travels in the *parameter* name: `ExposedCallable` already carries
      * a per-slot declared type name to every target, and a column that only composables use would be
-     * a second thing that can disagree with the first. `@` is not a character a Kotlin
-     * fully-qualified name can contain, so nothing legitimate can collide with the marker, and
-     * `pythonx._function_slot` is the single reader.
+     * a second thing that can disagree with the first. Neither `@` nor `(` nor `>` is a character a
+     * Kotlin fully-qualified name can contain, so nothing legitimate can collide with the grammar,
+     * and `pythonx._function_slot` is the single reader.
      *
-     * Anything else -- an arity relationship neither rule predicts -- returns `null`, so the slot
-     * keeps its declared name and `pythonx` declines it as an ordinary object handle rather than
-     * casting a wrapper to an interface it does not implement.
+     * Anything the walker cannot fully describe returns `null`, so the slot keeps its bare declared
+     * name and `pythonx` declines it as an ordinary object handle rather than casting a wrapper to an
+     * interface it does not implement. That covers an arity relationship neither rule predicts, and
+     * also a type argument with no classifier -- `SwipeableKt.rememberSwipeableState`'s
+     * `(T) -> Boolean` is the one such slot in the three jars, and a type *parameter* has no name a
+     * proxy could be built over.
      */
-    internal fun functionSlotTypeName(declaredName: String, descriptor: String): String? {
+    internal fun functionSlotTypeName(type: kotlin.metadata.KmType, declaredName: String, descriptor: String): String? {
         if (!declaredName.startsWith(KOTLIN_FUNCTION_PREFIX)) return null
         val declaredArity = declaredName.removePrefix(KOTLIN_FUNCTION_PREFIX).toIntOrNull() ?: return null
         val jvmArity = jvmFunctionArityOf(descriptor) ?: return null
-        return when (jvmArity) {
-            declaredArity -> declaredName
-            declaredArity + COMPOSABLE_LOWERED_SLOTS -> "$KOTLIN_FUNCTION_PREFIX$jvmArity$COMPOSABLE_TYPE_MARK"
-            else -> null
+        val composable = when (jvmArity) {
+            declaredArity -> false
+            declaredArity + COMPOSABLE_LOWERED_SLOTS -> true
+            else -> return null
         }
+        // `Function1<ColumnScope, Unit>` -- the declared arity plus one, the last being the return.
+        // Read off the type rather than the name because the name is only the classifier.
+        val arguments = type.arguments
+        if (arguments.size != declaredArity + 1) return null
+        val names = arguments.map { kotlinClassifierNameOf(it.type ?: return null) ?: return null }
+        val mark = if (composable) COMPOSABLE_TYPE_MARK else ""
+        return KOTLIN_FUNCTION_PREFIX + jvmArity + mark +
+            "(" + names.dropLast(1).joinToString(",") + ")" + FUNCTION_RETURNS + names.last()
     }
+
+    /** Separates a function slot's forwarded argument types from what it has to give back. Not a
+     * character a Kotlin classifier name can contain, so the grammar cannot be ambiguous. */
+    internal const val FUNCTION_RETURNS: String = "->"
+
+    /** The only return type a Python callable can currently stand in for; see [functionSlotTypeName]. */
+    internal const val UNIT_TYPE_NAME: String = "kotlin.Unit"
 
     /** How many parameters the Compose plugin appends to a composable function *type*: the
      * `Composer` and one `$changed`. Unlike a composable *function*, whose `$changed` count grows

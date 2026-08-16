@@ -1,7 +1,11 @@
 package python.multiplatform.ffi.pythonx
 
 import python.multiplatform.ffi.PyObject
+import python.multiplatform.ffi.types.basic.PyBool
+import python.multiplatform.ffi.types.basic.PyFloat
 import python.multiplatform.ffi.types.basic.PyInt
+import python.multiplatform.ffi.types.basic.PyNone
+import python.multiplatform.ffi.types.basic.PyString
 import python.multiplatform.reflection.ExposedCallable
 import python.multiplatform.reflection.FunctionTableFragment
 import python.multiplatform.reflection.HandleTable
@@ -124,13 +128,15 @@ object PythonCallables {
      * @param body the Python callable, already holding a reference of its own -- the trampoline's
      *   `PyObject(value, borrowed = true)`. The scope takes ownership of that reference and is what
      *   gives it back.
-     * @param jvmArity how many arguments the *compiled* function type takes: 0 for `() -> Unit`, 3
-     *   for a lowered `@Composable ColumnScope.() -> Unit`.
+     * @param jvmArity how many arguments the *compiled* function type takes: 0 for `() -> Unit`, 1
+     *   for `(Float) -> Unit`, 3 for a lowered `@Composable ColumnScope.() -> Unit`.
      * @param composable whether the last two of those are `$composer` and `$changed`.
+     * @param argTags one [TypeTag] name per **forwarded** argument, comma-separated and possibly
+     *   empty -- see [marshalArgument] for why this is passed rather than derived here.
      * @return the raw [ObjectReference] the wrapper is rooted under, which Python puts straight into
      *   the OBJECT slot as a bare handle.
      */
-    internal fun newFunction(body: PyObject, jvmArity: Int, composable: Boolean): Long {
+    internal fun newFunction(body: PyObject, jvmArity: Int, composable: Boolean, argTags: String): Long {
         val scope = current ?: run {
             // Closed here rather than leaked: the trampoline already took a reference for this
             // wrapper and nothing downstream exists to give it back.
@@ -149,19 +155,19 @@ object PythonCallables {
                     "$jvmArity cannot be one",
             )
         }
-        if (!composable && jvmArity != 0) {
+        val tags = if (argTags.isEmpty()) emptyList() else argTags.split(',')
+        val forwarded = jvmArity - if (composable) COMPOSABLE_LOWERED_SLOTS else 0
+        if (tags.size != forwarded) {
             body.close()
-            // Deliberately a refusal rather than dropping the arguments. A `(Float) -> Unit` whose
-            // argument silently never arrived would render as a slider that never moved, and nothing
-            // would say why. Forwarding them needs a decision about how a Kotlin value reaches a
-            // Python parameter that has no declared type here, which is not made yet.
+            // Not a diagnostic: the two sides marshal from the *same* list, and this is the check
+            // that they are in fact the same list. A short one would silently pair a `Float` with an
+            // OBJECT rule and hand Python a handle to a boxed number.
             throw IllegalArgumentException(
-                "a plain Kotlin function type of arity $jvmArity is not bound yet: only () -> Unit " +
-                    "crosses today, because forwarding an argument to Python needs a marshalling " +
-                    "rule this slot does not carry",
+                "a Kotlin function type of compiled arity $jvmArity forwards $forwarded argument(s), " +
+                    "but ${tags.size} marshalling tag(s) were given: '$argTags'",
             )
         }
-        val function = PythonFunction(scope, body, composable)
+        val function = PythonFunction(scope, body, composable, tags)
         val erased = try {
             function.erasedAs(jvmArity)
         } catch (t: Throwable) {
@@ -172,6 +178,13 @@ object PythonCallables {
         }
         return scope.add(body, erased)
     }
+
+    /** How many of a lowered composable lambda's compiled arguments are the compiler's rather than
+     * the declaration's: the `$composer` and the one `$changed`. Mirrors
+     * `ArtifactScanner.COMPOSABLE_LOWERED_SLOTS`, and the two are checked against each other by the
+     * arity/tag-count agreement above rather than by being shared, since they are in different
+     * modules. */
+    private const val COMPOSABLE_LOWERED_SLOTS = 2
 
     /**
      * The table entry [newFunction] is reached through.
@@ -193,14 +206,19 @@ object PythonCallables {
         override fun entries(): List<ExposedCallable> = listOf(
             ExposedCallable(
                 name = NEW_FUNCTION,
-                arity = 3,
-                paramTypes = listOf(TypeTag.OBJECT, TypeTag.INT, TypeTag.BOOLEAN),
+                arity = 4,
+                paramTypes = listOf(TypeTag.OBJECT, TypeTag.INT, TypeTag.BOOLEAN, TypeTag.STRING),
                 returnType = TypeTag.INT,
-                paramNames = listOf("body", "jvmArity", "composable"),
-                paramTypeNames = listOf("kotlin.Any", "kotlin.Int", "kotlin.Boolean"),
-                paramHasDefault = listOf(false, false, false),
+                paramNames = listOf("body", "jvmArity", "composable", "argTags"),
+                paramTypeNames = listOf("kotlin.Any", "kotlin.Int", "kotlin.Boolean", "kotlin.String"),
+                paramHasDefault = listOf(false, false, false, false),
                 callable = { args ->
-                    newFunction(args[0] as PyObject, (args[1] as Long).toInt(), args[2] as Boolean)
+                    newFunction(
+                        args[0] as PyObject,
+                        (args[1] as Long).toInt(),
+                        args[2] as Boolean,
+                        args[3] as String,
+                    )
                 },
             ),
         )
@@ -269,6 +287,8 @@ internal class PythonFunction(
     private val scope: PythonCallableScope,
     internal val body: PyObject,
     private val composable: Boolean,
+    /** One [TypeTag] name per forwarded argument, in order. See [marshalArgument]. */
+    private val argTags: List<String>,
 ) {
 
     /**
@@ -304,30 +324,75 @@ internal class PythonFunction(
                 "scope that held it is closed"
         }
         PythonCallables.withScope(scope) {
-            if (!composable) {
-                body().close()
-                return@withScope
-            }
             // The composer Compose established for *this* invocation, which is not necessarily the
             // one that was ambient when the lambda crossed. `$changed` -- the last argument -- is
-            // the caller's claim about argument staticness and is not Python's to read.
-            val composer = args[args.size - 2]
-                ?: throw IllegalStateException("a composable lambda was invoked with a null \$composer")
-            val root = HandleTable.register(composer)
+            // the caller's claim about argument staticness and is not Python's to read. Everything
+            // before those two is the declaration's own, and is Python's.
+            val composerRoot = if (!composable) null else HandleTable.register(
+                args[args.size - 2]
+                    ?: throw IllegalStateException("a composable lambda was invoked with a null \$composer"),
+            )
             try {
-                // The push and the pop are Python's, in `pythonx._content_thunk`: doing it here would
-                // mean two more boundary crossings per invocation to reach `push_composer` and
-                // `pop_composer`, and the `finally` that guarantees the pop belongs next to the call
-                // it guards.
-                val handle = PyInt.from(root.raw)
+                // Built before the call and closed after it, all of them, so that a failure part way
+                // through the marshalling does not leave the earlier ones to a collector that may
+                // not exist on this target.
+                val marshalled = ArrayList<PyObject>(argTags.size + 1)
                 try {
-                    body(handle).close()
+                    // The push and the pop are Python's, in `pythonx._callable_thunk`: doing it here
+                    // would mean two more boundary crossings per invocation to reach `push_composer`
+                    // and `pop_composer`, and the `finally` that guarantees the pop belongs next to
+                    // the call it guards.
+                    if (composerRoot != null) marshalled += PyInt.from(composerRoot.raw)
+                    for (i in argTags.indices) marshalled += marshalAn(argTags[i], args[i])
+                    body(*marshalled.toTypedArray()).close()
                 } finally {
-                    handle.close()
+                    for (value in marshalled) value.close()
                 }
             } finally {
-                HandleTable.release(root)
+                if (composerRoot != null) HandleTable.release(composerRoot)
             }
+        }
+    }
+
+    /**
+     * One Kotlin argument on its way into the Python callable.
+     *
+     * ### Why the tag comes from the walker rather than from the value
+     *
+     * A `when (value) { is Float -> ...; is String -> ... }` would need no tag at all and is wrong,
+     * because **the Python side has to make the same decision independently** -- an OBJECT arrives as
+     * a handle integer and has to be given a proxy of the declared type, and a `kotlin.Int` arrives
+     * as an integer that must stay one. Deciding from the runtime type here and from the declared
+     * name there is two rules that can disagree, and the case where they do is silent: a slot
+     * declared `kotlin.Number` holding an `Int` would be marshalled as a number and then wrapped as
+     * a proxy over the "handle" 5. Both sides therefore read the *same* list, which
+     * [PythonCallables.newFunction] checks the length of.
+     *
+     * Nullability is not in the tag and does not need to be: `null` is `None` whatever the slot
+     * said, which is the rule `UpcallTrampoline.toKotlin` already applies in the other direction.
+     */
+    private fun marshalAn(tag: String, value: Any?): PyObject {
+        // A reference of this frame's own rather than `PyNone.get()` itself: that is a cached
+        // singleton *wrapper*, and the caller closes everything it is given -- closing it would
+        // release the one every later `get()` hands back. `borrowed = true` is what makes the
+        // constructor take a reference instead of adopting one it was not given.
+        if (value == null) return PyObject(PyNone.get().pointer, borrowed = true)
+        return when (tag) {
+            "INT" -> PyInt.from((value as Number).toLong())
+            "FLOAT" -> PyFloat.from((value as Number).toDouble())
+            "BOOLEAN" -> PyBool.from(value as Boolean)
+            "STRING" -> PyString.from(value as String)
+            // Rooted, and **not** released here. The proxy `pythonx._adapt_arguments` builds over
+            // this handle is what gives it back, through the `__del__` every `_proxy_type` carries
+            // -- which is `HandleTable`'s stated contract for a handle that reaches Python, and the
+            // reason the thunk wraps every forwarded argument before it drops the ones the callable
+            // did not ask for. Releasing it here as well would be the double release `agent-rules`
+            // §14 is about; releasing it here *instead* would hand Python a stale handle for the
+            // duration of a callback that is allowed to keep it.
+            "OBJECT" -> PyInt.from(HandleTable.register(value).raw)
+            else -> throw IllegalArgumentException(
+                "a Kotlin function type argument tagged '$tag' has no marshalling rule",
+            )
         }
     }
 }
