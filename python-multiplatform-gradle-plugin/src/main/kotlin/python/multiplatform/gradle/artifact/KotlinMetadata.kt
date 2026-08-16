@@ -194,6 +194,26 @@ internal fun ArtifactClasspath.valueClassInfo(binaryName: String): ValueClassInf
 }
 
 /**
+ * A [BoundaryType] together with **what the boundary actually carries** for it.
+ *
+ * The two are not the same statement and only one of them can be read off a [BoundaryType]. A `Color`
+ * parameter's boundary type is a chain -- `Color(x as kotlin.ULong)` -- whose *tag* is `OBJECT` and
+ * whose read expression is Kotlin source. Generated Kotlin needs the second; a generated **thunk**
+ * (`ComposableThunks.kt`) needs the first, because it has to turn the object the handle table hands
+ * back into the erased JVM value the callee's descriptor declares, and to do that it has to know
+ * which class that object is an instance of.
+ *
+ * [carrier] is the classifier [resolveKotlinBoundary]'s descent **stopped** at, in the same
+ * `/`-separated spelling `KmClassifier.Class` uses, or `null` when the descent bottomed out in a
+ * Kotlin primitive (the value then arrives boxed as the width `TypeTag` promises -- `Long`, `Double`,
+ * `Boolean`, `String`, `ByteArray` -- which needs no class name to unbox).
+ *
+ * Deliberately produced by the *same* descent rather than by a second function that reproduces it:
+ * a carrier that disagreed with the tag would be a thunk casting to a class the boundary never sends.
+ */
+internal class ResolvedBoundary(val boundary: BoundaryType, val carrier: String?)
+
+/**
  * The Kotlin-type half of [boundaryTypeOf]'s policy: a declaration is bound only if every type in
  * its signature resolves here, and this is the whole of what "resolves" means -- a primitive Kotlin
  * type, or a value class whose relevant operation ([direction]) is public, unwrapped one level
@@ -203,7 +223,15 @@ internal fun ArtifactClasspath.valueClassInfo(binaryName: String): ValueClassInf
  * exactly the erased view a value class parameter lies about (see [ArtifactScanner]'s KDoc). This
  * keys off the Kotlin type metadata actually declares.
  */
-internal fun resolveKotlinType(type: KmType, classpath: ArtifactClasspath, direction: BoundaryDirection): BoundaryType? {
+internal fun resolveKotlinType(type: KmType, classpath: ArtifactClasspath, direction: BoundaryDirection): BoundaryType? =
+    resolveKotlinBoundary(type, classpath, direction)?.boundary
+
+/** [resolveKotlinType], keeping the carrier the descent stopped at. See [ResolvedBoundary]. */
+internal fun resolveKotlinBoundary(
+    type: KmType,
+    classpath: ArtifactClasspath,
+    direction: BoundaryDirection,
+): ResolvedBoundary? {
     val classifier = type.classifier as? KmClassifier.Class ?: return null
     // A nullable *primitive* or value class stays declined. `TypeTag.INT` carries a `Long` and the
     // read narrows it (`(args[0] as Long).toInt()`), so a `null` arriving for an `Int?` would throw
@@ -212,15 +240,15 @@ internal fun resolveKotlinType(type: KmType, classpath: ArtifactClasspath, direc
     // already nullable at the boundary (`UpcallTrampoline.toKotlin` maps Python `None` to `null`)
     // and the cast simply carries the `?`.
     if (!type.isNullable) {
-        kotlinPrimitiveBoundaryTypeOf(classifier.name)?.let { return it }
+        kotlinPrimitiveBoundaryTypeOf(classifier.name)?.let { return ResolvedBoundary(it, carrier = null) }
     } else {
-        nullablePrimitiveBoundaryTypeOf(classifier.name)?.let { return it }
+        nullablePrimitiveBoundaryTypeOf(classifier.name)?.let { return ResolvedBoundary(it, carrier = null) }
         if (kotlinPrimitiveBoundaryTypeOf(classifier.name) != null) return null
     }
 
     val info = if (type.isNullable) null else classpath.valueClassInfo(classifier.name)
     if (info != null) {
-        val underlying = resolveKotlinType(info.underlyingType, classpath, direction)
+        val underlying = resolveKotlinBoundary(info.underlyingType, classpath, direction)
         val usable = when (direction) {
             BoundaryDirection.PARAMETER -> info.constructorIsPublic
             BoundaryDirection.RETURN -> info.propertyIsPublic && info.propertyName != null
@@ -232,11 +260,104 @@ internal fun resolveKotlinType(type: KmType, classpath: ArtifactClasspath, direc
         // `docs/kotlin-extensions-in-python.md` §4.4 insists on -- but an instance that came out of
         // Kotlin can still be carried back into Kotlin, which is what a handle is for.
         if (underlying != null && usable) {
-            return valueClassBoundaryType(info.qualifiedName, underlying, info.propertyName)
+            return ResolvedBoundary(
+                valueClassBoundaryType(info.qualifiedName, underlying.boundary, info.propertyName),
+                // The wrapper is opened, so what crosses is whatever the *underlying* type crosses
+                // as: `Color` is unwrapped to its `ULong`, and a `ULong` is what the handle holds.
+                carrier = underlying.carrier,
+            )
         }
     }
-    return objectBoundaryTypeOrNull(type, classpath)
+    return objectBoundaryTypeOrNull(type, classpath)?.let { ResolvedBoundary(it, carrier = classifier.name) }
 }
+
+/**
+ * The descriptor `unbox-impl` returns on a `@JvmInline value class`'s **box** class, or `null` when
+ * this classifier has no such method -- which is every class that is not one.
+ *
+ * Read off the class file rather than derived from [ValueClassInfo.underlyingType], because the two
+ * can differ by a level of erasure that only the bytecode settles: `Color` wraps a `ULong`, `ULong`
+ * wraps a `Long`, and `Color.unbox-impl()` returns **`J`** -- the fully erased representation, not
+ * `Lkotlin/ULong;`. A thunk that predicted the intermediate would emit an `INVOKEVIRTUAL` whose
+ * return type does not match the slot it feeds, and the JVM's verifier would reject the generated
+ * class at load time with nothing said at build time.
+ */
+internal fun ArtifactClasspath.valueClassUnboxDescriptor(kotlinInternalName: String): String? {
+    val node = classNode(kotlinInternalName.replace('.', '$')) ?: return null
+    val method = node.methods?.firstOrNull {
+        it.name == VALUE_CLASS_UNBOX_METHOD &&
+            it.desc.startsWith("()") &&
+            (it.access and org.objectweb.asm.Opcodes.ACC_PUBLIC) != 0 &&
+            (it.access and org.objectweb.asm.Opcodes.ACC_STATIC) == 0
+    } ?: return null
+    return method.desc.substringAfter(')')
+}
+
+/** The accessor `kotlinc` emits on every `@JvmInline value class` box. Not a Kotlin name and never
+ * spelled in generated source -- only in a generated `INVOKEVIRTUAL`, which is resolved by the JVM's
+ * own linker exactly as `kotlinc`'s would be (`ComposableThunks.kt`'s KDoc, "why this is not looking
+ * a method up by name"). */
+internal const val VALUE_CLASS_UNBOX_METHOD = "unbox-impl"
+
+/**
+ * Every public class and interface [kotlinInternalName] **is a**, nearest first, `java.lang.Object`
+ * excluded.
+ *
+ * ### Why the walker answers this and `pythonx` cannot
+ *
+ * `docs/kotlin-extensions-in-python.md`'s coercion compares an owned value's declared type name with
+ * the slot's for equality, so `BitmapPainter` is refused where a `Painter` is wanted. Python holds
+ * *names*: a handle is an integer, `TypeTag.OBJECT` says nothing about what it points at, and the
+ * five targets have no shared reflection to ask (agent-rules §12 -- dynamic binding is a retired
+ * option, and Kotlin/Native has no `KClass.isInstance` for a name). The walker, on the other hand,
+ * has the class files open already: `ClassNode.superName` and `ClassNode.interfaces` are the answer,
+ * and reading them costs one already-cached [classNode] per link.
+ *
+ * ### Which direction is carried, and why it is the small one
+ *
+ * The **value's** ancestry, not the slot's subtypes. A `Painter` slot accepts every `Painter` there
+ * will ever be, which is unbounded and not knowable from one walk; a produced value has exactly one
+ * finite chain. So this is asked once per *declared return type* that crosses as a handle, and the
+ * result rides on that declaration's `returnTypeName`.
+ *
+ * ### What is excluded, and why each one
+ *
+ * - `java.lang.Object`, which every class has and no slot is ever declared as (`kotlin.Any` is a
+ *   built-in with no class file, so `objectBoundaryTypeOrNull` already declines a parameter of it).
+ *   Keeping it would add one entry to every chain and match nothing.
+ * - a supertype that is not JVM-public, or that is Kotlin-`internal` -- the same rule
+ *   [isNameablePublicClass] applies, and for the same reason: a name outside the module may not say
+ *   it, so no slot can be declared as it either.
+ * - anything past [limit] links. Not a defence against a hostile input -- these are jars the build
+ *   resolved -- but the cost is paid at build time on every build, and nothing measured comes close:
+ *   see `ReturnSupertypeTest.theAncestryTheTableCarriesIsMeasuredRatherThanAssumed`.
+ *
+ * A binary name becomes a Kotlin one the way metadata spells it: `/` and `$` both become `.`. A JVM
+ * supertype Kotlin renames (`java.util.List` for `kotlin.collections.List`) therefore comes out under
+ * its JVM name and simply never matches a slot, which is the honest failure -- a slot declared
+ * `kotlin.collections.List` is declined by `objectBoundaryTypeOrNull` anyway.
+ */
+internal fun ArtifactClasspath.nameablePublicSupertypesOf(kotlinInternalName: String, limit: Int = 24): List<String> {
+    val start = classNode(kotlinInternalName.replace('.', '$')) ?: return emptyList()
+    val found = LinkedHashSet<String>()
+    val pending = ArrayDeque<ClassNode>()
+    pending.addLast(start)
+    while (pending.isNotEmpty() && found.size < limit) {
+        val node = pending.removeFirst()
+        val parents = listOfNotNull(node.superName) + node.interfaces.orEmpty()
+        parents.forEach { binaryName ->
+            if (binaryName == JAVA_LANG_OBJECT) return@forEach
+            val parent = classNode(binaryName) ?: return@forEach
+            if ((parent.access and org.objectweb.asm.Opcodes.ACC_PUBLIC) == 0) return@forEach
+            val metadata = kotlinClassMetadataOf(parent) as? KotlinClassMetadata.Class
+            if (metadata != null && metadata.kmClass.visibility != Visibility.PUBLIC) return@forEach
+            if (found.add(binaryName.replace('/', '.').replace('$', '.'))) pending.addLast(parent)
+        }
+    }
+    return found.toList()
+}
+
+private const val JAVA_LANG_OBJECT = "java/lang/Object"
 
 /**
  * The object-handle boundary type: `docs/kotlin-extensions-in-python.md` §6's "type gate", and the

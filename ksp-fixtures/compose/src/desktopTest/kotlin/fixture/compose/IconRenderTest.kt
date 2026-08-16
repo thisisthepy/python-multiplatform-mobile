@@ -109,9 +109,10 @@ class IconRenderTest {
      *    is what `fbab1a68`/`ce1de0c3`/`a179b747` opened and what nothing had yet driven with a
      *    walked artefact on both ends;
      * 4. `painterResource`'s declared return type is exactly `androidx.compose.ui.graphics.painter
-     *    .Painter`, which is what lets `_coerce` match it to `Icon`'s `Painter` slot at all -- see
-     *    [aBitmapPainterIsRefusedByIconsPlainSpellingBecauseTheTableHasNoSubtyping] for what happens
-     *    when it is not.
+     *    .Painter`, which is what let `_coerce` match it to `Icon`'s `Painter` slot back when only
+     *    the exact name could match -- see
+     *    [aBitmapPainterIsAcceptedByIconsPainterSlotNowThatTheTableCarriesItsAncestry] for the rule
+     *    that no longer needs it to be exact.
      *
      * The assertion is the exact pixel count and not `> 0`: 24x24 opaque, the same number the Kotlin
      * control produces. A painter that failed to attach and left an empty box, or one stretched over
@@ -138,11 +139,18 @@ class IconRenderTest {
      * `Color` is a `@JvmInline value class` over `ULong`, and the going-in assumption was that it
      * would therefore cross as a packed number the way `Dp` crosses as a `Float`, needing
      * `pythonx.allow_raw_primitive` before Python could carry one anywhere. It does not, and the
-     * reason is one level down: `ULong`'s own `data` property is `internal`, so
-     * `resolveKotlinType`'s `RETURN` case cannot open the wrapper and falls through to the object
-     * handle. `Color(255, 0, 0)` therefore comes back as an **owned handle** whose declared type is
-     * `androidx.compose.ui.graphics.Color`, which is a better answer than a raw number: nothing has
-     * to be trusted not to reinterpret it.
+     * reason is **one level further down than `Color`**: `resolveKotlinType` opens `Color` happily
+     * (its constructor and its `value` accessor are both public) and then cannot open the `ULong`
+     * underneath, whose own constructor and `data` property are `internal`. So the descent stops
+     * there and the boundary carries a **`kotlin.ULong` instance**, under the declared name
+     * `androidx.compose.ui.graphics.Color` -- `Color(255, 0, 0)` comes back as an owned handle, which
+     * is a better answer than a raw number: nothing has to be trusted not to reinterpret it.
+     *
+     * Which class the handle really holds is not a curiosity. It is what
+     * `ArtifactScanner.composableDeclaredSlot` records as the slot's *carrier* and what the generated
+     * thunk `CHECKCAST`s before calling `unbox-impl` -- see
+     * [aComposablesColorSlotAcceptsAPythonBuiltColorAndTintsWithIt], which is the same value going the
+     * other way.
      *
      * `toArgb` is the round trip, and the assertion is the exact number rather than "it did not
      * raise": `Color(255, 0, 0)` is opaque red and `toArgb` is `0xFFFF0000`, which as a Kotlin `Int`
@@ -165,34 +173,36 @@ class IconRenderTest {
     }
 
     /**
-     * **And the wall that same value hits: a `@Composable`'s `Color` slot refuses it.**
+     * **The wall that same value used to hit, now drawn through.**
      *
-     * `Icon`'s `tint` is a `Color` and so is `AlertDialog`'s `containerColor`, and their slots are
-     * tagged `INT` while `lightColorScheme`'s 36 `Color` slots -- same type, same jar -- are tagged
-     * `OBJECT`. That is not a mistake in one of them; it is two code paths in `ArtifactScanner` with
-     * two different amounts of information. An ordinary declaration is typed from `@Metadata`, which
-     * knows `Color` is a value class and hands the wrapper across as a handle. A composable's
-     * parameters are typed from the **JVM descriptor** instead (`composableCandidate` ->
-     * `kotlinNameOfAdmittedDescriptor`), because its `$composer`/`$changed`/`$default` slots exist
-     * only in the descriptor -- and there `Color` is the letter `J`, indistinguishable from a `Long`.
+     * `ebe3365f` pinned this as a refusal: `Icon`'s `tint` was tagged `INT` while
+     * `lightColorScheme`'s 36 `Color` parameters -- same type, same jar -- were tagged `OBJECT`, so a
+     * `Color` handle could be carried into any ordinary declaration and into no composable. Two code
+     * paths in `ArtifactScanner` with two different amounts of information: an ordinary declaration
+     * typed from `@Metadata`, which knows `Color` is a value class; a composable typed from the
+     * **JVM descriptor**, where the same `Color` is the letter `J`.
      *
-     * So a `Color` can be built, and carried into any non-composable slot
-     * ([aPythonBuiltColorRoundTripsIntoAnotherWalkedCall],
-     * `ComposableRenderTest.lightColorSchemeIsCallableNowThatItsColoursCanBeBuilt`), and **not** into
-     * a composable's. Pinned here rather than left as a surprise, because closing it is a change to
-     * the composable path's typing and this is the test that would go green when it lands.
+     * The composable path reads `@Metadata` for its declared slots now
+     * (`ArtifactScanner.composableDeclaredSlot`), keeping the descriptor for the
+     * `$composer`/`$changed`/`$default` slots that only exist there -- so both tags below are
+     * `OBJECT`, and this is a render test rather than a pin.
+     *
+     * ### Why the assertion is the colour and not the pixel count
+     *
+     * `Icon` tints through `ColorFilter.tint`, which is `BlendMode.SrcIn`: it replaces colour and
+     * keeps alpha. The resource is opaque **white**, so the tint is the only thing deciding what
+     * comes out, and a tint that never reached Compose draws the same 576 pixels in
+     * `LocalContentColor`'s black. Counting ink would pass either way; counting *red* ink cannot.
      */
     @Test
-    fun aComposablesColorSlotRefusesAPythonBuiltColorBecauseTheTwoPathsTypeItDifferently() {
+    fun aComposablesColorSlotAcceptsAPythonBuiltColorAndTintsWithIt() {
         Python3.exec(
             """
             import pythonx
-            from pythonx.compose.ui.graphics import Color__Int_Int_Int_Int
-            from pythonx.compose.ui.res import painter_resource
 
             _icon = pythonx._BY_PACKAGE['androidx.compose.material3']['Icon']
             _tints = {(d.param_tags[3], d.param_type_names[3]) for d in _icon}
-            assert _tints == {('INT', 'androidx.compose.ui.graphics.Color')}, repr(_tints)
+            assert _tints == {('OBJECT', 'androidx.compose.ui.graphics.Color')}, repr(_tints)
 
             _scheme = pythonx._BY_PACKAGE['androidx.compose.material3']['light_color_scheme'][0]
             assert _scheme.param_tags[0] == 'OBJECT', _scheme.param_tags[0]
@@ -200,26 +210,29 @@ class IconRenderTest {
                 _scheme.param_type_names[0]
             """.trimIndent(),
         )
-        // And the call itself, so the refusal is observed and not only inferred from the tags. Inside
-        // a composition, because `Icon` and `painterResource` are both composables and a refusal
-        // raised for the *absence of a composer* would prove nothing about the tint.
-        val message = runCatching {
-            inkOf(
-                """
-                from pythonx.compose.ui.graphics import Color__Int_Int_Int_Int
-                from pythonx.compose.ui.res import painter_resource
-                from pythonx.compose.material3 import Icon
-                Icon(painter_resource('$RESOURCE'), content_description='a square',
-                     tint=Color__Int_Int_Int_Int(255, 0, 0))
-                """.trimIndent(),
-            )
-        }.exceptionOrNull()?.message
-        println("compose: a Color into a composable's tint slot -> $message")
-        assertTrue(
-            message != null && "no overload of Icon accepts these arguments" in message,
-            "a composable's Color slot accepted a Color handle -- the descriptor path now knows about " +
-                "value classes, and this pin should become a render test: $message",
+        val tinted = redOf(
+            """
+            from pythonx.compose.ui.graphics import Color__Int_Int_Int_Int
+            from pythonx.compose.ui.res import painter_resource
+            from pythonx.compose.material3 import Icon
+            Icon(painter_resource('$RESOURCE'), content_description='a square',
+                 tint=Color__Int_Int_Int_Int(255, 0, 0))
+            """.trimIndent(),
         )
+        // The control, and the one that makes the number mean something: the *same* call with the
+        // tint left out. `tint` declares a default, so this also drives the other half of the change
+        // -- an omitted OBJECT slot arrives as `None` and the thunk's unwrapper turns it into a zero
+        // the callee overwrites, rather than into a NullPointerException.
+        val untinted = redOf(
+            """
+            from pythonx.compose.ui.res import painter_resource
+            from pythonx.compose.material3 import Icon
+            Icon(painter_resource('$RESOURCE'), content_description='a square')
+            """.trimIndent(),
+        )
+        println("compose render: Icon(tint=Color(255,0,0)) -> $tinted red px, no tint -> $untinted red px")
+        assertEquals(SQUARE, tinted, "the icon did not come out opaque red")
+        assertEquals(0, untinted, "the default tint is red, so the tinted count proves nothing")
     }
 
     /**
@@ -299,44 +312,96 @@ class IconRenderTest {
     }
 
     /**
-     * **The nominal type check, which is the wall the `Painter` overload would have hit** had
-     * `painterResource` not existed.
+     * **The nominal type check, opened.** `ebe3365f` pinned this as a refusal: `_coerce` compared an
+     * owned value's declared type name against the slot's for **equality**, and the string
+     * `BitmapPainter` is not the string `Painter`. `pythonx` had no hierarchy to consult, because the
+     * table carried names and nothing else.
      *
-     * `BitmapPainter(image)` is bound and Python can build one, and `_coerce` compares the owned
-     * value's declared type name against the slot's for **equality**: `BitmapPainter` is not the
-     * string `Painter`. `pythonx` has no type hierarchy to consult -- the table carries names, not
-     * supertypes -- so a nominal mismatch is all it can see, and refusing is the same answer it gives
-     * a value class it cannot unpack.
+     * It carries the ancestry now, on the *value* side rather than the slot side -- a slot accepts
+     * unboundedly many subtypes, a produced value has one finite chain -- and `ArtifactScanner` reads
+     * it from the same class files it is already walking. See `ReturnSupertypeTest` for what that
+     * costs the table.
      *
-     * Recorded as its own fact because it is the next piece of work, not a defect of this one: the
-     * day the table carries supertypes, this test fails and every `Painter` in Compose becomes
-     * reachable rather than only the one function that happens to declare the base type.
+     * ### Why the proof is positional and not inked
+     *
+     * The same reason [pythonBuildsAnImageBitmapAndComposeLaysTheIconOutAtThatWidth] gives: nothing
+     * bound can write a pixel into an `ImageBitmap`, so a `BitmapPainter` over one draws nothing
+     * however well every layer beneath it worked. What it *does* have is an intrinsic size, which
+     * `Icon` sizes itself from -- so a 64-wide painter pushes the trailing `Text` right and an 8-wide
+     * one does not. An argument that was silently dropped, or a painter that never reached Compose,
+     * leaves that edge in one place for both.
      */
     @Test
-    fun aBitmapPainterIsRefusedByIconsPlainSpellingBecauseTheTableHasNoSubtyping() {
+    fun aBitmapPainterIsAcceptedByIconsPainterSlotNowThatTheTableCarriesItsAncestry() {
         Python3.exec(
             """
+            import pythonx
             from pythonx.compose.ui.graphics import ImageBitmap
+            from pythonx.compose.ui.graphics.painter import BitmapPainter
+
+            _painter = BitmapPainter(ImageBitmap(24, 24))
+            # The proxy still names the type the declaration returns, not its base: the ancestry is a
+            # separate fact and must not overwrite the identity.
+            assert type(_painter)._pythonx_type_name == 'androidx.compose.ui.graphics.painter.BitmapPainter', \
+                type(_painter)._pythonx_type_name
+            assert 'androidx.compose.ui.graphics.painter.Painter' in \
+                pythonx._SUPERTYPES.get('androidx.compose.ui.graphics.painter.BitmapPainter', ()), \
+                repr(pythonx._SUPERTYPES.get('androidx.compose.ui.graphics.painter.BitmapPainter'))
+            # And it is not a licence to accept anything: an ImageBitmap is not a Painter.
+            assert 'androidx.compose.ui.graphics.painter.Painter' not in \
+                pythonx._SUPERTYPES.get('androidx.compose.ui.graphics.ImageBitmap', ())
+            """.trimIndent(),
+        )
+        val narrow = rightmostInk(bitmapPainterInARow(8))
+        val wide = rightmostInk(bitmapPainterInARow(64))
+        println("compose render: Icon(BitmapPainter(ImageBitmap(8, 12))) -> x=$narrow, 64 wide -> x=$wide")
+        assertTrue(narrow > 0, "nothing drew at all -- the Text beside the Icon never composed")
+        assertTrue(
+            wide > narrow + 50,
+            "a 56px wider BitmapPainter moved the trailing Text by less than 50px: $narrow -> $wide",
+        )
+    }
+
+    /**
+     * The other side of the same rule, so that "accepts a subtype" cannot quietly become "accepts
+     * anything": an `ImageBitmap` is not a `Painter`, and the overload that takes one is selected by
+     * its own type rather than by falling through. Both spellings of the refusal are covered -- a
+     * value whose ancestry does not contain the slot's type, and a value with no ancestry at all.
+     */
+    @Test
+    fun aValueWhoseAncestryDoesNotReachTheSlotIsStillRefused() {
+        Python3.exec(
+            """
+            from pythonx.compose.ui.graphics import ImageBitmap, Color__Int_Int_Int_Int
             from pythonx.compose.ui.graphics.painter import BitmapPainter
             from pythonx.compose.material3 import Icon
 
-            _painter = BitmapPainter(ImageBitmap(24, 24))
-            assert type(_painter)._pythonx_type_name == 'androidx.compose.ui.graphics.painter.BitmapPainter', \
-                type(_painter)._pythonx_type_name
             try:
-                Icon(_painter, content_description='a square')
-                raise AssertionError(
-                    'Icon accepted a BitmapPainter for its Painter slot -- pythonx has become '
-                    'subtype-aware, which is a capability this test recorded as absent'
-                )
+                BitmapPainter(Color__Int_Int_Int_Int(255, 0, 0))
+                raise AssertionError('BitmapPainter accepted a Color for its ImageBitmap parameter')
+            except TypeError:
+                pass
+
+            try:
+                Icon(Color__Int_Int_Int_Int(255, 0, 0), content_description='not an image')
+                raise AssertionError('Icon accepted a Color as its image')
             except TypeError as _e:
-                # Every candidate declined, so the dispatcher reports the set rather than one
-                # slot's mismatch -- which is itself the point: a subtype-aware `_coerce` would
-                # have left exactly one candidate standing.
                 assert 'no overload of Icon accepts these arguments' in str(_e), str(_e)
             """.trimIndent(),
         )
     }
+
+    private fun bitmapPainterInARow(width: Int): String =
+        """
+        from pythonx.compose.foundation.layout import Row
+        from pythonx.compose.ui.graphics import ImageBitmap
+        from pythonx.compose.ui.graphics.painter import BitmapPainter
+        from pythonx.compose.material3 import Icon, Text
+        Row(content=lambda row: (
+            Icon(BitmapPainter(ImageBitmap($width, 12)), content_description='a square'),
+            Text('hi'),
+        ))
+        """.trimIndent()
 
     /**
      * **`ImageVector`, the third overload, still unreachable -- with the reason moved.**
@@ -523,6 +588,26 @@ class IconRenderTest {
 
     private fun inkOf(body: String): Int = inkOfScene { PythonComposition(body) }
 
+    /** How many pixels came out **opaque red**, which is what a tint that arrived produces and what
+     * one that was dropped cannot: `Icon`'s `SrcIn` filter replaces the resource's white. */
+    private fun redOf(body: String): Int {
+        val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
+            PythonComposition(body)
+        }
+        try {
+            val bitmap = Bitmap.makeFromImage(scene.render())
+            var red = 0
+            for (y in 0 until bitmap.height) {
+                for (x in 0 until bitmap.width) {
+                    if (bitmap.getColor(x, y) == OPAQUE_RED) red++
+                }
+            }
+            return red
+        } finally {
+            scene.close()
+        }
+    }
+
     private fun rightmostInk(body: String): Int {
         val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
             PythonComposition(body)
@@ -574,5 +659,8 @@ class IconRenderTest {
 
         /** What a 24dp square covers at density 1. */
         const val SQUARE = 24 * 24
+
+        /** `Color(255, 0, 0)` as `Bitmap.getColor` reports it: `0xFFFF0000`. */
+        const val OPAQUE_RED = 0xFFFF0000.toInt()
     }
 }

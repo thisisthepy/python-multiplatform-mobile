@@ -57,6 +57,20 @@ internal data class ThunkSpec(
     val methodName: String,
     /** The JVM method descriptor, synthetic parameters included. */
     val descriptor: String,
+    /**
+     * Per JVM parameter, the `@JvmInline value class` **box** the boundary sends for that slot, or
+     * `null` when the slot needs no unwrapping. Empty means "none of them do", which is every thunk
+     * emitted before a composable's declared slots were typed from `@Metadata`.
+     *
+     * Why a box arrives at a slot the descriptor says is a `long`: `Icon`'s `tint` is a `Color`, and
+     * `ArtifactScanner.composableDeclaredSlot` types it `OBJECT` because that is what an ordinary
+     * declaration taking the same `Color` has always done. The value crossing the boundary is
+     * therefore a handle to an *instance* -- of `kotlin.ULong`, the carrier
+     * `resolveKotlinBoundary`'s descent stopped at -- while the callee's signature takes the `J` it
+     * erases to. `unbox-impl` is the one operation that bridges them, and the name recorded here is
+     * the carrier's, read off its own class file together with the descriptor that method returns.
+     */
+    val valueClassUnboxOwners: List<String?> = emptyList(),
 ) : Serializable
 
 /** Where generated thunk classes live. Under [ARTIFACTS_PACKAGE] so that
@@ -148,20 +162,37 @@ internal class ComposableShape(
 /**
  * One class holding every thunk a single artefact fragment needs.
  *
- * No branches anywhere in the generated code, which is why [ClassWriter.COMPUTE_MAXS] is enough and
- * no `StackMapTable` has to be computed -- `COMPUTE_FRAMES` would need a `ClassLoader` that can see
- * Compose, and this runs inside a Gradle worker that deliberately cannot.
+ * The thunk bodies themselves have **no branches**, which is why [ClassWriter.COMPUTE_MAXS] is
+ * enough and no `StackMapTable` has to be computed for them -- `COMPUTE_FRAMES` would need a
+ * `ClassLoader` that can see Compose, and this runs inside a Gradle worker that deliberately cannot.
+ *
+ * The one exception is [visitValueClassUnwrapper], which has exactly one branch and writes its own
+ * frame by hand for that reason. It is a separate method rather than an inline sequence precisely so
+ * that the frame it needs is a fixed, trivial one (`F_SAME`, a single `Object` local, empty stack)
+ * instead of whatever the enclosing thunk's operand stack happened to hold at that point.
  */
 internal fun generateThunkClass(fragmentObjectName: String, specs: List<ThunkSpec>): ByteArray {
+    val internalName = thunkClassInternalName(fragmentObjectName)
     val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
     writer.visit(
         Opcodes.V1_8,
         Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL or Opcodes.ACC_SUPER,
-        thunkClassInternalName(fragmentObjectName),
+        internalName,
         null,
         "java/lang/Object",
         null,
     )
+    // One unwrapper per distinct (box, erased type) pair rather than per slot: `Color`'s `tint`
+    // appears on three `Icon` overloads alone, and every one of them wants the same two instructions.
+    val unwrappers = LinkedHashMap<Pair<String, String>, String>()
+    specs.forEach { spec ->
+        val (parameters, _) = splitMethodDescriptor(spec.descriptor)
+        parameters.forEachIndexed { slot, descriptor ->
+            val box = spec.valueClassUnboxOwners.getOrNull(slot) ?: return@forEachIndexed
+            unwrappers.getOrPut(box to descriptor) { "u${unwrappers.size}" }
+        }
+    }
+
     specs.forEachIndexed { index, spec ->
         val method = writer.visitMethod(
             Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC,
@@ -176,7 +207,18 @@ internal fun generateThunkClass(fragmentObjectName: String, specs: List<ThunkSpe
             method.visitVarInsn(Opcodes.ALOAD, 0)
             method.pushInt(slot)
             method.visitInsn(Opcodes.AALOAD)
-            method.unbox(descriptor)
+            val box = spec.valueClassUnboxOwners.getOrNull(slot)
+            if (box == null) {
+                method.unbox(descriptor)
+            } else {
+                method.visitMethodInsn(
+                    Opcodes.INVOKESTATIC,
+                    internalName,
+                    unwrappers.getValue(box to descriptor),
+                    "(Ljava/lang/Object;)$descriptor",
+                    false,
+                )
+            }
         }
         method.visitMethodInsn(Opcodes.INVOKESTATIC, spec.ownerInternalName, spec.methodName, spec.descriptor, false)
         method.box(returns)
@@ -184,8 +226,79 @@ internal fun generateThunkClass(fragmentObjectName: String, specs: List<ThunkSpe
         method.visitMaxs(0, 0)
         method.visitEnd()
     }
+    unwrappers.forEach { (key, name) -> writer.visitValueClassUnwrapper(name, key.first, key.second) }
     writer.visitEnd()
     return writer.toByteArray()
+}
+
+/**
+ * `static <erased> u<i>(Object)`: the box `HandleTable` handed back, opened into the value the
+ * callee's descriptor declares -- and **`null` turned into a zero rather than a
+ * `NullPointerException`**.
+ *
+ * ### Why null arrives at all, and why zero is the right answer
+ *
+ * A `@Composable`'s omitted argument is not absent: the slot is still a real JVM parameter, and what
+ * says it was left out is a bit of the `$default` mask (`docs/pythonx-adapter-design.md` §5.2). So
+ * `pythonx._absent` has to put *something* in the slot, and for an `OBJECT` slot the only thing it
+ * can put there is `None`. Its own docstring states the invariant that makes any value safe: the
+ * callee's generated prologue assigns over the slot before its first use, which is what the mask
+ * *means*. `_absent` already relies on it for the primitive widths (a `0` into a `FLOAT` slot); this
+ * is the same rule one type further on, and it is needed now because a slot that used to be `INT`
+ * -- and therefore got a `0` -- is an `OBJECT` since `ArtifactScanner.composableDeclaredSlot` began
+ * typing declared slots from `@Metadata`.
+ *
+ * `Icon(painter, contentDescription = ...)` with no `tint` is exactly that call, and without this it
+ * is an NPE inside a generated class with no source.
+ *
+ * ### The frame
+ *
+ * One `IFNULL`, therefore one merge point, therefore one `StackMapTable` entry -- written here
+ * rather than computed, because `ClassWriter.COMPUTE_FRAMES` resolves types through a `ClassLoader`
+ * that would have to see Compose and this generator runs in a worker that cannot. The frame is the
+ * simplest one there is: at the label, the single `Object` parameter is still the only local and the
+ * stack is empty, which is `F_SAME`.
+ */
+private fun ClassWriter.visitValueClassUnwrapper(name: String, boxInternalName: String, descriptor: String) {
+    val method = visitMethod(
+        Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC,
+        name,
+        "(Ljava/lang/Object;)$descriptor",
+        null,
+        null,
+    )
+    method.visitCode()
+    val absent = org.objectweb.asm.Label()
+    method.visitVarInsn(Opcodes.ALOAD, 0)
+    method.visitJumpInsn(Opcodes.IFNULL, absent)
+    method.visitVarInsn(Opcodes.ALOAD, 0)
+    method.visitTypeInsn(Opcodes.CHECKCAST, boxInternalName)
+    method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, boxInternalName, VALUE_CLASS_UNBOX_METHOD, "()$descriptor", false)
+    method.visitInsn(returnOpcodeOf(descriptor))
+    method.visitLabel(absent)
+    method.visitFrame(Opcodes.F_SAME, 0, null, 0, null)
+    method.pushZero(descriptor)
+    method.visitInsn(returnOpcodeOf(descriptor))
+    method.visitMaxs(0, 0)
+    method.visitEnd()
+}
+
+private fun returnOpcodeOf(descriptor: String): Int = when (descriptor) {
+    "J" -> Opcodes.LRETURN
+    "D" -> Opcodes.DRETURN
+    "F" -> Opcodes.FRETURN
+    "Z", "B", "S", "C", "I" -> Opcodes.IRETURN
+    else -> Opcodes.ARETURN
+}
+
+private fun MethodVisitor.pushZero(descriptor: String) {
+    when (descriptor) {
+        "J" -> visitInsn(Opcodes.LCONST_0)
+        "D" -> visitInsn(Opcodes.DCONST_0)
+        "F" -> visitInsn(Opcodes.FCONST_0)
+        "Z", "B", "S", "C", "I" -> visitInsn(Opcodes.ICONST_0)
+        else -> visitInsn(Opcodes.ACONST_NULL)
+    }
 }
 
 private fun MethodVisitor.pushInt(value: Int) {

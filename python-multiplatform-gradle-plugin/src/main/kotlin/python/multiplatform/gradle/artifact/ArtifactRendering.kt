@@ -59,6 +59,16 @@ internal data class ArtifactCallable(
     /** The declared Kotlin return type. */
     val returnTypeName: String? = null,
     /**
+     * What [returnTypeName] **is a**, nearest first -- the ancestry `pythonx._coerce` needs to let a
+     * `BitmapPainter` fill a `Painter` slot. Empty whenever the return does not cross as a handle,
+     * and whenever it has no public supertype worth naming.
+     *
+     * Kept beside [returnTypeName] rather than folded into it, so that everything reading a *type*
+     * keeps reading one: [renderEntry] is the single place the two are joined, and the fragment's
+     * `returnTypeName` literal is where they travel together. See [SUPERTYPE_SEPARATOR].
+     */
+    val returnSupertypes: List<String> = emptyList(),
+    /**
      * Whether each parameter may be **left out of a call**, which is a statement about [lambdaBody]
      * and not quite about the declaration.
      *
@@ -138,6 +148,30 @@ internal fun artifactFragmentObjectName(coordinates: String): String =
 private fun omittableSlotsOf(entry: ArtifactCallable): List<Boolean> =
     if ("== null" in entry.lambdaBody || entry.thunk != null) entry.paramHasDefault else entry.paramHasDefault.map { false }
 
+/**
+ * What separates a declared return type from the types it **is a**, inside the one string the
+ * boundary already carries for it.
+ *
+ * ### Why the answer travels in the type name
+ *
+ * The same reason `ArtifactScanner.functionSlotTypeName`'s does, and its KDoc makes the argument in
+ * full: `ExposedCallable` already carries a declared type name to every target, and a second column
+ * that only some producers fill would be one more thing that can disagree with the first. `<:` is not
+ * a character sequence a Kotlin fully-qualified name can contain -- neither `<` nor `:` is legal in
+ * one -- so nothing legitimate can collide with the grammar, and `pythonx._split_supertypes` is the
+ * single reader.
+ *
+ * It also keeps the change where the two ends of it are. `ExposedCallable` is the runtime's model and
+ * is written by KSP as well; a walked jar is the only producer that *has* a class hierarchy to read,
+ * and this is the only shape that lets it say so without every other producer growing a field it
+ * would leave empty.
+ */
+internal const val SUPERTYPE_SEPARATOR = "<:"
+
+/** `returnTypeName` as the fragment writes it: the declared type, then its ancestry. */
+internal fun renderedReturnTypeName(entry: ArtifactCallable): String? =
+    entry.returnTypeName?.let { (listOf(it) + entry.returnSupertypes).joinToString(SUPERTYPE_SEPARATOR) }
+
 private fun renderEntry(entry: ArtifactCallable): String {
     val paramTags = entry.paramTags.joinToString(", ") { "$TYPE_TAG.$it" }
     val paramNames = entry.paramNames.joinToString(", ") { it.quoted() }
@@ -152,7 +186,7 @@ private fun renderEntry(entry: ArtifactCallable): String {
         |    kind = $CALLABLE_KIND.FUNCTION,
         |    paramNames = listOf($paramNames),
         |    paramTypeNames = listOf($paramTypeNames),
-        |    returnTypeName = ${entry.returnTypeName?.quoted() ?: "null"},
+        |    returnTypeName = ${renderedReturnTypeName(entry)?.quoted() ?: "null"},
         |    isExtension = ${entry.receiverTypeName != null},
         |    receiverTypeName = ${entry.receiverTypeName?.quoted() ?: "null"},
         |    paramHasDefault = listOf($paramHasDefault),

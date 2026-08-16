@@ -628,7 +628,13 @@ internal object ArtifactScanner {
         if (shape.totalCount != paramDescriptors.size) return null
 
         val model = declarationModelOf(owner, ownerIsClass, function, classpath, isComposable = true) ?: return null
-        val paramTags = paramDescriptors.map { composableSlotTagOf(it) ?: return null }
+        // The declared slots are typed from `@Metadata`, the synthetic ones from the descriptor --
+        // see [composableDeclaredSlot] for why the pairing is safe and what refuses it.
+        val declaredSlots = (0 until declaredCount).map { index ->
+            composableDeclaredSlot(function.allParameterTypes[index], paramDescriptors[index], classpath) ?: return null
+        }
+        val syntheticTags = paramDescriptors.drop(declaredCount).map { composableSlotTagOf(it) ?: return null }
+        val paramTags = declaredSlots.map { it.tag } + syntheticTags
         val returnTag = if (returnDescriptor == "V") "UNIT" else composableSlotTagOf(returnDescriptor) ?: return null
         val declaredTypeNames = function.allParameterTypes.mapIndexed { index, type ->
             val declared = kotlinClassifierNameOf(type) ?: return null
@@ -659,12 +665,18 @@ internal object ArtifactScanner {
                 paramNames = paramNames,
                 paramTypeNames = paramTypeNames,
                 returnTypeName = kotlinClassifierNameOf(function.returnType),
+                returnSupertypes = returnSupertypesOf(function.returnType, returnTag, classpath),
                 // The declaration's own answer, unlike every other producer here -- and it is the
                 // honest one, because the mask reaches *every* default with no cap and no branch to
                 // decline. A synthetic slot is never omittable: `pythonx` always computes all three.
                 paramHasDefault = (0 until declaredCount).map { function.allParameterDefaults.getOrElse(it) { false } } +
                     List(syntheticNames.size) { false },
-                thunk = ThunkSpec(ownerInternalName, jvmMethodName, "(${paramDescriptors.joinToString("")})$returnDescriptor"),
+                thunk = ThunkSpec(
+                    ownerInternalName,
+                    jvmMethodName,
+                    "(${paramDescriptors.joinToString("")})$returnDescriptor",
+                    valueClassUnboxOwners = declaredSlots.map { it.unboxOwner } + List(syntheticTags.size) { null },
+                ),
             ),
             declaration = model.copy(
                 bindingName = qualifiedName,
@@ -950,9 +962,117 @@ internal object ArtifactScanner {
     /** [KOTLIN_FUNCTION_PREFIX] as `KmClassifier.Class` spells it. */
     private const val KOTLIN_FUNCTION_INTERNAL_PREFIX = "kotlin/Function"
 
+    /**
+     * One **declared** slot of a composable: how it marshals, and what the thunk has to do to the
+     * object the boundary sends before the erased JVM signature will take it.
+     *
+     * @param unboxOwner the `@JvmInline value class` box the boundary carries, which the thunk
+     *   unwraps with `unbox-impl`; `null` when the slot needs no unwrapping.
+     * @param upgraded whether the answer differs from what the JVM descriptor alone would have said.
+     *   Carried for the measurement in `ComposableValueClassSlotTest` and for nothing else: a slot
+     *   that was never upgraded proves the fix reached nothing.
+     */
+    internal class ComposableSlot(val tag: String, val unboxOwner: String?, val upgraded: Boolean)
+
+    /**
+     * **The wall `ebe3365f` pinned**: the same walker typed `Color` two ways, and a `@Composable`'s
+     * `Color` slot refused the very handle an ordinary declaration accepted.
+     *
+     * ### The two views, and why there were two
+     *
+     * An ordinary declaration is typed by [resolveKotlinType] from `@Metadata`, which knows `Color`
+     * is a `@JvmInline value class` over a `ULong` whose own constructor is `internal` -- so it can
+     * neither be built from a raw number nor unwrapped, and crosses as an object handle. A
+     * composable's parameters were typed by [composableSlotTagOf] from the **JVM descriptor**, where
+     * the same `Color` is the letter `J`. `INT` and `OBJECT` for one type, in one jar.
+     *
+     * The descriptor is not gratuitous. A composable's `$composer`, `$changed` and `$default` slots
+     * are added by the Compose plugin during IR lowering and are **not declared anywhere in
+     * metadata**, so the JVM parameter list is genuinely longer than the Kotlin one and only the
+     * descriptor can say what the trailing slots are. What did not follow -- and was the defect -- is
+     * that the *declared* slots had to be read from it too.
+     *
+     * ### How the two lists are paired
+     *
+     * Positionally, over the first [ComposableShape.declaredCount] JVM parameters, and that is a
+     * *checked* relation rather than an assumption: [ComposableShape.of] has already established
+     * that JVM parameter `declaredCount` is the `Composer` and that every parameter after it is an
+     * `int`, and [composableCandidate] additionally requires `shape.totalCount` to equal the JVM
+     * parameter count. Two arities, related in exactly one admissible way -- the same argument
+     * [functionSlotTypeName] makes for a function-typed slot, where a declared `Function1` may be a
+     * compiled `Function1` or a compiled `Function3` and nothing else.
+     *
+     * ### And what stops a wrong pairing from being silent
+     *
+     * The arity relation says the lists are the same length; it cannot say that slot *i* of one is
+     * slot *i* of the other. So every pair is **cross-checked** here, and there are only three ways
+     * for a pair to be admitted:
+     *
+     * | the two views | what it means | what happens |
+     * |---|---|---|
+     * | the same tag | a primitive against its own descriptor, an object against a reference, a `Dp` (`FLOAT`) against an `F` | bound, unchanged |
+     * | metadata says `OBJECT`, and the carrier's own `unbox-impl` returns **exactly** this descriptor | a value class the walker cannot open, erased into the slot | bound as a handle, and the thunk unwraps it |
+     * | metadata resolves to nothing at all | a nullable primitive, a built-in with no class file, a function type | the descriptor's answer stands, which is what shipped before |
+     *
+     * Anything else -- a `Modifier` against a `J`, a `Color` against a `Ljava/lang/String;` -- returns
+     * `null` and **declines the whole declaration**. It cannot be bound to "whichever view was
+     * consulted last", because that is precisely the failure this method exists to remove.
+     *
+     * `ComposableValueClassSlotTest.everyComposableSlotAgreesBetweenMetadataAndDescriptorWhenPairedInOrder`
+     * measures that no composable in three Compose jars is declined by that rule, and its sibling
+     * shifts the pairing by one slot to show the rule is not vacuous.
+     */
+    internal fun composableDeclaredSlot(
+        type: KmType,
+        descriptor: String,
+        classpath: ArtifactClasspath,
+    ): ComposableSlot? {
+        val descriptorTag = composableSlotTagOf(descriptor)
+        val resolved = resolveKotlinBoundary(type, classpath, BoundaryDirection.PARAMETER)
+            // Nothing metadata can say about this type, so there is nothing to disagree with: a
+            // nullable primitive, a Kotlin built-in with no class file, `kotlin.FunctionN`.
+            ?: return descriptorTag?.let { ComposableSlot(it, unboxOwner = null, upgraded = false) }
+        val metadataTag = resolved.boundary.tag
+        if (metadataTag == descriptorTag) return ComposableSlot(metadataTag, unboxOwner = null, upgraded = false)
+
+        val carrier = resolved.carrier
+        if (metadataTag == OBJECT_TAG && carrier != null &&
+            classpath.valueClassUnboxDescriptor(carrier) == descriptor
+        ) {
+            return ComposableSlot(OBJECT_TAG, unboxOwner = carrier, upgraded = true)
+        }
+        // Metadata says an object and the slot is erased, but nothing on this classpath can turn the
+        // one into the other -- the box class is not resolvable. Declining would take away a binding
+        // that exists today, so the descriptor's answer stands and `pythonx` keeps refusing the call
+        // with the message it already gives. Counted by the sibling test rather than hidden.
+        if (metadataTag == OBJECT_TAG && descriptorTag != null && !descriptor.startsWith("L") && !descriptor.startsWith("[")) {
+            return ComposableSlot(descriptorTag, unboxOwner = null, upgraded = false)
+        }
+        return null
+    }
+
+    private const val OBJECT_TAG = "OBJECT"
+
+    /**
+     * The ancestry of one declaration's return type, or nothing at all.
+     *
+     * Asked **only** when the return crosses as a handle, which is the only case in which the answer
+     * can ever be read: `pythonx._coerce` consults it for an owned `OBJECT` value on its way into
+     * another slot, and a `Dp` result -- `FLOAT`, a raw number -- has no identity to carry an
+     * ancestry on. That single condition is also what keeps the cost down; see
+     * [nameablePublicSupertypesOf] and `ReturnSupertypeTest` for what it comes to.
+     */
+    private fun returnSupertypesOf(returnType: KmType, returnTag: String, classpath: ArtifactClasspath): List<String> {
+        if (returnTag != OBJECT_TAG) return emptyList()
+        val classifier = returnType.classifier as? KmClassifier.Class ?: return emptyList()
+        return classpath.nameablePublicSupertypesOf(classifier.name)
+    }
+
     /** A boundary tag for one JVM slot of a composable, which is the **compiled** shape rather than
      * the declared one: the thunk calls the erased signature, so a `Color` parameter is the `long`
-     * it erases to. `null` declines the whole declaration. */
+     * it erases to. `null` declines the whole declaration. Still the answer for the **synthetic**
+     * slots, which metadata does not declare at all; see [composableDeclaredSlot] for the declared
+     * ones. */
     private fun composableSlotTagOf(descriptor: String): String? = when {
         descriptor == "C" || descriptor == "V" -> null
         else -> boundaryTypeOf(descriptor)?.tag
@@ -1107,6 +1227,7 @@ internal object ArtifactScanner {
             paramNames = function.allParameterNames,
             paramTypeNames = paramTypeNames,
             returnTypeName = returnTypeName,
+            returnSupertypes = returnSupertypesOf(function.returnType, returnType.tag, classpath),
             // Deliberately all `false` until [applyDefaultOmission] says otherwise: this column is a
             // statement about **this body**, and this body passes everything.
             paramHasDefault = List(resolvedParams.size) { false },

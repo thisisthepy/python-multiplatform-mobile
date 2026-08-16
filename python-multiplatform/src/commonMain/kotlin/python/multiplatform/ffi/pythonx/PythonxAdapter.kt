@@ -144,7 +144,7 @@ object PythonxAdapter {
                 'kotlin_name', 'package', 'leaf', 'base', 'suffix', 'arity', 'kind', 'is_suspend',
                 'param_names', 'param_tags', 'param_type_names', 'return_tag', 'return_type_name',
                 'is_extension', 'receiver_type_name', 'param_has_default', 'handle',
-                'composer_index', 'changed_slots', 'default_slots',
+                'composer_index', 'changed_slots', 'default_slots', 'return_supertypes',
             )
 
             def __init__(self, row):
@@ -157,6 +157,10 @@ object PythonxAdapter {
                 (self.kotlin_name, self.arity, self.kind, self.is_suspend, self.param_names,
                  self.param_tags, self.param_type_names, self.return_tag, self.return_type_name,
                  self.is_extension, self.receiver_type_name, self.param_has_default) = row
+                # The declared return type and what it **is a** travel in one string; see
+                # `_split_supertypes`. Split here, once, so that everything downstream -- `_wrap`,
+                # `_pythonx_type_name`, every message -- keeps seeing exactly the name it did before.
+                self.return_type_name, self.return_supertypes = _split_supertypes(self.return_type_name)
                 self.package, _, self.leaf = self.kotlin_name.rpartition('.')
                 self.base, _, self.suffix = self.leaf.partition('__')
                 self.handle = None
@@ -223,6 +227,39 @@ object PythonxAdapter {
         _BY_PACKAGE = {}     # kotlin package -> {python name -> [_Decl]}
         _BY_RECEIVER = {}    # kotlin receiver type -> {python name -> [_Decl]}
         _PACKAGES_SEEN = set()
+        _SUPERTYPES = {}     # kotlin type name -> the types it is a, nearest first
+
+
+        # What `ArtifactRendering.SUPERTYPE_SEPARATOR` writes between a declared return type and its
+        # ancestry. Neither character is legal in a Kotlin fully-qualified name, which is the same
+        # property `${'$'}composer` and `_COMPOSABLE_MARK` rely on: the string is the flag, and it cannot
+        # drift out of step with the thing it describes.
+        _SUPERTYPE_SEPARATOR = '<:'
+
+
+        def _split_supertypes(type_name):
+            '''`'A<:B<:C'` -> `('A', ('B', 'C'))`. A name with no ancestry comes back unchanged.
+
+            Only a *walked jar* can answer what a type is a subtype of -- it is the one producer with
+            the class files open -- so this is written by `ArtifactScanner` and by nothing else. A KSP
+            fragment's rows have no separator in them and reach the same code path with an empty
+            ancestry, which is the truth rather than a special case.
+            '''
+            if not type_name or _SUPERTYPE_SEPARATOR not in type_name:
+                return type_name, ()
+            parts = type_name.split(_SUPERTYPE_SEPARATOR)
+            return parts[0], tuple(parts[1:])
+
+
+        def _is_a(declared, wanted):
+            '''Whether a value declaring type [declared] may fill a slot declared [wanted].
+
+            Nominal equality, widened by exactly the ancestry the table carries and by nothing else.
+            There is no rule here for a type nothing produced -- an entry appears in `_SUPERTYPES`
+            only because some bound declaration *returns* it, which is the only way a value of it can
+            reach a slot in the first place.
+            '''
+            return declared == wanted or wanted in _SUPERTYPES.get(declared, ())
 
 
         def _register_table(rows):
@@ -238,6 +275,7 @@ object PythonxAdapter {
             _BY_PACKAGE.clear()
             _BY_RECEIVER.clear()
             _PACKAGES_SEEN.clear()
+            _SUPERTYPES.clear()
             present = set()
             for row in rows:
                 kotlin_name = row[0]
@@ -248,6 +286,12 @@ object PythonxAdapter {
                 else:
                     decl.update(row)
                 present.add(kotlin_name)
+                # Keyed by the type rather than by the declaration: an ancestry is a fact about a
+                # type, and several declarations routinely return the same one. Written once and
+                # never merged -- two producers of one type read it off the same class file, so a
+                # disagreement would be a walker bug rather than something to reconcile here.
+                if decl.return_supertypes and decl.return_type_name not in _SUPERTYPES:
+                    _SUPERTYPES[decl.return_type_name] = decl.return_supertypes
                 _index(_BY_PACKAGE.setdefault(decl.package, {}), decl)
                 if decl.is_extension and decl.receiver_type_name:
                     _index(_BY_RECEIVER.setdefault(decl.receiver_type_name, {}), decl)
@@ -858,7 +902,12 @@ object PythonxAdapter {
                     # handle a few lines below is already trusted with no type check at all in strict
                     # mode, so an owned-but-untyped value gets the same trust rather than a stricter
                     # rule than the boundary's own currency.
-                    if type_name is not None and declared is not None and declared != type_name:
+                    # Subtyping, not equality: `BitmapPainter` fills a `Painter` slot. The ancestry
+                    # is the value's own -- carried on the declaration that produced it, read off the
+                    # jar by `ArtifactScanner.nameablePublicSupertypesOf` -- so nothing here has to
+                    # know a hierarchy it cannot see. A value with no ancestry recorded is still
+                    # matched by name alone, which is what every KSP-produced row is.
+                    if type_name is not None and declared is not None and not _is_a(declared, type_name):
                         return _refuse(
                             strict,
                             'expected ' + _simple_name(type_name) + ' but got ' + _simple_name(declared),
