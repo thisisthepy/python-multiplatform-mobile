@@ -59,8 +59,10 @@ import kotlin.test.fail
  *   was the direct cause of §5c's open question and of the JNI audit's phantom finding recorded in
  *   [JniCallConventionClassificationTest].
  * - [noCPythonDeprecatedSymbolIsInTheExpectSurface] -- the reclassification half of issue #4,
- *   derived from `Py_DEPRECATED(...)` in the CPython 3.13 headers bundled under
+ *   derived from `Py_DEPRECATED(...)` in the CPython headers bundled under
  *   `src/nativeInterop/cinterop/include`, not from anyone's memory of the deprecation schedule.
+ *   That those headers are the version the build actually ships is not assumed here; it is a
+ *   separate assertion, in [VendoredHeaderVersionTest], because for a year they were not.
  * - [everyDocumentedDeprecationIsMarkedInKotlin] -- the softer half. CPython documents some
  *   deprecations only in prose ("Deprecated since version 3.13: use X instead"), and that prose is
  *   already in this repository, copied into the KDoc of the declaration it belongs to. Where the
@@ -206,7 +208,7 @@ class EmbedApiSurfaceTest {
         val offenders = expects.filter { it in cpythonDeprecatedSymbols }.sorted()
         assertTrue(
             offenders.isEmpty(),
-            "these functions are marked Py_DEPRECATED in the CPython 3.13 headers bundled under " +
+            "these functions are marked Py_DEPRECATED in the CPython headers bundled under " +
                 "src/nativeInterop/cinterop/include, and issue #4 asks for the `expect` surface not " +
                 "to include them: $offenders. A compiler-enforced deprecation is also a removal " +
                 "schedule -- CPython deletes the symbol a release or two later and the `actual` " +
@@ -444,11 +446,17 @@ class EmbedApiSurfaceTest {
         )
 
         /**
-         * Symbols the bundled CPython 3.13 headers mark with `Py_DEPRECATED(...)`.
+         * Symbols the bundled CPython headers mark with `Py_DEPRECATED(...)`.
          *
          * Derived rather than listed: the deprecation schedule belongs to CPython, and a list
          * copied into Kotlin goes stale the next time the bundled interpreter moves. `internal/`
          * is skipped -- those are private symbols this project may not call at all.
+         *
+         * "Derived" only helps if the tree derived from is the right one. It went stale anyway --
+         * the tree sat at 3.13 while `pythonVersion` moved to 3.14.7 -- so the version agreement
+         * is asserted separately in [VendoredHeaderVersionTest] rather than assumed here. The
+         * refresh to 3.14.7 took this set from 81 symbols to 101 and changed no verdict: none of
+         * the 23 newly deprecated names is in the `expect` surface.
          */
         val cpythonDeprecatedSymbols: Set<String> by lazy {
             val root = File(moduleDirectory, "src/nativeInterop/cinterop/include")

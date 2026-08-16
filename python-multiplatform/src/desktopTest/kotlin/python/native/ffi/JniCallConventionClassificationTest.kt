@@ -623,7 +623,17 @@ class JniCallConventionClassificationTest {
             result
         }
 
-        /** `PyAPI_FUNC` prototypes from the bundled CPython headers -- the evidence base. */
+        /**
+         * `PyAPI_FUNC` prototypes from the bundled CPython headers -- the evidence base.
+         *
+         * That the bundled headers are the version the build ships is asserted by
+         * [VendoredHeaderVersionTest], not assumed here: this tree read 3.13 while `pythonVersion`
+         * was 3.14.7, which would have classified a re-signatured function from the wrong text
+         * while this suite went on agreeing with itself. The refresh to 3.14.7 took this map from
+         * 1129 prototypes to 1207 and left every classification below unchanged -- none of the six
+         * prototypes 3.14 drops, nor the one whose signature moved (`_PyLong_NumBits`), is among
+         * the 319 that this file's wrappers call.
+         */
         val prototypes: Map<String, Prototype> by lazy {
             val includeRoot = File(moduleDirectory, "src/nativeInterop/cinterop/include")
             assertTrue(includeRoot.isDirectory, "no bundled CPython headers at $includeRoot")

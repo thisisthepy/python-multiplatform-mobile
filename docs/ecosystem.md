@@ -284,6 +284,38 @@ runtime is the evidence layer, not the build: a function whose deprecation or si
 mismatch the check set out to look for, in the one shape nobody had looked at, and it is recorded
 rather than fixed here — refreshing the header tree is a separate change with its own verification.
 
+**That separate change was made (2026-08-17), and it answered the open question: nothing this
+project uses moved between 3.13 and 3.14.** The vendored `include/` tree was replaced with the
+3.14.7 headers out of the build's own checksum-verified extraction
+(`build/python-standalone/extracted/3.14.7/android-aarch64/prefix/include/python3.14/`; the four
+`pyconfig-<platform>.h` files and the hand-written `pyconfig.h` dispatcher were re-derived from the
+matching per-platform extractions, since CPython ships one `pyconfig.h` per build and this tree
+serves four). The evidence base the two suites read grew from 1129 `PyAPI_FUNC` prototypes to 1207
+and from 81 `Py_DEPRECATED` symbols to 101, and **every conclusion drawn from it was unchanged**:
+the JNI classification reported byte-identical totals before and after
+(`LEAF_PROVEN=5, RE_ENTRANT_BY_JNI_UPCALL=3, RE_ENTRANT_BY_SIGNATURE=293, UNDECIDED=65`; 34
+GC-blocking declarations, 22 promoted, 12 quarantined), and `desktopTest` went 467/0/1 → 469/0/1,
+the two added tests being the new guard below.
+
+Why nothing moved, stated as a set intersection rather than as an impression: of the 6 prototypes
+3.14 drops (`PyUnstable_InterpreterState_GetMainModule`, `_PyBytes_Join`, `_PyTrash_begin`,
+`_PyTrash_end`, `_Py_InitializeMain`, `_Py_fopen_obj`), the 1 whose signature changed
+(`_PyLong_NumBits`, `size_t` → `int64_t`), and the 23 newly marked `Py_DEPRECATED` (led by
+`PyThread_exit_thread`, `_PyThreadState_UncheckedGet`, `_Py_HashPointer`, and the whole
+`_PyUnicodeWriter_*` family), **none appears in the 312-name `expect` surface of `EmbedAPI.kt`, and
+none appears among the 319 CPython prototypes `jni_onload.def` calls.** Every one of the 30 is a
+private (`_Py`/`_PyUnstable`) symbol this project's abi3 self-rule already forbids. So the
+3.13-vs-3.14 evidence gap was real but benign, and it is now closed rather than argued about.
+
+The guard that keeps it closed is `VendoredHeaderVersionTest` (`src/desktopTest/.../
+VendoredHeaderVersionTest.kt`): it compares `patchlevel.h`'s `PY_MAJOR/MINOR/MICRO_VERSION` against
+`gradle.properties`'s `pythonVersion` and fails if they diverge, with a canary test so that a
+regex that stops matching fails loudly instead of making the comparison vacuous. It was watched
+failing on the pre-refresh tree (`expected:<3.1[4.7]> but was:<3.1[3.0]>`, sole failure in a
+469-test run) before it was trusted. It compares versions, not contents — deliberately, since a
+content comparison would need the extraction present and so would be unavailable exactly when the
+extraction has not been run.
+
 The rest of that tree is genuinely unreferenced and large: `git ls-files` counts 15,842 tracked files
 under `src/nativeInterop/cinterop` (679 MB in `lib/`, 2.6 MB in `include/`), and of `lib/` only
 `lib/desktop` is read, by the `-PpythonVersion=3.13.0` branch above. The Android CPython 3.13 standard
