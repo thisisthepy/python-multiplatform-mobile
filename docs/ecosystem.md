@@ -239,6 +239,31 @@ This section documents the current state, language/build system/distribution art
 - **Unverified**:
   - Behavior of WASM browser runtime (`wasm-experiment/`) under production web bundlers.
 
+**Issues (checked 2026-08-16):** the only open issue against this repository is
+[`python-multiplatform#4`](https://github.com/thisisthepy/python-multiplatform/issues/4), "Add Python/C API
+expect declaration reclassification and actual definitions" (deadline noted in the issue as `25-07-24`, i.e.
+already past). It has no checklist, just two prose tasks: (1) reclassify the `expect` declarations in
+`EmbedAPI.kt`, excluding deprecated/soon-to-be-deprecated APIs and ones judged unnecessary, and (2) add
+`actual` definitions for `androidMain`, `desktopMain`, `nativeMain`.
+
+Cross-checked against code rather than assumed:
+
+- `EmbedAPI.kt` (`commonMain`) currently declares 335 `expect` members. `EmbedAPI.android.kt` has 336
+  `actual` members, `EmbedAPI.native.kt` has 336, `EmbedAPI.desktop.kt` has 315 — all three platforms are
+  substantially covered, though desktop's count runs 20 lower and this agent did not diff which 20 to say
+  whether that is a real gap or a difference in how the same expect is satisfied. `EmbedAPI.wasmJs.kt`
+  exists too (not one of the three the issue named).
+- "Reclassify... does not include Deprecated" was not done by exclusion: `grep -ci deprecated
+  EmbedAPI.kt` finds 14 hits, and several are `@Deprecated`-annotated Kotlin declarations (e.g. around
+  line 1490) rather than omitted ones. So the repository kept deprecated CPython APIs and marked them
+  `@Deprecated` in Kotlin instead of dropping them — a different resolution than the issue's literal ask,
+  not a completion of it as written.
+- Given the volume of FFI/upcall work landed since (`git log --oneline -20` on this repo is dominated by
+  GIL, upcall-table and free-threading commits, none mentioning issue #4 by number), this agent could not
+  find a commit that closes this issue explicitly; the `actual`-definition half looks done by inspection,
+  the "reclassification" half looks handled differently than specified. Not confirmed against a commit
+  message either way — flagged, not asserted.
+
 ---
 
 ### `toolchain`
@@ -268,6 +293,38 @@ This section documents the current state, language/build system/distribution art
   - Applied by end-user Kotlin Multiplatform projects.
 - **Unverified**:
   - Behavior of `integration()` configuration with `KLIBDEPENS` wheel metadata (only documented in DSL spec).
+
+**Issues (checked 2026-08-16):** two open issues,
+[`toolchain#2`](https://github.com/thisisthepy/toolchain/issues/2) ("[Todo] Kotlin Gradle Plugin and Build
+Tools" — a checklist, sub-issue `pypackpack#2`) and
+[`toolchain#1`](https://github.com/thisisthepy/toolchain/issues/1) ("[Todo] Toolchain-lite for python-only
+users", parent `pypackpack#2`, one line: `tcl install pythonx-compose`). Full checklist-vs-code table is in
+§5c. Three corrections to the bullets above, found by reading the current tree (`git log --oneline -12`
+runs through `fb1dba7`, `30a064c`, `f7008eb`) rather than by re-deriving them:
+
+- **The `createMetaClass.kt` generator this file described above no longer exists.** `git log` shows it
+  deleted in `30a064c` ("Feat: Open the packagePython chain, delegate dependency install, and delete the
+  meta generator"); `find . -iname "createMetaClass*"` in the working tree returns nothing. The "Observed
+  Current State" bullet above describing it is stale as of that commit — left as written per this
+  repository's convention of not erasing superseded claims, corrected here instead.
+- **"Delete redundant tasks" (this file's own gap item) did not happen by deletion.** `InstallDependenciesTask`,
+  `BuildPythonArtifactTask` and `AssemblePythonPackageTask` all still exist, under the same names. What
+  changed is their bodies: `InstallDependenciesTask` no longer shells `uv install -r` (not a real `uv`
+  verb) and instead calls `pypackpack`'s `dependency.backend.BaseInterface` directly (confirmed by reading
+  `InstallDependenciesTask.kt`'s current source, which now imports
+  `org.thisisthepy.python.multiplatform.packpack.dependency.backend.BaseInterface`). The naive
+  copy-to-`src/main/assets/python`-then-zip step that lived inline in `PythonPlugin.kt`'s `afterEvaluate`
+  was deleted (that part of the gap item is accurate), but the task classes were rewired, not removed.
+- **"Wire up DSL" is now partially wrong.** `integration()` and `buildTypes` (`debug`/`release` selection
+  via `-Ppython.buildType`) are wired as of `fb1dba7` and an earlier commit respectively — confirmed by
+  reading `PythonPlugin.kt`'s `collectInstallDependencies` (folds `implementations + integrations`) and
+  `resolveActiveBuildType`. `hotReload`, `codePush`, `buildFeatures` (`metaclass`/`compose`), `metaDirs`,
+  `libDirs` and per-variant `platforms` (e.g. Android min-SDK) remain unwired — but `fb1dba7`'s commit
+  message states this was tested, not assumed: registering `PythonConfiguration.kt`'s extension was tried
+  and confirmed to compile and do nothing (`usage-example` never imports the DSL package that would reach
+  it), and the rest have no corresponding concept in `pypackpack` to bind to yet. `PythonConfiguration.kt`
+  dead-code claim re-confirmed by this agent: `grep -rn PythonConfiguration toolchain/src/main/kotlin`
+  outside its own file returns nothing.
 
 ---
 
@@ -299,6 +356,75 @@ This section documents the current state, language/build system/distribution art
 - **Unverified**:
   - Wheel patch generation (`WheelPatchBundler.kt`) and incremental upload logic (placeholder files only).
 
+**Issues (checked 2026-08-16):** four open issues —
+[`pypackpack#2`](https://github.com/thisisthepy/pypackpack/issues/2) ("[Todo] PyPackPack Initial
+Development", parent `toolchain#2`, subs `pypackpack#1`/`toolchain#1`),
+[`pypackpack#1`](https://github.com/thisisthepy/pypackpack/issues/1) ("[Todo] Python Dependency
+Management", parent `pypackpack#2`, sub `pypackpack#5`),
+[`pypackpack#5`](https://github.com/thisisthepy/pypackpack/issues/5) ("Managing Multi-Platform Dependencies
+in uv with Platform Markers", help wanted, a how-to guide rather than a checklist), and
+[`pypackpack#12`](https://github.com/thisisthepy/pypackpack/issues/12) ("Ambiguous file name due to
+duplicated name on entirely codebase", a naming-convention proposal). Full checklist-vs-code table in §5c.
+Several "Gap to Goal" items above are now stale — this repository moved fast in the last two days
+(`git log --oneline -12` runs `488bac0` back through `08353c7`, all dated 2026-08-15/16) — and their commit
+messages are unusually explicit about what they do and do not close, so this agent read each rather than
+inferring from diff stats:
+
+- **"Publish to Maven" is done.** `d10ab76` ("Build: Publish packpack, so toolchain can finally depend on
+  it") added `maven-publish` to `packpack/build.gradle.kts`; the commit message states
+  `publishToMavenLocal` now produces `org.thisisthepy.python.multiplatform:packpack:0.1.0`. The one caveat
+  the same commit records — CLI dependencies (Clikt, Ktor, zstd) leaking onto a library consumer's
+  classpath because the CLI lived in the same module — was itself closed one commit later, `488bac0`
+  ("Build: Split the CLI into its own module"): confirmed by `find . -iname BuildCommand.kt`, which now
+  resolves under `cli/src/main/kotlin/.../cli/BuildCommand.kt`, not under `packpack/`.
+- **"Implement `bundle` stage" is partially done, more precisely than "all four bundlers are
+  placeholders."** `8d7b4b4` ("Feat: Implement the resource bundle...") implemented `ResourceBundler.kt`
+  (310 lines, its own 328-line test file) — the one bundle type `python-multiplatform` and `toolchain`
+  need per the commit message. `BinaryBundler.kt`, `FatWheelBundler.kt`, `SingleWheelBundler.kt` and
+  `WheelPatchBundler.kt` are still placeholders (re-confirmed by this agent, unchanged). But
+  `ResourceBundler` is not yet reachable from the CLI: `grep -n "ResourceBundler\|resource"
+  cli/.../BuildCommand.kt` finds nothing, and `docs/SPEC.md` (pypackpack's own spec, current as of these
+  commits) says outright "there is no `source`/`resource` bundle-type subcommand yet". So the class exists
+  and is tested; the CLI seam to it does not.
+- **The "destination disagreement" gap item is mostly fixed, with a named residual.** `5de8656` ("Fix:
+  Close the three known defects...") added a `registry.properties` file bridging `install`'s
+  project-relative writes and `find`/`list`/`uninstall`'s `~/.pypackpack/python/<version>` reads. `docs/SPEC.md`
+  confirms this in its `python install` section. The same section still lists "Final placement after
+  download/extraction is incomplete (marked `TODO` in code)" as an open limitation — the registry closes
+  the *lookup* mismatch, not this separate placement TODO.
+- **"Auto-install build tools" is done.** `isMesonInstalled()` used to be a stub returning `true`
+  (per `8d7b4b4`'s commit message); `5de8656` made it probe `meson --version`/`ninja --version` for real
+  and call `Meson.installMeson()` when the probe fails.
+- **"CLI pass-through flags" is done, not just started.** `5de8656`'s message states `add`/`remove`/
+  `sync`/`tree` forward unrecognized flags in all three command shapes, verified through the middleware to
+  the per-target `uv` call — `docs/SPEC.md`'s dependency-management section documents the same allowlist
+  (`parsePassthroughArgs` in `cli/CommandExtension.kt`) and a known ordering gotcha (`--target`'s greedy
+  vararg swallows a passthrough flag placed after it).
+- **Non-Meson compile backends and bundlers remain placeholders, re-confirmed.** `Clang.kt`, `MSVC.kt`,
+  `NDK.kt`, `XCode.kt`, `Emscripten.kt`, `Cargo.kt`, `Nuitka.kt` are all still exactly 4 lines each
+  (`wc -l`, checked by this agent, unchanged from what this file already said).
+- **`pypackpack#12`'s file-naming complaint is unresolved.** The suggested rename
+  (`BaseInterface.kt`/`DefaultInterface.kt` duplicated across `dependency/`, `compile/backend/`,
+  `compile/middleware/`, `bundle/`, `deploy/` → `FrontendInterface.kt`/`MiddlewareInterface.kt`/
+  `BackendInterface.kt`/`DefaultMiddleware.kt`/`DefaultBackend.kt`) has not been applied — `find . -iname
+  "*Interface*.kt"` still returns the ambiguous names the issue complains about, unchanged.
+- **`pypackpack#5`'s platform-marker guide describes something that already mostly works.** `MarkerPolicy`
+  (`dependency/middleware/DefaultInterface.kt`) builds `platform_system == '...' and platform_machine ==
+  '...'` markers per target and `--python-platform` is threaded through `tree`/`sync`/`add`/`remove`. The
+  one place it does not hold: `docs/KNOWN_ISSUES.md` records that the marker `uv add` actually persists
+  can come out as `platform_machine`/`sys_platform` instead of `platform_system`/`platform_machine`, which
+  can make `remove --target` fail to find a dependency added with that same target. So the guide's
+  approach is largely implemented, with one recorded, unfixed matching bug rather than being unbuilt.
+- **`pypackpack#1`'s "Middleware Refactoring" item ("are `DevEnv`/`CrossEnv` redundant wrappers?") is
+  still genuinely open**, not stale: reading `DevEnv.kt` now, its methods still follow "resolve project
+  root → delegate to backend → print success/failure", i.e. still the shape the issue calls a simple
+  wrapper. `CrossEnv.kt` (552 lines) has grown well past that shape, though — asymmetric, unresolved by
+  this agent's reading, matches the issue's unchecked box.
+- **`pypackpack#1`'s "settings.gradle.kts — [ ] uv" item could not be resolved to a concrete claim.** The
+  issue text is a single unexplained bullet with no elaboration. `settings.gradle.kts` today has no
+  mention of `uv` (checked directly); whether that is the intended scope of the checkbox, this agent could
+  not determine from the issue alone — left open rather than guessed.
+
 ---
 
 ### `pythonx-compose`
@@ -327,6 +453,11 @@ This section documents the current state, language/build system/distribution art
   - Uses `.pyi` stubs emitted by `toolchain` / `PythonMultiplatform` plugin for editor autocompletion.
 - **Unverified**:
   - Full hot-reload integration with Jupyter notebook server outside `UI.ipynb` static cells.
+
+**Issues (checked 2026-08-16):** `gh issue list --repo thisisthepy/pythonx-compose --state open` returns
+nothing. There is no issue tracker source for this repository's gap list — everything in "Gap to Goal"
+above is this document's own inference from reading the code, not sourced from an issue. Flagged here so
+it is not mistaken for the issue-backed items in the other three repos.
 
 ---
 
@@ -459,6 +590,124 @@ has no JVM has no `JClass`, and says so.
 artefacts at build time and emit stubs per source set. It is not a sibling of `PythonProxySource`,
 which fills `sys.modules` at runtime; these are different products for different consumers, one for
 the interpreter and one for the IDE. Long term that generator belongs to `toolchain` — see §5.
+
+---
+
+## 5c. Issue checklists against the code
+
+§5 was originally written by reading working copies, and it never opened an issue tracker — this
+repository's own `ROADMAP.md` mentions the other repos zero times, and the same was true of GitHub issues.
+That is the gap this section closes. Issues read in full, 2026-08-16:
+
+    gh issue list --repo thisisthepy/toolchain --state open
+    gh issue list --repo thisisthepy/pypackpack --state open
+    gh issue list --repo thisisthepy/python-multiplatform --state open
+    gh issue list --repo thisisthepy/pythonx-compose --state open
+
+`pythonx-compose` has none open. Seven issues came back across the other three repos, each read with
+`gh issue view <n> --repo <repo>`, then checked against the working copy (not against the issue's own
+description of itself). "✅ done" below means this agent found the corresponding code and, where the issue
+or a commit message made a narrower claim, checked that narrower claim too — not just that a file with a
+plausible name exists.
+
+### `toolchain#2` — "[Todo] Kotlin Gradle Plugin and Build Tools"
+
+| Checklist item | Issue's checkbox | Actual state (checked against code) |
+|---|---|---|
+| Create the basic structure of the plugin | ☑ checked | ✅ matches — `PythonPlugin.kt` registers the `python` extension and three tasks |
+| Python version setup → Version Enum (alpha, rc, normal) | ☐ unchecked | ❌ matches — `compileSdk` is a plain `String` in `DSLCore.kt`; no enum anywhere |
+| Build target platform setup → platform-specific min-SDK setting | ☐ unchecked | 🟡 partial — `AndroidPlatformExtension.androidSdk: Int` exists in `DSLPlatforms.kt` but no task reads it (per `fb1dba7`'s own commit message: "platforms has a partial hook... mapping them silently would be wrong") |
+| Build target platform setup → check Kotlin-side enabled build target | ☐ unchecked | ❌ matches — no code found that inspects which KMP targets are enabled |
+| Hot reload / Code Push → expose a direct run button | ☐ unchecked | ❌ matches — `HotReloadExtension`/`CodePushExtension` (`DSLPackaging.kt`) are pure data holders; `fb1dba7`: "hotReload and codePush have no backend concept in packpack" |
+| SourceSet setup → `implementation` | ☐ unchecked | ✅ **stale checkbox** — wired since before `fb1dba7`; `collectInstallDependencies` reads `implementations` |
+| SourceSet setup → `integration` | ☐ unchecked | ✅ **stale checkbox** — `fb1dba7` ("Feat: Make integration() install...") folds `integrations` into the same install list; it is treated identically to `implementation`, no `KLIBDEPENS` distinction (deliberately, per the same commit — nothing in `pypackpack` has that concept) |
+| SourceSet setup → etcs (src/resource path, sourceset naming) | ☐ unchecked | ❌ matches — `SourceSetConfig.srcDirs`/`metaDirs`/`libDirs` (`DSLBuild.kt`) accept values via DSL but nothing reads them (`fb1dba7`: "metaDirs and libDirs have nothing in the resource bundler to bind to") |
+| CompileLevel setup (debug/release, project flavors) | ☐ unchecked | 🟡 partial — `debug`/`release` selection via `resolveActiveBuildType`/`-Ppython.buildType` is wired; project flavors (`buildFeatures`) are not (`fb1dba7`: "buildFeatures has no consumer at all") |
+| Automate the build process and integrate with KMP | ☐ unchecked | 🟡 largely done, not fully end-to-end verified by this agent — `buildTask`→`installTask`→`packageTask` chain runs and delegates real work to `pypackpack`'s `ResourceBundler` (`30a064c`); this agent did not run `usage-example` to confirm a full build |
+
+### `toolchain#1` — "[Todo] Toolchain-lite for python-only users"
+
+One line, no checklist: `tcl install pythonx-compose`. ❌ Not started — `find . -iname "*tcl*" -o -iname
+"*lite*"` in the `toolchain` working copy (excluding `.git`/`build`) returns nothing.
+
+### `pypackpack#2` — "[Todo] PyPackPack Initial Development"
+
+| Checklist item | Issue's checkbox | Actual state (checked against code) |
+|---|---|---|
+| Create the basic structure of the plugin | ☐ unchecked | (parent bullet, not independently checkable — see sub-items) |
+| Python version setup → Version Enum | ☐ unchecked | ❌ same as `toolchain#2` — no enum found in either repo |
+| Build target platform setup → platform-specific min-SDK | ☐ unchecked | ❌ not found in `pypackpack` |
+| Build target platform setup → check Kotlin-side enabled build target | ☑ checked | 🟡 not independently verified by this agent — no corroborating code found in the time available; recorded as unverified rather than disputed |
+| Hot reload / Code Push → run button | ☐ unchecked | ❌ matches |
+| SourceSet setup → implementation (python-only) | ☐ unchecked | 🟡 the underlying dependency-add path exists (`DependencyBackend.addDependencies`), but this is `toolchain`'s DSL concept, not `pypackpack`'s — checkbox sits on the wrong side of the boundary the ecosystem doc draws in §1 |
+| SourceSet setup → integration (python+kotlin mixed) | ☐ unchecked | ❌ matches — no `KLIBDEPENS` handling anywhere in `pypackpack` (grepped, zero hits) |
+| External tool detection → Nuitka | ☐ unchecked | ❌ matches — `Nuitka.kt` is 4 lines |
+| External tool detection → Host Python | ☑ checked | ✅ matches — `python install` downloads a prebuilt CPython from `python-multiplatform`'s GitHub releases (`docs/SPEC.md`, confirmed) |
+| External tool detection → MSVC, Clang | ☐ unchecked | ❌ matches — both 4-line placeholders |
+| External tool detection → Poetry or UV | ☑ checked | ✅ matches — `dependency/backend/external/UV.kt` is a real, exercised integration |
+| External tool detection → Crossenv or equivalent | ☐ unchecked | 🟡 partial — `CrossEnv.kt` exists at 552 lines and is exercised by `add`/`sync`/`tree` per-target commands, but "creating a dedicated venv per target" is explicitly listed as not-yet-implemented in `docs/SPEC.md` |
+| Compilation modes → instant (pure python) | ☑ checked | 🟡 not verified as a selectable mode — `docs/SPEC.md` states the `--level` CLI flag is "accepted but ignored" for `build`, i.e. there's exactly one behavior today, which happens to look like `instant`, not a selection mechanism |
+| Compilation modes → bytecode/mixed/native | ☐ unchecked | ❌ matches — `docs/SPEC.md` lists all three as "Not yet implemented (target)" |
+| Build Tools → configure Nuitka | ☐ unchecked | ❌ matches |
+| Build Tools → compatibility testing with Android | ☐ unchecked | ❌ not found |
+| Build Tools → minification | ☐ unchecked | ❌ matches — `compile/middleware/minification/` has only the base interface |
+
+### `pypackpack#1` — "[Todo] Python Dependency Management"
+
+| Checklist item | Issue's checkbox | Actual state (checked against code) |
+|---|---|---|
+| Handle `pyproject.toml` → lossless modification | ☑ checked | ✅ matches — `utils/toml/TomlEditor.kt` + `TomlValue.kt` exist and are exercised (SPEC.md's `target add/remove`, `package remove` sections describe editing specific keys in place) |
+| Fix `CrossEnv.kt` abstraction → encapsulate UV logic in backend | ☑ checked | ✅ plausible, not fully re-derived — `CrossEnv.kt`'s target-marker logic (`MarkerPolicy`) and per-target `uv` calls live in the middleware/backend layers this item describes; this agent did not diff against a pre-fix version to confirm the decoupling directly |
+| Middleware Refactoring → is `DevEnv`/`CrossEnv` still a redundant wrapper? | ☐ unchecked | ✅ matches, genuinely still open — `DevEnv.kt` (240 lines) still follows "resolve project root → delegate to backend → print result" for every method, the shape the issue questions. `CrossEnv.kt` (552 lines) has grown well past a simple wrapper, which is itself an argument the two are no longer symmetric — unresolved either way |
+| Target Platforms → research a cleaner architecture for platform-specific deps via UV | ☐ unchecked | 🟡 partial — `MarkerPolicy`/`Platforms.describeTarget` (`utils/Platforms.kt`) already implement a `platform_system`/`platform_machine` marker scheme and thread `--python-platform` through `tree`/`sync`, i.e. a pattern exists; whether it counts as the "research" this item asks for is a judgment call this agent did not make either way |
+| `settings.gradle.kts` → `uv` | ☐ unchecked | ❓ could not resolve — the issue gives no elaboration beyond the single word "uv"; `settings.gradle.kts` today has no `uv` reference at all, but this agent could not determine what behavior the checkbox is asking for, so this is left open rather than guessed |
+
+### `pypackpack#5` — "Managing Multi-Platform Dependencies in uv with Platform Markers" (help wanted, guide not checklist)
+
+Not a checklist — a how-to document proposing `platform_system`/`platform_machine` PEP 508 markers per
+target. 🟡 **largely already matches the shipped design**: `MarkerPolicy.markerForTarget` in
+`dependency/middleware/DefaultInterface.kt` builds exactly `platform_system == '...' and platform_machine
+== '...'`, and `--python-platform` is passed to `uv tree`/`uv add` per target. The one place code and guide
+diverge in practice: `docs/KNOWN_ISSUES.md` records that the marker text `uv add` actually persists can
+come back as `platform_machine`/`sys_platform` rather than `platform_system`/`platform_machine`, which
+breaks `remove --target`'s re-derived-marker matching for some dependencies. So the guide's approach is
+implemented, with one recorded, unfixed bug in marker-round-tripping.
+
+### `pypackpack#12` — "Ambiguous file name due to duplicated name on entirely codebase" (question, not checklist)
+
+❌ **Not addressed.** The issue proposes renaming `BaseInterface.kt`/`DefaultInterface.kt` (duplicated
+across `dependency/`, `compile/backend/`, `compile/middleware/`, `bundle/`, `deploy/`) to
+`FrontendInterface.kt`/`MiddlewareInterface.kt`/`BackendInterface.kt`/`DefaultMiddleware.kt`/
+`DefaultBackend.kt`. `find . -iname "*Interface*.kt"` in the current tree still shows `BaseInterface.kt`
+and `DefaultInterface.kt` repeated in all five domains named in the issue, unchanged.
+
+### `python-multiplatform#4` — "Add Python/C API expect declaration reclassification and actual definitions"
+
+No checklist, two prose tasks. See the "Issues" note under this repository's own §5 entry above for the
+full cross-check; summary: the `actual`-definition half looks done across `androidMain`/`desktopMain`/
+`nativeMain` by counting `expect`/`actual` members (335/336/336/315), the "reclassify to exclude
+deprecated APIs" half was instead resolved by keeping deprecated APIs and marking them `@Deprecated` in
+Kotlin — a different outcome than literally excluding them.
+
+### What is issue-sourced vs. this document's own inference
+
+Per the task that produced this section: items in §5's existing "Gap to Goal" lists that also appear in an
+issue above are issue-sourced, and are now cross-referenced from within §5 itself (see the "Issues" note in
+each repository's block). Two kinds of mismatch, kept separate rather than merged:
+
+- **In an issue, missing from §5's original gap lists**: `pypackpack#12`'s file-naming complaint;
+  `pypackpack#1`'s `DevEnv`/`CrossEnv` redundancy question and its unexplained `settings.gradle.kts`/`uv`
+  item; `toolchain#2`'s Python-version-enum and Kotlin-target-detection sub-items; `pypackpack#2`'s
+  compile-mode checklist (`instant`/`bytecode`/`mixed`/`native`) and Android-build-compatibility item.
+  These were not in this document before this pass — they are what "renders §5 incomplete" in the sense
+  the task described, now folded into each repository's "Issues" note above rather than duplicated again
+  here.
+- **In §5's original gap lists, absent from any issue**: `PythonMultiplatform`'s `@Composable`-callable-shape
+  gap (already closed per §4 item 1, and never was a `python-multiplatform` issue — it is `pythonx-compose`'s
+  problem surfacing in this repo's code), its `sys.meta_path` lazy-import gap, and all of `pythonx-compose`'s
+  "Gap to Goal" list. These are this document's own judgment calls, not sourced from a tracker — flagged in
+  the `pythonx-compose` "Issues" note above since that repository has zero open issues to source anything
+  from.
 
 ---
 
