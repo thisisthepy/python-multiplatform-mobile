@@ -670,3 +670,117 @@ Collected, in the order that unblocks the most.
    extensions on `Modifier` need a dispatch receiver Python has no implicit form for. No shape chosen.
 10. **Overload dispatch** — inherited unchanged. The walker currently drops 33 of 130 `Modifier`
     names. A Python-side dispatcher needs (1) to exist first, since it selects on argument names.
+
+---
+
+## 9. Measured — the `Modifier` extensions still declined, and `pointerInput` opened
+
+`ArtifactScannerTest.composeModifierExtensionsSurviveBothGates` and
+`FunctionSlotBindingTest.mostFunctionTypedModifierExtensionsAreNoLongerDeclinedForBeingFunctionTyped`
+were run against the real Compose 1.7.0 desktop jars (`ANDROID_HOME=... ./gradlew
+:python-multiplatform-gradle-plugin:test --tests ...`, 2026-08-17) to get the *current* decline list
+by name rather than assume the count in either test's own KDoc is still current. It is not: **eight**
+public top-level `Modifier` extensions have zero binding overload today, not the "44"/"8" figures
+recorded when those tests were written. Two more names (`pullRefresh`, `contextMenuOpenDetector`) have
+a declined *overload* beside a bound one and so are not in this list — a caller can already reach
+`pullRefresh(modifier, state, enabled)`, just not the callback-based overload.
+
+| name | JVM signature (`javap -p`, Compose 1.7.0) | decline reason (`ArtifactScanner`, measured) |
+|---|---|---|
+| `pointerInput` | `Modifier.pointerInput(Any?, suspend PointerInputScope.() -> Unit)` → `Function2<PointerInputScope, Continuation<Unit>, Any?>` | suspend function-typed parameter — **now bound**, see below |
+| `dragAndDropSource` | `dragAndDropSource(Modifier, (DrawScope)->Unit, suspend DragAndDropSourceScope.() -> Unit)` → `Function2<..., Continuation<Unit>, Any?>` | suspend function-typed parameter, same family as `pointerInput` |
+| `draggable` | `draggable(Modifier, DraggableState, ..., onDragStarted: suspend CoroutineScope.(Offset)->Unit, onDragStopped: suspend CoroutineScope.(Float)->Unit, ...)` → both `Function3<CoroutineScope, X, Continuation<Unit>, Any?>` | suspend function-typed parameter |
+| `composed` | `composed(Modifier, (InspectorInfo)->Unit, factory: @Composable Modifier.() -> Modifier)` → `factory` compiles to `Function3<Modifier, Composer, Integer, Modifier>` | `@Composable` function-typed parameter of a declaration that is not itself `@Composable`: `ArtifactScanner`'s generated fragment is compiled without the Compose plugin |
+| `swipeable` | `swipeable-pPrIpRY<T>(Modifier, SwipeableState<T>, ..., thresholds: (T, T) -> ThresholdConfig, ...)` | the `thresholds` slot's declared type argument is the type parameter `T`, which has no name a cast could spell |
+| `modifierLocalProvider` | `modifierLocalProvider<T>(Modifier, ProvidableModifierLocal<T>, () -> T)` | same: `() -> T`'s `T` has no name |
+| `anchoredDraggable` | `anchoredDraggable<T>(Modifier, AnchoredDraggableState<T>, ...)` | not function-typed at all — the *required* `state` parameter's own type carries the unnameable `T`, so `resolveKotlinType` answers "no boundary type" before the function-slot grammar is ever asked |
+| `layoutId` | `layoutId(Modifier, layoutId: Any)` | not function-typed — `resolveKotlinType` has no boundary type for a bare `kotlin.Any`/`java.lang.Object` parameter (no hint of which `TypeTag` an arbitrary Python value crossing there should marshal as) |
+
+So the eight split into three unrelated limits, not one:
+
+- **suspend lambda** (`pointerInput`, `dragAndDropSource`, `draggable`, and `pullRefresh`'s declined
+  overload) — §9.1 opens one of these.
+- **generic type parameter with no spellable name** (`swipeable`, `modifierLocalProvider`,
+  `anchoredDraggable`) — a walker limit, not a suspend one; see §9.2.
+- **compile-model mismatch** (`composed`) and **unconstrained parameter type** (`layoutId`) — one
+  declaration each, see §9.2.
+
+### 9.1 `Modifier.pointerInput` — judged reachable, and reached
+
+The blocking claim in `FunctionSlotBindingTest`'s KDoc is narrower than it reads: "a Python callable
+cannot answer `COROUTINE_SUSPENDED`" is true of a *bare* Python callable substituted for the whole
+suspend lambda, but `pointerInput`'s block does not need to *be* the suspend function — it needs to
+*call into* one, once per event, and the suspension all happens inside `awaitPointerEventScope {
+awaitPointerEvent() }`, which is ordinary Kotlin the compiler already knows how to build a state
+machine for. Nothing about Python has to suspend at all if the loop that suspends is hand-written
+Kotlin and Python is only ever asked a synchronous question at each iteration — exactly the shape
+`PythonCallables.PythonFunction` already crosses for every *other* `Function0..Function5` slot in this
+codebase (`docs/pythonx-adapter-design.md` §4.2's `content=`, among others).
+
+That is `fixture.compose.pythonPointerInput` (`ksp-fixtures/compose/src/desktopMain/kotlin/fixture/
+compose/PythonPointerInput.kt`): a hand-written, ordinarily-compiled `suspend` Kotlin function —
+
+    fun pythonPointerInput(modifier: Modifier, onEvent: PyObject): Modifier =
+        modifier.pointerInput(Unit) {
+            try {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        onEvent(type, x, y).close()   // ordinary, non-suspending PyObject.invoke
+                    }
+                }
+            } finally { onEvent.close() }
+        }
+
+bound by KSP exactly the way `fixture.compose.emptyModifier` already is (`FragmentScanner
+.topLevelFunctionEntry`, a plain top-level function, no artefact walker involved — `Modifier.
+pointerInput` itself is untouched and still declines, correctly, for the reason in the table above).
+It is a plain parameter rather than an extension receiver on purpose:
+`FragmentScanner.topLevelFunctionEntry` calls a declaration by its qualified name over
+`function.parameters` alone and never reads `KSFunctionDeclaration.extensionReceiver`, so `fun
+Modifier.pythonPointerInput(...)` would silently drop the receiver from the generated call. Changing
+that is shared infrastructure and out of scope here; `pythonPointerInput(modifier, onEvent)` is the
+shape that works today.
+
+**Proven, not asserted.** `ksp-fixtures/compose/src/desktopTest/kotlin/fixture/compose/
+PointerInputRenderTest.kt` drives a real `Move`/`Press`/`Release` sequence through
+`ImageComposeScene.sendPointerEvent` — the same entry point `CallbackDrivenRenderTest` uses for
+`Checkbox` — at a `Text` sized by the walked `size__Dp`, whose displayed string is
+`str(len(_tap_events))`. The test asserts, in Python, that at least one `press` event arrived with
+coordinates inside the 48×48 target box (not a stub value), and separately that a *fresh* scene shows
+a different digit once the callback has run — the same two-part shape (`_events` list, then a second
+scene) `CallbackDrivenRenderTest` uses for `Checkbox`/`Switch`, for the same reason: the scene that
+received the tap does not itself recompose from a Python list mutation Compose's snapshot system
+cannot see. Confirmed red first: with `PythonPointerInput.kt` removed, both tests fail with
+`PyException: cannot import name 'pythonPointerInput' from 'fixture.compose'`; restored, both pass
+(`:ksp-fixtures:compose:desktopTest`, 50 tests / 0 failures, up from 48 before this file).
+
+### 9.2 The other six — judged, not attempted
+
+- **`dragAndDropSource`, `draggable`, `pullRefresh`'s callback overload** are the same suspend-lambda
+  shape as `pointerInput` — a real suspension point inside hand-written Kotlin, a synchronous callback
+  to Python per event. `pythonPointerInput`'s pattern generalises to each of them; none is built here
+  (§9's whole point was finishing one rather than starting four).
+- **`composed`** looks reachable by a related but different mechanism: its `factory` compiles to the
+  *same* lowered shape (`Function3<Modifier, Composer, Integer, Modifier>`) `PythonCallables` already
+  crosses for every composable `content=` slot, so the missing piece is not the crossing but a
+  `@Composable` call site — which `ksp-fixtures/compose` already has the Compose plugin to compile.
+  A hand-written `@Composable fun pythonComposed(modifier: Modifier, factory: PyObject): Modifier`
+  threading the composer the way `PythonComposition` already does is the same shape as §9.1's fix,
+  applied to a composable call instead of a suspend one. Not attempted; unverified whether `composed`'s
+  own contract (it is itself *not* `@Composable`, so its factory runs during application, not
+  composition) admits a composer at all.
+- **`swipeable`, `modifierLocalProvider`, `anchoredDraggable`** share a limit `pythonPointerInput`'s
+  technique does not reach: the unspellable part is a **type parameter** (`T` in `SwipeableState<T>`,
+  `ProvidableModifierLocal<T>`, `AnchoredDraggableState<T>`), not a suspend modifier. A hand-written
+  wrapper can dodge this the same way `PyObject`-typed parameters dodge every other type problem at
+  this boundary, but only per concrete `T` — `pythonSwipeableFloat(modifier, state:
+  SwipeableState<Float>, ...)`, one declaration per instantiation a caller wants, not one wrapper that
+  covers the whole generic surface the way `pythonPointerInput` covers every `pointerInput` call site.
+  Not attempted, and not the same shape of fix.
+- **`layoutId`** declines for an unrelated reason: its one non-`Modifier` parameter is `kotlin.Any`,
+  which is not a suspend lambda, not a generic type parameter and not itself unbindable — the walker
+  simply has no rule for "whatever tag the caller meant", since `layoutId` is real-world called with a
+  bare `String` or `Int`, not a Kotlin object handle. A hand-written wrapper fixing the parameter's
+  *tag* (`pythonLayoutIdString(modifier, id: String)`, `pythonLayoutIdInt(modifier, id: Long)`) would
+  work the same way `pythonPointerInput` does; not attempted.
