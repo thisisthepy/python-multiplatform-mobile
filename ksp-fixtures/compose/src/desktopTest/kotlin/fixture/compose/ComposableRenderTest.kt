@@ -426,11 +426,16 @@ class ComposableRenderTest {
      * `onForgotten` releases and that has not fired. Both are released at disposal, and both
      * reference counts come back.
      *
-     * That the first pass's callable is still held is a **cost** as much as a correctness property:
-     * a composition that recomposes *n* times holds *n* Python callables until it is disposed, and
-     * `everyCrossingBuildsItsOwnWrapperAndTheScopeHoldsThemAll` in `commonTest` states the same
-     * thing from the other side. Releasing one when Compose stops using it needs a hook that reports
-     * *that*, and `RememberObserver` is not one -- a `content` is a parameter, not a remembered value.
+     * That the first pass's callable is still held is a **cost** as much as a correctness property,
+     * and this test is deliberately the case interning cannot help: `_first` and `_second` are two
+     * different callables, so two wrappers is the right answer and the count is 2 either way. The
+     * case where it is *one* callable passed again -- which is what a recomposing UI does -- is
+     * `RecompositionAccumulationTest`, and it measured twelve wrappers for twelve passes before the
+     * scope started keying them.
+     *
+     * What is still unsolved is a hook that reports Compose dropping *one* slot, which is what would
+     * let a callable that genuinely changed be released between passes rather than at disposal.
+     * `RememberObserver` is not one -- a `content` is a parameter, not a remembered value.
      */
     @Test
     fun theHolderSurvivesARecompositionAndReleasesBothCallablesAtDisposal() {

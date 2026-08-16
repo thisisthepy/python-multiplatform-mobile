@@ -252,19 +252,31 @@ class PythonxCallableTest {
     /**
      * What a crossing **allocates**, which is the part of its cost this can state without a clock.
      *
-     * One wrapper per crossing, held until the scope closes, and nothing is interned -- so a body
-     * that writes `content=lambda: ...` inside a loop, or a composition that recomposes *n* times,
-     * costs *n* Python references and *n* `HandleTable` roots that are all released together at the
-     * end rather than as they stop being reachable. That is a real and unbounded property of the
-     * design as it stands, and it is asserted here so that it is a recorded number rather than a
-     * surprise.
+     * This used to assert the opposite, and the opposite was true: one wrapper per crossing, nothing
+     * interned, so *n* crossings cost *n* Python references and *n* `HandleTable` roots held until
+     * the scope closed. `:ksp-fixtures:compose`'s `RecompositionAccumulationTest` measured what that
+     * came to for a real composition -- **twelve** wrappers for one `content=` composed twelve times,
+     * and twenty-four for a `Button` -- and `PythonCallableScope` now keys them. The number here is 1.
+     *
+     * Three assertions, because there are three different ways to arrive at 1 and only one of them
+     * is the intended one:
+     *
+     * | assertion | what it rules out |
+     * |---|---|
+     * | [ComposableShapedFragment.contentInvocations] is [REPETITIONS] | the loop stopped calling `Column` |
+     * | `scope.reuseCount` is `REPETITIONS - 1` | the crossings stopped happening rather than being answered |
+     * | `scope.liveCount` is 1 | the table is consulted and never hits |
+     *
+     * The `lambda:` is written **inside a loop**, so it is a different function object on every
+     * iteration -- which is precisely why the key cannot be `id()`. All [REPETITIONS] of them share
+     * one code object, because this body is compiled once.
      *
      * **No wall-clock figure is claimed.** `agent-rules` §11 forbids fixing one on a loaded machine,
      * and the run that produced this had a load average of 3.5--8 on eight cores. Nanoseconds per
      * crossing are unmeasured.
      */
     @Test
-    fun everyCrossingBuildsItsOwnWrapperAndTheScopeHoldsThemAll() = withAdapter {
+    fun crossingsOfOneCallableShareOneWrapperAndTheScopeHoldsIt() = withAdapter {
         val scope = PythonCallables.newScope()
         PythonCallables.withScope(scope) {
             pushComposer()
@@ -282,9 +294,55 @@ class PythonxCallableTest {
                 popComposer()
             }
             assertEquals(REPETITIONS, ComposableShapedFragment.contentInvocations)
-            assertEquals(REPETITIONS, scope.liveCount, "one wrapper per crossing, none reused")
+            assertEquals(
+                REPETITIONS - 1, scope.reuseCount,
+                "expected every crossing after the first to be answered from the scope's table",
+            )
+            assertEquals(1, scope.liveCount, "one wrapper for $REPETITIONS crossings of one callable")
         }
-        scope.close()
+        assertEquals(1, scope.close(), "the scope released something it did not build")
+    }
+
+    /**
+     * The other side of the key: **two callables that differ only in what they captured are two
+     * wrappers, and each is invoked as itself.**
+     *
+     * Without this, the assertion above is satisfiable by a cache that keys on nothing and hands the
+     * first wrapper to every caller -- which is not a leak but a *wrong frame*, and a wrong frame is
+     * invisible to every reference count in this file. So each crossing's content appends **its own**
+     * captured number and what is asserted is the list Python ends up with.
+     */
+    @Test
+    fun twoCallablesThatCapturedDifferentValuesDoNotShareAWrapper() = withAdapter {
+        val scope = PythonCallables.newScope()
+        PythonCallables.withScope(scope) {
+            pushComposer()
+            try {
+                Python3.exec(
+                    """
+                    from pythonx.compose.foundation.layout import Column
+                    _px_captured = []
+                    def _px_make(n):
+                        return lambda: _px_captured.append(n)
+                    for _px_i in range(REPS):
+                        Column(content=_px_make(_px_i % 3))
+                    """.trimIndent().replace("REPS", REPETITIONS.toString()),
+                )
+            } finally {
+                popComposer()
+            }
+            assertEquals(3, scope.liveCount, "expected one wrapper per distinct capture, not per crossing")
+            assertEquals(
+                REPETITIONS - 3, scope.reuseCount,
+                "the crossings after the first three were not answered from the table",
+            )
+        }
+        assertEquals(
+            (0 until REPETITIONS).joinToString(", ", "[", "]") { (it % 3).toString() },
+            eval("_px_captured"),
+            "a reused wrapper invoked another capture's callable",
+        )
+        assertEquals(3, scope.close())
     }
 
     /**
@@ -433,10 +491,12 @@ class PythonxCallableTest {
                 popComposer()
             }
         }
-        // The wrappers themselves are roots too -- one per crossing, released together by the scope
-        // (`everyCrossingBuildsItsOwnWrapperAndTheScopeHoldsThemAll`). Closing first leaves only what
-        // this test is about: what the *invocations* rooted.
-        assertEquals(REPETITIONS + 1, scope.close(), "the scope did not hold one wrapper per crossing")
+        // The wrappers themselves are roots too -- two of them, because the loop's `lambda: None` is
+        // one callable interned across all $REPETITIONS crossings and the keeping content is another
+        // (`crossingsOfOneCallableShareOneWrapperAndTheScopeHoldsIt`). Closing first leaves only what
+        // this test is about: what the *invocations* rooted, of which there are still $REPETITIONS
+        // + 1, because interning shares a wrapper and does not skip a call.
+        assertEquals(2, scope.close(), "expected one wrapper per distinct callable, not per crossing")
 
         // One live handle above the baseline: the receiver the last content kept. Everything the
         // dropping contents were handed has been given back, which a thunk that truncated before
@@ -461,10 +521,10 @@ class PythonxCallableTest {
      * **What one *invocation* costs**, as distinct from what one crossing costs, which is the part
      * of it a clock is not needed for.
      *
-     * `everyCrossingBuildsItsOwnWrapperAndTheScopeHoldsThemAll` measures the crossing: one wrapper
-     * and one root per `content=` written, all held until the scope closes. This measures the other
-     * axis, which forwarding an argument newly created -- **one wrapper, invoked many times**, the
-     * shape a recomposing composition really has.
+     * `crossingsOfOneCallableShareOneWrapperAndTheScopeHoldsIt` measures the crossing: one wrapper
+     * per distinct callable, held until the scope closes. This measures the other axis, which
+     * forwarding an argument newly created -- **one wrapper, invoked many times**, the shape a
+     * recomposing composition really has, and the axis interning does *not* touch.
      *
      * The claim is that a forwarded object's root does not accumulate. `HandleTable`'s array is
      * bounded by peak live entries rather than by total issued, so a root registered and released

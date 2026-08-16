@@ -68,6 +68,43 @@ import python.multiplatform.reflection.TypeTag
  * `onForgotten` as "the one that fails silently and should be tested first"; the seam is here and the
  * test is there.
  *
+ * ### Interning, and what the holder costs without it
+ *
+ * The scope releases everything at once, which settles *whether* a callable comes back and says
+ * nothing about how much is held meanwhile. `RecompositionAccumulationTest` measured that: one
+ * `content=` composed twelve times held **twelve** wrappers, twelve `HandleTable` roots and twelve
+ * Python references, all of them until disposal. Linear in frames, and a UI recomposes several times
+ * a second.
+ *
+ * So a crossing now asks the scope for a wrapper it already made before making one. What counts as
+ * "already made" is `PythonxAdapter._intern_key`, and it is neither `id()` nor `==`: a `lambda:` is a
+ * new object every pass *and* `PythonComposition` `exec`s a source string, so it is a newly compiled
+ * one. The key is what the callable is made of -- its code by value, its captures and defaults by
+ * address, and the slot it is going into. [PythonCallableScope.reuseCount] reports how many crossings
+ * that answered, so "the count stopped growing" cannot be confused with "nothing crossed".
+ *
+ * Two callables that are genuinely different still get two wrappers, and one closing over a value
+ * that changes between passes is genuinely different -- sharing there would leave Compose calling
+ * the first pass's capture forever. That case still accumulates, and it is the one a release point
+ * would have to solve; `RecompositionAccumulationTest` states its number rather than leaving it to be
+ * discovered.
+ *
+ * ### The release point, and why nothing releases early yet
+ *
+ * `RememberObserver` is not it and cannot be: a `content` is a *parameter*, not a remembered value,
+ * so nothing reports the slot being dropped. The candidate that remains is a sweep at the end of each
+ * composition pass -- give back every wrapper the pass neither built nor reused -- and its
+ * precondition was measured rather than assumed:
+ * `RecompositionAccumulationTest.everyLiveWrapperIsResuppliedOnEveryPassEvenWhenNested` shows a
+ * nested `content` re-supplying **both** its wrappers on every pass, so nothing Compose holds goes
+ * untouched. That test is the guard a sweep would be built on.
+ *
+ * It is not built, and the reason is a shape nothing has measured: a slot Compose *retains across a
+ * re-supply*. `LaunchedEffect(key) { block }` keeps the block it has when `key` is unchanged, so a
+ * pass supplying a different wrapper would leave the retained one untouched and still live -- and a
+ * wrapper released while Compose still calls it is `agent-rules` §14's failure, arriving somewhere
+ * else. Interning bounds the case that actually recurs; the sweep waits for that measurement.
+ *
  * ### Double release
  *
  * [PythonCallableScope.close] reports how many wrappers it released and answers `0` for every call
@@ -136,7 +173,31 @@ object PythonCallables {
      * @return the raw [ObjectReference] the wrapper is rooted under, which Python puts straight into
      *   the OBJECT slot as a bare handle.
      */
-    internal fun newFunction(body: PyObject, jvmArity: Int, composable: Boolean, argTags: String): Long {
+    /**
+     * The cached wrapper for [internKey] in the open scope, or `0` if there is none.
+     *
+     * Asked **before** the thunk is built, which is the whole point of it being a separate entry: on
+     * a hit the Python side skips `inspect.signature` and the closure allocation entirely, and a
+     * recomposing composition takes that path every time after the first. Routing the question
+     * through [newFunction] instead would mean paying for both on every pass and then throwing the
+     * result away.
+     *
+     * `0` rather than an exception for "no scope is open": a lookup that cannot find a scope has not
+     * found a wrapper either, and the caller's next step is [newFunction], which raises the message
+     * that explains what a scope is. Two places saying it would let them drift.
+     */
+    internal fun findFunction(internKey: String): Long {
+        if (internKey.isEmpty()) return ObjectReference.NONE_RAW
+        return current?.reuse(internKey) ?: ObjectReference.NONE_RAW
+    }
+
+    internal fun newFunction(
+        body: PyObject,
+        jvmArity: Int,
+        composable: Boolean,
+        argTags: String,
+        internKey: String,
+    ): Long {
         val scope = current ?: run {
             // Closed here rather than leaked: the trampoline already took a reference for this
             // wrapper and nothing downstream exists to give it back.
@@ -147,6 +208,14 @@ object PythonCallables {
                     "PythonCallables.withScope), because Compose keeps calling it after the call " +
                     "that passed it has returned",
             )
+        }
+        // Asked again even though `findFunction` was asked first: that call is an optimisation the
+        // Python side may skip (it does, for a callable with no structure to key on), and a second
+        // entry under one key would be a wrapper the scope holds and nothing can ever reach.
+        val cached = scope.reuse(internKey)
+        if (cached != ObjectReference.NONE_RAW) {
+            body.close()
+            return cached
         }
         if (composable && jvmArity < 2) {
             body.close()
@@ -176,7 +245,7 @@ object PythonCallables {
             body.close()
             throw t
         }
-        return scope.add(body, erased)
+        return scope.add(body, erased, internKey)
     }
 
     /** How many of a lowered composable lambda's compiled arguments are the compiler's rather than
@@ -206,26 +275,42 @@ object PythonCallables {
         override fun entries(): List<ExposedCallable> = listOf(
             ExposedCallable(
                 name = NEW_FUNCTION,
-                arity = 4,
-                paramTypes = listOf(TypeTag.OBJECT, TypeTag.INT, TypeTag.BOOLEAN, TypeTag.STRING),
+                arity = 5,
+                paramTypes = listOf(TypeTag.OBJECT, TypeTag.INT, TypeTag.BOOLEAN, TypeTag.STRING, TypeTag.STRING),
                 returnType = TypeTag.INT,
-                paramNames = listOf("body", "jvmArity", "composable", "argTags"),
-                paramTypeNames = listOf("kotlin.Any", "kotlin.Int", "kotlin.Boolean", "kotlin.String"),
-                paramHasDefault = listOf(false, false, false, false),
+                paramNames = listOf("body", "jvmArity", "composable", "argTags", "internKey"),
+                paramTypeNames = listOf(
+                    "kotlin.Any", "kotlin.Int", "kotlin.Boolean", "kotlin.String", "kotlin.String",
+                ),
+                paramHasDefault = listOf(false, false, false, false, false),
                 callable = { args ->
                     newFunction(
                         args[0] as PyObject,
                         (args[1] as Long).toInt(),
                         args[2] as Boolean,
                         args[3] as String,
+                        args[4] as String,
                     )
                 },
+            ),
+            ExposedCallable(
+                name = FIND_FUNCTION,
+                arity = 1,
+                paramTypes = listOf(TypeTag.STRING),
+                returnType = TypeTag.INT,
+                paramNames = listOf("internKey"),
+                paramTypeNames = listOf("kotlin.String"),
+                paramHasDefault = listOf(false),
+                callable = { args -> findFunction(args[0] as String) },
             ),
         )
     }
 
     /** The name `pythonx` resolves. Shared so the Python source and the entry cannot drift. */
     internal const val NEW_FUNCTION: String = "pythonx.runtime.newFunction"
+
+    /** @see findFunction */
+    internal const val FIND_FUNCTION: String = "pythonx.runtime.findFunction"
 }
 
 /**
@@ -239,18 +324,64 @@ class PythonCallableScope internal constructor() {
 
     private val bodies = ArrayList<PyObject>()
     private val roots = ArrayList<ObjectReference>()
+
+    /**
+     * The wrappers this scope can hand out again, by the key `PythonxAdapter._intern_key` computed
+     * for the callable and its slot.
+     *
+     * ### Why the table is here and not in Python
+     *
+     * The value is a `HandleTable` root, and a root outlives its scope by exactly nothing -- [close]
+     * releases it. A Python-side cache would have to be told when that happened, which is the same
+     * "who says it is over" problem the wrapper itself has, one level up. Here the answer is free:
+     * the map dies with the thing it describes.
+     *
+     * ### Why the key can contain `id()`s and still be sound
+     *
+     * `_intern_key` is built out of the addresses of a callable's code object, its captured values
+     * and its defaults, and an address is only unambiguous while the object at it is alive. It is:
+     * every entry in this map is a root over a wrapper that holds the `PyObject` for the callable,
+     * which holds all of them. So no key in this table can name a freed object, and the id reuse
+     * that would make two different callables collide cannot happen while the entry exists.
+     * `HandleTable.register`'s own KDoc says registration is *not* interning and that two proxies
+     * over one object need not agree -- that stays true, and this is the layer above it that does
+     * intern, for the one case where the object crossing is a callable Compose will call again.
+     */
+    private val interned = HashMap<String, Long>()
+
     private var closed = false
+    private var reused = 0
 
     /** How many callables this scope is currently holding a Python reference for. */
     val liveCount: Int get() = bodies.size
 
+    /**
+     * How many crossings were answered out of [interned] instead of building a wrapper.
+     *
+     * Reported so that "the count stopped growing" and "nothing crossed at all" are distinguishable:
+     * a `content=` that stopped reaching Kotlin would leave [liveCount] at 1 as well, and only this
+     * says the later passes were served rather than skipped.
+     */
+    val reuseCount: Int get() = reused
+
     /** Whether [close] has already run. A wrapper checks this before touching its `PyObject`. */
     val isClosed: Boolean get() = closed
 
-    internal fun add(body: PyObject, erased: Any): Long {
+    /** The handle already issued for [internKey], or [ObjectReference.NONE_RAW]. */
+    internal fun reuse(internKey: String): Long {
+        if (internKey.isEmpty() || closed) return ObjectReference.NONE_RAW
+        val found = interned[internKey] ?: return ObjectReference.NONE_RAW
+        reused++
+        return found
+    }
+
+    internal fun add(body: PyObject, erased: Any, internKey: String): Long {
         val root = HandleTable.register(erased)
         bodies.add(body)
         roots.add(root)
+        // An empty key is "this callable has no structure to key on" -- a C builtin, say. It gets a
+        // wrapper per crossing, which is what everything got before this table existed.
+        if (internKey.isNotEmpty()) interned[internKey] = root.raw
         return root.raw
     }
 
@@ -272,6 +403,10 @@ class PythonCallableScope internal constructor() {
         for (body in bodies) body.close()
         roots.clear()
         bodies.clear()
+        // Cleared last and unconditionally: a key left behind would name a released root, and
+        // `reuse` would hand it out. The `closed` guard in `reuse` covers the same case twice on
+        // purpose -- one of them is a policy and the other is the thing that makes it true.
+        interned.clear()
         return released
     }
 }

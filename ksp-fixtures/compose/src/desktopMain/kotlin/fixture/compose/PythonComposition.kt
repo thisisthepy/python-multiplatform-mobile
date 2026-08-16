@@ -105,6 +105,7 @@ class PythonCallableArena : RememberObserver {
 
     override fun onRemembered() {
         created++
+        latest = this
     }
 
     override fun onForgotten() {
@@ -131,11 +132,24 @@ class PythonCallableArena : RememberObserver {
         var abandoned: Int = 0
         var released: Int = 0
 
+        /**
+         * The most recently remembered arena, so a test can read [PythonCallableScope.liveCount]
+         * **while the composition is still alive**.
+         *
+         * The counters above can only be read after disposal, and "how much did this composition
+         * accumulate across its recompositions" is a question about the interval before it --
+         * `RecompositionAccumulationTest` is the whole reason this exists. Set in [onRemembered]
+         * rather than in the constructor because an arena that was built and then abandoned by a
+         * discarded composition never becomes the one a render is measuring.
+         */
+        var latest: PythonCallableArena? = null
+
         fun resetCounters() {
             created = 0
             forgotten = 0
             abandoned = 0
             released = 0
+            latest = null
         }
     }
 }

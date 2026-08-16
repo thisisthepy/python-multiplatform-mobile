@@ -656,6 +656,131 @@ object PythonxAdapter {
         _CALLABLE_PENDING = object()
 
 
+        def _code_key(code):
+            '''One code object, described **by value**, so that two compilations of one source agree.
+
+            This is the part `id()` cannot do, and the reason is `PythonComposition`: it `exec`s a
+            source *string* on every composition pass, and `exec` compiles. A `lambda` written in that
+            string therefore gets a brand-new code object every pass -- CPython's constant-sharing,
+            which is what makes two evaluations of one `lambda` statement share a code object, only
+            holds within a single compilation. So the code object's address changes every frame and
+            the only thing that does not is what the code *is*.
+
+            `co_code` alone is not it: `lambda: Text('hi')` and `lambda: Text('bye')` compile to
+            identical bytecode and differ only in `co_consts`. Position alone is not it either, for
+            the same reason -- two different sources both have a `<string>` line 4. The two together,
+            plus the names and the argument shape, are.
+
+            Constants are recursed into rather than `repr`ed, because a nested function's constant is
+            a code object whose `repr` carries its address -- which would make a `content=` that
+            itself declares a `content=` fail to intern for a reason with nothing to do with what it
+            does.
+            '''
+            parts = [
+                getattr(code, 'co_qualname', None) or code.co_name,
+                code.co_filename,
+                str(code.co_firstlineno),
+                str(code.co_flags),
+                str(code.co_argcount) + '/' + str(code.co_posonlyargcount) + '/' +
+                str(code.co_kwonlyargcount),
+                code.co_code.hex(),
+                repr(code.co_names), repr(code.co_varnames),
+                repr(code.co_freevars), repr(code.co_cellvars),
+            ]
+            for const in code.co_consts:
+                # `hasattr(const, 'co_code')` rather than an `isinstance` against `types.CodeType`:
+                # this module imports nothing it does not have to, and a code object is the only
+                # constant that answers to it.
+                parts.append(_code_key(const) if hasattr(const, 'co_code') else repr(const))
+            return '\x1f'.join(parts)
+
+
+        def _intern_key(value, slot):
+            '''What makes two crossings **the same callable in the same slot**, or `''` for "cannot say".
+
+            ### The measurement this answers
+
+            `RecompositionAccumulationTest` composes one body twelve times and counted, before this
+            existed, twelve wrappers, twelve `HandleTable` roots and twelve Python references held --
+            for one `content=`. All of it comes back at disposal, so it is not a leak; it is a live UI
+            growing linearly in frames, and a UI recomposes several times a second.
+
+            ### Why identity is not the criterion
+
+            `content=lambda: Text('hi')` builds a **new function object on every pass**, so `id(value)`
+            is a fresh number every time and interns nothing at all -- and that is the spelling every
+            example in this module uses. Two lambdas written at one source position are nonetheless
+            the same callable in every sense that matters here, and CPython says so structurally: the
+            code object is stored in the enclosing code's constants and is therefore *one* object for
+            the life of the module. So the key is built out of what the callable is made of:
+
+            | part | why it is in the key |
+            |---|---|
+            | `__code__`, **by value** (`_code_key`) | the body. Its *address* is no good: `PythonComposition` `exec`s a source string, so every pass compiles a new code object |
+            | `__globals__` | the same source in two modules is two callables |
+            | `__closure__` cell **contents** | `lambda: Text(n)` for two `n`s does two things |
+            | `__defaults__`, `__kwdefaults__` | same, spelled differently |
+            | `__self__` for a bound method | `a.on_click` and `b.on_click` are not interchangeable |
+            | the slot | a wrapper carries its invocation convention: a composable `content` threads a composer and an `onClick` does not, and one object cannot be both |
+
+            Captured values are compared **by address, not by `==`**, so a capture that changed to an
+            equal-but-distinct object misses and gets its own wrapper. That is the conservative
+            direction: a miss costs a wrapper, a wrong hit renders a stale frame.
+
+            ### Why addresses are sound here and would not be in a plain memo
+
+            An `id()` is only unambiguous while its object is alive, and CPython reuses addresses
+            eagerly. Every key this returns is stored by `PythonCallableScope`, whose entry roots a
+            wrapper that holds the callable -- which holds its cells, its cell *contents*, its
+            defaults, its globals and its receiver. Nothing a live key names can have been freed, so
+            no two distinct callables can collide. A cache that did not hold its keys' objects alive
+            could not make that argument, which is why this table lives on the Kotlin scope. (The
+            code object is the exception and is keyed by value; see `_code_key` for why it has to be.)
+
+            The one case where a cell can outlive what the key said it held is a rebound variable in
+            a shared enclosing frame -- and there the *cached* callable's cell is the same cell, so it
+            sees the new value too and the two agree anyway.
+
+            ### What returns `''`
+
+            A callable with no `__code__` at all -- a C builtin, a `functools.partial`, an instance
+            with `__call__` -- and a closure cell that is still empty (a recursive definition being
+            defined). Those get a wrapper per crossing, which is what everything got before.
+            '''
+            func = value
+            receiver = ''
+            inner = getattr(value, '__func__', None)
+            if inner is not None:
+                # A bound method is a *fresh object* on every attribute access, so its own `id` is
+                # useless; the pair that identifies it is the underlying function and the receiver.
+                receiver = 's' + str(id(getattr(value, '__self__', None)))
+                func = inner
+            code = getattr(func, '__code__', None)
+            if code is None:
+                return ''
+            parts = ['c' + _code_key(code), 'g' + str(id(getattr(func, '__globals__', None))), receiver]
+            closure = getattr(func, '__closure__', None)
+            if closure:
+                for cell in closure:
+                    try:
+                        parts.append('z' + str(id(cell.cell_contents)))
+                    except ValueError:
+                        # An empty cell: the callable is not fully defined yet, so nothing here can
+                        # describe what it will do.
+                        return ''
+            defaults = getattr(func, '__defaults__', None)
+            if defaults:
+                parts.extend('d' + str(id(d)) for d in defaults)
+            kwdefaults = getattr(func, '__kwdefaults__', None)
+            if kwdefaults:
+                parts.extend('k' + name + ':' + str(id(kwdefaults[name])) for name in sorted(kwdefaults))
+            # `repr` of the slot rather than its arity: two `Function3@Composable`s differ only in the
+            # receiver type they forward, which is what decides whether an argument is wrapped as a
+            # `ColumnScope` proxy or a `RowScope` one.
+            parts.append('#' + repr(slot))
+            return '|'.join(parts)
+
+
         def _make_function(value, slot):
             '''Hands [value] to Kotlin as a `FunctionN`, and returns the handle of the wrapper.
 
@@ -663,8 +788,25 @@ object PythonxAdapter {
             Compose stores a `content` in the slot table and calls it on later recompositions, long
             after the statement that wrote `content=lambda: ...` dropped Python's last reference to
             it. A bare handle is what comes back, which is exactly what an OBJECT slot takes.
+
+            **The scope is asked for an existing wrapper first**, and that lookup is a separate entry
+            point rather than a flag on `newFunction` so that a hit costs one crossing and nothing
+            else: `_positional_capacity` runs `inspect.signature`, which is the most expensive thing
+            on this path, and `_callable_thunk` allocates a closure. A recomposing composition takes
+            the hit path on every pass after the first, so those are exactly the costs worth not
+            paying twelve times for one `content=`.
+
+            A **miss** pays for the lookup on top of everything it paid before -- one `_resolve` and
+            one `invoke` that answer nothing. That is the trade, and no wall-clock figure is claimed
+            for either side of it (`agent-rules` §11): what is measured here is allocation, in
+            `RecompositionAccumulationTest`, and the machine that ran it was not idle.
             '''
             jvm_arity, composable, arg_types, _return_type = slot
+            key = _intern_key(value, slot)
+            if key:
+                found = _boundary()['invoke'](_resolve('pythonx.runtime.findFunction'), (key,))
+                if found:
+                    return found
             wanted = _positional_capacity(value, len(arg_types))
             if wanted is None:
                 raise TypeError(
@@ -675,7 +817,7 @@ object PythonxAdapter {
             body = _callable_thunk(value, composable, arg_types, wanted)
             return _boundary()['invoke'](
                 _resolve('pythonx.runtime.newFunction'),
-                (body, jvm_arity, composable, ','.join(_arg_tag(t) for t in arg_types)),
+                (body, jvm_arity, composable, ','.join(_arg_tag(t) for t in arg_types), key),
             )
 
 
