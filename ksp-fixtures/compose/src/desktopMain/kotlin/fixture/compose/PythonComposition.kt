@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.RememberObserver
 import androidx.compose.runtime.currentComposer
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.pythonx.PythonCallableScope
 import python.multiplatform.ffi.pythonx.PythonCallables
@@ -138,3 +139,23 @@ class PythonCallableArena : RememberObserver {
         }
     }
 }
+
+/**
+ * The one seed `ComposableRenderTest`'s render-proof tests need that neither the artefact walker
+ * nor `pythonx` can supply on their own: a `Modifier` chain has to start somewhere, and the thing it
+ * starts from is `Modifier` the *expression* -- `androidx.compose.ui.Modifier.Companion`, an object
+ * instance the walker cannot hand out because it only binds functions.
+ * `ksp-fixtures/artifact`'s `ComposeSeed.kt` solved the exact same gap the same way, for the
+ * non-composable half of Compose's surface; this is that solution, in this module, so `Spacer` --
+ * whose one parameter has no default and is therefore not omittable -- has something to be given.
+ *
+ * Bound by KSP, not the artefact walker: a plain top-level function in this module's own source is
+ * an ordinary `FunctionTable` entry, reached from Python through `PythonProxySource` under this
+ * module's own Kotlin package name (`fixture.compose.empty_modifier`), the same route
+ * `WalkedArtifactComposeModifierTest` uses for `fixture.artifact.emptyModifier`. `pythonx`'s
+ * `_BY_PACKAGE` dispatch -- built over `ArtifactTable` -- never sees it, and does not need to: the
+ * `Modifier` handle this returns is an ordinary `TypeTag.OBJECT` value, indistinguishable at the
+ * boundary from one a walked declaration produced, so it can be threaded into a `pythonx`-bound
+ * composable's `modifier` slot once built.
+ */
+fun emptyModifier(): Modifier = Modifier

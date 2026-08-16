@@ -486,6 +486,357 @@ class ComposableRenderTest {
     }
 
 
+    /**
+     * **`Button`.** Both of its non-defaulted slots at once: `onClick` (`Function0`, no receiver)
+     * and `content` (`Function3@Composable(RowScope)`), the same two shapes `ce1de0c3` and
+     * `a179b747` proved separately, now on the declaration the design doc singles out as "the
+     * closest": `ComposableBindingTest` had already confirmed `Button.onClick` is
+     * `kotlin.Function0` and `Button.content` is `kotlin.Function3@Composable` against the real
+     * `material3-desktop.jar`, but only as a synthetic-fixture claim. This renders the real
+     * declaration.
+     */
+    @Test
+    fun buttonComposesItsClickHandlerAndItsRowScopedContent() {
+        val drawn = inkOf(
+            """
+            from pythonx.compose.material3 import Button, Text
+            Button(on_click=lambda: None, content=lambda: Text('hi'))
+            """.trimIndent(),
+        )
+        val empty = inkOf(
+            """
+            from pythonx.compose.material3 import Button
+            Button(on_click=lambda: None, content=lambda: None)
+            """.trimIndent(),
+        )
+        println("compose render: Button(content=Text('hi')) -> $drawn px, empty content -> $empty px")
+        assertTrue(empty > 0, "a Button with no content must still draw its own surface")
+        assertTrue(drawn > empty, "the content lambda never reached the button's surface: $empty vs $drawn")
+    }
+
+    /**
+     * **`Card`, and the overload dispatcher choosing correctly.** `material3` declares two `Card`s:
+     * one taking only `content` (all the rest defaulted) and one also requiring `onClick`. Calling
+     * `Card(content=...)` alone has to resolve to the *first* -- the second's `onClick` has no
+     * default, so a caller supplying only `content` cannot satisfy it. This is a claim about
+     * `pythonx`'s `_Overloads` dispatch as much as about `Card`: picking the wrong member would
+     * either raise (the clickable overload demanding `onClick`) or -- if the dispatcher instead
+     * arbitrated rather than tried each candidate -- silently ignore `content`.
+     */
+    @Test
+    fun cardResolvesToTheNonClickableOverloadAndDrawsItsContent() {
+        val drawn = inkOf(
+            """
+            from pythonx.compose.material3 import Card, Text
+            Card(content=lambda scope: Text('hi'))
+            """.trimIndent(),
+        )
+        val empty = inkOf(
+            """
+            from pythonx.compose.material3 import Card
+            Card(content=lambda scope: None)
+            """.trimIndent(),
+        )
+        println("compose render: Card(content=Text('hi')) -> $drawn px, empty content -> $empty px")
+        assertEquals(0, empty, "an empty Card must draw nothing, or the measurement is not measuring")
+        assertTrue(drawn > 0, "the content lambda never reached Card")
+    }
+
+    /**
+     * **`MaterialTheme`, and a `content` with no scope at all.** Every container proven so far --
+     * `Column`, `Row`, `Box` -- hands its content a receiver (`ColumnScope`, `RowScope`, `BoxScope`).
+     * `MaterialTheme.content` is `@Composable () -> Unit`: `kotlin.Function2`, no receiver, arity
+     * zero. Nothing before this exercised that shape, so this is not decoration -- it is the one
+     * case `functionSlotTypeName`'s `Function2` branch had never been asked to bind through render.
+     */
+    @Test
+    fun materialThemeComposesAZeroArgumentContentLambda() {
+        val drawn = inkOf(
+            """
+            from pythonx.compose.material3 import MaterialTheme, Text
+            MaterialTheme(content=lambda: Text('hi'))
+            """.trimIndent(),
+        )
+        val empty = inkOf(
+            """
+            from pythonx.compose.material3 import MaterialTheme
+            MaterialTheme(content=lambda: None)
+            """.trimIndent(),
+        )
+        println("compose render: MaterialTheme(content=Text('hi')) -> $drawn px, empty content -> $empty px")
+        assertEquals(0, empty, "an empty MaterialTheme must draw nothing")
+        assertTrue(drawn > 0, "the content lambda never reached MaterialTheme")
+    }
+
+    /**
+     * **`ListItem`.** `headlineContent` is the one parameter with no default (also `Function2`,
+     * arity zero) and it crosses under its `to_python_name` spelling, `headline_content` -- so this
+     * also pins that the walker's camelCase-to-snake_case kwarg mapping reaches a real multi-word
+     * parameter name and not just single-word ones (`content`, `modifier`) every other test here
+     * happens to use.
+     *
+     * The empty control is not zero, unlike `Column`'s or `Row`'s: `ListItem`, like `Button`, always
+     * paints its own container surface (`colors.containerColor` at `tonalElevation`) whether or not
+     * `headlineContent` draws anything, so "more ink with real content" is the same shape of claim
+     * [buttonComposesItsClickHandlerAndItsRowScopedContent] makes, not the empty-means-zero shape
+     * `Column`'s does.
+     */
+    @Test
+    fun listItemComposesItsHeadlineContentUnderItsSnakeCasedName() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import ListItem, Text
+            ListItem(headline_content=lambda: Text('hi'))
+            """.trimIndent(),
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import ListItem
+            ListItem(headline_content=lambda: None)
+            """.trimIndent(),
+        )
+        // Ink *count* cannot tell these apart: `ListItem`'s own container surface already covers
+        // essentially the whole 200x60 scene (measured: 11200 non-background pixels either way), so
+        // text drawn on top changes which pixels are non-background, not how many are. The distinct
+        // *colors* present do differ -- the glyph color is not the container fill color -- which is
+        // the same argument [lightAndDarkColorSchemesHaveNoReachableCallBecauseTheOmissionCapIsFarBelowTheirArity]'s
+        // sibling test would have made for `colorScheme`, applied here to whether `headlineContent`
+        // painted anything at all.
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: ListItem(headline_content=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+                "empty -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "a ListItem with no headline must still draw its own container surface")
+        assertTrue(
+            drawnColors != emptyColors,
+            "headline_content added no new color over the bare container: $emptyColors vs $drawnColors",
+        )
+    }
+
+    /**
+     * **`Badge`, the one declaration here with *no* required parameter at all.** Every other
+     * container in this file needs at least a `content` or an `onClick`; `Badge`'s every slot --
+     * including `content` -- defaults, so `Badge()` alone has to draw the small dot Compose gives a
+     * badge with nothing in it. That is the leaf claim, on the same footing as `Text('hi')`. The
+     * second half is the container claim `Badge(content=...)` adds on top: more ink than the bare
+     * dot, the same "the content is not just present but composed" argument
+     * [pythonFillsAContainersContentSlotWithALambda] makes for `Column`.
+     */
+    @Test
+    fun badgeDrawsItsLeafFormWithNoArgumentsAndMoreWithContent() {
+        val bare = inkOf(
+            """
+            from pythonx.compose.material3 import Badge
+            Badge()
+            """.trimIndent(),
+        )
+        val withContent = inkOf(
+            """
+            from pythonx.compose.material3 import Badge, Text
+            Badge(content=lambda: Text('hi'))
+            """.trimIndent(),
+        )
+        println("compose render: Badge() -> $bare px, Badge(content=Text('hi')) -> $withContent px")
+        assertTrue(bare > 0, "Badge() with every parameter defaulted must still draw its own dot")
+        assertTrue(withContent > bare, "the content lambda added no ink over the bare badge: $bare vs $withContent")
+    }
+
+    /**
+     * **`BadgedBox`, two required `BoxScope` slots on one declaration.** `badge` and `content` both
+     * default to nothing -- both must be supplied, both are `Function3@Composable(BoxScope)`, and
+     * both have to compose: the control swaps a real `Badge()` for `None` in the badge slot and
+     * shows less ink, so "something in the badge slot ran" cannot be satisfied by a slot that was
+     * silently skipped.
+     */
+    @Test
+    fun badgedBoxComposesBothItsBadgeAndItsContentScopes() {
+        val withBadge = inkOf(
+            """
+            from pythonx.compose.material3 import BadgedBox, Badge, Text
+            BadgedBox(badge=lambda scope: Badge(content=lambda: Text('9')), content=lambda scope: Text('hi'))
+            """.trimIndent(),
+        )
+        val withoutBadge = inkOf(
+            """
+            from pythonx.compose.material3 import BadgedBox, Text
+            BadgedBox(badge=lambda scope: None, content=lambda scope: Text('hi'))
+            """.trimIndent(),
+        )
+        println("compose render: BadgedBox with a badge -> $withBadge px, without -> $withoutBadge px")
+        assertTrue(withoutBadge > 0, "the content scope never composed")
+        assertTrue(withBadge > withoutBadge, "the badge scope never composed: $withoutBadge vs $withBadge")
+    }
+
+    /**
+     * **`IconButton`.** `onClick` (`Function0`) and `content` (`Function2`, zero-argument, unlike
+     * `Button`'s `RowScope`-receiving one) both required, neither defaulted.
+     */
+    @Test
+    fun iconButtonComposesItsClickHandlerAndItsContent() {
+        val drawn = inkOf(
+            """
+            from pythonx.compose.material3 import IconButton, Text
+            IconButton(on_click=lambda: None, content=lambda: Text('hi'))
+            """.trimIndent(),
+        )
+        val empty = inkOf(
+            """
+            from pythonx.compose.material3 import IconButton
+            IconButton(on_click=lambda: None, content=lambda: None)
+            """.trimIndent(),
+        )
+        println("compose render: IconButton(content=Text('hi')) -> $drawn px, empty content -> $empty px")
+        assertEquals(0, empty, "an IconButton with empty content must draw nothing")
+        assertTrue(drawn > 0, "the content lambda never reached IconButton")
+    }
+
+    /**
+     * **`Row`, on its own** -- not riding along inside another test's `NavigationBarItem` scene.
+     * `aScopeForwardedToPythonCanCallTheExtensionComposableDeclaredOnIt` already renders a `Row`,
+     * but every pixel in it comes from the extension composable in its content; this is the direct
+     * counterpart to [pythonFillsAContainersContentSlotWithALambda], so `Row` has the same minimal
+     * proof `Column` does rather than only a proof borrowed from a harder test.
+     */
+    @Test
+    fun rowFillsItsContentSlotWithALambdaJustAsColumnDoes() {
+        val drawn = inkOf(
+            """
+            from pythonx.compose.foundation.layout import Row
+            from pythonx.compose.material3 import Text
+            Row(content=lambda row: Text('hi'))
+            """.trimIndent(),
+        )
+        val empty = inkOf(
+            """
+            from pythonx.compose.foundation.layout import Row
+            Row(content=lambda row: None)
+            """.trimIndent(),
+        )
+        println("compose render: Row(content=Text('hi')) -> $drawn px, empty content -> $empty px")
+        assertEquals(0, empty, "a Row whose content draws nothing must draw nothing")
+        assertTrue(drawn > 0, "the content lambda never reached Row")
+    }
+
+    /**
+     * **`Box`, and the overload dispatcher again.** `foundation.layout` declares two `Box`es: a
+     * content-free one whose only parameter is a *non-defaulted* `Modifier` (`Box__Modifier` --
+     * see [ModifierSeededRenderTest] for why that one is unreachable without a seed), and the one
+     * this test wants, whose `content` is the only non-defaulted slot. Calling `Box(content=...)`
+     * has to resolve to the second: the first has no `content` parameter to accept the keyword
+     * argument at all.
+     */
+    @Test
+    fun boxResolvesToTheContentOverloadAndFillsItsBoxScopedSlot() {
+        val drawn = inkOf(
+            """
+            from pythonx.compose.foundation.layout import Box
+            from pythonx.compose.material3 import Text
+            Box(content=lambda scope: Text('hi'))
+            """.trimIndent(),
+        )
+        val empty = inkOf(
+            """
+            from pythonx.compose.foundation.layout import Box
+            Box(content=lambda scope: None)
+            """.trimIndent(),
+        )
+        println("compose render: Box(content=Text('hi')) -> $drawn px, empty content -> $empty px")
+        assertEquals(0, empty, "a Box whose content draws nothing must draw nothing")
+        assertTrue(drawn > 0, "the content lambda never reached Box")
+    }
+
+    /**
+     * **What is *not* proven, and why: `lightColorScheme`/`darkColorScheme` have no reachable call
+     * at all.**
+     *
+     * The plan going in was `MaterialTheme(color_scheme=light_color_scheme(), content=...)` against
+     * `dark_color_scheme()`, checking that the two renders draw the same ink in different colors --
+     * `Text`'s default color is `LocalContentColor.current`, which `MaterialTheme` derives from
+     * `colorScheme.onSurface`, and Material's own light and dark schemes disagree about that color by
+     * design. Neither function is a composable, so nothing about composition was in question, only
+     * whether the `ColorScheme` it returns reaches `MaterialTheme`.
+     *
+     * It never got that far: `light_color_scheme()` -- zero arguments, every one of its 36 `Color`
+     * parameters defaulted in Kotlin -- raises `no value for primary`. `ArtifactScanner
+     * .MAX_OMITTABLE_PARAMETERS` caps default-omission at 6 defaulted parameters per declaration
+     * (`docs/kotlin-extensions-in-python.md`'s measurement behind the cap: the widest declaration
+     * bound anywhere in the corpus before Compose had four), and `light_color_scheme`'s 36 is not
+     * close. `applyDefaultOmission` sees more than the cap allows and gives up on the whole
+     * declaration -- not "some of the 36 became omittable", *none* of them did -- so every call must
+     * write every argument, and there is nothing this module's included packages can put in a `Color`
+     * slot: `Color` and its constructor functions live in `androidx.compose.ui.graphics`, which
+     * `artifactIncludePackages` does not walk. The same shape [iconHasNoReachableSourceForAnyOfItsThreeRequiredImageTypes]
+     * documents for `Icon`, checked the same way: read what the walker actually recorded rather than
+     * infer the limit from one failed call.
+     */
+    @Test
+    fun lightAndDarkColorSchemesHaveNoReachableCallBecauseTheOmissionCapIsFarBelowTheirArity() {
+        Python3.exec(
+            """
+            import pythonx
+            _decl = pythonx._BY_PACKAGE['androidx.compose.material3']['light_color_scheme'][0]
+            # Every one of the 36 Color parameters declares a default in Kotlin -- this is Kotlin's
+            # own view, unaffected by the walker's omission cap.
+            assert _decl.declared_arity() == 36, _decl.declared_arity()
+            assert all(_decl.param_has_default[i] is False for i in range(_decl.declared_arity())), (
+                "light_color_scheme became partly omittable -- ArtifactScanner.MAX_OMITTABLE_PARAMETERS "
+                "(6) must have grown past 36, or the omission plan changed: " + repr(_decl.param_has_default)
+            )
+            try:
+                from pythonx.compose.material3 import light_color_scheme
+                light_color_scheme()
+                raise AssertionError('light_color_scheme() must not be callable with zero arguments')
+            except TypeError as _e:
+                assert 'no value for primary' in str(_e), str(_e)
+            """.trimIndent(),
+        )
+    }
+
+    /**
+     * **What is *not* proven, and why.** `Icon` has three overloads -- `ImageBitmap`, `ImageVector`,
+     * `Painter` -- and every one of them declares its one image parameter with no default, so
+     * calling `Icon` at all needs a value of one of those three types. None of them is reachable:
+     * they are declared in `androidx.compose.ui.graphics`, `.graphics.vector` and `.graphics.painter`,
+     * none of which this module's `artifactIncludePackages` walks (`material3` and
+     * `foundation.layout` only, deliberately narrow -- see `build.gradle.kts`), and even widening
+     * that would not be enough for `ImageVector`: building one needs `ImageVector.Builder`, a
+     * stateful multi-call API (`.addPath`, `.build()`) the walker has never been asked to bind, not
+     * a single constructor call. `Painter` is `abstract`, so it needs a concrete subclass
+     * (`BitmapPainter`, `VectorPainter`) with the same problem one level down.
+     *
+     * Rather than assert that some hand-picked Python expression fails -- which would only show
+     * that expression is wrong, not that the capability is missing -- this asks the walked table
+     * itself: nothing anywhere in it returns any of `Icon`'s three parameter types, in either
+     * package this module walks. That is the fact that makes `Icon` unreachable, checked directly
+     * instead of inferred from one failed call.
+     */
+    @Test
+    fun iconHasNoReachableSourceForAnyOfItsThreeRequiredImageTypes() {
+        Python3.exec(
+            """
+            import pythonx
+            _icon_image_types = {
+                'androidx.compose.ui.graphics.ImageBitmap',
+                'androidx.compose.ui.graphics.vector.ImageVector',
+                'androidx.compose.ui.graphics.painter.Painter',
+            }
+            _decls = pythonx._BY_PACKAGE['androidx.compose.material3']['Icon']
+            _icon_param_types = {_d.param_type_names[0] for _d in _decls}
+            assert _icon_param_types == _icon_image_types, \
+                "Icon's overloads no longer match what this test recorded: " + repr(_icon_param_types)
+
+            _producers = [
+                (pkg, name) for pkg, table in pythonx._BY_PACKAGE.items() for name, decls in table.items()
+                for d in decls if d.return_type_name in _icon_image_types
+            ]
+            assert _producers == [], \
+                'Icon became reachable -- something now produces one of its image types: ' + repr(_producers)
+            """.trimIndent(),
+        )
+    }
+
     private fun columnCalling(name: String): String =
         "from pythonx.compose.foundation.layout import Column\nColumn(content=$name)"
 
