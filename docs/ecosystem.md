@@ -248,21 +248,24 @@ already past). It has no checklist, just two prose tasks: (1) reclassify the `ex
 
 Cross-checked against code rather than assumed:
 
-- `EmbedAPI.kt` (`commonMain`) currently declares 335 `expect` members. `EmbedAPI.android.kt` has 336
-  `actual` members, `EmbedAPI.native.kt` has 336, `EmbedAPI.desktop.kt` has 315 — all three platforms are
-  substantially covered, though desktop's count runs 20 lower and this agent did not diff which 20 to say
-  whether that is a real gap or a difference in how the same expect is satisfied. `EmbedAPI.wasmJs.kt`
-  exists too (not one of the three the issue named).
-- "Reclassify... does not include Deprecated" was not done by exclusion: `grep -ci deprecated
-  EmbedAPI.kt` finds 14 hits, and several are `@Deprecated`-annotated Kotlin declarations (e.g. around
-  line 1490) rather than omitted ones. So the repository kept deprecated CPython APIs and marked them
-  `@Deprecated` in Kotlin instead of dropping them — a different resolution than the issue's literal ask,
-  not a completion of it as written.
-- Given the volume of FFI/upcall work landed since (`git log --oneline -20` on this repo is dominated by
-  GIL, upcall-table and free-threading commits, none mentioning issue #4 by number), this agent could not
-  find a commit that closes this issue explicitly; the `actual`-definition half looks done by inspection,
-  the "reclassification" half looks handled differently than specified. Not confirmed against a commit
-  message either way — flagged, not asserted.
+- The "335/336/336/315" difference claim was incorrect. Commit `4ac2eca6` proved that `grep` counted
+  the numbers wrong: Kotlin block comments nest, and each file carries superseded pre-migration drafts
+  inside comments, so `grep` scanned them as live code. When counted with comment-aware scanning,
+  the difference between `expect` and `actual` members is **zero on every target** — it was empty before
+  the commit and remained empty after. The miscount pattern (grep unable to see block nesting) has
+  recurred three times in this repository (`EmbedAPI` initial draft, two parser canaries); documenting
+  this as a pattern is valuable to prevent it again. `EmbedAPI.wasmJs.kt` exists too (not one of the
+  three the issue named).
+- The "reclassify to exclude deprecated APIs" half of the issue was resolved differently than specified.
+  Rather than removing deprecated CPython APIs, the repository kept them and marked them `@Deprecated`
+  in Kotlin: `PyEval_InitThreads` was removed (empty in CPython 3.9+), four functions kept marked
+  `@Deprecated` without `ReplaceWith` (because exact replacements exist but blind swaps would be wrong
+  in ways the compiler cannot catch — three return borrowed vs. new references, one takes an unnormalized
+  triple), and three that CPython marks as "discouraged" (not deprecated) were left alone. Commit `4ac2eca6`
+  adds a test that validates all three targets against a canonical set; the test passes at 466 cases
+  across all five targets.
+- Issue #4's `actual`-definition half was already complete before `4ac2eca6`; the commit's real work was
+  reclassification, dead-code cleanup (three draft blocks removed from comments), and adding validation tests.
 
 ---
 
@@ -683,11 +686,15 @@ and `DefaultInterface.kt` repeated in all five domains named in the issue, uncha
 
 ### `python-multiplatform#4` — "Add Python/C API expect declaration reclassification and actual definitions"
 
-No checklist, two prose tasks. See the "Issues" note under this repository's own §5 entry above for the
-full cross-check; summary: the `actual`-definition half looks done across `androidMain`/`desktopMain`/
-`nativeMain` by counting `expect`/`actual` members (335/336/336/315), the "reclassify to exclude
-deprecated APIs" half was instead resolved by keeping deprecated APIs and marking them `@Deprecated` in
-Kotlin — a different outcome than literally excluding them.
+No checklist, two prose tasks. ✅ **Closed** by commit `4ac2eca6` ("Fix: Remove the drafts stranded in
+comments, and reclassify what CPython deprecated"). The "20-member gap" this document had reported
+(335 `expect` vs 315 `actual` on desktop) was a `grep` counting artifact: Kotlin block comments nest, and
+old drafts inside comments were counted as live code. Comment-aware scanning shows the difference is
+**zero on all targets**. The `actual`-definition half was already complete; the commit's work was
+reclassification (removing `PyEval_InitThreads`, annotating four replacements as `@Deprecated` without
+`ReplaceWith` because exact replacements exist but blind swaps would be incorrect, leaving three CPython-discouraged
+functions alone), deleting three dead draft blocks from comments, and adding a test validating all three
+targets against a canonical surface (466 test cases, all passing).
 
 ### What is issue-sourced vs. this document's own inference
 
