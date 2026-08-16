@@ -214,7 +214,7 @@ This section documents the current state, language/build system/distribution art
 ### `PythonMultiplatform` (this repository)
 
 - **Observed Current State**:
-  - Embedded CPython 3.13 FFI binder (`python-multiplatform/src/commonMain/kotlin/.../EmbedAPI.kt`, platform implementations in `EmbedAPI.desktop.kt`, `bindings.kt`, JNI/Panama/cinterop).
+  - Embedded CPython FFI binder (`python-multiplatform/src/commonMain/kotlin/.../EmbedAPI.kt`, platform implementations in `EmbedAPI.desktop.kt`, `bindings.kt`, JNI/Panama/cinterop). **Correction, 2026-08-17: this line used to say "CPython 3.13" — stale.** `gradle.properties`'s `pythonVersion` (the single source of truth, read into `Versions.currentVersion` at `python-multiplatform/src/commonMain/kotlin/python/multiplatform/Versions.kt`) is `3.14.7`, and every platform's *observed runtime* agrees: desktop prints `runtime : 3.14.7` (`ROADMAP.md:2063`), Android prints `3.14.7` on both `pmp_api36` and `pmp_api26` (`ROADMAP.md:2073`), wasmJs prints `3.14.2` — its own, separately-pinned Emscripten build, not this line's concern (`docs/wasm-design.md`). See the version-mismatch check below.
   - Kotlin object model hierarchy (`python-multiplatform/src/commonMain/kotlin/.../PyObject.kt` and wrappers).
   - Code generators: KSP processor (`python-multiplatform-ksp/`) producing `FunctionTableFragment`s, and Gradle plugin (`python-multiplatform-gradle-plugin/src/main/kotlin/.../ArtifactBindingGenerator.kt`) scanning resolved dependency JARs via ASM for `ArtifactTable` fragments.
   - Multiplatform target support: Desktop JVM/Panama, Android JNI, iOS Native Cinterop, androidNativeArm64 (`:python-multiplatform:compileKotlinAndroidNativeArm64`).
@@ -238,6 +238,81 @@ This section documents the current state, language/build system/distribution art
   - `pythonx-compose` and consumer applications depend on `PythonMultiplatform` runtime and its Gradle/KSP bindings plugin.
 - **Unverified**:
   - Behavior of WASM browser runtime (`wasm-experiment/`) under production web bundlers.
+
+**Version check (2026-08-17): "3.14 runtime vs. 3.13 header, never checked" — could not find the
+sentence, checked the claim anyway.** The literal sentence was searched for across every `.md` file
+in this repository (`grep -rn` for Korean and English phrasings of "nobody/no one checked", "never
+verified", "mismatch", combined with "header"/"헤더" and "runtime"/"런타임") and in the git history
+of this file; it does not appear anywhere, verbatim or paraphrased. The nearest things on record are
+this section's own now-corrected "CPython 3.13" line above (stale since the version became
+configurable) and `ROADMAP.md:2033`, which already fixed a test fixture that hardcoded the string
+"CPython 3.13" while `pythonVersion` had moved to 3.14.7. Neither is the sentence quoted, and neither
+left the underlying question — do headers and runtime actually agree, per platform — checked. That
+question was checked here, freshly, platform by platform:
+
+| platform | header source | runtime source | agree? | how checked |
+|---|---|---|---|---|
+| desktop | none — Panama binds by symbol name at runtime (`java.lang.foreign.Linker`/`SymbolLookup`), no C header is compiled against | `libpython3.14.dylib`/`.so`/`.dll` extracted from the `python-build-standalone` archive pinned to `pythonVersion` (`python-checksums.properties`: `macos-aarch64-3.14.7-20260807`, etc.) | n/a — no header exists to disagree with the runtime | read `build.gradle.kts`'s desktop `jvm()` block; no `cinterop`/`headers()` call anywhere in it; `ROADMAP.md:1034-1038` records the same conclusion independently |
+| iOS / androidNative (Kotlin/Native `cinterop`) | `$targetExtractDir/include/python$libVersion/Python.h` (Android) or the extracted `Python.xcframework/.../Headers` (iOS) — **read from the same extraction the runtime library comes from**, not from any vendored copy | same archive, same extraction, `libVersion`/`targetExtractDir` computed from the one `pythonVersion`/`libVersion` variables | **yes, by construction** — both paths are derived from the same Gradle variable, so they cannot independently drift for a given build | read `python-multiplatform/build.gradle.kts:1093-1128` (`targetIncludePath`, the `cinterops.create("python")` block); confirmed no `defFile`/hardcoded header path overrides it |
+| Android JNI (`artMain`, `jni_onload.def`) | none — hand-written `extern` prototypes in `jni_onload.def`, no `#include <Python.h>`, pointers passed as `jlong` | `libpython$libVersion.so` linked with `-lpython$libVersion` from the same extraction tree | n/a for headers; symbol-level agreement already checked by earlier work (`nm`/`objdump` against the shipped `.so`, cited in `ROADMAP.md` around the 3.15 migration) | read `python-multiplatform/src/artMain/cinterop/jni_onload.def` and its `build.gradle.kts` cinterop block (no `headers()`/`includeDirs()` call) |
+| wasmJs | Emscripten's own CPython 3.14.2 build, entirely separate toolchain (`docs/wasm-design.md`) | same 3.14.2 build (`Embedded CPython version: 3.14.2`, `docs/wasm-design.md:1287`; `runtime : 3.14.2` sample output, `ROADMAP.md:1488`) | yes, and deliberately a different minor-patch than the 3.14.7 native default — documented and reasoned about at length in `docs/wasm-design.md`, not an oversight |
+
+**What is genuinely stale, and does not affect any of the above:** two artefacts in this repository
+still carry CPython 3.13 and are not read by the default build. `python-multiplatform/src/nativeInterop/cinterop/include/patchlevel.h`
+is a vendored header tree whose `PY_VERSION` reads `"3.13.0+"` — `git log` shows it landed with
+`b184cba5` (pre-dates `pythonVersion` becoming a Gradle property) and `build.gradle.kts` never
+references `nativeInterop/cinterop/include` at all; cinterop reads headers from the version-keyed
+extraction tree instead (table above). `binary/` holds five committed CPython 3.13.0 archives from
+`python-build-standalone` release `20241008` (`binary/download.md`); they are consumed only by the
+special-cased branch `if (configuredPythonVersion == "3.13.0" && !pythonFreeThreaded)` in the
+`desktopJar` task (`build.gradle.kts:1049`), i.e. only if a consumer explicitly builds with
+`-PpythonVersion=3.13.0`. That legacy path has no `Py_LIMITED_API`/header dependency either (desktop
+never compiles against headers), so even under `-PpythonVersion=3.13.0` there is no header/runtime
+split — but `python-checksums.properties` has **no 3.13.0 entries for Android or iOS**, so that flag
+would fail checksum verification on those two targets rather than silently mixing versions; this was
+not run to confirm the failure mode, only the absence of pinned checksums.
+
+**Correction to the paragraph above, made while verifying it: the 3.13 headers are not inert.** They
+are not a *compiler* input — that part holds, `build.gradle.kts` never puts
+`nativeInterop/cinterop/include` on an include path. But two test suites read that directory as their
+source of truth about the C API: `EmbedApiSurfaceTest.kt:454` and
+`JniCallConventionClassificationTest.kt:628` both open `src/nativeInterop/cinterop/include` and
+derive, respectively, the deprecation schedule the `expect` surface is checked against and the JNI
+call-convention classification. So the one place in this repository where a 3.13 header meets a 3.14
+runtime is the evidence layer, not the build: a function whose deprecation or signature changed in
+3.14 would be classified from 3.13's text and the tests would agree with themselves. This is the
+mismatch the check set out to look for, in the one shape nobody had looked at, and it is recorded
+rather than fixed here — refreshing the header tree is a separate change with its own verification.
+
+The rest of that tree is genuinely unreferenced and large: `git ls-files` counts 15,842 tracked files
+under `src/nativeInterop/cinterop` (679 MB in `lib/`, 2.6 MB in `include/`), and of `lib/` only
+`lib/desktop` is read, by the `-PpythonVersion=3.13.0` branch above. The Android CPython 3.13 standard
+library trees under `lib/android/<abi>/python3.13/` are referenced by no build file, no Kotlin source
+and no test; the runtime stdlib comes from the version-keyed extraction instead. Whether to remove
+them is a repository-size decision, not a correctness one, and is left open.
+
+**`Py_LIMITED_API` status, checked directly:** `grep -rn "Py_LIMITED_API"` across `.kts`/`.def` build
+files finds it only inside vendored CPython header guards (`#if defined(Py_LIMITED_API) ...`) — it is
+never passed as a compiler define anywhere (no `-DPy_LIMITED_API`, no `compilerOpts` setting it). This
+independently confirms `ROADMAP.md:1031-1038`'s own finding, reached from the free-threading
+investigation rather than this one: the project does **not** build against the Limited API / Stable
+ABI in the `Py_LIMITED_API`-macro sense. "abi3" as used elsewhere in this repository's docs means a
+self-imposed rule about which C API functions this project chooses to call (ones stable across
+versions), not a `Py_LIMITED_API` compilation mode. So the "Stable ABI permits a header/runtime minor
+mismatch" escape hatch the task brief raised does not apply here — but it is not needed, either,
+because the table above shows headers and runtime are never independently sourced in the first place.
+
+**Residual risk, marked as such because it was not run:** the table above is a build-configuration
+argument (headers and runtime derive from one variable), corroborated by *observed* `sys.version`-
+equivalent output on desktop and Android and by an existing wasmJs run — not by a from-scratch build
+of `compileKotlinIosSimulatorArm64`/`compileKotlinAndroidNativeArm64` performed in this pass (this
+check reused `ROADMAP.md`'s existing, dated build/test evidence rather than re-running Gradle). If a
+future change hardcodes a header path or a library name outside the `libVersion`/`targetIncludePath`
+variables audited above, this guarantee would silently stop holding; nothing currently tests for that
+kind of regression directly (the closest is the version-agnostic assertion in `Python3Test.kt`'s
+`versionReportsTheConfiguredRelease`, which catches a runtime drift but not a header-only one, since
+no target here has a runtime check *of the header's declared version* — the headers have no
+executable presence to assert against).
 
 **Issues (checked 2026-08-16):** the only open issue against this repository is
 [`python-multiplatform#4`](https://github.com/thisisthepy/python-multiplatform/issues/4), "Add Python/C API
