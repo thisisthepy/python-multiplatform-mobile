@@ -27,11 +27,19 @@ import python.multiplatform.reflection.UpcallTable
  * The two candidates were a `.py` file emitted by KSP and shipped as a resource, and Python source
  * rendered at run time and `exec`'d. This is the second, for three reasons:
  *
- * 1. **There is no resource path to put a `.py` on.** Kotlin/Native has no `getResourceAsStream`,
- *    and the interpreter's `sys.path` on iOS, androidNative and wasm points at the per-platform
- *    CPython trees under `src/nativeInterop/cinterop/lib/...`. Getting one generated file into each
- *    of those, and onto `sys.path` before the first import, is a per-platform packaging problem this
- *    repository has not solved for anything. `Python3.exec` already works on all five.
+ * 1. **There is no resource path to put a `.py` on that works everywhere.** Kotlin/Native has no
+ *    `getResourceAsStream`, and the interpreter's `sys.path` on iOS, androidNative and wasm points
+ *    at the per-platform CPython trees under `src/nativeInterop/cinterop/lib/...`. `Python3.exec`
+ *    already works on all five.
+ *
+ *    This reason used to end "...is a per-platform packaging problem this repository has not solved
+ *    for anything", and that half is no longer true.
+ *    [python.multiplatform.env.PythonPayload] puts a directory on `sys.path` before the first
+ *    import, and desktop and Android have a real packaging step feeding it -- a jar resource that
+ *    is extracted, an APK asset that is unpacked. What still holds is the part this reason rests
+ *    on: there is no such step on **iOS** (it needs an Xcode build phase nobody has written),
+ *    androidNative or wasm, so a file shipped that way would exist on two platforms out of five.
+ *    Reason 2 below would hold even if all five had one.
  * 2. **KSP does not know what will be installed.** A fragment is per Kotlin module; the table is
  *    assembled at run time by `UpcallTable.install`, and an application may install a subset (every
  *    test in this repository does). Build-time Python would describe a table that may never exist,

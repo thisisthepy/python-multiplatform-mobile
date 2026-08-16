@@ -37,6 +37,27 @@ the two extra steps (`rsync`ing the stdlib into the built `.app` and resolving
 `SIMCTL_CHILD_PYTHONHOME` from `simctl get_app_container` after install) this repository does not
 yet automate.
 
+## The consumer's payload is staged and not attached — the runtime half is here, the Xcode half is not
+
+`PythonPayload.discoverStagedPayloadRoots` looks for `python/` under
+`NSBundle.mainBundle.resourcePath` and puts it on `sys.path` if it is there. Nothing puts it there.
+
+`toolchain`'s `49da1d8` produces `build/pythonStaging/ios/python` and stops, saying why: "a native
+framework has no Gradle resource mechanism, and its resources go through an Xcode phase in a project
+file this plugin does not own." So three things are missing, all of them packaging:
+
+1. A **Copy Bundle Resources** phase referencing that directory, with *folder reference* semantics —
+   a group flattens the package directories and every `__init__.py` collides.
+2. A **build-order dependency** on the Gradle task that produces it, expressed in the Run Script
+   phase `iosApp/` already uses to drive Gradle.
+3. A **run on device or simulator that proves it**, which is not desktop's check. Per the section
+   above, a path under this repo's external volume does not merely fail for an *installed* app — it
+   parks `open$NOCANCEL` forever at 0% CPU. Reading the payload out of the app's own bundle is what
+   avoids that, and is why the answer must be the bundle rather than a workspace path.
+
+Until (1) and (2) exist this returns an empty list on every run, and no test here can tell "the
+phase is missing" from "the code is wrong". Desktop is the platform driven end to end instead.
+
 ## No boundary, in either direction
 
 Python and Kotlin share one binary. Downcalls are direct cinterop calls, and an upcall from
