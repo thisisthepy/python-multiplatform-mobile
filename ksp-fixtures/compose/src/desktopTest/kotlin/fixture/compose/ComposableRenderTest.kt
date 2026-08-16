@@ -599,9 +599,8 @@ class ComposableRenderTest {
         // essentially the whole 200x60 scene (measured: 11200 non-background pixels either way), so
         // text drawn on top changes which pixels are non-background, not how many are. The distinct
         // *colors* present do differ -- the glyph color is not the container fill color -- which is
-        // the same argument [lightAndDarkColorSchemesHaveNoReachableCallBecauseTheOmissionCapIsFarBelowTheirArity]'s
-        // sibling test would have made for `colorScheme`, applied here to whether `headlineContent`
-        // painted anything at all.
+        // the same argument [lightColorSchemeIsCallableNowThatItsColoursCanBeBuilt] makes for
+        // `colorScheme`, applied here to whether `headlineContent` painted anything at all.
         val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
         val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
         println(
@@ -748,72 +747,75 @@ class ComposableRenderTest {
     }
 
     /**
-     * **What is *not* proven, and why: `lightColorScheme`/`darkColorScheme` have no reachable call
-     * at all.**
+     * **`lightColorScheme`, which `a6742a1c` pinned as having no reachable call at all -- and now
+     * has one.**
      *
-     * The plan going in was `MaterialTheme(color_scheme=light_color_scheme(), content=...)` against
-     * `dark_color_scheme()`, checking that the two renders draw the same ink in different colors --
-     * `Text`'s default color is `LocalContentColor.current`, which `MaterialTheme` derives from
-     * `colorScheme.onSurface`, and Material's own light and dark schemes disagree about that color by
-     * design. Neither function is a composable, so nothing about composition was in question, only
-     * whether the `ColorScheme` it returns reaches `MaterialTheme`.
+     * That pin had two halves and only one of them was about `lightColorScheme`. The half that
+     * stands: `ArtifactScanner.MAX_OMITTABLE_PARAMETERS` caps default-omission at 6 defaulted
+     * parameters per declaration, `applyDefaultOmission` gives up on the *whole* declaration when a
+     * candidate exceeds it -- not "some of the 36 became omittable", none of them did -- so every one
+     * of the 36 `Color` arguments must still be written. That is asserted below, unchanged.
      *
-     * It never got that far: `light_color_scheme()` -- zero arguments, every one of its 36 `Color`
-     * parameters defaulted in Kotlin -- raises `no value for primary`. `ArtifactScanner
-     * .MAX_OMITTABLE_PARAMETERS` caps default-omission at 6 defaulted parameters per declaration
-     * (`docs/kotlin-extensions-in-python.md`'s measurement behind the cap: the widest declaration
-     * bound anywhere in the corpus before Compose had four), and `light_color_scheme`'s 36 is not
-     * close. `applyDefaultOmission` sees more than the cap allows and gives up on the whole
-     * declaration -- not "some of the 36 became omittable", *none* of them did -- so every call must
-     * write every argument, and there is nothing this module's included packages can put in a `Color`
-     * slot: `Color` and its constructor functions live in `androidx.compose.ui.graphics`, which
-     * `artifactIncludePackages` does not walk. The same shape [iconHasNoReachableSourceForAnyOfItsThreeRequiredImageTypes]
-     * documents for `Icon`, checked the same way: read what the walker actually recorded rather than
-     * infer the limit from one failed call.
+     * The half that does not: *"there is nothing this module's included packages can put in a `Color`
+     * slot"*. That was a statement about `artifactIncludePackages`, not about the boundary, and
+     * `androidx.compose.ui.graphics` is in the walk now. `Color(255, 0, 0)` builds one --
+     * `IconRenderTest.aPythonBuiltColorRoundTripsIntoAnotherWalkedCall` pins the value round trip --
+     * and `lightColorScheme`'s slots are `OBJECT`, so the handles go straight in.
+     *
+     * ### Why 36 written arguments is a *render* test and not a table one
+     *
+     * Writing 36 arguments proves nothing on its own: they could all be dropped. So the scheme is
+     * built with every colour black except `primary`, handed to `MaterialTheme`, and a `Button`
+     * inside it paints its container from `colorScheme.primary` -- so the colour that comes out of
+     * Skia is the colour Python put in that one named slot out of 36. A scheme whose arguments were
+     * shifted by one, or whose keyword mapping went wrong, would paint a different slot's black.
      */
     @Test
-    fun lightAndDarkColorSchemesHaveNoReachableCallBecauseTheOmissionCapIsFarBelowTheirArity() {
+    fun lightColorSchemeIsCallableNowThatItsColoursCanBeBuilt() {
         Python3.exec(
             """
             import pythonx
             _decl = pythonx._BY_PACKAGE['androidx.compose.material3']['light_color_scheme'][0]
-            # Every one of the 36 Color parameters declares a default in Kotlin -- this is Kotlin's
-            # own view, unaffected by the walker's omission cap.
+            # Every one of the 36 Color parameters declares a default in Kotlin, and none of them is
+            # omittable here. The cap, unchanged by anything in this commit.
             assert _decl.declared_arity() == 36, _decl.declared_arity()
             assert all(_decl.param_has_default[i] is False for i in range(_decl.declared_arity())), (
                 "light_color_scheme became partly omittable -- ArtifactScanner.MAX_OMITTABLE_PARAMETERS "
                 "(6) must have grown past 36, or the omission plan changed: " + repr(_decl.param_has_default)
             )
+            from pythonx.compose.material3 import light_color_scheme
             try:
-                from pythonx.compose.material3 import light_color_scheme
                 light_color_scheme()
                 raise AssertionError('light_color_scheme() must not be callable with zero arguments')
             except TypeError as _e:
                 assert 'no value for primary' in str(_e), str(_e)
             """.trimIndent(),
         )
+
+        val red = distinctColorsOf(themedButton(255, 0, 0))
+        val green = distinctColorsOf(themedButton(0, 255, 0))
+        println("compose render: MaterialTheme(light_color_scheme(primary=red)) -> ${red.size} colors, green -> ${green.size}")
+        assertTrue(0xFFFF0000.toInt() in red, "the red primary never reached the Button's container: $red")
+        assertTrue(0xFF00FF00.toInt() in green, "the green primary never reached the Button's container: $green")
+        assertTrue(0xFFFF0000.toInt() !in green, "a green scheme painted red, so the argument was not read: $green")
     }
 
     /**
-     * **What is *not* proven, and why.** `Icon` has three overloads -- `ImageBitmap`, `ImageVector`,
-     * `Painter` -- and every one of them declares its one image parameter with no default, so
-     * calling `Icon` at all needs a value of one of those three types. None of them is reachable:
-     * they are declared in `androidx.compose.ui.graphics`, `.graphics.vector` and `.graphics.painter`,
-     * none of which this module's `artifactIncludePackages` walks (`material3` and
-     * `foundation.layout` only, deliberately narrow -- see `build.gradle.kts`), and even widening
-     * that would not be enough for `ImageVector`: building one needs `ImageVector.Builder`, a
-     * stateful multi-call API (`.addPath`, `.build()`) the walker has never been asked to bind, not
-     * a single constructor call. `Painter` is `abstract`, so it needs a concrete subclass
-     * (`BitmapPainter`, `VectorPainter`) with the same problem one level down.
+     * **`Icon`, which the same commit pinned as unreachable -- two of its three overloads are not.**
      *
-     * Rather than assert that some hand-picked Python expression fails -- which would only show
-     * that expression is wrong, not that the capability is missing -- this asks the walked table
-     * itself: nothing anywhere in it returns any of `Icon`'s three parameter types, in either
-     * package this module walks. That is the fact that makes `Icon` unreachable, checked directly
-     * instead of inferred from one failed call.
+     * The pin was right about the table and wrong about what that measured. Nothing in the walk
+     * returned an `ImageBitmap`, an `ImageVector` or a `Painter`, and the reason was
+     * `artifactIncludePackages`: all three are built in packages this module did not walk. Two more
+     * packages later, `ImageBitmap` and `Painter` both have producers and `IconRenderTest` renders
+     * pixels through the `Painter` overload.
+     *
+     * `ImageVector` still has none, and this is where that fact is checked over the table rather than
+     * inferred from a failed call -- the shape the original pin got right.
+     * `IconRenderTest.imageVectorIsUnreachableBecauseItsBuilderIsANestedClassTheWalkerNeverOpens`
+     * carries the reason.
      */
     @Test
-    fun iconHasNoReachableSourceForAnyOfItsThreeRequiredImageTypes() {
+    fun twoOfIconsThreeImageTypesNowHaveProducersInTheWalkAndImageVectorDoesNot() {
         Python3.exec(
             """
             import pythonx
@@ -827,15 +829,47 @@ class ComposableRenderTest {
             assert _icon_param_types == _icon_image_types, \
                 "Icon's overloads no longer match what this test recorded: " + repr(_icon_param_types)
 
-            _producers = [
-                (pkg, name) for pkg, table in pythonx._BY_PACKAGE.items() for name, decls in table.items()
-                for d in decls if d.return_type_name in _icon_image_types
-            ]
-            assert _producers == [], \
-                'Icon became reachable -- something now produces one of its image types: ' + repr(_producers)
+            _produced = {
+                d.return_type_name
+                for table in pythonx._BY_PACKAGE.values() for decls in table.values() for d in decls
+                if d.return_type_name in _icon_image_types
+            }
+            assert _produced == {
+                'androidx.compose.ui.graphics.ImageBitmap',
+                'androidx.compose.ui.graphics.painter.Painter',
+            }, repr(_produced)
             """.trimIndent(),
         )
     }
+
+    /**
+     * `light_color_scheme` with every slot black except `primary`, inside a `MaterialTheme`, around a
+     * `Button` whose container reads `colorScheme.primary`.
+     *
+     * The keyword names are read off the walked declaration rather than typed out, so the test says
+     * "all 36, whatever they are called" instead of pinning a Compose version's parameter list.
+     */
+    private fun themedButton(red: Int, green: Int, blue: Int): String =
+        """
+        import pythonx
+        from pythonx.compose.ui.graphics import Color__Int_Int_Int_Int as _Color
+        from pythonx.compose.material3 import light_color_scheme, MaterialTheme, Button
+
+        _decl = pythonx._BY_PACKAGE['androidx.compose.material3']['light_color_scheme'][0]
+        _slots = [pythonx.to_python_name(_n) for _n in _decl.param_names]
+        _black = _Color(0, 0, 0)
+        _written = dict((_slot, _black) for _slot in _slots)
+        _written['primary'] = _Color($red, $green, $blue)
+        _scheme = light_color_scheme(**_written)
+
+        MaterialTheme(
+            color_scheme=_scheme,
+            content=lambda: Button(on_click=lambda: None, content=lambda: None),
+        )
+        """.trimIndent()
+
+    private fun distinctColorsOf(body: String): Set<Int> =
+        pixelsOf(body).filter { it != BACKGROUND }.toSet()
 
     private fun columnCalling(name: String): String =
         "from pythonx.compose.foundation.layout import Column\nColumn(content=$name)"

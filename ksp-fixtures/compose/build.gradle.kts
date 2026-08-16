@@ -67,12 +67,32 @@ pythonBindings {
     artifactConfiguration.set("desktopCompileClasspath")
     artifactSourceSet.set("desktopMain")
     // Narrow on purpose, and narrower than `:ksp-fixtures:artifact`'s: binding all of Compose would
-    // make this fixture's compile time the cost of a proof it does not need. Two packages, and the
-    // second is not decoration -- `Text` is a *leaf*, and a leaf is reachable without ever filling a
-    // function-typed slot. `androidx.compose.foundation.layout.Column` is the container whose
-    // `content` declares no default, so it is the declaration that is unreachable until a Python
-    // callable can cross, which is what `ComposableRenderTest` renders.
-    artifactIncludePackages.set(listOf("androidx.compose.material3", "androidx.compose.foundation.layout"))
+    // make this fixture's compile time the cost of a proof it does not need. Each entry earns its
+    // place.
+    //
+    // 1. `material3` -- `Text` is a *leaf*, reachable without ever filling a function-typed slot.
+    // 2. `foundation.layout` -- `Column` is the container whose `content` declares no default, so it
+    //    is the declaration that is unreachable until a Python callable can cross, which is what
+    //    `ComposableRenderTest` renders.
+    // 3. `ui.graphics` -- where every *value* material3 asks for is built: `Color`, and with it
+    //    `ImageBitmap`, `BitmapPainter` and the `vector` and `painter` subpackages, since the match
+    //    is a namespace one. `a6742a1c` pinned `Icon` and `lightColorScheme` as unreachable and this
+    //    line is the whole of why: both were asking for a value from a package nothing walked. See
+    //    `IconRenderTest`.
+    // 4. `ui.res` -- the one thing a *constructed* value cannot be. An `ImageBitmap` with no pixels
+    //    written into it is transparent, and writing them needs `Canvas.drawRect`, an **instance**
+    //    method (`ArtifactScanner.kotlinCandidates` binds `ACC_STATIC` only). Loading an image is
+    //    static all the way down -- `openResource` -> `loadImageBitmap`, and `painterResource` for
+    //    the `Painter` overload -- so this is what makes `Icon` draw a pixel rather than merely
+    //    compose.
+    artifactIncludePackages.set(
+        listOf(
+            "androidx.compose.material3",
+            "androidx.compose.foundation.layout",
+            "androidx.compose.ui.graphics",
+            "androidx.compose.ui.res",
+        ),
+    )
     generateStubs.set(false)
 }
 
