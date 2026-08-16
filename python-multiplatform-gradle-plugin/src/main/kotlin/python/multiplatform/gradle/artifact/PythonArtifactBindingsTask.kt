@@ -7,6 +7,7 @@ import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.MapProperty
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputFiles
+import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
@@ -60,6 +61,21 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
     @get:Input
     abstract val includePrefixes: ListProperty<String>
 
+    /**
+     * The whole classpath of the isolated worker that runs [KlibScanner], bar this plugin's own jar:
+     * the klib reader plus what [ArtifactScanner] needs, resolved by the consumer's project. See
+     * [scanKlibIsolated] and `KlibScanWorkAction.pluginCodeSource`.
+     *
+     * `@Internal` rather than `@Classpath` on purpose. It is a lazily-resolved configuration holding one
+     * pinned coordinate, and marking it an input would make Gradle resolve it during this task's
+     * up-to-date check -- a 55 MiB download for every consumer that walks *jars only* and never reaches
+     * the klib branch. Nothing is lost by not tracking it: the coordinate is generated into this plugin
+     * (`DEFAULT_KLIB_WORKER_COORDINATES`), so it cannot change without the plugin jar changing, and the
+     * plugin jar is already part of the task implementation Gradle hashes.
+     */
+    @get:Internal
+    abstract val klibReaderClasspath: ConfigurableFileCollection
+
     @get:OutputDirectory
     abstract val outputDirectory: DirectoryProperty
 
@@ -112,7 +128,7 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
                     //
                     // Not a direct `KlibScanner.scanKlib` call: see this class's KDoc, "The klib
                     // branch runs behind a worker classloader boundary".
-                    workerExecutor.scanKlibIsolated(file, includes, temporaryDir).callables
+                    workerExecutor.scanKlibIsolated(file, includes, temporaryDir, klibReaderClasspath.files).callables
                 }
                 // An artefact that contributed nothing gets no fragment: a fragment with no entries
                 // would still take a `moduleName` in `UpcallTable`'s installed set, which is the one

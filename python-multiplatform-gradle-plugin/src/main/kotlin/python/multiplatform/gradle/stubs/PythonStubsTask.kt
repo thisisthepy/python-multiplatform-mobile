@@ -8,6 +8,7 @@ import org.gradle.api.provider.ListProperty
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputFile
 import org.gradle.api.tasks.InputFiles
+import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
@@ -69,6 +70,14 @@ abstract class PythonStubsTask : DefaultTask() {
     abstract val includePrefixes: ListProperty<String>
 
     /**
+     * The klib reader for the isolated worker, exactly as
+     * [python.multiplatform.gradle.artifact.PythonArtifactBindingsTask.klibReaderClasspath] -- including
+     * why it is `@Internal` rather than an input.
+     */
+    @get:Internal
+    abstract val klibReaderClasspath: ConfigurableFileCollection
+
+    /**
      * §5.3's manifest, owned by the Python package being stubbed. Absent means only the Kotlin-FQN
      * product is emitted, which is the honest default: `pythonx.compose.layout` wrapping
      * `androidx.compose.foundation.layout` is not inferable from anything this plugin can see.
@@ -101,7 +110,7 @@ abstract class PythonStubsTask : DefaultTask() {
             //
             // Not a direct `KlibScanner.scanKlibDeclarations` call: same classloader-scope collision
             // `PythonArtifactBindingsTask`'s KDoc documents, worked around the same way.
-            workerExecutor.scanKlibIsolated(klib, includes, temporaryDir).declarations
+            workerExecutor.scanKlibIsolated(klib, includes, temporaryDir, klibReaderClasspath.files).declarations
         }
 
         val manifestFile = manifest.orNull?.asFile

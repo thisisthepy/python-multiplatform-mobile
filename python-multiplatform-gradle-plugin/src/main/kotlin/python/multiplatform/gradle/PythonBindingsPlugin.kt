@@ -304,6 +304,7 @@ class PythonBindingsPlugin : Plugin<Project> {
 
         val configuration = project.configurations.findByName(configurationName)
             ?: error("no configuration named '$configurationName' in ${project.path}")
+        val klibReader = klibReaderClasspath(project)
         // `incoming.artifacts` rather than the configuration's own file collection: it is the only
         // route that carries each file's *coordinates* alongside it, and a fragment has to be named
         // after the artefact rather than after whatever the cache called the file.
@@ -322,6 +323,7 @@ class PythonBindingsPlugin : Plugin<Project> {
                 },
             )
             includePrefixes.set(includes)
+            klibReaderClasspath.from(klibReader)
             outputDirectory.set(
                 project.layout.buildDirectory.dir("generated/pythonArtifactBindings/$sourceSetName"),
             )
@@ -332,8 +334,63 @@ class PythonBindingsPlugin : Plugin<Project> {
 
         addKotlinSourceDirectory(project, sourceSetName, task)
         addThunkClasspath(project, sourceSetName, task)
-        configureStubGeneration(project, extension, resolved, includes, sourceSetName)
+        configureStubGeneration(project, extension, resolved, includes, sourceSetName, klibReader)
     }
+
+    /**
+     * Everything `KlibScanWorkAction`'s isolated worker classloader needs beside this plugin's own
+     * jar, resolved **in the consumer's project** rather than taken from this plugin's classpath.
+     *
+     * ### Why it cannot be a plugin dependency
+     *
+     * `kotlin-compiler-embeddable` on this plugin's runtime classpath becomes `runtime` scope in its
+     * published POM, which puts it on the plugin classloader of every build that applies the plugin id
+     * -- beside the Kotlin Gradle Plugin's own copy of the same classes. KGP then fails to create its
+     * own tasks:
+     *
+     *     Could not create task of type 'KotlinCompile'.
+     *       > Could not generate a decorated class for type KotlinCompile.
+     *         > class org.jetbrains.kotlin.build.report.metrics.BuildTimeMetric has interface
+     *           org.jetbrains.kotlin.build.report.metrics.BuildPerformanceMetric as super class
+     *
+     * `./gradlew tasks` failed on that in all three external consumer projects, whether or not they
+     * asked for any artefact walking at all. Gradle warns about this jar being on a build classpath
+     * ("unpredictable and inconsistent behavior"); in this combination it is not unpredictable, it is a
+     * hard failure every time. The worker classloader isolation `KlibScanWorkAction` already has does
+     * not help -- that isolates *execution*, and the breakage is the jar merely being *present*.
+     *
+     * ### Why the whole worker classpath, not only the reader
+     *
+     * The worker classloader cannot borrow anything from the plugin's own: in an external consumer,
+     * every plugin in the same `plugins { }` block shares one classloader, so this plugin's `.urLs`
+     * out there include the Kotlin Gradle Plugin's `kotlin-util-klib` -- the exact jar the isolation
+     * exists to escape. `KlibScanWorkAction.pluginCodeSource`'s KDoc has the printed list. So the
+     * worker's classpath is this configuration plus this plugin's own jar, and nothing else, which is
+     * why `kotlin-metadata-jvm` and ASM are named here too even though the plugin already depends on
+     * them for the *jar* walker.
+     *
+     * ### Why detached, and why it costs a consumer nothing
+     *
+     * `detachedConfiguration` keeps it out of the consumer's own configuration container, so no
+     * `configurations.all { }` rule, dependency substitution or platform constraint of theirs can move
+     * the versions away from the ones `KlibScanner` was compiled against -- the same reason
+     * `configureWasmBrowserRuntimeStaging` uses one. It is only ever resolved from
+     * `PythonArtifactBindingsTask`/`PythonStubsTask`'s task action, and only in the klib branch: a
+     * consumer walking jars only never downloads it, and a consumer who registers no walker never
+     * creates the tasks at all.
+     *
+     * `Usage=java-runtime` because a bare detached configuration carries no attributes, and these
+     * modules publish Gradle module metadata with both an api and a runtime variant to choose between.
+     */
+    private fun klibReaderClasspath(project: Project) =
+        project.configurations.detachedConfiguration(
+            *DEFAULT_KLIB_WORKER_COORDINATES.map { project.dependencies.create(it) }.toTypedArray(),
+        ).apply {
+            attributes.attribute(
+                org.gradle.api.attributes.Usage.USAGE_ATTRIBUTE,
+                project.objects.named(org.gradle.api.attributes.Usage::class.java, org.gradle.api.attributes.Usage.JAVA_RUNTIME),
+            )
+        }
 
     /**
      * Puts the generated composable thunks on the compilation's classpath.
@@ -400,6 +457,7 @@ class PythonBindingsPlugin : Plugin<Project> {
         resolved: org.gradle.api.artifacts.ArtifactCollection,
         includes: List<String>,
         sourceSetName: String,
+        klibReader: org.gradle.api.artifacts.Configuration,
     ) {
         if (!extension.generateStubs.getOrElse(true)) return
         val task = project.tasks.register("generatePythonStubs", PythonStubsTask::class.java) {
@@ -407,6 +465,7 @@ class PythonBindingsPlugin : Plugin<Project> {
             description = "Emits .pyi stubs for the declarations the artefact walker bound."
             artifacts.from(resolved.artifactFiles)
             includePrefixes.set(includes)
+            klibReaderClasspath.from(klibReader)
             manifest.set(extension.stubManifest)
             outputDirectory.set(project.layout.buildDirectory.dir("generated/pythonStubs/$sourceSetName"))
         }
