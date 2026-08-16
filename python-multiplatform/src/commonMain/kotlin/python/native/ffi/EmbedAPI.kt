@@ -25,231 +25,6 @@ expect fun AddressValue.toNativePointer(): NativePointer
 expect fun Long.toNativePointer(): NativePointer?
 
 
-/**
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Section 1
-// Initializing and finalizing the interpreter
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-/**
- *Part of the Stable ABI.
- *
- * Initialize the Python interpreter.
- * In an application embedding Python, this should be called before using any other Python/C API functions; see Before Python Initialization for the few exceptions.
- *
- * This initializes the table of loaded modules (sys.modules), and creates the fundamental modules builtins, __main__ and sys. It also initializes the module search path (sys.path).
- * It does not set sys.argv; use the Python Initialization Configuration API for that. This is a no-op when called for a second time (without calling Py_FinalizeEx() first).
- * There is no return value; it is a fatal error if the initialization fails.
- *
- * Use Py_InitializeFromConfig() to customize the Python Initialization Configuration.
- *
- * Note: On Windows, changes the console mode from O_TEXT to O_BINARY, which will also affect non-Python uses of the console using the C Runtime.
- */
-expect inline fun Py_Initialize()
-
-/**
- *Part of the Stable ABI.
- *
- * This function works like Py_Initialize() if initsigs is 1.
- * If initsigs is 0, it skips initialization registration of signal handlers, which may be useful when CPython is embedded as part of a larger application.
- *
- * Use Py_InitializeFromConfig() to customize the Python Initialization Configuration.
- *
- * @param initsigs: 0(skip signal handler registration) or 1(normal initialization)
- */
-expect inline fun Py_InitializeEx(initsigs: Int)
-
-//expect inline fun Py_InitializeFromConfig()
-
-/**
- *Part of the Stable ABI.
- *
- * Return true (nonzero) when the Python interpreter has been initialized, false (zero) if not.
- * After Py_FinalizeEx() is called, this returns false until Py_Initialize() is called again.
- *
- * @return 1(true), 0(false)
- */
-expect inline fun Py_IsInitialized(): Int
-
-/**
- * Part of the Stable ABI since version 3.13.
- *
- * Return true (non-zero) if the main Python interpreter is shutting down.
- * Return false (zero) otherwise.
- *
- * Added in version 3.13.
- */
-expect inline fun Py_IsFinalizing(): Int
-
-/**
- *Part of the Stable ABI.
- *
- * This is a backwards-compatible version of Py_FinalizeEx() that disregards the return value.
- */
-expect inline fun Py_Finalize()
-
-/**
- * Part of the Stable ABI since version 3.6.
- *
- * Undo all initializations made by Py_Initialize() and subsequent use of Python/C API functions, and destroy all sub-interpreters (see Py_NewInterpreter() below) that were created and not yet destroyed since the last call to Py_Initialize().
- * Ideally, this frees all memory allocated by the Python interpreter.
- * This is a no-op when called for a second time (without calling Py_Initialize() again first).
- *
- * Since this is the reverse of Py_Initialize(), it should be called in the same thread with the same interpreter active.
- * That means the main thread and the main interpreter.
- * This should never be called while Py_RunMain() is running.
- *
- * Normally the return value is 0.
- * If there were errors during finalization (flushing buffered data), -1 is returned.
- *
- * This function is provided for a number of reasons.
- * An embedding application might want to restart Python without having to restart the application itself.
- * An application that has loaded the Python interpreter from a dynamically loadable library (or DLL) might want to free all memory allocated by Python before unloading the DLL.
- * During a hunt for memory leaks in an application a developer might want to free all memory allocated by Python before exiting from the application.
- *
- * Bugs and caveats:
- * The destruction of modules and objects in modules is done in random order; this may cause destructors (__del__() methods) to fail when they depend on other objects (even functions) or modules.
- * Dynamically loaded extension modules loaded by Python are not unloaded.
- * Small amounts of memory allocated by the Python interpreter may not be freed (if you find a leak, please report it).
- * Memory tied up in circular references between objects is not freed.
- * Some memory allocated by extension modules may not be freed.
- * Some extensions may not work properly if their initialization routine is called more than once; this can happen if an application calls Py_Initialize() and Py_FinalizeEx() more than once.
- *
- * Raises an auditing event cpython._PySys_ClearAuditHooks with no arguments.
- *
- * @return 0(success), -1(failure)
- */
-expect inline fun Py_FinalizeEx(): Int
-
-/**
- * Part of the Stable ABI since version 3.8.
- *
- * Similar to Py_Main() but argv is an array of bytes strings, allowing the calling application to delegate the text decoding step to the CPython runtime.
- *
- * Added in version 3.8.
- */
-//expect inline fun Py_BytesMain(args: Array<String>): Int
-
-/**
- * Executes the main module in a fully configured CPython runtime.
- *
- * Executes the command (PyConfig.run_command), the script (PyConfig.run_filename) or the module (PyConfig.run_module) specified on the command line or in the configuration.
- * If none of these values are set, runs the interactive Python prompt (REPL) using the __main__ module’s global namespace.
- *
- * If PyConfig.inspect is not set (the default), the return value will be 0 if the interpreter exits normally (that is, without raising an exception), or 1 if the interpreter exits due to an exception.
- * If an otherwise unhandled SystemExit is raised, the function will immediately exit the process instead of returning 1.
- *
- * If PyConfig.inspect is set (such as when the -i option is used), rather than returning when the interpreter exits, execution will instead resume in an interactive Python prompt (REPL) using the __main__ module’s global namespace.
- * If the interpreter exited with an exception, it is immediately raised in the REPL session.
- * The function return value is then determined by the way the REPL session terminates: returning 0 if the session terminates without raising an unhandled exception, exiting immediately for an unhandled SystemExit, and returning 1 for any other unhandled exception.
- *
- * This function always finalizes the Python interpreter regardless of whether it returns a value or immediately exits the process due to an unhandled SystemExit exception.
- *
- * See Python Configuration for an example of a customized Python that always runs in isolated mode using Py_RunMain().
- */
-expect inline fun Py_RunMain(): Int
-
-/**
- * Executes the Python source code from command in the __main__ module according to the flags argument.
- * If __main__ does not already exist, it is created.
- * Returns 0 on success or -1 if an exception was raised.
- * If there was an error, there is no way to get the exception information.
- * For the meaning of flags, see below.
- *
- * Note that if an otherwise unhandled SystemExit is raised, this function will not return -1, but exit the process, as long as PyConfig.inspect is zero.
- */
-expect inline fun PyRun_SimpleString(command: String): Int
-
-/**
- * Return value: New reference.
- *
- * Execute Python source code from str in the context specified by the objects globals and locals with the compiler flags specified by flags.
- * globals must be a dictionary; locals can be any object that implements the mapping protocol.
- * The parameter start specifies the start token that should be used to parse the source code.
- *
- * Returns the result of executing the code as a Python object, or NULL if an exception was raised.
- */
-expect fun PyRun_String(str: String, start: Int, globals: NativePointer, locals: NativePointer): NativePointer?
-
-/**
- *Part of the Stable ABI.
- *
- * Return the version of this Python interpreter. This is a string that looks something like
- * "3.0a5+ (py3k:63103M, May 12 2008, 00:53:55) \n[GCC 4.2.3]"
- *
- * The first word (up to the first space character) is the current Python version; the first characters are the major and minor version separated by a period. The returned string points into static storage; the caller should not modify its value. The value is available to Python code as sys.version.
- *
- * See also the Py_Version constant.
- */
-expect inline fun Py_GetVersion(): String?
-
-/**
- *Part of the Stable ABI.
- *
- * Return the platform identifier for the current platform.
- * On Unix, this is formed from the “official” name of the operating system, converted to lower case, followed by the major revision number;
- * e.g., for Solaris 2.x, which is also known as SunOS 5.x, the value is 'sunos5'.
- * On macOS, it is 'darwin'. On Windows, it is 'win'.
- * The returned string points into static storage; the caller should not modify its value.
- * The value is available to Python code as sys.platform.
- */
-expect inline fun Py_GetPlatform(): String?
-
-/**
- *Part of the Stable ABI.
- *
- * Return the official copyright string for the current Python version, for example
- *
- * 'Copyright 1991-1995 Stichting Mathematisch Centrum, Amsterdam'
- *
- * The returned string points into static storage; the caller should not modify its value.
- * The value is available to Python code as sys.copyright.
- */
-expect inline fun Py_GetCopyright(): String?
-
-/**
- *Part of the Stable ABI.
- *
- * Return an indication of the compiler used to build the current Python version, in square brackets, for example:
- * "[GCC 2.7.2.2]"
- *
- * The returned string points into static storage; the caller should not modify its value.
- * The value is available to Python code as part of the variable sys.version.
- */
-expect inline fun Py_GetCompiler(): String?
-
-/**
- *Part of the Stable ABI.
- *
- * Return information about the sequence number and build date and time of the current Python interpreter instance, for example
- * "#67, Aug  1 1997, 22:34:28"
- *
- * The returned string points into static storage; the caller should not modify its value.
- * The value is available to Python code as part of the variable sys.version.
- */
-expect inline fun Py_GetBuildInfo(): String?
-
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Section 2
-// Exception handling
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-expect fun PyErr_Occurred(): NativePointer?
-//expect inline fun PyErr_Clear()
-//expect inline fun PyErr_Print()
-
-
-
-expect fun PyLong_FromLongLong(v: Long): NativePointer?
-expect inline fun PyLong_AsLongLong(p: NativePointer): Long
-expect inline fun PyLong_AsInt(p: NativePointer): Int
-
-
-expect fun PyUnicode_FromString(str: String): NativePointer?
-expect inline fun PyUnicode_AsUTF8(unicode: NativePointer): String?
-*/
-
-
-//**************************************************
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Section 1
 // Initialization, Finalization, and Threads
@@ -368,16 +143,20 @@ expect inline fun Py_FinalizeEx(): Int
  */
 expect inline fun Py_Finalize()
 
-/**
- *  *Part of the Stable ABI since version 3.8.*
- *
- * Similar to "Py_Main()" but *argv* is an array of bytes strings,
- * allowing the calling application to delegate the text decoding step
- * to the CPython runtime.
- *
- * Added in version 3.8.
- */
-//expect inline fun Py_BytesMain(args: Array<String>): Int // 수동 추가
+// `Py_BytesMain(int argc, char **argv)` is deliberately absent from this surface.
+//
+// It is the one declaration from the superseded pre-migration draft that had no live counterpart,
+// so deleting that draft removed the last copy of it. It is not being revived here: every other
+// entry point in this file marshals scalars, pointers or a single string, and `char **argv` needs
+// a per-platform array marshaller -- an `Arena`-allocated pointer array on desktop, a
+// `jobjectArray` -> `char**` wrapper plus a `JNINativeMethod` registration and a call-convention
+// classification on Android, `allocArray<CPointerVar<ByteVar>>` on native, and a linear-memory
+// argv on wasm. That is four marshallers and a JNI table change for one function.
+//
+// Its only consumer is `Python3.runApp`, which already throws `NotImplementedError` naming this
+// function, and `Python3Test` pins that message so the gap cannot be quietly closed or quietly
+// forgotten. Reviving it is a task of its own; the native-side body written for it survives in
+// git history (`EmbedAPI.native.kt`, inside the block deleted here).
 
 /**
  * Executes the main module in a fully configured CPython runtime.
@@ -506,8 +285,22 @@ expect inline fun Py_GetBuildInfo(): String?
  * "Py_Initialize()" anymore.
  *
  * Deprecated since version 3.9.
+ *
+ * This is no longer bound to a C symbol. `ceval.h` marks it `Py_DEPRECATED(3.9)`, which is a
+ * compiler-enforced deprecation and therefore a removal schedule, and since 3.9 the C function's
+ * body has been empty. A Kotlin no-op is not an approximation of it — it is the same behaviour with
+ * one fewer FFI crossing — so nothing is lost by taking it out of the `expect`/`actual` surface,
+ * and callers written against older embeddings still compile. `EmbedApiSurfaceTest` derives the
+ * `Py_DEPRECATED` set from the bundled headers and fails if this name reappears in the surface.
  */
-expect inline fun PyEval_InitThreads()
+@Deprecated(
+    "Does nothing since CPython 3.9, where it also became Py_DEPRECATED. Py_Initialize has " +
+        "created the GIL by itself since 3.7; delete the call.",
+    level = DeprecationLevel.WARNING,
+)
+fun PyEval_InitThreads() {
+    // Intentionally empty: this mirrors the CPython 3.9+ implementation exactly.
+}
 
 /**
  *  *Return value: Borrowed reference.*
@@ -944,7 +737,19 @@ expect inline fun PyErr_SetRaisedException(exc: NativePointer)
  *   This function is normally only used by legacy code that needs to
  *   save and restore the error indicator temporarily. Use
  *   "PyErr_Fetch()" to save the current error indicator.
+ *
+ * Kept in the surface rather than deleted, because [PyErr_SetRaisedException] is not an alias for
+ * it: that one takes a single, already-normalized exception instance, while this takes the
+ * unnormalized `(type, value, traceback)` triple and normalizes lazily. Nothing in Kotlin can
+ * forward one to the other without inventing the normalization, so removing this would remove a
+ * capability rather than a duplicate. CPython names no removal version for it either.
  */
+@Deprecated(
+    "Deprecated by CPython 3.12 in favour of PyErr_SetRaisedException, which takes one " +
+        "normalized exception instead of the (type, value, traceback) triple. Not a mechanical " +
+        "substitution: this call steals a reference to each of the three arguments.",
+    level = DeprecationLevel.WARNING,
+)
 expect inline fun PyErr_Restore(type: NativePointer, value: NativePointer, traceback: NativePointer)
 
 /**
@@ -1765,7 +1570,19 @@ expect inline fun PyImport_ImportFrozenModule(name: String): Int
  * Return a dictionary of the builtins in the current execution frame,
  * or the interpreter of the thread state if no frame is currently
  * executing.
+ *
+ * Kept in the surface rather than deleted, because PyEval_GetFrameBuiltins is **not** a drop-in replacement: this
+ * function returns a *borrowed* reference and PyEval_GetFrameBuiltins returns a *new* one. Substituting it without
+ * also adding the matching decref moves ownership silently, and this repository has already had a
+ * heap corrupted once by a borrowed pointer wrapped as owned. The migration is a real change at
+ * each call site, so the declaration stays and carries this warning until those call sites move.
  */
+@Deprecated(
+    "Deprecated by CPython 3.13 in favour of PyEval_GetFrameBuiltins. Do NOT substitute blindly: this returns a " +
+        "BORROWED reference and PyEval_GetFrameBuiltins returns a NEW one, so the replacement needs a decref " +
+        "this one must not have.",
+    level = DeprecationLevel.WARNING,
+)
 expect fun PyEval_GetBuiltins(): NativePointer?
 
 /**
@@ -1797,7 +1614,19 @@ expect fun PyEval_GetBuiltins(): NativePointer?
  * "PyFrame_GetLocals()", "locals()", and "FrameType.f_locals" no
  * longer make use of the shared cache dictionary. Refer to the What’s
  * New entry for additional details.
+ *
+ * Kept in the surface rather than deleted, because PyEval_GetFrameLocals is **not** a drop-in replacement: this
+ * function returns a *borrowed* reference and PyEval_GetFrameLocals returns a *new* one. Substituting it without
+ * also adding the matching decref moves ownership silently, and this repository has already had a
+ * heap corrupted once by a borrowed pointer wrapped as owned. The migration is a real change at
+ * each call site, so the declaration stays and carries this warning until those call sites move.
  */
+@Deprecated(
+    "Deprecated by CPython 3.13 in favour of PyEval_GetFrameLocals. Do NOT substitute blindly: this returns a " +
+        "BORROWED reference and PyEval_GetFrameLocals returns a NEW one, so the replacement needs a decref " +
+        "this one must not have.",
+    level = DeprecationLevel.WARNING,
+)
 expect fun PyEval_GetLocals(): NativePointer?
 
 /**
@@ -1809,7 +1638,19 @@ expect fun PyEval_GetLocals(): NativePointer?
  *
  * Return a dictionary of the global variables in the current
  * execution frame, or "NULL" if no frame is currently executing.
+ *
+ * Kept in the surface rather than deleted, because PyEval_GetFrameGlobals is **not** a drop-in replacement: this
+ * function returns a *borrowed* reference and PyEval_GetFrameGlobals returns a *new* one. Substituting it without
+ * also adding the matching decref moves ownership silently, and this repository has already had a
+ * heap corrupted once by a borrowed pointer wrapped as owned. The migration is a real change at
+ * each call site, so the declaration stays and carries this warning until those call sites move.
  */
+@Deprecated(
+    "Deprecated by CPython 3.13 in favour of PyEval_GetFrameGlobals. Do NOT substitute blindly: this returns a " +
+        "BORROWED reference and PyEval_GetFrameGlobals returns a NEW one, so the replacement needs a decref " +
+        "this one must not have.",
+    level = DeprecationLevel.WARNING,
+)
 expect fun PyEval_GetGlobals(): NativePointer?
 
 /**

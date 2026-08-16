@@ -122,7 +122,7 @@ actual inline fun Py_GetPlatform(): String? = Wasm.readUtf8String(python.native.
 actual inline fun Py_GetCopyright(): String? = Wasm.readUtf8String(python.native.ffi.bindings.Py_GetCopyright())
 actual inline fun Py_GetCompiler(): String? = Wasm.readUtf8String(python.native.ffi.bindings.Py_GetCompiler())
 actual inline fun Py_GetBuildInfo(): String? = Wasm.readUtf8String(python.native.ffi.bindings.Py_GetBuildInfo())
-actual inline fun PyEval_InitThreads() = python.native.ffi.bindings.PyEval_InitThreads()
+// PyEval_InitThreads has no actual: it is a @Deprecated Kotlin no-op in EmbedAPI.kt, matching the empty CPython 3.9+ body.
 actual fun PyThreadState_GetDict(): NativePointer? = python.native.ffi.bindings.PyThreadState_GetDict().toNativePointerFromRaw()
 actual inline fun PyGILState_Ensure(): Int = python.native.ffi.bindings.PyGILState_Ensure()
 actual inline fun PyGILState_Release(state: Int) = python.native.ffi.bindings.PyGILState_Release(state)

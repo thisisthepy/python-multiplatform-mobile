@@ -29,14 +29,13 @@ actual inline fun Py_IsInitialized(): Int = python.native.ffi.bindings.Py_IsInit
 actual inline fun Py_IsFinalizing(): Int = python.native.ffi.bindings.Py_IsFinalizing()
 actual inline fun Py_FinalizeEx(): Int = python.native.ffi.bindings.Py_FinalizeEx()
 actual inline fun Py_Finalize() = python.native.ffi.bindings.Py_Finalize()
-// actual inline fun Py_BytesMain(argc: Int, argv: List<String>): Int
 actual inline fun Py_RunMain(): Int = python.native.ffi.bindings.Py_RunMain()
 actual inline fun Py_GetVersion(): String? = python.native.ffi.bindings.Py_GetVersion()
 actual inline fun Py_GetPlatform(): String? = python.native.ffi.bindings.Py_GetPlatform()
 actual inline fun Py_GetCopyright(): String? = python.native.ffi.bindings.Py_GetCopyright()
 actual inline fun Py_GetCompiler(): String? = python.native.ffi.bindings.Py_GetCompiler()
 actual inline fun Py_GetBuildInfo(): String? = python.native.ffi.bindings.Py_GetBuildInfo()
-actual inline fun PyEval_InitThreads() = python.native.ffi.bindings.PyEval_InitThreads()
+// PyEval_InitThreads has no actual: it is a @Deprecated Kotlin no-op in EmbedAPI.kt, matching the empty CPython 3.9+ body.
 actual fun PyThreadState_GetDict(): NativePointer? = python.native.ffi.bindings.PyThreadState_GetDict().toNativePointerFromRaw()
 
 actual inline fun PyGILState_Ensure(): Int = python.native.ffi.bindings.PyGILState_Ensure()

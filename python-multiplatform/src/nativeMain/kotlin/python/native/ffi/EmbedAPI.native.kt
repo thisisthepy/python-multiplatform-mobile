@@ -2,8 +2,6 @@ package python.native.ffi
 
 import kotlinx.cinterop.*
 import kotlinx.cinterop.memScoped
-import platform.posix.getenv
-import platform.posix.setenv
 import python.native.ffi.bindings.PyObject
 import kotlin.experimental.ExperimentalNativeApi
 import python.native.ffi.bindings.PyTuple_GetItem
@@ -43,92 +41,6 @@ private const val exportClassName = "bindings"
 private const val namePrefix = "Java_${packageName}_${exportClassName}_"
 
 
-/**
-// Section 1
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_Initialize() {
-    println("Native Python Home: ${getenv("PYTHONHOME")?.toKString()}")  // TODO: Remove Debugging line
-    python.native.ffi.bindings.Py_Initialize()
-}
-@CName("${namePrefix}Py_1InitializeEx")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_InitializeEx(initsigs: Int) = python.native.ffi.bindings.Py_InitializeEx(initsigs)
-//actual fun Py_InitializeFromConfig(config) = python.native.ffi.bindings.Py_InitializeFromConfig()
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_IsInitialized() = python.native.ffi.bindings.Py_IsInitialized()
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_Finalize() = python.native.ffi.bindings.Py_Finalize()
-@CName("${namePrefix}Py_1FinalizeEx")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_FinalizeEx() = python.native.ffi.bindings.Py_FinalizeEx()
-@CName("${namePrefix}Py_1IsFinalizing")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_IsFinalizing() = python.native.ffi.bindings.Py_IsFinalizing()
-@CName("${namePrefix}Py_1BytesMain")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_BytesMain(args: Array<String>) = memScoped {
-    val cArgs = allocArray<CPointerVar<ByteVar>>(args.size + 1)
-    args.forEachIndexed { index, arg -> cArgs[index] = arg.cstr.ptr }
-    cArgs[args.size] = null
-    python.native.ffi.bindings.Py_BytesMain(args.size, cArgs)
-}
-@CName("${namePrefix}Py_1RunMain")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_RunMain() = python.native.ffi.bindings.Py_RunMain()
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun PyRun_SimpleString(command: String): Int = python.native.ffi.bindings.PyRun_SimpleString(command)
-@CName("${namePrefix}PyRun_1String")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual fun PyRun_String(
-    str: String, start: Int, globals: NativePointer, locals: NativePointer
-): NativePointer? = python.native.ffi.bindings.PyRun_String(
-    str, start, globals.toPlatformPointer(), locals.toPlatformPointer()
-).toNativePointer()
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_GetVersion(): String? = python.native.ffi.bindings.Py_GetVersion()?.toKString()
-@CName("${namePrefix}Py_1GetPlatform")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_GetPlatform(): String? = python.native.ffi.bindings.Py_GetPlatform()?.toKString()
-@CName("${namePrefix}Py_1GetCopyright")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_GetCopyright(): String? = python.native.ffi.bindings.Py_GetCopyright()?.toKString()
-@CName("${namePrefix}Py_1GetCompiler")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_GetCompiler(): String? = python.native.ffi.bindings.Py_GetCompiler()?.toKString()
-@CName("${namePrefix}Py_1GetBuildInfo")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun Py_GetBuildInfo(): String? = python.native.ffi.bindings.Py_GetBuildInfo()?.toKString()
-
-
-// Section 2
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual fun PyErr_Occurred(): NativePointer? = python.native.ffi.bindings.PyErr_Occurred().toNativePointer()
-
-
-
-@OptIn(ExperimentalForeignApi::class)
-actual fun PyLong_FromLongLong(v: Long): NativePointer? = python.native.ffi.bindings.PyLong_FromLongLong(v).toNativePointer()
-@OptIn(ExperimentalForeignApi::class)
-actual inline fun PyLong_AsLongLong(p: NativePointer): Long = python.native.ffi.bindings.PyLong_AsLongLong(p.toPlatformPointer())
-@OptIn(ExperimentalForeignApi::class)
-actual inline fun PyLong_AsInt(p: NativePointer): Int = python.native.ffi.bindings.PyLong_AsInt(p.toPlatformPointer())
-
-
-
-
-
-@OptIn(ExperimentalForeignApi::class)
-actual fun PyUnicode_FromString(str: String): NativePointer? =
-    python.native.ffi.bindings.PyUnicode_FromString(str).toNativePointer()
-@OptIn(ExperimentalForeignApi::class)
-actual inline fun PyUnicode_AsUTF8(unicode: NativePointer): String? =
-    python.native.ffi.bindings.PyUnicode_AsUTF8(unicode.toPlatformPointer())?.toKString()
-
-
- */
-
-
-//**************************************************
 // Section 1
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_Initialize() = python.native.ffi.bindings.Py_Initialize()
@@ -145,14 +57,6 @@ actual inline fun Py_IsFinalizing(): Int = python.native.ffi.bindings.Py_IsFinal
 actual inline fun Py_FinalizeEx(): Int = python.native.ffi.bindings.Py_FinalizeEx()
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_Finalize() = python.native.ffi.bindings.Py_Finalize()
-//@CName("${namePrefix}Py_1BytesMain")
-//@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-//actual inline fun Py_BytesMain(args: Array<String>) = memScoped {
-//    val cArgs = allocArray<CPointerVar<ByteVar>>(args.size + 1)
-//    args.forEachIndexed { index, arg -> cArgs[index] = arg.cstr.ptr }
-//    cArgs[args.size] = null
-//    python.native.ffi.bindings.Py_BytesMain(args.size, cArgs)
-//} // 수동 추가
 @CName("${namePrefix}Py_1RunMain")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_RunMain() = python.native.ffi.bindings.Py_RunMain() // 수동 추가
@@ -170,9 +74,7 @@ actual inline fun Py_GetCompiler(): String? = python.native.ffi.bindings.Py_GetC
 @CName("${namePrefix}Py_1GetBuildInfo")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual inline fun Py_GetBuildInfo(): String? = python.native.ffi.bindings.Py_GetBuildInfo()?.toKString()
-@CName("${namePrefix}PyEval_1InitThreads")
-@OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
-actual inline fun PyEval_InitThreads() = python.native.ffi.bindings.PyEval_InitThreads()
+// PyEval_InitThreads has no actual: it is a @Deprecated Kotlin no-op in EmbedAPI.kt, matching the empty CPython 3.9+ body.
 @CName("${namePrefix}PyThreadState_1GetDict")
 @OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 actual fun PyThreadState_GetDict(): NativePointer? = python.native.ffi.bindings.PyThreadState_GetDict().toNativePointer()

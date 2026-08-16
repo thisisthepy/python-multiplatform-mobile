@@ -27,53 +27,6 @@ actual fun Long.toNativePointer(): NativePointer? = if (this > 0) NativePointer(
 internal inline fun JNIPointer?.toNativePointer(): NativePointer? = this?.let { if (it > 0) NativePointer(it) else null }
 
 
-/**
-// Section 1
-actual inline fun Py_Initialize() = python.native.ffi.bindings.Py_Initialize()
-actual inline fun Py_InitializeEx(initsigs: Int) = python.native.ffi.bindings.Py_InitializeExN(initsigs)
-//actual fun Py_InitializeFromConfig(config) = python.native.ffi.bindings.Py_InitializeFromConfig()
-actual inline fun Py_IsInitialized() = python.native.ffi.bindings.Py_IsInitialized()
-actual inline fun Py_IsFinalizing() = python.native.ffi.bindings.Py_IsFinalizingN()
-actual inline fun Py_Finalize() = python.native.ffi.bindings.Py_Finalize()
-actual inline fun Py_FinalizeEx(): Int = python.native.ffi.bindings.Py_FinalizeExN()
-actual inline fun Py_BytesMain(args: Array<String>): Int = python.native.ffi.bindings.Py_BytesMain(args)
-actual inline fun Py_RunMain(): Int = python.native.ffi.bindings.Py_RunMain()
-actual inline fun PyRun_SimpleString(command: String): Int = python.native.ffi.bindings.PyRun_SimpleString(command)
-actual fun PyRun_String(
-    str: String, start: Int, globals: NativePointer, locals: NativePointer
-): NativePointer? = python.native.ffi.bindings.PyRun_String(
-    str, start, globals.toPlatformPointer(), locals.toPlatformPointer()
-).toNativePointer()
-actual inline fun Py_GetVersion(): String? = python.native.ffi.bindings.Py_GetVersion()
-actual inline fun Py_GetPlatform(): String? = python.native.ffi.bindings.Py_GetPlatform()
-actual inline fun Py_GetCopyright(): String? = python.native.ffi.bindings.Py_GetCopyright()
-actual inline fun Py_GetCompiler(): String? = python.native.ffi.bindings.Py_GetCompiler()
-actual inline fun Py_GetBuildInfo(): String? = python.native.ffi.bindings.Py_GetBuildInfo()
-
-
-// Section 2
-actual fun PyErr_Occurred(): NativePointer? = python.native.ffi.bindings.PyErr_Occurred().toNativePointer()
-
-
-
-
-
-
-actual fun PyLong_FromLongLong(v: Long): NativePointer? = python.native.ffi.bindings.PyLong_FromLongLong(v).toNativePointer()
-actual inline fun PyLong_AsLongLong(p: NativePointer): Long = python.native.ffi.bindings.PyLong_AsLongLong(p.toPlatformPointer())
-actual inline fun PyLong_AsInt(p: NativePointer): Int = python.native.ffi.bindings.PyLong_AsInt(p.toPlatformPointer())
-
-
-actual fun PyUnicode_FromString(str: String): NativePointer? =
-    python.native.ffi.bindings.PyUnicode_FromString(str).toNativePointer()
-actual inline fun PyUnicode_AsUTF8(unicode: NativePointer): String? =
-    python.native.ffi.bindings.PyUnicode_AsUTF8(unicode.toPlatformPointer())
-
-
-*/
-
-
-//**************************************************
 // Section 1
 // Runs site.py and other start-up Python; unbounded, so never on a GC-blocking path.
 actual inline fun Py_Initialize() = python.native.ffi.bindings.Py_InitializeN()
@@ -83,7 +36,6 @@ actual inline fun Py_IsFinalizing(): Int = python.native.ffi.bindings.Py_IsFinal
 actual inline fun Py_FinalizeEx(): Int = python.native.ffi.bindings.Py_FinalizeExN()
 // Runs atexit handlers and __del__ during teardown.
 actual inline fun Py_Finalize() = python.native.ffi.bindings.Py_FinalizeN()
-// actual inline fun Py_BytesMain(argc: Int, argv: List<String>): Int // 수동 추가
 actual inline fun Py_RunMain(): Int = python.native.ffi.bindings.Py_RunMainN() // 수동 추가
 actual inline fun Py_GetVersion(): String? {
     // CPython-owned const char* return value. JVM side must NOT free it.
@@ -106,7 +58,7 @@ actual inline fun Py_GetBuildInfo(): String? {
     val ptr = python.native.ffi.bindings.Py_GetBuildInfoN()
     return if (ptr != 0L) python.native.ffi.bindings.ffiReadUtf8(ptr) else null
 }
-actual inline fun PyEval_InitThreads() = python.native.ffi.bindings.PyEval_InitThreadsN()
+// PyEval_InitThreads has no actual: it is a @Deprecated Kotlin no-op in EmbedAPI.kt, matching the empty CPython 3.9+ body.
 actual fun PyThreadState_GetDict(): NativePointer? = python.native.ffi.bindings.PyThreadState_GetDictN().toNativePointer()
 
 actual inline fun PyGILState_Ensure(): Int = python.native.ffi.bindings.PyGILState_EnsureN()
