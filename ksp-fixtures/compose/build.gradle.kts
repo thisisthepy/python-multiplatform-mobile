@@ -66,10 +66,13 @@ pythonBindings {
 
     artifactConfiguration.set("desktopCompileClasspath")
     artifactSourceSet.set("desktopMain")
-    // Narrow on purpose, and narrower than `:ksp-fixtures:artifact`'s: binding all of material3
-    // would make this fixture's compile time the cost of a proof it does not need. `Text` is the
-    // acceptance criterion and it lives here.
-    artifactIncludePackages.set(listOf("androidx.compose.material3"))
+    // Narrow on purpose, and narrower than `:ksp-fixtures:artifact`'s: binding all of Compose would
+    // make this fixture's compile time the cost of a proof it does not need. Two packages, and the
+    // second is not decoration -- `Text` is a *leaf*, and a leaf is reachable without ever filling a
+    // function-typed slot. `androidx.compose.foundation.layout.Column` is the container whose
+    // `content` declares no default, so it is the declaration that is unreachable until a Python
+    // callable can cross, which is what `ComposableRenderTest` renders.
+    artifactIncludePackages.set(listOf("androidx.compose.material3", "androidx.compose.foundation.layout"))
     generateStubs.set(false)
 }
 

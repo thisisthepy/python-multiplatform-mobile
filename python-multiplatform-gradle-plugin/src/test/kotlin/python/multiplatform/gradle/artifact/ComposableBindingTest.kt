@@ -237,6 +237,87 @@ class ComposableBindingTest {
         return writer.toByteArray()
     }
 
+    /**
+     * The rule `ArtifactScanner.functionSlotTypeName` decides a `content` slot by, measured rather
+     * than assumed: **a function-typed parameter of a composable is either plain or lowered by
+     * exactly two.**
+     *
+     * A `@Composable` function *type* gains a `Composer` and **one** `$changed` when the Compose
+     * plugin lowers it -- one, not the `ceil(n/10)` a lowered composable *function* carries, which is
+     * what makes the two cases distinguishable at all. That relation is the whole basis on which
+     * `pythonx` decides whether to thread a composer through an invocation, so a declaration that
+     * contradicted it would produce a wrapper cast to an interface it does not implement, at the
+     * call site, with nothing said earlier.
+     *
+     * Deliberately not a fixed count: it prints how many slots it checked and fails on the first one
+     * whose two arities are related in neither way.
+     */
+    @Test
+    fun everyFunctionTypedSlotOfAComposableIsEitherPlainOrLoweredByTwo() {
+        val jars = listOfNotNull(
+            jarUnder("org.jetbrains.compose.material3", "material3-desktop"),
+            jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop"),
+            jarUnder("org.jetbrains.compose.material", "material-desktop"),
+        )
+        if (jars.isEmpty()) return
+        var plain = 0
+        var lowered = 0
+        val wrong = mutableListOf<String>()
+        forEachPublicComposable(jars, composeClasspath()) { owner, function, method ->
+            val (descriptors, _) = splitMethodDescriptor(method.desc)
+            function.allParameterTypes.forEachIndexed { index, type ->
+                val descriptor = descriptors.getOrNull(index) ?: return@forEachIndexed
+                val jvmArity = ArtifactScanner.jvmFunctionArityOf(descriptor) ?: return@forEachIndexed
+                val declared = kotlinClassifierNameOf(type)
+                val reported = declared?.let { ArtifactScanner.functionSlotTypeName(it, descriptor) }
+                when {
+                    reported == null ->
+                        wrong += "$owner.${function.kotlinName} slot $index: declared=$declared jvm=Function$jvmArity"
+                    reported.endsWith(ArtifactScanner.COMPOSABLE_TYPE_MARK) -> lowered++
+                    else -> plain++
+                }
+            }
+        }
+        println("function-typed composable slots: $plain plain, $lowered lowered by two")
+        assertTrue(plain + lowered > 100, "expected the jars to declare function-typed slots; saw ${plain + lowered}")
+        assertEquals(emptyList(), wrong, "function-typed slots whose declared and compiled arities are unrelated")
+    }
+
+    /**
+     * The two rows of that distinction that decide whether a container is usable, named individually.
+     *
+     * `Column.content` is the acceptance criterion's slot and it declares **no default**, so a
+     * `Column` whose `content` cannot be filled is not reachable at all -- unlike `Text`, which is
+     * reachable with everything but its string omitted. `Button.onClick` is the plain case in the
+     * same walk, so a rule that marked every function type as composable would fail here rather than
+     * only at the call site.
+     */
+    @Test
+    fun theContentSlotIsMarkedComposableAndAnOnClickIsNot() {
+        val layout = jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop") ?: return
+        val material3 = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val classpath = composeClasspath()
+
+        val column = ArtifactScanner.scanJar(layout, listOf("androidx.compose.foundation.layout"), classpath)
+            .single { it.name == "androidx.compose.foundation.layout.Column" }
+        assertEquals(
+            listOf("modifier", "verticalArrangement", "horizontalAlignment", "content"),
+            column.paramNames.take(4),
+        )
+        assertEquals("kotlin.Function3@Composable", column.paramTypeNames[3], "Column.content")
+        assertEquals(false, column.paramHasDefault[3], "content declares no default, so it must be fillable")
+
+        val button = ArtifactScanner.scanJar(material3, listOf("androidx.compose.material3"), classpath)
+            .single { it.name.substringAfterLast('.') == "Button" }
+        assertEquals("onClick", button.paramNames.first())
+        assertEquals("kotlin.Function0", button.paramTypeNames[0], "Button.onClick is not lowered")
+        assertEquals(
+            "kotlin.Function3@Composable",
+            button.paramTypeNames[button.paramNames.indexOf("content")],
+            "Button.content is",
+        )
+    }
+
     private fun forEachPublicComposable(
         jars: List<File>,
         classpath: List<File>,

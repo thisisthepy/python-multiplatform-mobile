@@ -424,6 +424,94 @@ object PythonxAdapter {
             _VALUE_CLASS_ALLOWLIST.add(kotlin_type_name)
 
 
+        # ------------------------------------------------------------------- callables (§6)
+
+        _FUNCTION_PREFIX = 'kotlin.Function'
+
+        # What `ArtifactScanner.functionSlotTypeName` appends to a slot whose declared
+        # `kotlin.FunctionN` was lowered by the Compose plugin into a JVM `FunctionN+2`. Not a legal
+        # character in a Kotlin fully-qualified name, which is the same trick `${'$'}composer` plays one
+        # layer up: the name is the flag, and it cannot drift out of step with the slot it describes.
+        _COMPOSABLE_MARK = '@Composable'
+
+
+        def _function_slot(type_name):
+            '''`(jvm_arity, composable)` for a Kotlin function-typed slot, or `None`.
+
+            The arity is the **compiled** one -- what the object will be invoked with -- because that
+            is what decides which `FunctionN` interface Kotlin has to hand back. For a lowered
+            composable lambda the last two of those are the `${'$'}composer` and the `${'$'}changed` Compose
+            appends to a function *type* exactly as it appends them to a function.
+            '''
+            if not type_name or not type_name.startswith(_FUNCTION_PREFIX):
+                return None
+            composable = type_name.endswith(_COMPOSABLE_MARK)
+            tail = type_name[len(_FUNCTION_PREFIX):]
+            if composable:
+                tail = tail[:-len(_COMPOSABLE_MARK)]
+            if not tail.isdigit():
+                return None
+            return (int(tail), composable)
+
+
+        def _is_python_callable(value):
+            '''A Python callable that is not already something the boundary can carry.
+
+            An `int` is excluded because it is the raw boundary's own currency for an object handle,
+            and a proxy is excluded because it already owns a Kotlin object -- either could in
+            principle be callable, and neither is what this path is for.
+            '''
+            if getattr(value, '_pm_handle', None) is not None:
+                return False
+            if isinstance(value, int):
+                return False
+            return callable(value)
+
+
+        def _content_thunk(fn):
+            '''Wraps a Python callable so that Kotlin can hand it the composer of the invocation.
+
+            The push and the pop are here rather than on the Kotlin side because the composer stack
+            is this module's, and reaching it from Kotlin would be two more boundary crossings per
+            invocation -- one to resolve `push_composer` and one to call it -- for a `try/finally`
+            Python can write directly.
+
+            **The composer is the one this invocation was given**, not the one that was current when
+            the lambda crossed. Compose invokes a stored content lambda again on later
+            recompositions, with whatever composer is current then; a thunk that closed over the
+            creating composer would be pushing a position that no longer exists.
+            '''
+            def _thunk(composer):
+                _COMPOSER.append(composer)
+                try:
+                    return fn()
+                finally:
+                    _COMPOSER.pop()
+            return _thunk
+
+
+        # Returned by `_coerce` for a callable during a *trial* bind. `_Overloads` binds every
+        # candidate to find out which one matches, and building a wrapper for a candidate that then
+        # loses would hand Kotlin a Python reference nothing ever calls -- held until the composition
+        # ends, because the scope is what releases it. So the wrapper is built only in the strict
+        # bind, and `_Overloads` re-binds its winner strictly before calling.
+        _CALLABLE_PENDING = object()
+
+
+        def _make_function(value, jvm_arity, composable):
+            '''Hands [value] to Kotlin as a `FunctionN`, and returns the handle of the wrapper.
+
+            The wrapper belongs to the enclosing `PythonCallables` scope, which is the composition's:
+            Compose stores a `content` in the slot table and calls it on later recompositions, long
+            after the statement that wrote `content=lambda: ...` dropped Python's last reference to
+            it. A bare handle is what comes back, which is exactly what an OBJECT slot takes.
+            '''
+            body = _content_thunk(value) if composable else value
+            return _boundary()['invoke'](
+                _resolve('pythonx.runtime.newFunction'), (body, jvm_arity, composable)
+            )
+
+
         def _is_value_class_over_primitive(tag, type_name):
             # The table cannot say "value class" -- but a parameter whose marshalling tag is a primitive
             # while its *declared* type is not a Kotlin primitive is one, and that is enough. `Dp` is
@@ -610,6 +698,15 @@ object PythonxAdapter {
                     )
                 return value.raw
             if tag == 'OBJECT':
+                # A Kotlin function type is the one OBJECT slot Python can fill with something it
+                # made itself. Everything else in this branch requires a handle, because a Kotlin
+                # object is the only thing a Kotlin parameter can hold; a function is the exception
+                # because Kotlin can be given one that calls back.
+                slot = _function_slot(type_name)
+                if slot is not None and _is_python_callable(value):
+                    if not strict:
+                        return _CALLABLE_PENDING
+                    return _make_function(value, slot[0], slot[1])
                 handle = getattr(value, '_pm_handle', None)
                 if handle is not None:
                     declared = _declared_type_name(value)
@@ -934,7 +1031,15 @@ object PythonxAdapter {
                     fewest = min(entry[2] for entry in matched)
                     matched = [entry for entry in matched if entry[2] == fewest]
                 if len(matched) == 1:
-                    decl, bound, _ = matched[0]
+                    decl = matched[0][0]
+                    # Re-bound strictly, and the trial binding above is discarded. A trial bind is a
+                    # question -- *would* this candidate accept these arguments -- and a coercion
+                    # with a side effect must not answer it: `_coerce` hands a Python callable to
+                    # Kotlin, and doing that for a candidate that then loses would leave a Python
+                    # reference held for the life of the composition with nothing ever calling it.
+                    # `_CALLABLE_PENDING` is what a trial bind puts in such a slot instead, and this
+                    # is why it never reaches the boundary.
+                    bound, _ = _bind(decl, args, kwargs, True)
                     return _wrap(
                         _boundary()['invoke'](decl.bound_handle(), bound),
                         decl.return_type_name if decl.return_tag == 'OBJECT' else None,
@@ -1163,6 +1268,10 @@ object PythonxAdapter {
      * @return the source that was executed, so a caller can log or inspect exactly what ran.
      */
     fun install(): String {
+        // The adapter's own Kotlin service, registered by the layer that needs it rather than by
+        // every consumer's table. Idempotent by `moduleName`, so a second install after a `clear()`
+        // puts it back and one after a `register` does nothing. See [PythonCallables.Fragment].
+        UpcallTable.register(PythonCallables.Fragment)
         val source = render(UpcallTable.entries())
         Python3.exec(source)
         return source

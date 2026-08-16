@@ -1,5 +1,7 @@
 package fixture.compose
 
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import org.jetbrains.skia.Bitmap
@@ -131,6 +133,234 @@ class ComposableRenderTest {
     }
 
     /**
+     * **The container.** `Column(content=lambda: Text('hi'))` -- a Python callable filling a Kotlin
+     * `Function3`.
+     *
+     * ### Why this is a different claim from `Text('hi')`
+     *
+     * `Text` is a leaf: every one of its sixteen parameters is a value, so it was reachable the
+     * moment the `$default` mask was. `Column` is not, and not because it is harder -- because
+     * `content` is the one parameter it does **not** default. Until a Python callable could become a
+     * `Function3`, `Column` had no reachable call at all, and neither did `Row`, `Box` or `Button`.
+     * A UI is containers; that is why this and not another leaf.
+     *
+     * ### How "the content drew" is decided
+     *
+     * The same way [pythonDrawsARealMaterial3Text] decides it, and with the same guard against the
+     * weaker claim: a `Column` whose content draws is compared against a `Column` whose content is
+     * `pass`. So "Compose composed a Column" cannot pass this -- an empty `Column` composes exactly
+     * as much and draws nothing. The text is offset by a padding-free `Column`, so the ink is the
+     * text's own.
+     */
+    @Test
+    fun pythonFillsAContainersContentSlotWithALambda() {
+        val drawn = inkOf(
+            """
+            from pythonx.compose.foundation.layout import Column
+            from pythonx.compose.material3 import Text
+            Column(content=lambda: Text('hi'))
+            """.trimIndent(),
+        )
+        val empty = inkOf(
+            """
+            from pythonx.compose.foundation.layout import Column
+            Column(content=lambda: None)
+            """.trimIndent(),
+        )
+
+        println("compose render: Column(content=lambda: Text('hi')) -> $drawn px, empty content -> $empty px")
+        assertEquals(0, empty, "a Column whose content draws nothing must draw nothing")
+        assertTrue(drawn > 0, "the content lambda never reached Compose")
+    }
+
+    /**
+     * The content lambda is a real composition position, not a string that got concatenated
+     * somewhere: **two** `Text`s inside one `Column` stack, and stacking is more ink than either.
+     *
+     * Without this, a `content` that was invoked once with the wrong composer -- or a body that was
+     * `exec`ed at the outer position and merely happened to draw -- would be indistinguishable from
+     * one that composed inside the container.
+     */
+    @Test
+    fun theContentComposesInsideTheContainerAndNotBesideIt() {
+        val one = inkOf(
+            """
+            from pythonx.compose.foundation.layout import Column
+            from pythonx.compose.material3 import Text
+            Column(content=lambda: Text('hi'))
+            """.trimIndent(),
+        )
+        val two = inkOf(
+            """
+            from pythonx.compose.foundation.layout import Column
+            from pythonx.compose.material3 import Text
+
+            def _body():
+                Text('hi')
+                Text('hi')
+
+            Column(content=_body)
+            """.trimIndent(),
+        )
+
+        println("compose render: one Text in a Column -> $one px, two -> $two px")
+        assertTrue(two > one, "a second child added no ink: $one vs $two")
+    }
+
+    /**
+     * **`docs/pythonx-adapter-design.md` §6 item 1, executed:** when Compose drops the slot, the
+     * Python callable comes back.
+     *
+     * `sys.getrefcount` is the measurement and the callable is held in a Python global, so the only
+     * thing that can move the count is the Kotlin side taking a reference and giving it back.
+     * `RememberObserver.onForgotten` is the only hook that reports the drop, which is why
+     * [PythonCallableArena] is a remembered value and why this test closes the scene rather than
+     * merely letting it go out of scope.
+     *
+     * Three assertions, because a leak test alone would pass a double release (`agent-rules` §14):
+     * the count goes **up** while the composition is alive, comes **back** when it is disposed, and
+     * the arena reports releasing **exactly one** callable rather than releasing something twice.
+     */
+    @Test
+    fun aDisposedCompositionGivesEveryPythonCallableBack() {
+        Python3.exec(
+            """
+            import sys
+            from pythonx.compose.material3 import Text
+
+            def _content():
+                Text('hi')
+
+            _base = sys.getrefcount(_content)
+            """.trimIndent(),
+        )
+
+        PythonCallableArena.resetCounters()
+        val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
+            PythonComposition(
+                """
+                from pythonx.compose.foundation.layout import Column
+                Column(content=_content)
+                """.trimIndent(),
+            )
+        }
+        try {
+            scene.render()
+            Python3.exec("_held = sys.getrefcount(_content)")
+        } finally {
+            scene.close()
+        }
+
+        Python3.exec("_after = sys.getrefcount(_content)")
+        val base = pyInt("_base")
+        val held = pyInt("_held")
+        val after = pyInt("_after")
+
+        println(
+            "callable lifetime: refcount base=$base held=$held disposed=$after; " +
+                "arenas created=${PythonCallableArena.created} forgotten=${PythonCallableArena.forgotten} " +
+                "released=${PythonCallableArena.released}",
+        )
+        assertEquals(1, PythonCallableArena.created, "the arena was never remembered")
+        assertTrue(held > base, "nothing held a reference for the composition: $base -> $held")
+        assertEquals(1, PythonCallableArena.forgotten, "onForgotten never fired, so nothing could release")
+        // Not "at least one": `close` reports `0` for every call after the first, so a total above
+        // the number of callables that crossed is the double-release this cannot be allowed to pass.
+        assertEquals(1, PythonCallableArena.released, "callables released, expected exactly the one that crossed")
+        assertEquals(base, after, "the composition did not give the Python reference back")
+    }
+
+    /**
+     * **The holder outlives a composition pass**, which is the property the whole arrangement rests
+     * on and the one a single render cannot show.
+     *
+     * A second pass is forced by changing the source `PythonComposition` is given, so the Python body
+     * runs again and a second callable crosses. Two things are then true and they are different
+     * claims: the arena is **the same one** -- `remember` returned it again, so `created` is still 1
+     * after two passes -- and the callable from the *first* pass is still held, because nothing but
+     * `onForgotten` releases and that has not fired. Both are released at disposal, and both
+     * reference counts come back.
+     *
+     * That the first pass's callable is still held is a **cost** as much as a correctness property:
+     * a composition that recomposes *n* times holds *n* Python callables until it is disposed, and
+     * `everyCrossingBuildsItsOwnWrapperAndTheScopeHoldsThemAll` in `commonTest` states the same
+     * thing from the other side. Releasing one when Compose stops using it needs a hook that reports
+     * *that*, and `RememberObserver` is not one -- a `content` is a parameter, not a remembered value.
+     */
+    @Test
+    fun theHolderSurvivesARecompositionAndReleasesBothCallablesAtDisposal() {
+        Python3.exec(
+            """
+            import sys
+            from pythonx.compose.material3 import Text
+
+            def _first():
+                Text('hi')
+
+            def _second():
+                Text('hi hi hi hi hi')
+
+            _base_first = sys.getrefcount(_first)
+            _base_second = sys.getrefcount(_second)
+            """.trimIndent(),
+        )
+
+        PythonCallableArena.resetCounters()
+        val body = mutableStateOf(columnCalling("_first"))
+        val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
+            PythonComposition(body.value)
+        }
+        val firstInk: Int
+        val secondInk: Int
+        try {
+            firstInk = inkOfImage(scene.render())
+            body.value = columnCalling("_second")
+            Snapshot.sendApplyNotifications()
+            secondInk = inkOfImage(scene.render())
+            Python3.exec("_held_first = sys.getrefcount(_first)")
+            assertEquals(1, PythonCallableArena.created, "the arena was rebuilt instead of remembered")
+            assertEquals(0, PythonCallableArena.released, "something released a callable before disposal")
+        } finally {
+            scene.close()
+        }
+        Python3.exec("_after_first = sys.getrefcount(_first)\n_after_second = sys.getrefcount(_second)")
+
+        println(
+            "recomposition: ink $firstInk -> $secondInk; _first refcount " +
+                "${pyInt("_base_first")} held=${pyInt("_held_first")} disposed=${pyInt("_after_first")}; " +
+                "released=${PythonCallableArena.released}",
+        )
+        assertTrue(secondInk > firstInk, "the second pass drew the first pass's content: $firstInk vs $secondInk")
+        assertTrue(
+            pyInt("_held_first") > pyInt("_base_first"),
+            "the first pass's callable was not still held during the second",
+        )
+        assertEquals(2, PythonCallableArena.released, "expected both passes' callables to be released once each")
+        assertEquals(pyInt("_base_first"), pyInt("_after_first"), "the first pass's callable never came back")
+        assertEquals(pyInt("_base_second"), pyInt("_after_second"), "the second pass's callable never came back")
+    }
+
+    private fun columnCalling(name: String): String =
+        "from pythonx.compose.foundation.layout import Column\nColumn(content=$name)"
+
+    private fun inkOfImage(image: Image): Int {
+        val bitmap = Bitmap.makeFromImage(image)
+        var ink = 0
+        for (y in 0 until bitmap.height) {
+            for (x in 0 until bitmap.width) {
+                if (bitmap.getColor(x, y) != BACKGROUND) ink++
+            }
+        }
+        return ink
+    }
+
+    /** One Python `int` global, read into Kotlin. `PythonTestFixture` is `commonTest` of another
+     * module, so the two C API calls it wraps are repeated here rather than depended on. */
+    private fun pyInt(name: String): Int = Python3.import("__main__").getAttr("__dict__").let { globals ->
+        Python3.eval(name, PY_EVAL_INPUT, globals, globals).toString().toInt()
+    }
+
+    /**
      * How many pixels of a 200x60 scene differ from the background after running [body] inside a
      * composition.
      */
@@ -158,5 +388,8 @@ class ComposableRenderTest {
     private companion object {
         /** `ImageComposeScene` clears to transparent black. */
         const val BACKGROUND = 0
+
+        /** CPython's `Py_eval_input`. */
+        const val PY_EVAL_INPUT = 258
     }
 }

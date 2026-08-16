@@ -84,5 +84,79 @@ object ComposableShapedFragment : FunctionTableFragment {
             returnTypeName = COMPOSER,
             callable = { StubComposer },
         ),
+        // A **container**: the shape `androidx.compose.foundation.layout.Column` really has, reduced
+        // the same way `Text` above is. Slot 1 is the one this fixture exists for -- a parameter the
+        // walker reports as `kotlin.Function3@Composable`, which is a `@Composable ColumnScope.() ->
+        // Unit` after the Compose plugin lowered it (measured: `Column`'s JVM descriptor takes
+        // `Lkotlin/jvm/functions/Function3;` where metadata declares `kotlin.Function1`).
+        ExposedCallable(
+            name = "androidx.compose.foundation.layout.Column",
+            arity = 5,
+            paramTypes = listOf(TypeTag.OBJECT, TypeTag.OBJECT, TypeTag.OBJECT, TypeTag.INT, TypeTag.INT),
+            returnType = TypeTag.UNIT,
+            kind = CallableKind.FUNCTION,
+            paramNames = listOf("modifier", "content", "\$composer", "\$changed", "\$default"),
+            paramTypeNames = listOf(
+                "androidx.compose.ui.Modifier", COMPOSABLE_FUNCTION3, COMPOSER, "kotlin.Int", "kotlin.Int",
+            ),
+            returnTypeName = null,
+            paramHasDefault = listOf(true, false, false, false, false),
+            callable = { args ->
+                calls += args.toList()
+                // Exactly what Compose does with a lowered `content`: an ordinary interface call
+                // passing the scope, the composer and a `$changed` of its own. If the object in
+                // slot 1 is not a `Function3` this is where it fails, which is the point.
+                @Suppress("UNCHECKED_CAST")
+                val content = args[1] as Function3<Any?, Any?, Any?, Unit>
+                contentInvocations++
+                // Deliberately **not** `args[2]`. Compose hands a content lambda the composer that
+                // is current where the content runs, and a wrapper that ignored its own argument and
+                // reused whatever `pythonx.push_composer` last saw would pass every test that used
+                // one composer. A distinct object makes that shortcut fail.
+                content(StubScope, InnerComposer, 0L)
+                Unit
+            },
+        ),
+        // A **plain** function-typed parameter on a composable: `Button`'s `onClick`, which is
+        // `kotlin.Function0` in metadata *and* `Lkotlin/jvm/functions/Function0;` in the descriptor.
+        // Nothing was lowered, so nothing pushes a composer and the callable takes no arguments --
+        // which is the distinction `_function_slot` has to make and this entry is here to check.
+        ExposedCallable(
+            name = "androidx.compose.material3.Button",
+            arity = 4,
+            paramTypes = listOf(TypeTag.OBJECT, TypeTag.OBJECT, TypeTag.INT, TypeTag.INT),
+            returnType = TypeTag.UNIT,
+            kind = CallableKind.FUNCTION,
+            paramNames = listOf("onClick", "\$composer", "\$changed", "\$default"),
+            paramTypeNames = listOf("kotlin.Function0", COMPOSER, "kotlin.Int", "kotlin.Int"),
+            returnTypeName = null,
+            paramHasDefault = listOf(false, false, false, false),
+            callable = { args ->
+                calls += args.toList()
+                @Suppress("UNCHECKED_CAST")
+                clicks += args[0] as Function0<Unit>
+                Unit
+            },
+        ),
     )
+
+    /** What the walker emits for a slot whose declared `kotlin.Function1` was lowered to a JVM
+     * `Function3` -- see `ArtifactScanner.functionSlotTypeName`. */
+    const val COMPOSABLE_FUNCTION3: String = "kotlin.Function3@Composable"
+
+    /** Stands in for `ColumnScope`: the receiver Compose threads into a lowered content lambda, and
+     * the argument `PythonCallables` must **drop** rather than forward, because Python has no way to
+     * be handed one. */
+    object StubScope
+
+    /** The composer a container hands its content, distinct from [StubComposer] on purpose. */
+    object InnerComposer
+
+    /** How many times [entries]'s `Column` has invoked its `content`. Distinct from [calls]: a
+     * container that received a content it never called would otherwise look identical. */
+    var contentInvocations: Int = 0
+
+    /** Every `onClick` Kotlin was handed, **not** invoked -- so that a test can call one after the
+     * composition that produced it has gone, which is the lifetime question. */
+    val clicks: MutableList<Function0<Unit>> = mutableListOf()
 }

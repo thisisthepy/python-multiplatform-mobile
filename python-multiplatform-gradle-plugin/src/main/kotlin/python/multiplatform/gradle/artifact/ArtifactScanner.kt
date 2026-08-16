@@ -584,7 +584,10 @@ internal object ArtifactScanner {
         val model = declarationModelOf(owner, ownerIsClass, function, classpath, isComposable = true) ?: return null
         val paramTags = paramDescriptors.map { composableSlotTagOf(it) ?: return null }
         val returnTag = if (returnDescriptor == "V") "UNIT" else composableSlotTagOf(returnDescriptor) ?: return null
-        val declaredTypeNames = function.allParameterTypes.map { kotlinClassifierNameOf(it) ?: return null }
+        val declaredTypeNames = function.allParameterTypes.mapIndexed { index, type ->
+            val declared = kotlinClassifierNameOf(type) ?: return null
+            functionSlotTypeName(declared, paramDescriptors[index]) ?: declared
+        }
 
         val syntheticNames = shape.syntheticParameterNames()
         val paramNames = (0 until declaredCount).map { function.allParameterNames.getOrNull(it) ?: "p$it" } + syntheticNames
@@ -628,6 +631,72 @@ internal object ArtifactScanner {
      * keyword argument can collide with it. */
     internal const val COMPOSER_PARAMETER_NAME = "\$composer"
     private const val COMPOSER_TYPE_NAME = "androidx.compose.runtime.Composer"
+
+    /**
+     * The name a **function-typed** parameter of a composable is reported under, or `null` when this
+     * is not one and the declared name should stand.
+     *
+     * ### Why the declared name alone is not enough
+     *
+     * `androidx.compose.foundation.layout.Column` declares
+     * `content: @Composable ColumnScope.() -> Unit`, which `@Metadata` records as `kotlin.Function1`
+     * -- an extension function type over `ColumnScope`. Its JVM descriptor is
+     * `Lkotlin/jvm/functions/Function3;`, because the Compose plugin appends a `Composer` and one
+     * `$changed` to a composable function *type* exactly as it appends them to a composable
+     * function. `androidx.compose.material3.Button` declares `onClick: () -> Unit`, which is
+     * `kotlin.Function0` in **both**.
+     *
+     * `pythonx` has to hand Kotlin an object implementing the right interface, so it needs the
+     * compiled arity; and it has to know whether to thread a composer through the invocation, so it
+     * needs to know which of the two cases this is. Both are answered by comparing the two arities
+     * the walker already has, and neither is guessed:
+     *
+     * | | declared | compiled | reported |
+     * |---|---|---|---|
+     * | `Button.onClick` | `Function0` | `Function0` | `kotlin.Function0` |
+     * | `Column.content` | `Function1` | `Function3` | `kotlin.Function3@Composable` |
+     *
+     * ### Why the answer travels in the type name
+     *
+     * The same reason `$composer` travels in the *parameter* name: `ExposedCallable` already carries
+     * a per-slot declared type name to every target, and a column that only composables use would be
+     * a second thing that can disagree with the first. `@` is not a character a Kotlin
+     * fully-qualified name can contain, so nothing legitimate can collide with the marker, and
+     * `pythonx._function_slot` is the single reader.
+     *
+     * Anything else -- an arity relationship neither rule predicts -- returns `null`, so the slot
+     * keeps its declared name and `pythonx` declines it as an ordinary object handle rather than
+     * casting a wrapper to an interface it does not implement.
+     */
+    internal fun functionSlotTypeName(declaredName: String, descriptor: String): String? {
+        if (!declaredName.startsWith(KOTLIN_FUNCTION_PREFIX)) return null
+        val declaredArity = declaredName.removePrefix(KOTLIN_FUNCTION_PREFIX).toIntOrNull() ?: return null
+        val jvmArity = jvmFunctionArityOf(descriptor) ?: return null
+        return when (jvmArity) {
+            declaredArity -> declaredName
+            declaredArity + COMPOSABLE_LOWERED_SLOTS -> "$KOTLIN_FUNCTION_PREFIX$jvmArity$COMPOSABLE_TYPE_MARK"
+            else -> null
+        }
+    }
+
+    /** How many parameters the Compose plugin appends to a composable function *type*: the
+     * `Composer` and one `$changed`. Unlike a composable *function*, whose `$changed` count grows
+     * with its parameters, a lowered lambda carries exactly one -- checked against every composable
+     * three Compose jars declare by `ComposableBindingTest.everyFunctionTypedSlotOfAComposableIsEitherPlainOrLoweredByTwo`. */
+    private const val COMPOSABLE_LOWERED_SLOTS = 2
+
+    private const val KOTLIN_FUNCTION_PREFIX = "kotlin.Function"
+
+    /** Must match `pythonx`'s `_COMPOSABLE_MARK`. */
+    internal const val COMPOSABLE_TYPE_MARK = "@Composable"
+
+    /** The arity of `Lkotlin/jvm/functions/FunctionN;`, or `null` for anything else. */
+    internal fun jvmFunctionArityOf(descriptor: String): Int? {
+        if (!descriptor.startsWith(JVM_FUNCTION_PREFIX) || !descriptor.endsWith(";")) return null
+        return descriptor.substring(JVM_FUNCTION_PREFIX.length, descriptor.length - 1).toIntOrNull()
+    }
+
+    private const val JVM_FUNCTION_PREFIX = "Lkotlin/jvm/functions/Function"
 
     /** A boundary tag for one JVM slot of a composable, which is the **compiled** shape rather than
      * the declared one: the thunk calls the erased signature, so a `Color` parameter is the `long`
