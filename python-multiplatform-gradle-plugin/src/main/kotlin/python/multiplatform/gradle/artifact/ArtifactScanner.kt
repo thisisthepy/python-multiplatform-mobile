@@ -1,5 +1,10 @@
 package python.multiplatform.gradle.artifact
 
+import kotlin.metadata.KmClassifier
+import kotlin.metadata.KmType
+import kotlin.metadata.KmVariance
+import kotlin.metadata.isNullable
+import kotlin.metadata.isSuspend
 import kotlin.metadata.jvm.KotlinClassMetadata
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
@@ -64,7 +69,8 @@ import java.util.jar.JarFile
  * all 19 Compose Multiplatform desktop jars, and identified three separate rules each of which
  * produced that zero on its own. All three are now gone, and the measurement that replaced it --
  * `ArtifactScannerTest.composeModifierExtensionsSurviveBothGates`, over the same jars -- is
- * **314 declarations, 104 of them `Modifier` extensions**:
+ * **788 declarations, 157 of them `Modifier` extensions** (314/104 when the three rules below were
+ * the whole story; composables and then function-typed slots account for the rest):
  *
  * | rule | what it cost | where it went |
  * |---|---|---|
@@ -72,11 +78,17 @@ import java.util.jar.JarFile
  * | the type gate: no boundary type for an ordinary object | every remaining declaration, `Modifier` being an interface | `resolveKotlinType`'s object-handle case (`KotlinMetadata.kt`) |
  * | drop a name carried by more than one binding | 33 of `Modifier`'s 130 names, `padding`/`size`/`background`/`border`/`clickable` among them | [disambiguateOverloads] |
  *
- * Of the 45 public top-level `Modifier` extensions still declined, **43 declare a function-typed
- * parameter** (counted by the same test): a Python callable cannot become a Kotlin `FunctionN` at
- * this boundary -- `UpcallTrampoline.toKotlinObject` would hand the cast a `PyObject` -- so binding
- * them would produce entries that always fail. That is the honest remaining limit, and it is not a
- * metadata problem.
+ * A fourth rule cost most of what was left. Of the 46 public top-level `Modifier` extensions still
+ * declined, **44 declared a function-typed parameter**, because `resolveKotlinType` looks a
+ * classifier up as a public class file and Kotlin's built-in `FunctionN` has none. That is
+ * [functionSlotOrNull]'s subject, and the same test now measures **157 `Modifier` extensions bound
+ * and 8 declined, 6 of them function-typed** -- `clickable`, `combinedClickable`, `semantics`,
+ * `drawBehind`, `toggleable` and 45 others where there were none.
+ *
+ * What is left is not a metadata problem either, and each remaining case has a reason rather than an
+ * absence: a `suspend` lambda (`pointerInput`), a `@Composable` lambda inside a declaration that is
+ * not one (`composed`), a type argument that is a type *parameter* (`swipeable`). See
+ * [functionSlotOrNull].
  *
  * ### Facades, parts, and extension receivers
  *
@@ -492,7 +504,7 @@ internal object ArtifactScanner {
                         isComposable(method),
                     )
                 }
-                candidateFromFunction(owner, ownerIsClass, function, classpath, isComposable(method))
+                candidateFromFunction(owner, ownerIsClass, function, classpath, paramDescriptors, isComposable(method))
             }
     }
 
@@ -780,6 +792,164 @@ internal object ArtifactScanner {
 
     private const val JVM_FUNCTION_PREFIX = "Lkotlin/jvm/functions/Function"
 
+    /**
+     * What one function-typed parameter of a **non**-`@Composable` declaration becomes: the slot name
+     * `pythonx` reads, the boundary type generated Kotlin casts through, or the reason there is
+     * neither.
+     *
+     * `null` from [functionSlotOrNull] means "not a function type at all", which is the ordinary
+     * path; an instance with a [declineReason] means "a function type this walker will not bind".
+     */
+    private class FunctionSlot(
+        val typeName: String? = null,
+        val boundary: BoundaryType? = null,
+        val declineReason: String? = null,
+    )
+
+    /**
+     * The gap `a179b747` left, and where it was.
+     *
+     * That commit made a function-typed slot describable and fillable, and both halves are producer-
+     * independent: [functionSlotTypeName] writes the signature and `pythonx._make_function` builds a
+     * `FunctionN` from it. What is **not** shared is how a slot's type reaches a call:
+     *
+     * | producer | the call site | what the type has to be |
+     * |---|---|---|
+     * | `@Composable` | [generateThunkClass]'s bytecode | erased -- a `CHECKCAST` to `kotlin/jvm/functions/FunctionN` needs no Kotlin name |
+     * | everything else | generated Kotlin source | **spellable** -- `args[i] as (Float) -> Unit` |
+     *
+     * So the composable path never asked `resolveKotlinType` about a function type and this one did,
+     * and got the only answer that function can give: `objectBoundaryTypeOrNull` requires the
+     * classifier to exist as a public class file, and Kotlin's built-in `FunctionN` has none anywhere
+     * -- they live in `.kotlin_builtins`. 44 of the 46 declined public top-level `Modifier`
+     * extensions declined for exactly that (`ArtifactScannerTest`), `clickable` among them.
+     *
+     * `objectBoundaryTypeOrNull` is deliberately **not** widened. Its rule is right for what it can
+     * see: a classifier with no class file is one generated source must not name, and it has no
+     * access to the JVM descriptor that says a `kotlin.Function1` slot is compiled as `Function1`
+     * rather than as a lowered `Function3`. The exception is opted into here, by the one caller that
+     * holds both facts.
+     *
+     * ### What stays declined
+     *
+     * - **`suspend`.** `Modifier.pointerInput(block: suspend PointerInputScope.() -> Unit)` records
+     *   its type as `Function2<PointerInputScope, Continuation<Unit>, Any?>`, which [functionSlotTypeName]
+     *   describes perfectly well -- and Kotlin will not let generated source assign a `Function2` to a
+     *   `suspend` function type, nor can a Python callable answer `COROUTINE_SUSPENDED`. It is a
+     *   *different* limit from the one this method opens, which is why it is named rather than left
+     *   to fail as a compile error in somebody's generated fragment.
+     * - **`@Composable`, inside a declaration that is not.** `Modifier.composed(factory:)` is the
+     *   case. The fragment is compiled without the Compose plugin (`:ksp-fixtures:artifact`'s
+     *   `build.gradle.kts` says so, and it is the whole shape of that fixture's claim), so
+     *   `@Composable Modifier.() -> Modifier` written there is an ordinary `Function1` while the slot
+     *   is a lowered `Function3`. **This one does not fail as a compile error**, which is why it is
+     *   declined by name rather than left to the compiler: removing this guard and asking for
+     *   `androidx.compose.ui.ComposedModifierKt` produces a fragment that compiles, casting
+     *   `args[2] as kotlin.Function1<Modifier, Modifier>` beside a slot reported as
+     *   `kotlin.Function3@Composable(…)->…` -- so `pythonx` would build a `Function3` from the name and
+     *   hand it to a `Function1` call site, and the disagreement would surface inside Compose. The
+     *   thunk path has no such problem, which is why a composable *declaration* binds these and a
+     *   non-composable one cannot.
+     * - **anything [renderKotlinFunctionType] cannot write**, which is a type argument that is a type
+     *   *parameter* or a star projection (`Modifier.swipeable`'s `thresholds`), a use-site variance
+     *   this walker will not reproduce, or a classifier that is not a nameable public class.
+     *
+     * A slot returning something other than `kotlin.Unit` is **not** declined here, and that is the
+     * same judgement `a179b747` made for composables rather than a new one: the return type is in the
+     * name precisely so that `pythonx._coerce` can refuse to fill it *with a reason* -- `TypeTag`
+     * carries one `INT` for `Byte` through `Long`, so neither side can say which boxed type the callee
+     * will cast the erased answer to. Binding the declaration around it costs nothing and buys a
+     * caller of `Modifier.onKeyEvent` a message about the slot instead of an `AttributeError` about
+     * the whole name.
+     */
+    private fun functionSlotOrNull(type: KmType, descriptor: String, classpath: ArtifactClasspath): FunctionSlot? {
+        val declared = kotlinClassifierNameOf(type) ?: return null
+        if (!declared.startsWith(KOTLIN_FUNCTION_PREFIX)) return null
+        if (type.isSuspend) {
+            return FunctionSlot(
+                declineReason = "a suspend function-typed parameter ($declared): its compiled shape takes a " +
+                    "Continuation and answers COROUTINE_SUSPENDED, which no Python callable can do",
+            )
+        }
+        val name = functionSlotTypeName(type, declared, descriptor)
+            ?: return FunctionSlot(
+                declineReason = "a function-typed parameter this walk cannot describe ($declared): a type " +
+                    "argument has no name a proxy could be built over",
+            )
+        if (name.startsWith(KOTLIN_FUNCTION_PREFIX + jvmFunctionArityOf(descriptor) + COMPOSABLE_TYPE_MARK)) {
+            return FunctionSlot(
+                declineReason = "a @Composable function-typed parameter of a declaration that is not itself " +
+                    "@Composable: generated Kotlin is compiled without the Compose plugin, so it cannot " +
+                    "produce the lowered function type the callee takes",
+            )
+        }
+        val rendered = renderKotlinFunctionType(type, classpath)
+            ?: return FunctionSlot(
+                declineReason = "a function-typed parameter generated Kotlin cannot spell ($declared): some " +
+                    "part of its signature is not a nameable public type",
+            )
+        // The same OBJECT boundary an ordinary handle crosses on -- what Python puts in the slot is
+        // the handle `pythonx._make_function` got back from `PythonCallables.newFunction`, and the
+        // trampoline has already resolved it to the wrapper by the time this cast runs. The cast is
+        // unchecked (the wrapper is a `Function1<Any?, Unit>` whatever the slot said), which the
+        // fragment's file-level `@Suppress("UNCHECKED_CAST")` already covers.
+        return FunctionSlot(typeName = name, boundary = BoundaryType("OBJECT", "(%s as $rendered)", "(%s)"))
+    }
+
+    /** The Kotlin-source spelling of a function type: `kotlin.Function1<kotlin.Float, kotlin.Unit>`.
+     * Written as the `FunctionN` classifier rather than as `(Float) -> Unit` because the two are the
+     * same type and the first needs no bracket rules; assignability to an extension function type
+     * (`Modifier.() -> Unit`) holds either way, since Kotlin distinguishes those only at declaration
+     * sites. */
+    private fun renderKotlinFunctionType(type: KmType, classpath: ArtifactClasspath): String? =
+        renderKotlinSourceType(type, classpath, depth = 0)
+
+    /**
+     * A type this walker is willing to **write into generated Kotlin**, or `null`.
+     *
+     * Deliberately stricter than `renderKotlinTypeName`, which serves an `as` cast on an ordinary
+     * object handle and therefore only has to be a name. This one lands inside a generic argument
+     * list, where three things it can ignore become wrong answers:
+     *
+     * - **nullability of an argument.** `Function1` is contravariant in its argument, so
+     *   `Function1<LayoutCoordinates, Unit>` is not assignable to `Function1<LayoutCoordinates?, Unit>`
+     *   -- `Modifier.onFocusedBoundsChanged` is the case, and a cast rebuilt from the slot *name*
+     *   (which drops `?`, being a key) would not compile.
+     * - **use-site variance.** A projection this walker reproduced by dropping it would silently be a
+     *   different type; declined instead, since nothing measured needs one.
+     * - **a Kotlin built-in.** `kotlin.Float` and `kotlin.Unit` have no class file and are perfectly
+     *   writable, which is the one direction `isNameablePublicClass` is too strict in --
+     *   [kotlinPrimitiveBoundaryTypeOf] is the list of the ones this boundary already knows, plus
+     *   `kotlin.Any`, which is what an unconstrained argument becomes.
+     */
+    private fun renderKotlinSourceType(type: KmType, classpath: ArtifactClasspath, depth: Int): String? {
+        if (depth > 4) return null
+        val classifier = type.classifier as? KmClassifier.Class ?: return null
+        val internal = classifier.name
+        val writable = internal == KOTLIN_ANY_INTERNAL_NAME ||
+            // The function type itself, which is the whole point and is the one classifier
+            // `isNameablePublicClass` is guaranteed to reject: `kotlin.Function1` is mapped onto a
+            // JVM interface and has no class file of its own under that name anywhere.
+            internal.startsWith(KOTLIN_FUNCTION_INTERNAL_PREFIX) ||
+            kotlinPrimitiveBoundaryTypeOf(internal) != null ||
+            classpath.isNameablePublicClass(internal)
+        if (!writable) return null
+        val suffix = if (type.isNullable) "?" else ""
+        val base = internal.replace('/', '.')
+        if (type.arguments.isEmpty()) return base + suffix
+        val arguments = type.arguments.map { projection ->
+            if (projection.variance != KmVariance.INVARIANT) return null
+            val argument = projection.type ?: return null
+            renderKotlinSourceType(argument, classpath, depth + 1) ?: return null
+        }
+        return "$base<${arguments.joinToString(", ")}>$suffix"
+    }
+
+    private const val KOTLIN_ANY_INTERNAL_NAME = "kotlin/Any"
+
+    /** [KOTLIN_FUNCTION_PREFIX] as `KmClassifier.Class` spells it. */
+    private const val KOTLIN_FUNCTION_INTERNAL_PREFIX = "kotlin/Function"
+
     /** A boundary tag for one JVM slot of a composable, which is the **compiled** shape rather than
      * the declared one: the thunk calls the erased signature, so a `Color` parameter is the `long`
      * it erases to. `null` declines the whole declaration. */
@@ -866,22 +1036,36 @@ internal object ArtifactScanner {
         ownerIsClass: Boolean,
         function: ResolvedFunction,
         classpath: ArtifactClasspath,
+        paramDescriptors: List<String>,
         isComposable: Boolean,
     ): Candidate? {
         val model = declarationModelOf(owner, ownerIsClass, function, classpath, isComposable) ?: return null
         val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
         val receiverIndex = if (function.isExtension) 1 else 0
 
-        val resolvedParams = function.allParameterTypes.map { type ->
-            resolveKotlinType(type, classpath, BoundaryDirection.PARAMETER)
+        // Read before `resolveKotlinType` is asked anything, because for a function-typed parameter
+        // it is the one that would answer -- and would answer "no". See [functionSlotOrNull].
+        val functionSlots = function.allParameterTypes.mapIndexed { index, type ->
+            functionSlotOrNull(type, paramDescriptors[index], classpath)
+        }
+        functionSlots.firstNotNullOfOrNull { it?.declineReason }?.let { return declined(it) }
+
+        val resolvedParams = function.allParameterTypes.mapIndexed { index, type ->
+            functionSlots[index]?.boundary
+                ?: resolveKotlinType(type, classpath, BoundaryDirection.PARAMETER)
                 ?: return declined("no boundary type for parameter ${kotlinClassifierNameOf(type) ?: type.classifier}")
         }
         val returnType = resolveKotlinType(function.returnType, classpath, BoundaryDirection.RETURN)
             ?: return declined("no boundary type for return ${kotlinClassifierNameOf(function.returnType) ?: function.returnType.classifier}")
         // Declared, not marshalled: a `Dp` parameter's tag is FLOAT and its declared name is
-        // `androidx.compose.ui.unit.Dp`. `docs/pythonx-adapter-design.md` §2.4 row 4.
-        val paramTypeNames = function.allParameterTypes.map {
-            kotlinClassifierNameOf(it) ?: return declined("unnameable parameter type")
+        // `androidx.compose.ui.unit.Dp`. `docs/pythonx-adapter-design.md` §2.4 row 4. A function slot
+        // is the one exception and is the reason [functionSlotTypeName] exists: its declared name
+        // alone (`kotlin.Function1`) says neither what the lambda is invoked with nor what it must
+        // give back, and `pythonx` needs both to build a wrapper at all.
+        val paramTypeNames = function.allParameterTypes.mapIndexed { index, type ->
+            functionSlots[index]?.typeName
+                ?: kotlinClassifierNameOf(type)
+                ?: return declined("unnameable parameter type")
         }
         val returnTypeName = kotlinClassifierNameOf(function.returnType)
 

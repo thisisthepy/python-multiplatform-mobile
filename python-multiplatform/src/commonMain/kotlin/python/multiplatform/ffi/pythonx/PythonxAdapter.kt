@@ -1113,11 +1113,17 @@ object PythonxAdapter {
                     # `docs/pythonx-adapter-design.md` §4.5 -- metadata carries the flag and never the
                     # expression, so this is the only place the default value can come from.
                     #
-                    # It costs nothing that was previously possible. `UpcallTrampoline.toKotlin` maps
-                    # `None` to `null` before it looks at the tag, `resolveKotlinType` declines a
-                    # nullable primitive and a nullable value class outright, and `_coerce` below
-                    # refuses `None` for an OBJECT slot -- so no call that used to reach Kotlin passed
-                    # a `None` in a slot this now reads as an omission.
+                    # It costs nothing that was previously possible, and the reason is `_coerce` rather
+                    # than the walker: `_coerce` refuses `None` for every tag it knows -- 'expected a
+                    # str' for STRING, 'expected a bool' for BOOLEAN, a handle or a callable for OBJECT
+                    # -- so no `None` a caller wrote in a slot has ever reached Kotlin as a *value*.
+                    # `resolveKotlinType` narrows it further by declining a nullable number, a nullable
+                    # Boolean and a nullable value class outright; a nullable `String`/`ByteArray` is
+                    # bound (`nullablePrimitiveBoundaryTypeOf`, which is what makes `Modifier.clickable`
+                    # reachable) and is the one case where "omitted" is the only way to spell `null`
+                    # from `pythonx`. That is exact for a slot whose Kotlin default *is* `null`, which
+                    # every such slot measured so far has, and it is a refusal rather than a wrong
+                    # value for one that is not.
                     slots[index] = None
                     defaults_used += 1
                     continue

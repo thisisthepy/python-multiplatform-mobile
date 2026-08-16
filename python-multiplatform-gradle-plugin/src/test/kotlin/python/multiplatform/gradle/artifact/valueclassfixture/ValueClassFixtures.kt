@@ -82,17 +82,33 @@ fun Rope.tagged(): String = "rope"
 fun Meters.tagged(): String = "meters"
 
 /**
- * A function-typed parameter: the shape 43 of the 45 declined public top-level `Modifier`
- * extensions have (`ArtifactScannerTest.composeModifierExtensionsSurviveBothGates` counts them).
- * `resolveKotlinType` declines it -- a Python callable cannot become a Kotlin `Function0` at this
- * boundary -- so it binds nothing, and `DeclarationModelTest` uses it for the other half of
- * `docs/pyi-generation-design.md` §2.2's third property: a declined declaration stays *visible* in
- * the model, with its reason, instead of vanishing at a `return null`.
+ * A function-typed parameter: the shape 44 of the 46 declined public top-level `Modifier` extensions
+ * had (`ArtifactScannerTest.composeModifierExtensionsSurviveBothGates` counts them), and the one
+ * `ArtifactScanner.functionSlotOrNull` opened.
+ *
+ * This used to be *the* declined witness: `resolveKotlinType` refused it because Kotlin's built-in
+ * `Function0` has no class file to name, and `DeclarationModelTest` used it for the other half of
+ * `docs/pyi-generation-design.md` §2.2's third property. It binds now, so the declined witness moved
+ * to [withSuspendCallback] and this one records the positive: a declaration that **invokes** what it
+ * is handed, which is what `:ksp-fixtures:artifact` exercises against `kotlin.system.measureTimeMillis`
+ * for real.
  */
 fun withCallback(action: () -> Unit): Int {
     action()
     return 1
 }
+
+/**
+ * The function-typed shape that is still declined, and not for want of a *name*: its slot is
+ * describable and its arity checks out.
+ *
+ * A `suspend` lambda's compiled type is `Function1<Continuation<Unit>, Any?>`, it answers
+ * `COROUTINE_SUSPENDED` rather than a value, and Kotlin will not let source assign a `Function1` to a
+ * `suspend` function type at all. `Modifier.pointerInput` is the real-world case -- the one
+ * `a179b747`'s open note named beside `clickable`, and the one that turns out to be a different limit
+ * from the one that note was about.
+ */
+fun withSuspendCallback(action: suspend () -> Unit): Int = if (action === action) 1 else 0
 
 /**
  * `kotlin.time.Duration.getInWholeSeconds-impl(J)J`'s exact shape: a value class with a *public*

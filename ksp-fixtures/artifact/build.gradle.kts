@@ -66,6 +66,12 @@ kotlin {
                 implementation("org.jetbrains.compose.ui:ui-desktop:$composeVersion")
                 implementation("org.jetbrains.compose.ui:ui-unit-desktop:$composeVersion")
                 implementation("org.jetbrains.compose.foundation:foundation-layout-desktop:$composeVersion")
+                // `Modifier.clickable` lives here rather than in `foundation-layout`, and it is the
+                // acceptance criterion for a **non-composable** function-typed slot: an ordinary
+                // function taking `onClick: () -> Unit`, so it needs no composition to call and yet
+                // was unreachable for as long as a `kotlin.FunctionN` parameter was declined one
+                // layer before the slot grammar was consulted (`ArtifactScanner.functionSlotOrNull`).
+                implementation("org.jetbrains.compose.foundation:foundation-desktop:$composeVersion")
             }
         }
         val desktopTest by getting {
@@ -101,8 +107,27 @@ pythonBindings {
     // in, measured at **zero bound declarations** before the metadata-kind gate and the type gate
     // were opened. Narrow on purpose -- binding all of Compose here would make this fixture's
     // compile time the cost of a proof it does not need.
+    //
+    // The last two are for the **non-composable function-typed slot**, and both are named as single
+    // *classes* rather than packages, which `artifactIncludePackages` allows and which keeps this
+    // list's own "narrow on purpose" rule:
+    //
+    // - `androidx.compose.foundation.ClickableKt` is `Modifier.clickable` and `combinedClickable`.
+    //   Asking for `androidx.compose.foundation` would sweep in `gestures`, `lazy`, `text` and
+    //   everything else under it, which is compile time spent on a proof this does not need.
+    // - `kotlin.system.TimingKt` is `measureTimeMillis(block: () -> Unit)`, which has the **same**
+    //   `kotlin.Function0()->kotlin.Unit` slot as `clickable.onClick` and, unlike every Compose
+    //   callback, *invokes* it at the moment it is called. Compose stores its callbacks -- `clickable`
+    //   is `composed { }`, `drawBehind` is a node -- so nothing in those jars can show a Python
+    //   callable actually running outside a composition, and `WalkedArtifactCallbackTest` needs a
+    //   declaration that runs one.
     artifactIncludePackages.set(
-        listOf("junit.runner", "junit.framework", "kotlin.text", "fixture.valueclass", "androidx.compose.foundation.layout"),
+        listOf(
+            "junit.runner", "junit.framework", "kotlin.text", "fixture.valueclass",
+            "androidx.compose.foundation.layout",
+            "androidx.compose.foundation.ClickableKt",
+            "kotlin.system.TimingKt",
+        ),
     )
 
     // `docs/pyi-generation-design.md` §5.3. The file is this fixture's, standing in for the one that

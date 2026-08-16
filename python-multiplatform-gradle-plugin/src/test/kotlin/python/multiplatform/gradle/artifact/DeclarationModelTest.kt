@@ -126,16 +126,26 @@ class DeclarationModelTest {
      * §2.2 property 3: "a model entry can be marked *not bound, reason X* and still be stubbed -- or
      * deliberately not stubbed... Today a declined declaration returns `null` and vanishes."
      *
-     * `withCallback` is the fixture for the shape that declines 43 of the 45 unbound `Modifier`
-     * extensions: a function-typed parameter.
+     * `withSuspendCallback` is the fixture for the function-typed shape that is **still** declined.
+     * `withCallback` used to be -- the shape 44 of the 46 unbound `Modifier` extensions had -- and it
+     * binds now (`FunctionSlotBindingTest`), so the two are asserted together: what moved and what
+     * did not.
      */
     @Test
     fun aDeclinedDeclarationStaysVisibleWithItsReason() {
-        val withCallback = fixtureDeclarations().single { it.simpleName == "withCallback" }
-        assertNull(withCallback.bindingName, "the binder declined it, and that is the fact being kept")
-        val reason = assertNotNull(withCallback.declineReason)
-        assertTrue("kotlin.Function0" in reason, reason)
-        assertEquals("kotlin.Function0", withCallback.parameters.single().type.qualifiedName)
+        val declined = fixtureDeclarations().single { it.simpleName == "withSuspendCallback" }
+        assertNull(declined.bindingName, "the binder declined it, and that is the fact being kept")
+        val reason = assertNotNull(declined.declineReason)
+        assertTrue("suspend" in reason, reason)
+        assertEquals("kotlin.Function1", declined.parameters.single().type.qualifiedName)
+
+        // The half that moved. A plain `() -> Unit` binds now, and the *model* still spells its
+        // parameter with the declared classifier: the signature grammar is the binding's answer
+        // (`ArtifactCallable.paramTypeNames`), not the stub's.
+        val bound = fixtureDeclarations().single { it.simpleName == "withCallback" }
+        assertEquals("fixture.artifactvalueclass.withCallback", bound.bindingName)
+        assertNull(bound.declineReason)
+        assertEquals("kotlin.Function0", bound.parameters.single().type.qualifiedName)
     }
 
     /** `suspend` is declined by both producers and §3.1 says it must not be stubbed. It is still in

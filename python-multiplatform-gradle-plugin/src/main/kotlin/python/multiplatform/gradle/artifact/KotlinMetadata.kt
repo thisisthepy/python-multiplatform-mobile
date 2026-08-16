@@ -213,8 +213,9 @@ internal fun resolveKotlinType(type: KmType, classpath: ArtifactClasspath, direc
     // and the cast simply carries the `?`.
     if (!type.isNullable) {
         kotlinPrimitiveBoundaryTypeOf(classifier.name)?.let { return it }
-    } else if (kotlinPrimitiveBoundaryTypeOf(classifier.name) != null) {
-        return null
+    } else {
+        nullablePrimitiveBoundaryTypeOf(classifier.name)?.let { return it }
+        if (kotlinPrimitiveBoundaryTypeOf(classifier.name) != null) return null
     }
 
     val info = if (type.isNullable) null else classpath.valueClassInfo(classifier.name)
@@ -320,7 +321,7 @@ private fun renderKotlinTypeName(type: KmType, classpath: ArtifactClasspath): St
 /** Whether generated Kotlin in another module may write this classifier's name: it has to exist as
  * a class file this walk can see, be JVM-public, and -- when it is Kotlin -- be Kotlin-public too
  * (`internal` is JVM-public and is not a name anybody outside the module may say). */
-private fun ArtifactClasspath.isNameablePublicClass(kotlinInternalName: String): Boolean {
+internal fun ArtifactClasspath.isNameablePublicClass(kotlinInternalName: String): Boolean {
     // Metadata spells a nested class `Outer.Inner`; its class file is `Outer$Inner`.
     val node = classNode(kotlinInternalName.replace('.', '$')) ?: return false
     if ((node.access and org.objectweb.asm.Opcodes.ACC_PUBLIC) == 0) return false
@@ -343,6 +344,29 @@ private fun valueClassBoundaryType(qualifiedName: String, underlying: BoundaryTy
  * spells a top-level class: `/`-separated, no leading slash. One table, not two: both this and
  * [boundaryTypeOf] resolve to the same [BoundaryType] instances, because a JVM `I` and a Kotlin
  * `kotlin.Int` have to widen and narrow identically. */
+/**
+ * The two entries of [kotlinPrimitiveBoundaryTypeOf] that survive a `?`, and why the others do not.
+ *
+ * The nullable branch of [resolveKotlinType] declines every primitive on one stated reason: `TypeTag
+ * .INT` carries a `Long` and the read *narrows* it (`(args[0] as Long).toInt()`), so a `null` would
+ * throw inside the cast rather than reach the declaration. That reason is about the numeric widths
+ * and it does not apply to a `String` or a `ByteArray`: their JVM shape is already a reference, their
+ * read is a plain cast with nothing to narrow, and `UpcallTrampoline.toKotlin` already answers `null`
+ * for a Python `None` **whatever the tag says** -- the one line that makes a nullable boundary work at
+ * all. So the only thing that had to change is the `?` on the cast, and declining them was the rule
+ * being coarser than its own justification.
+ *
+ * Measured cost of that coarseness: `Modifier.clickable`, `combinedClickable` and `mouseClickable`
+ * were declined for `onClickLabel: String?` alone, after their `onClick` slot became bindable
+ * (`FunctionSlotBindingTest`). A nullable `Boolean?`/`Int?` stays declined, and `ArtifactScannerTest`
+ * keeps that pinned.
+ */
+private fun nullablePrimitiveBoundaryTypeOf(kotlinInternalName: String): BoundaryType? = when (kotlinInternalName) {
+    "kotlin/String" -> BoundaryType("STRING", "(%s as String?)", "(%s)")
+    "kotlin/ByteArray" -> BoundaryType("BYTES", "(%s as ByteArray?)", "(%s)")
+    else -> null
+}
+
 internal fun kotlinPrimitiveBoundaryTypeOf(kotlinInternalName: String): BoundaryType? = when (kotlinInternalName) {
     "kotlin/Boolean" -> boundaryTypeOf("Z")
     "kotlin/Byte" -> boundaryTypeOf("B")
