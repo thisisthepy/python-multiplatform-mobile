@@ -34,10 +34,18 @@ import python.multiplatform.reflection.UpcallTable
  * ### Why the source is a Kotlin string and not a `.py` file
  *
  * The same reason [python.multiplatform.ffi.upcall.PythonProxySource] gives, and §2.5 restates for
- * this layer specifically: **there is no resource path to put a `.py` on.** Kotlin/Native has no
- * `getResourceAsStream`, and `sys.path` on iOS, androidNative and wasm points into the per-platform
- * CPython trees under `src/nativeInterop/cinterop/lib/...`. `Python3.exec` works on all five today
- * and nothing else does.
+ * this layer specifically: **there is no resource path to put a `.py` on that works everywhere.**
+ * Kotlin/Native has no `getResourceAsStream`, and `sys.path` on iOS, androidNative and wasm points
+ * into the per-platform CPython trees under `src/nativeInterop/cinterop/lib/...`. `Python3.exec`
+ * works on all five today and nothing else does.
+ *
+ * [python.multiplatform.env.PythonPayload] has since solved *half* of this, and the half it solved
+ * is not this one. It puts a **consumer's** payload directory on `sys.path` before the first
+ * import, from a real packaging step, on desktop (a jar resource, extracted) and Android (an APK
+ * asset, unpacked). It is not a route for a *library-generated* file: iOS needs an Xcode phase
+ * nobody has written, androidNative and wasm have no packaging step at all, and the table this
+ * renders is assembled at run time from whatever `UpcallTable.install` was given -- the second
+ * reason `PythonProxySource` gives, which no packaging work touches.
  *
  * This is the third candidate §2.5 lists, and its cost is named there and not disputed here: the
  * source is hostile to editing, diffing and shipping to PyPI, which `pythonx-compose`'s

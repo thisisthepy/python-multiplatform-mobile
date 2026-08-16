@@ -72,9 +72,95 @@ object PythonBootstrap {
         // System.getenv delegates to this same native environment (unlike the JVM's cached no-arg
         // map), which is why PythonHomeCheck can read back what is set here.
         Os.setenv(PYTHONHOME, staging.prefix.absolutePath, true)
+        // Unpacked and *registered* here, put on sys.path by Python3.initialize below. The split
+        // is not a preference: reading assets needs this Context and sys.path does not exist until
+        // Py_Initialize() has run, so the two halves cannot happen at the same moment. See
+        // PythonPayload.
+        payloadStaging = stagePayload(context, prefix)
         Python3.initialize(silent = silent)
         return staging
     }
+
+    /**
+     * What the last [stagePayload] did, for a host app that wants to log it. Null until
+     * [initialize] or [stagePayload] has run, and after either of them when the APK carries no
+     * `assets/python/`.
+     */
+    @Volatile
+    var payloadStaging: PayloadStaging? = null
+        private set
+
+    /**
+     * Unpacks `assets/python/` into `<prefix>/python/` and registers it as a `sys.path` entry for
+     * [Python3.initialize] to install, unless a stamp says the same build already did.
+     *
+     * This is the *consumer's own Python code* -- `pypackpack`'s `ResourceBundler` payload, staged
+     * into the APK by `toolchain`'s `stagePythonBundleAndroid`. It is a different tree from the one
+     * [stageStdlib] unpacks and is deliberately kept separate rather than merged into it:
+     *
+     * - **The stdlib is ABI-scoped and this is not.** `assets/<abi>/lib/python<X.Y>` exists once
+     *   per ABI because it carries `lib-dynload`'s native extension modules. A resource payload is
+     *   pure data and source, identical on every ABI, and giving it an ABI directory would ship it
+     *   as many times as the APK has ABIs.
+     * - **They change on different schedules.** The stdlib changes when this library's version
+     *   does; the payload changes on every edit to the app's own Python. One stamp covering both
+     *   would re-unpack 800-odd stdlib files because one application module was edited.
+     *
+     * Same discipline as [stageStdlib] otherwise, and for the same reason recorded there: the stamp
+     * is removed before the rewrite and written after the last byte, so an interrupted unpack
+     * cannot be mistaken for a finished one.
+     *
+     * @return null when the APK has no `assets/python/`, which is the normal state of an app that
+     *   has not configured a Python package.
+     */
+    @JvmOverloads
+    @Synchronized
+    fun stagePayload(context: Context, prefix: File = context.filesDir): PayloadStaging? {
+        val started = System.nanoTime()
+        val root = PythonPayload.PAYLOAD_ROOT
+        if (context.assets.list(root).isNullOrEmpty()) return null
+
+        val payloadDir = File(prefix, root)
+        val stamp = expectedStamp(context, PAYLOAD_ABI_PLACEHOLDER)
+        val stampFile = payloadStampFile(prefix)
+
+        if (stampFile.takeIf { it.isFile }?.readText() == stamp) {
+            AndroidPayloadRoots.register(payloadDir)
+            return PayloadStaging(payloadDir, unpacked = false, fileCount = 0, bytes = 0L,
+                elapsedMillis = elapsedMillis(started))
+        }
+
+        stampFile.delete()
+        payloadDir.deleteRecursively()
+        if (!payloadDir.mkdirs() && !payloadDir.isDirectory) {
+            throw IOException("could not create $payloadDir to unpack the Python payload into")
+        }
+
+        val counter = Counter()
+        copyAssetTree(context.assets, root, payloadDir, ByteArray(COPY_BUFFER_BYTES), counter)
+        stampFile.writeText(stamp)
+
+        AndroidPayloadRoots.register(payloadDir)
+        return PayloadStaging(payloadDir, unpacked = true, fileCount = counter.files,
+            bytes = counter.bytes, elapsedMillis = elapsedMillis(started))
+    }
+
+    /** The stamp [stagePayload] writes last. Public so a host app can implement "re-unpack next launch". */
+    fun payloadStampFile(prefix: File): File = File(prefix, PAYLOAD_STAMP_NAME)
+
+    /** What [stagePayload] did. */
+    data class PayloadStaging(
+        /** `<prefix>/python`, the directory that goes on `sys.path`. */
+        val payloadDir: File,
+        /** False when a matching stamp was found and nothing was written. */
+        val unpacked: Boolean,
+        /** Files written, zero when [unpacked] is false. */
+        val fileCount: Int,
+        /** Bytes written, zero when [unpacked] is false. */
+        val bytes: Long,
+        /** Wall time for this call, including the stamp check that decided to skip. */
+        val elapsedMillis: Long,
+    )
 
     /**
      * Unpacks `assets/<abi>/lib/python<X.Y>/` into `<prefix>/lib/python<X.Y>/`, unless a stamp
@@ -287,6 +373,15 @@ object PythonBootstrap {
 
     private const val PYTHONHOME = "PYTHONHOME"
     private const val STAMP_NAME = ".python-multiplatform-stdlib"
+    private const val PAYLOAD_STAMP_NAME = ".python-multiplatform-payload"
+
+    /**
+     * Stands in for the ABI in the payload's stamp. The payload is not ABI-scoped (see
+     * [stagePayload]), but the stamp shares [expectedStamp] with the stdlib's so that the two
+     * cannot drift on the parts that *do* matter -- the library version, the version code and
+     * `lastUpdateTime`, which is what makes an upgrade restage.
+     */
+    private const val PAYLOAD_ABI_PLACEHOLDER = "payload"
 
     /**
      * 64 KB. Large enough that the `lib-dynload` extension modules -- the biggest files in the

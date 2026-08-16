@@ -29,6 +29,28 @@ entry (192→124 ms on API 26, 324→150 ms on API 36, for 804 files / 20.1 MB).
 `openBasedDirectoryDetectionAgreesWithListBased` re-derives both classifications on device on
 whatever API level is running rather than trusting it.
 
+## The consumer's payload is a second tree, with a second stamp
+
+`assets/python/` is the consumer's own Python — `toolchain`'s `stagePythonBundleAndroid` registers
+its staging root as an AGP asset source. `PythonBootstrap.stagePayload` unpacks it to
+`<filesDir>/python` and registers it; `Python3.initialize` puts it on `sys.path[0]`.
+
+Kept separate from `stageStdlib` rather than merged into it, for two reasons:
+
+- **The stdlib is ABI-scoped and the payload is not.** `assets/<abi>/lib/python<X.Y>` exists per ABI
+  because of `lib-dynload`'s native extension modules. A resource payload is source and data,
+  identical on every ABI; giving it an ABI directory ships it once per ABI in the APK.
+- **They change on different schedules.** One stamp covering both re-unpacks 800-odd stdlib files
+  because one application module was edited.
+
+Same discipline otherwise: the stamp comes out before the rewrite and goes in after the last byte,
+and it carries `versionCode` + `lastUpdateTime` so an upgrade restages over a surviving `filesDir`.
+
+**An app that brings CPython up without `PythonBootstrap.initialize` gets no payload.** Reading an
+APK's assets needs a `Context` and `Python3.initialize` has none, so staging and installing are two
+steps: `PythonBootstrap` does the half that needs a `Context`, exactly as it already does for
+`PYTHONHOME`.
+
 ## Bind through `RegisterNatives`, not symbol names
 
 `JNI_OnLoad` (in `artMain`) registers CPython's own C functions directly against the

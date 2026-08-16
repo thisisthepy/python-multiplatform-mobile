@@ -95,6 +95,33 @@ The staged prefix is shared per machine (under the Gradle user home), keyed by v
 release + platform, and stamped after the last extracted byte — so an interrupted extraction is
 never mistaken for a finished one. See ROADMAP §15h.
 
+## The consumer's own Python is a classpath resource, and `python/` collides with our own package
+
+`toolchain`'s `stagePythonBundleDesktop` puts a consumer's payload at the **root of the jar** as
+`python/`. `PythonPayload`/`ClasspathPayload` is what reads it: a `file:` classpath entry is used
+where it lies, a `jar:` one is extracted to `<tmp>/python-multiplatform-payload/<digest>` under the
+same completion-marker discipline `PythonBootstrap.stageStdlib` uses, and the result goes on
+`sys.path[0]` from inside `Python3.initialize()`.
+
+**Do not match on the name `python/`.** This library's own top-level Kotlin package *is* `python`,
+so `python/multiplatform` and `python/native` class files answer `getResources("python/")` on every
+classpath this library is on — the build output directory during a Gradle build, and
+`python-multiplatform.jar` itself once published. Name-based discovery therefore puts a directory of
+`.class` files at `sys.path[0]` in every consuming application, and extracts the whole library jar
+to do it. Observed, not theorised: the first run of `PythonPayloadTest` returned
+`build/classes/kotlin/desktop/{main,test}/python`. Discovery asks what is *in* the root instead — at
+least one immediate child that is a `.py`/`.pyc`, or a directory with an `__init__` in it, which is
+exactly what `ResourceBundler` produces.
+
+Extraction is unavoidable here for the same reason it is on Android: CPython's importer opens
+modules with `open(2)` and cannot read a zip entry. Measured on this machine, 203 files: cold
+extraction 36 ms, stamp hit 1.4 ms, `sys.path` prepend 0.2 ms.
+
+This is **not** `PYTHONHOME`. That names the standard library prefix, is read by `getenv(3)` before
+`Py_Initialize()`, and is set by the Gradle plugin as the process starts because a JVM cannot set an
+environment variable for itself. The payload is the application's own code and goes on a list that
+does not exist until `Py_Initialize()` has built it.
+
 ## CPython is loaded from disk, not from the image
 
 `manager.kt` extracts `libpython` from a classpath resource, but a native image bakes registered

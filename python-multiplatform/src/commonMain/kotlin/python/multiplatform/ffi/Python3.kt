@@ -2,6 +2,7 @@ package python.multiplatform.ffi
 
 import python.multiplatform.BuildConfig
 import python.multiplatform.env.PythonHomeCheck
+import python.multiplatform.env.PythonPayload
 import python.multiplatform.ffi.exceptions.PyException
 import python.multiplatform.ffi.types.modules.PyModule
 import python.native.ffi.*
@@ -42,7 +43,14 @@ object Python3 {
      * Initialize Python
      */
     fun initialize(silent: Boolean = false) {
-        if (isInitialized) return
+        if (isInitialized) {
+            // Not a no-op: something else may have reached Py_Initialize() first (isInitialized is
+            // seeded from Py_IsInitialized()), in which case this is the only call that will ever
+            // get here and the consumer's payload has still not been put on sys.path. The hook
+            // does its work at most once per process, so arriving here repeatedly is free.
+            PythonPayload.installStagedRootsOnStartup()
+            return
+        }
         // Runs once per process, before the call whose own failure mode is either an uncatchable
         // `Py_FatalError()` abort or -- on a sandboxed `PYTHONHOME` -- a silent hang (see
         // PythonHomeCheck's doc comment). Cheap even so: one or two filesystem probes against a
@@ -70,6 +78,12 @@ object Python3 {
         // commonMain and commonTest is now inside withPython{} or withGIL{}, so this is safe.
         // See ROADMAP §1 and §4 for the history and the previous revert.
         if (mainThreadState == null) mainThreadState = PyEval_SaveThread()
+        // The consumer's own Python code goes on sys.path here: after Py_Initialize() built the
+        // list (nothing can add to it before that point) and before this function returns, so
+        // before any import a caller can reach. `PYTHONHOME` above is the *standard library* and
+        // is a separate mechanism entirely -- see PythonPayload for the whole reasoning, and for
+        // the `autoInstall` switch that turns this off.
+        PythonPayload.installStagedRootsOnStartup()
     }
 
     /**
