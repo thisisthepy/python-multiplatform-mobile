@@ -755,21 +755,128 @@ cannot see. Confirmed red first: with `PythonPointerInput.kt` removed, both test
 `PyException: cannot import name 'pythonPointerInput' from 'fixture.compose'`; restored, both pass
 (`:ksp-fixtures:compose:desktopTest`, 50 tests / 0 failures, up from 48 before this file).
 
-### 9.2 The other six — judged, not attempted
+### 9.2 `draggable` and `dragAndDropSource` — reached, the same way `pointerInput` was
 
-- **`dragAndDropSource`, `draggable`, `pullRefresh`'s callback overload** are the same suspend-lambda
-  shape as `pointerInput` — a real suspension point inside hand-written Kotlin, a synchronous callback
-  to Python per event. `pythonPointerInput`'s pattern generalises to each of them; none is built here
-  (§9's whole point was finishing one rather than starting four).
-- **`composed`** looks reachable by a related but different mechanism: its `factory` compiles to the
-  *same* lowered shape (`Function3<Modifier, Composer, Integer, Modifier>`) `PythonCallables` already
-  crosses for every composable `content=` slot, so the missing piece is not the crossing but a
-  `@Composable` call site — which `ksp-fixtures/compose` already has the Compose plugin to compile.
-  A hand-written `@Composable fun pythonComposed(modifier: Modifier, factory: PyObject): Modifier`
-  threading the composer the way `PythonComposition` already does is the same shape as §9.1's fix,
-  applied to a composable call instead of a suspend one. Not attempted; unverified whether `composed`'s
-  own contract (it is itself *not* `@Composable`, so its factory runs during application, not
-  composition) admits a composer at all.
+Both measured against the real Compose 1.7.0 desktop jars (`javap -p`, and — since there is no sources
+jar for this Compose version — bytecode disassembly of the internal node classes where the declared
+signature alone did not settle how the slot is actually driven), 2026-08-17.
+
+- **`draggable`** (`androidx.compose.foundation.gestures.DraggableKt.draggable`) is not one suspend
+  slot but two different shapes: `state: DraggableState`'s own `onDelta` (built by the top-level
+  `DraggableState(onDelta: (Float) -> Unit): DraggableState` factory, itself a plain function, not
+  `@Composable`) is an *ordinary, non-suspend* `Function1<Float, Unit>` the internal drag node calls
+  directly, once per raw pointer delta — the same shape every other plain callback in this codebase
+  already crosses. `onDragStarted: suspend CoroutineScope.(Offset) -> Unit` and
+  `onDragStopped: suspend CoroutineScope.(Float) -> Unit` are `draggable`'s own parameters and are the
+  `pointerInput` shape: each invoked once per gesture, by a coroutine whose body never actually
+  suspends. `fixture.compose.pythonDraggable`
+  (`ksp-fixtures/compose/src/desktopMain/kotlin/fixture/compose/PythonDraggable.kt`) builds a
+  `DraggableState` from one `PyObject` callback and passes two hand-written trivial-suspend lambdas for
+  the other two, calling all three synchronously. **Lifetime is not solved here and the file says so**:
+  unlike `pointerInput`'s single suspend loop, there is no one coroutine whose `finally` covers this
+  function's whole lifetime — `onDelta` is held by the `DraggableState` for as long as the internal drag
+  node stays attached, which this function has no hook into without wrapping itself in a `@Composable`
+  (a different fix; see `composed` below). The three `PyObject` references are never closed; each call
+  to `pythonDraggable` leaks them. Measured, not guessed: `DraggableRenderTest` composes it once per
+  scene, so the leak is bounded (three references) for that test.
+
+  Proven, not asserted: `ksp-fixtures/compose/src/desktopTest/kotlin/fixture/compose
+  /DraggableRenderTest.kt` drives a real horizontal drag (`Move`/`Press`/several `Move` steps past the
+  default touch slop/`Release`) through `ImageComposeScene.sendPointerEvent`. Python asserts, in Python,
+  that `on_drag_started` fired exactly once with a real position inside the 48×48 box, that
+  `on_delta` fired at least once and its accumulated total is strictly positive (not a zero-stub), and
+  that `on_drag_stopped` fired exactly once with a `float`; a fresh scene shows the accumulated total as
+  a changed digit (ink 58→131px, 140px changed). The negative control is a press-and-release entirely
+  outside the 48×48 box: none of the three callbacks fire. Confirmed red first: with
+  `PythonDraggable.kt` removed, both tests fail with `cannot import name 'pythonDraggable'`; restored,
+  both pass.
+
+- **`dragAndDropSource`** (`androidx.compose.foundation.draganddrop.DragAndDropSourceKt
+  .dragAndDropSource`) turns out to be the *same* mechanism `pointerInput` uses, not merely the same
+  declared shape: disassembling `DragAndDropSourceNode`'s constructor shows it `delegate`s a
+  `SuspendingPointerInputFilterKt.SuspendingPointerInputModifierNode(dragAndDropSourceHandler)` — the
+  identical node `Modifier.pointerInput` itself delegates to. `DragAndDropSourceScope` (the `block`
+  parameter's receiver) extends `PointerInputScope`, so `fixture.compose.pythonDragAndDropSource`'s body
+  is `pythonPointerInput`'s loop, verbatim, on a different receiver type — including the same
+  `finally`-based lifetime, since it is the same underlying coroutine. `drawDragDecoration` (the other,
+  non-suspend parameter) is a hardcoded no-op here; this proves the suspend slot's events reach Python,
+  not that `startTransfer`/`drawDragDecoration` do anything real (a `DragAndDropTransferData` needs a
+  `java.awt.datatransfer.Transferable`, a real drag payload and a different, unmeasured claim). Required
+  `@OptIn(ExperimentalFoundationApi::class)`, and one thing surfaced only at runtime, not in `javap`:
+  Compose Multiplatform desktop prints `"Compose Multiplatform doesn't support Modifier
+  .dragAndDropSource yet"` (once per composition of the modifier) — a warning from elsewhere in
+  `dragAndDropSource`'s own implementation, not an exception, and it does not stop the delegated
+  `SuspendingPointerInputModifierNode` from receiving real events: the render test's ink still moves
+  (58→59px, 68px changed) and Python's assertions on real (kind, x, y) values still pass.
+
+  Proven the same way as `pointerInput`: `DragAndDropSourceRenderTest.kt`, structurally identical to
+  `PointerInputRenderTest.kt` (a tap-in-box positive claim, a tap-outside-box negative control).
+  Confirmed red first (`cannot import name 'pythonDragAndDropSource'` with the file removed); green
+  restored.
+
+### 9.3 `layoutId` — reached, and one more limit found along the way
+
+`layoutId(Modifier, id: Any)` declines for the reason §9's table gives: its one non-`Modifier`
+parameter is `kotlin.Any`, which `resolveKotlinType` has no `TypeTag` for. `fixture.compose
+.pythonLayoutIdString(modifier: Modifier, id: String): Modifier` fixes the parameter's tag exactly the
+way the table's KDoc predicted — one concrete-`String` wrapper, no suspend or generic-type problem
+involved at all.
+
+Proving what it tagged is where a second, previously unmeasured limit showed up. A first version paired
+it with a hand-written `@Composable fun pythonLayoutIdProbe(...)`, meant to read `Measurable.layoutId`
+back and place a child accordingly — bound as a plain top-level function the way `pythonPointerInput`
+is. **It does not bind, confirmed by running it**: `cannot import name 'pythonLayoutIdProbe'`, silently
+(no compile error, no KSP warning surfaced by the "e: "-line check) — `BindingPolicy.isComposable`
+excludes *every* `@Composable` top-level function from `FragmentScanner`'s plain-function path on
+purpose, per its own KDoc: a `@Composable` in the consumer's own source cannot be called from the
+generated, non-composable fragment source, and KSP must not try. `PythonComposition` is not a
+counterexample to this — Python never calls it; `ImageComposeScene`'s own composable content lambda
+does, from a context that already has a composer. This is a more definite answer than `composed`'s
+"unverified whether a composer is admitted at all" below: for a plain hand-written composable in this
+module's own source, the answer is no, independent of any per-declaration contract question.
+
+`LayoutIdRenderTest.kt`'s working version reads `layoutId` back the same way `PythonComposition` itself
+is reached: a `Layout` built in the *Kotlin test*, wrapping `PythonComposition`, whose one measurable is
+whatever single `Text` Python's body composed. It places that child at x=0 if the child's `layoutId`
+equals an `expectTag` known only to the Kotlin test (never crossed to Python) or at x=60 otherwise.
+Positive case (`aMatchingLayoutIdPlacesTheChildAtTheLeft`): tag and probe both `"python-tag"`, ink at
+x∈[0,20). Negative control (`aMismatchedLayoutIdPlacesTheChildAtTheRight`): tag `"python-tag"`, probe
+`"a-different-tag"`, ink at x∈[60,80) instead — ruling out a stub that always reports a match or drops
+the string Python actually sent. Confirmed red first (`cannot import name 'pythonLayoutIdString'` with
+`PythonLayoutId.kt` removed); green restored. `pythonLayoutIdInt` was judged not worth building
+alongside it: the `String` case is what needed a second crossing path to be found at all, and `Int`
+would exercise nothing new.
+
+### 9.4 `pullRefresh`'s callback overload, `composed`, and the generic-type group — still not attempted
+
+- **`pullRefresh`'s callback overload** (`androidx.compose.material.pullrefresh.PullRefreshKt
+  .pullRefresh(Modifier, onPull: (Float) -> Float, onRelease: suspend (Float) -> Float, enabled:
+  Boolean)`) turns out **not** to be the same shape §9's table assumed. Disassembling it (no sources jar
+  for this Compose version) shows it builds a `PullRefreshNestedScrollConnection(onPull, onRelease,
+  enabled)` and installs it with `Modifier.nestedScroll` — `onPull`/`onRelease` are driven by
+  `NestedScrollConnection` callbacks from a *scrollable descendant's* pre-scroll/pre-fling reports, not
+  by pointer events this modifier's own suspend body awaits directly the way `pointerInput`,
+  `draggable` and `dragAndDropSource` all do. `onPull` also has to *return* the `Float` amount consumed,
+  which `pythonDraggable`'s `onDelta` (returning `Unit`) does not. Reaching it the way §9.2 reaches
+  `draggable` is very likely still possible — `onPull`'s marshalling is one more step than a `Unit`
+  callback, and `onRelease` is the same trivial-suspend-lambda shape as `onDragStopped` — but proving it
+  needs a real nested-scroll parent/child composed inside the test (a scrollable container whose
+  over-scroll at rest actually reaches `PullRefreshNestedScrollConnection`), which is a materially larger
+  test harness than a bare tagged `Modifier` under a pointer. Not attempted here for that reason, not a
+  suspend-shape reason.
+- **`composed`** looks reachable by a related but different mechanism from §9.2/§9.3: its `factory`
+  compiles to the *same* lowered shape (`Function3<Modifier, Composer, Integer, Modifier>`)
+  `PythonCallables` already crosses for every composable `content=` slot, so the missing piece is not
+  the crossing but a `@Composable` call site — which `ksp-fixtures/compose` already has the Compose
+  plugin to compile. A hand-written `@Composable fun pythonComposed(modifier: Modifier, factory:
+  PyObject): Modifier` threading the composer the way `PythonComposition` already does is the same
+  shape as §9.1's fix, applied to a composable call instead of a suspend one — and, unlike
+  `pythonLayoutIdProbe` above, it would not hit `BindingPolicy.isComposable`'s exclusion, because
+  nothing about that check is about *this* function: `pythonComposed` itself need not be `@Composable`
+  to thread a composer through to `factory`'s call site, the same way `PythonComposition` is the one
+  `@Composable` and `pythonPointerInput` — which calls into it — is not. Not attempted; still unverified
+  whether `composed`'s own contract (it is itself *not* `@Composable`, so its factory runs during
+  application, not composition) admits a composer at all.
 - **`swipeable`, `modifierLocalProvider`, `anchoredDraggable`** share a limit `pythonPointerInput`'s
   technique does not reach: the unspellable part is a **type parameter** (`T` in `SwipeableState<T>`,
   `ProvidableModifierLocal<T>`, `AnchoredDraggableState<T>`), not a suspend modifier. A hand-written
@@ -778,9 +885,3 @@ cannot see. Confirmed red first: with `PythonPointerInput.kt` removed, both test
   SwipeableState<Float>, ...)`, one declaration per instantiation a caller wants, not one wrapper that
   covers the whole generic surface the way `pythonPointerInput` covers every `pointerInput` call site.
   Not attempted, and not the same shape of fix.
-- **`layoutId`** declines for an unrelated reason: its one non-`Modifier` parameter is `kotlin.Any`,
-  which is not a suspend lambda, not a generic type parameter and not itself unbindable — the walker
-  simply has no rule for "whatever tag the caller meant", since `layoutId` is real-world called with a
-  bare `String` or `Int`, not a Kotlin object handle. A hand-written wrapper fixing the parameter's
-  *tag* (`pythonLayoutIdString(modifier, id: String)`, `pythonLayoutIdInt(modifier, id: Long)`) would
-  work the same way `pythonPointerInput` does; not attempted.
