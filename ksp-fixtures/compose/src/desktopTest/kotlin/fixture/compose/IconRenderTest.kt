@@ -302,11 +302,15 @@ class IconRenderTest {
             """
             import pythonx
             _all = [d for table in pythonx._BY_PACKAGE.values() for decls in table.values() for d in decls]
-            # The mechanism, not the symptom: every entry the walker emits is a top-level function or
-            # an extension, because `kotlinCandidates` filters on ACC_STATIC. `Canvas.drawRect` is an
-            # instance method and so is every other way to put a pixel in a bitmap.
-            assert all(d.kind == 'FUNCTION' for d in _all), \
-                'the walker now binds something other than FUNCTION: ' + repr(sorted({d.kind for d in _all}))
+            # The mechanism, not the symptom: nothing the walker emits can *call* into an existing
+            # object. Functions are top-level or extensions, because `kotlinCandidates` filters on
+            # ACC_STATIC, and static getters read a singleton's value without taking a receiver.
+            # `Canvas.drawRect` is an instance method, and so is every other way to put a pixel in a
+            # bitmap. The day an instance method becomes reachable, this fails and the positional
+            # proof above can become an inked one.
+            _kinds = sorted({d.kind for d in _all})
+            assert set(_kinds) <= {'FUNCTION', 'STATIC_GETTER'}, \
+                'the walker now binds a kind that may take a receiver: ' + repr(_kinds)
             """.trimIndent(),
         )
     }

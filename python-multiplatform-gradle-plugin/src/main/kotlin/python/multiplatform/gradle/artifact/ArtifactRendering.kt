@@ -68,6 +68,7 @@ internal data class ArtifactCallable(
      * `returnTypeName` literal is where they travel together. See [SUPERTYPE_SEPARATOR].
      */
     val returnSupertypes: List<String> = emptyList(),
+    val kind: String = "FUNCTION",
     /**
      * Whether each parameter may be **left out of a call**, which is a statement about [lambdaBody]
      * and not quite about the declaration.
@@ -183,7 +184,7 @@ private fun renderEntry(entry: ArtifactCallable): String {
         |    arity = ${entry.arity},
         |    paramTypes = listOf($paramTags),
         |    returnType = $TYPE_TAG.${entry.returnTag},
-        |    kind = $CALLABLE_KIND.FUNCTION,
+        |    kind = $CALLABLE_KIND.${entry.kind},
         |    paramNames = listOf($paramNames),
         |    paramTypeNames = listOf($paramTypeNames),
         |    returnTypeName = ${renderedReturnTypeName(entry)?.quoted() ?: "null"},
