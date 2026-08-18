@@ -703,6 +703,7 @@ internal object ArtifactScanner {
                 returnType = returnModel,
                 isComposable = false,
                 isSuspend = false,
+                kind = "STATIC_GETTER",
                 bindingName = name,
                 returnBoundaryTag = returnType.tag,
             ),

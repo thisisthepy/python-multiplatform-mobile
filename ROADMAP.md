@@ -2886,14 +2886,9 @@ what is blocking it and what the next concrete step is.
    takes, and that part does need a device. `ksp-fixtures/android`'s 8 `jvmTest`s are also still
    not exercised on one.
 
-8. **wasm's `ProxyTypeExports.kt`-shaped trampoline generation is manual.** (§10, "Upcalls: closed")
-   The three delegating lines a wasm executable module must declare by hand are currently
-   hand-written in the test fixture; the design doc calls generating them from
-   `python-multiplatform-gradle-plugin` "the obvious next step" and it has not been done. **(a)
-   blocking it:** nothing technical recorded — the mechanism this would generate is proven working,
-   just not templated by the plugin yet. **(b) next step:** add the generation to
-   `python-multiplatform-gradle-plugin`, mirroring how it already generates the `installGeneratedUpcallTable`
-   `actual` per leaf (§13).
+8. ~~wasm's `ProxyTypeExports.kt`-shaped trampoline generation is manual.~~ **Closed 2026-08-18 (`112b54d0`), plugin wiring completed.**
+   `GenerateWasmProxyExportsTask` (`python-multiplatform-gradle-plugin`) generates the three `@WasmExport` proxy type slot trampolines (`pmp_tp_traverse`, `pmp_tp_clear`, `pmp_tp_dealloc`) from `WasmProxyExportsRendering.kt`. The hand-written test fixture `ProxyTypeExports.kt` was deleted in `112b54d0` and replaced by the task output in `:python-multiplatform:wasmJsTest`. `PythonBindingsPlugin` now automatically registers `generateWasmProxyExports` and wires its output directory to `wasmJsMain` for consumers (including `:sample`). Note that `UpcallExports.kt` / `WasmExports.kt` remain hand-written for `pmp_invoke` (the general upcall dispatcher), which is distinct from the CPython proxy type slots.
+
 
 9. ~~`jvmMain` unification (§8) is verified but not applied.~~ **Attempted at scale, 2026-08-18
    (`work/jvmmain`).** The premise — ~330 duplicated `actual`s collapsing into ~14 shared shape

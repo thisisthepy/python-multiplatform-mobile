@@ -276,6 +276,7 @@ class PythonBindingsPlugin : Plugin<Project> {
             // consumer's own `kotlin { ... }` block creates -- both of which are declared after
             // `plugins { ... }` and so do not exist while this plugin is being applied.
             configureArtifactBindings(this, extension)
+            configureWasmProxyExports(this)
         }
     }
 
@@ -483,7 +484,7 @@ class PythonBindingsPlugin : Plugin<Project> {
      * can name. Passing the task provider rather than a directory is what makes the compilation --
      * and KSP's own scan of the same source set -- depend on the walker having run.
      */
-    private fun addKotlinSourceDirectory(
+    internal fun addKotlinSourceDirectory(
         project: Project,
         sourceSetName: String,
         task: org.gradle.api.tasks.TaskProvider<*>,
@@ -659,5 +660,23 @@ class PythonBindingsPlugin : Plugin<Project> {
                 method.parameterTypes.all { it == String::class.java }
         } ?: error("KspExtension has no arg(String, String); python-multiplatform-gradle-plugin needs updating")
         arg.invoke(ksp, key, value)
+    }
+
+    internal fun configureWasmProxyExports(project: Project) {
+        val kotlin = project.extensions.findByName("kotlin") ?: return
+        val sourceSets = kotlin.javaClass.methods
+            .firstOrNull { it.name == "getSourceSets" && it.parameterCount == 0 }
+            ?.also { it.isAccessible = true }
+            ?.invoke(kotlin) as? org.gradle.api.NamedDomainObjectContainer<*>
+            ?: return
+        if (sourceSets.findByName("wasmJsMain") == null) return
+
+        val task = project.tasks.register("generateWasmProxyExports", GenerateWasmProxyExportsTask::class.java) {
+            group = "python"
+            description = "Generates the @WasmExport trampoline functions for CPython proxy type slots."
+            packageName.set("python.multiplatform.generated.wasm")
+            outputDirectory.set(project.layout.buildDirectory.dir("generated/wasmProxyExports/main"))
+        }
+        addKotlinSourceDirectory(project, "wasmJsMain", task)
     }
 }
