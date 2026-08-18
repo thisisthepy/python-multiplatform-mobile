@@ -940,3 +940,24 @@ Seven components remain unjudgeable in this harness, and the reasons why:
 2. **`Typography` / `Shapes` / `dynamicLightColorScheme`** (`typography.py`, `shape.py`, `dynamic_color.py`): These are data classes or functions returning styling objects (like `ColorScheme`), not `@Composable` UI elements that emit pixels.
 3. **`DatePicker` / `TimePicker` / `SwipeToDismiss`** (`date_picker.py`, `time_picker.py`, `swipe_to_dismiss.py`): Require complex state objects (e.g., `DatePickerState`) that cannot be trivially instantiated from Python without a wrapping `@Composable` block or `ExperimentalMaterial3Api` annotations.
 4. **`BottomSheetScaffold` / `ModalBottomSheet`** (`bottom_sheet.py`): Require complex nested slot parameters (e.g., `sheetContent`) and internal states (`SheetState`) that do not easily render in an isolated visual harness.
+
+### §9.5 `anchoredDraggable`, through a concrete type
+
+The three modifiers declined for an unspellable type parameter are not equally blocked, and one of
+them is now bound. `anchoredDraggable` takes its anchors and its state over a generic `T`; a wrapper
+that fixes `T` to `String` binds as an ordinary top-level function, the way the identifier wrapper
+fixed its own tag type. String was chosen because the states a swipe moves between are discrete
+names -- "start", "end" -- and a caller writes them literally.
+
+Proven the way the drag wrapper was: a real gesture crosses the boundary, Python asserts it received
+the anchor it settled toward rather than a stub, and a gesture outside the box invokes nothing. Ink
+moves 58 to 59 pixels, 68 pixels change. Removing the wrapper fails both tests.
+
+It carries the same unfixed lifetime as the plain drag wrapper -- the confirm callback is held by the
+state object and never closed -- and that is stated in its own documentation rather than discovered
+later. `DraggableLeakTest` already pins the shape of that leak and the reason interning cannot reach
+it.
+
+`swipeable` and `modifierLocalProvider` are unchanged: the same technique applies, one wrapper per
+concrete type, and nobody has needed one yet.
+
