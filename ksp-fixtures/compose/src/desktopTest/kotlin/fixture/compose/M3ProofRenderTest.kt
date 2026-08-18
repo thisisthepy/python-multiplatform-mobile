@@ -422,6 +422,298 @@ class M3ProofRenderTest {
         )
     }
 
+    // ── 11. Checkbox ──────────────────────────────────────────────────────────
+
+    @Test
+    fun checkboxRendersItsCheckedAndUncheckedStates() {
+        val checked = inkOf(
+            """
+            from pythonx.compose.material3 import Checkbox
+            Checkbox(checked=True, on_checked_change=lambda v: None)
+            """.trimIndent(),
+        )
+        val unchecked = inkOf(
+            """
+            from pythonx.compose.material3 import Checkbox
+            Checkbox(checked=False, on_checked_change=lambda v: None)
+            """.trimIndent(),
+        )
+        println("compose render: Checkbox checked=$checked px, unchecked=$unchecked px")
+        assertTrue(checked > 0, "Checkbox(checked=True) drew nothing")
+        assertTrue(unchecked > 0, "Checkbox(checked=False) drew nothing")
+        assertTrue(
+            checked > unchecked,
+            "checked Checkbox should have more ink than unchecked: $unchecked vs $checked",
+        )
+    }
+
+    // ── 12. Switch ────────────────────────────────────────────────────────────
+
+    @Test
+    fun switchRendersItsCheckedAndUncheckedStates() {
+        val checked = inkOf(
+            """
+            from pythonx.compose.material3 import Switch
+            Switch(checked=True, on_checked_change=lambda v: None)
+            """.trimIndent(),
+        )
+        val unchecked = inkOf(
+            """
+            from pythonx.compose.material3 import Switch
+            Switch(checked=False, on_checked_change=lambda v: None)
+            """.trimIndent(),
+        )
+        println("compose render: Switch checked=$checked px, unchecked=$unchecked px")
+        assertTrue(checked > 0, "Switch(checked=True) drew nothing")
+        assertTrue(unchecked > 0, "Switch(checked=False) drew nothing")
+        assertTrue(
+            checked != unchecked,
+            "checked Switch should differ from unchecked: $unchecked vs $checked",
+        )
+    }
+
+    // ── 13. BottomAppBar ──────────────────────────────────────────────────────
+
+    @Test
+    fun bottomAppBarComposesItsContentLambda() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import BottomAppBar, Text
+            BottomAppBar(content=lambda *args: Text('hi'))
+            """.trimIndent(),
+            width = 200, height = 64,
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import BottomAppBar
+            BottomAppBar(content=lambda *args: None)
+            """.trimIndent(),
+            width = 200, height = 64,
+        )
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: BottomAppBar(content=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+                "empty -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "BottomAppBar with empty content must still draw its container")
+        assertTrue(
+            drawnColors != emptyColors,
+            "BottomAppBar content lambda added no new colour: $emptyColors vs $drawnColors",
+        )
+    }
+
+    // ── 14. NavigationBar ──────────────────────────────────────────────────────
+
+    @Test
+    fun navigationBarComposesItsContentLambda() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import NavigationBar, Text
+            NavigationBar(content=lambda *args: Text('hi'))
+            """.trimIndent(),
+            width = 200, height = 64,
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import NavigationBar
+            NavigationBar(content=lambda *args: None)
+            """.trimIndent(),
+            width = 200, height = 64,
+        )
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: NavigationBar(content=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+                "empty -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "NavigationBar with empty content must still draw its container")
+        assertTrue(
+            drawnColors != emptyColors,
+            "NavigationBar content lambda added no new colour: $emptyColors vs $drawnColors",
+        )
+    }
+
+    // ── 15. NavigationRail ────────────────────────────────────────────────────
+
+    @Test
+    fun navigationRailComposesItsContentLambda() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import NavigationRail, Text
+            NavigationRail(content=lambda *args: Text('hi'))
+            """.trimIndent(),
+            width = 80, height = 200,
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import NavigationRail
+            NavigationRail(content=lambda *args: None)
+            """.trimIndent(),
+            width = 80, height = 200,
+        )
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: NavigationRail(content=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+                "empty -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "NavigationRail with empty content must still draw")
+        assertTrue(
+            drawnColors != emptyColors,
+            "NavigationRail content lambda added no new colour",
+        )
+    }
+
+    // ── 16. ExtendedFloatingActionButton ───────────────────────────────────────
+
+    @Test
+    fun extendedFloatingActionButtonComposesItsContent() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import ExtendedFloatingActionButton, Text
+            ExtendedFloatingActionButton(on_click=lambda: None, text=lambda: Text('hi'), icon=lambda: None)
+            """.trimIndent(),
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import ExtendedFloatingActionButton
+            ExtendedFloatingActionButton(on_click=lambda: None, text=lambda: None, icon=lambda: None)
+            """.trimIndent(),
+        )
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: ExtendedFAB(content=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+                "empty -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "ExtendedFAB must draw its container")
+        assertTrue(
+            drawnColors != emptyColors,
+            "ExtendedFAB content lambda added no new colour",
+        )
+    }
+
+    // ── 17. Snackbar ──────────────────────────────────────────────────────────
+
+    @Test
+    fun snackbarComposesItsContent() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import Snackbar, Text
+            Snackbar(content=lambda: Text('hi'))
+            """.trimIndent(),
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import Snackbar, Text
+            Snackbar(content=lambda: Text(''))
+            """.trimIndent(),
+        )
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: Snackbar(content=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+                "empty -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "Snackbar must draw its container")
+        assertTrue(
+            drawnColors != emptyColors,
+            "Snackbar content lambda added no new colour",
+        )
+    }
+
+    // ── 18. AlertDialog ───────────────────────────────────────────────────────
+
+    @Test
+    fun alertDialogComposesItsButtonsAndTitle() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import AlertDialog, Text
+            AlertDialog(on_dismiss_request=lambda: None, confirm_button=lambda: Text('OK'), title=lambda: Text('hi'))
+            """.trimIndent(),
+            width = 200, height = 200,
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import AlertDialog
+            AlertDialog(on_dismiss_request=lambda: None, confirm_button=lambda: None, title=lambda: None)
+            """.trimIndent(),
+            width = 200, height = 200,
+        )
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: AlertDialog(content) -> ${drawnColors.size} distinct colors, " +
+                "empty -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "AlertDialog must draw its container")
+        assertTrue(
+            drawnColors != emptyColors,
+            "AlertDialog content added no new colour",
+        )
+    }
+
+    // ── 19. NavigationDrawerItem ──────────────────────────────────────────────
+
+    @Test
+    fun navigationDrawerItemComposesItsLabel() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import NavigationDrawerItem, Text
+            NavigationDrawerItem(label=lambda: Text('hi'), selected=True, on_click=lambda: None)
+            """.trimIndent(),
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import NavigationDrawerItem
+            NavigationDrawerItem(label=lambda: None, selected=True, on_click=lambda: None)
+            """.trimIndent(),
+        )
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: NavigationDrawerItem(label=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+                "empty -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "NavigationDrawerItem must draw its container")
+        assertTrue(
+            drawnColors != emptyColors,
+            "NavigationDrawerItem label added no new colour",
+        )
+    }
+
+    // ── 21. SearchBar ─────────────────────────────────────────────────────────
+
+    @Test
+    fun searchBarComposesItsContent() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import SearchBar, Text
+            SearchBar(query="hi", on_query_change=lambda _: None, on_search=lambda _: None, active=False, on_active_change=lambda _: None, content=lambda *args: Text('hi'))
+            """.trimIndent(),
+            width = 200, height = 200,
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import SearchBar
+            SearchBar(query="", on_query_change=lambda _: None, on_search=lambda _: None, active=False, on_active_change=lambda _: None, content=lambda *args: None)
+            """.trimIndent(),
+            width = 200, height = 200,
+        )
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: SearchBar(content=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+                "empty -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "SearchBar must draw its container")
+        assertTrue(
+            drawnColors != emptyColors,
+            "SearchBar content added no new colour",
+        )
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private fun inkOf(body: String, width: Int = 200, height: Int = 60): Int =

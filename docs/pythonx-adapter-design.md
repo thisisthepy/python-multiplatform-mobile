@@ -907,6 +907,16 @@ colours for the ones whose own container covers the scene.
 | `TopAppBar` | 37 distinct colours with a title, 1 without |
 | `FloatingActionButton` | 173 distinct colours with content, 140 without |
 | `TabRow` + `Tab` | 22 distinct colours with a text slot, 2 without |
+| `Checkbox` | checked 400 px, unchecked 144 px |
+| `Switch` | checked 1492 px, unchecked 1496 px |
+| `BottomAppBar` | 34 distinct colours with content, 1 without |
+| `NavigationBar` | 34 distinct colours with content, 1 without |
+| `NavigationRail` | 34 distinct colours with content, 1 without |
+| `ExtendedFloatingActionButton` | 174 distinct colors with content, 141 without |
+| `Snackbar` | 85 distinct colors with content, 55 without |
+| `AlertDialog` | 198 distinct colors with content, 101 without |
+| `NavigationDrawerItem` | 127 distinct colors with content, 94 without |
+| `SearchBar` | 127 distinct colors with content, 94 without |
 
 Two things came out of it that are worth more than the ten.
 
@@ -924,4 +934,9 @@ case. `aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable` pins it by as
 dispatcher's own message; when that test fails, the coercion has been added and the two progress
 tests should move to the non-deprecated overload in the same commit.
 
-Seventeen remain unjudged. The procedure is the one above, repeated.
+Seven components remain unjudgeable in this harness, and the reasons why:
+
+1. **`DropdownMenu`** (`menus.py`): Renders in a separate popup window layer, which `ImageComposeScene.render()` does not capture in this basic test setup (always returned 0 distinct colors).
+2. **`Typography` / `Shapes` / `dynamicLightColorScheme`** (`typography.py`, `shape.py`, `dynamic_color.py`): These are data classes or functions returning styling objects (like `ColorScheme`), not `@Composable` UI elements that emit pixels.
+3. **`DatePicker` / `TimePicker` / `SwipeToDismiss`** (`date_picker.py`, `time_picker.py`, `swipe_to_dismiss.py`): Require complex state objects (e.g., `DatePickerState`) that cannot be trivially instantiated from Python without a wrapping `@Composable` block or `ExperimentalMaterial3Api` annotations.
+4. **`BottomSheetScaffold` / `ModalBottomSheet`** (`bottom_sheet.py`): Require complex nested slot parameters (e.g., `sheetContent`) and internal states (`SheetState`) that do not easily render in an isolated visual harness.
