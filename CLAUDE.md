@@ -323,9 +323,12 @@ grep 하면 그 거부를 못 본다 — 그러면 머지된 줄 알고 **옛 �
 
 ### agy 호출 시 주의
 
-- **Claude 계열 모델에는 `--effort` 를 붙이면 안 된다.** `claude-opus-4-6-thinking` 과 `claude-sonnet-4-6` 모두
-  붙이는 즉시 실행이 실패한다 (`invalid model selection: --effort is not supported for model "..."`).
-  `--effort` 는 Gemini 계열에만 준다.
+- **`--effort` 는 모델 이름에 강도가 안 붙은 것에만 준다.** 두 가지가 다 실패한다:
+  - Claude 계열(`claude-opus-4-6-thinking`, `claude-sonnet-4-6`) — `--effort is not supported for model "..."`
+  - 강도가 이름에 이미 들어간 Gemini(`gemini-3.6-flash-high`, `gemini-3.1-pro-high`) —
+    `--model gemini-3.6-flash-high conflicts with --effort=medium`
+  즉 `--effort` 를 붙일 수 있는 것은 `gemini-3.6-flash` 처럼 접미사 없는 이름뿐이다.
+  **어느 쪽이든 즉시 종료되므로, 배경 실행이면 아무 일도 안 하고 성공처럼 보인다.**
 - 실행 후 로그 앞부분을 반드시 확인한다. 인자 오류는 즉시 종료되는데, 배경 실행이면 성공처럼 보인다.
 - **사용량 한도는 Gemini 계열과 Claude 계열이 별도로 집계된다.** 한쪽이
   `Individual quota reached` 로 막혀도 다른 쪽은 그대로 쓸 수 있으니, 작업을 멈추지 말고 남은 계열로 계속 진행한다.
