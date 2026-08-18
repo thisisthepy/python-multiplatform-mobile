@@ -885,3 +885,43 @@ would exercise nothing new.
   SwipeableState<Float>, ...)`, one declaration per instantiation a caller wants, not one wrapper that
   covers the whole generic surface the way `pythonPointerInput` covers every `pointerInput` call site.
   Not attempted, and not the same shape of fix.
+
+## §10 The zero-byte material3 stubs, ten of them judged
+
+The downstream package carries twenty-nine files under `material3`, twenty-seven of them zero
+bytes. They were never wrappers that got emptied: nothing had established whether the adaptation
+layer produces those declarations at all, which is a different question from the one the deletions
+answered. Ten are answered now, by render tests in `ksp-fixtures/compose` (`M3ProofRenderTest`), on
+the evidence model already in use -- pixels for components that leave background visible, distinct
+colours for the ones whose own container covers the scene.
+
+| declaration | evidence |
+|---|---|
+| `HorizontalDivider` | 200 px against 0 for an empty body |
+| `RadioButton` | selected 254 px, deselected 166 px -- the argument reaches the component |
+| `LinearProgressIndicator` | 800 px at `progress=0.75` |
+| `CircularProgressIndicator` | 414 px at `progress=0.75` |
+| `Surface` | 192 px with content, 0 without |
+| `Scaffold` | 34 distinct colours with content, 1 without |
+| `Slider` | 1062 px, and the pixel sets differ between two values |
+| `TopAppBar` | 37 distinct colours with a title, 1 without |
+| `FloatingActionButton` | 173 distinct colours with content, 140 without |
+| `TabRow` + `Tab` | 22 distinct colours with a text slot, 2 without |
+
+Two things came out of it that are worth more than the ten.
+
+**A component that animates forever cannot be rendered by this harness.** The indeterminate
+progress indicators run an infinite transition, so the composition never goes idle and
+`ImageComposeScene.render` never returns. It presents as a slow suite: thirty-seven minutes with
+seven seconds of CPU, diagnosed from a thread dump rather than from the log, which said nothing at
+all. Both tests use the determinate overload instead. Anything else that animates without input
+will hang the same way.
+
+**A Python callable is refused for a slot typed `() -> Float`, while one for `() -> Unit` is
+accepted.** The dispatcher lists all three overloads and rejects the call. Every function slot
+exercised before this was a callback returning `Unit`, so nothing had touched the value-returning
+case. `aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable` pins it by asserting the
+dispatcher's own message; when that test fails, the coercion has been added and the two progress
+tests should move to the non-deprecated overload in the same commit.
+
+Seventeen remain unjudged. The procedure is the one above, repeated.
