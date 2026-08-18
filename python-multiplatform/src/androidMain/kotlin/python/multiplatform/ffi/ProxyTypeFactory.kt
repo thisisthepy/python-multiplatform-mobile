@@ -4,6 +4,7 @@ import python.multiplatform.reflection.ClassLookup
 import python.multiplatform.reflection.HandleTable
 import python.multiplatform.reflection.ObjectReference
 import python.native.ffi.bindings
+import python.native.ffi.internedUtf8
 
 /**
  * The Kotlin half of the proxy type's `tp_traverse`, `tp_clear` and `tp_dealloc`.
@@ -170,10 +171,22 @@ actual object ProxyTypeFactory {
     fun setHandle(proxy: Long, handle: Long) = bindings.proxySetHandle(proxy, handle)
 
     /**
-     * Not wired on Android yet. [setHandle] already gives a *test* a way to put a handle into an
-     * instance of this type -- what is missing is a Python-visible base a *generated* proxy could
-     * subclass and a way for the rendered `__init__` to reach [setHandle] instead of assigning
-     * `self._pm_handle`. See `ProxyTypeFactory`'s class doc and `ROADMAP.md` §7.
+     * Publishes [createProxyType]'s type into `__main__` as `_pm_proxy_base`.
+     *
+     * `PyObject_SetAttrStringN` takes the type's own address directly as the value -- a
+     * `PyTypeObject*` is a valid `PyObject*`, its header is the same one every other object here
+     * has -- so this needs no `ctypes` round trip through an integer and back. `PyObject_SetAttrStringN`
+     * does not steal the reference it is given; the type is never freed anyway (see
+     * `proxy_create_type`'s own spec/slots allocations in `jni_onload.def`), so nothing here needs
+     * an extra incref to keep it alive under `__main__`.
      */
-    actual fun installGcBase(): Boolean = false
+    actual fun installGcBase(): Boolean {
+        val type = createProxyType()
+        if (type == 0L) return false
+        return withGIL {
+            val main = bindings.PyImport_AddModuleN(internedUtf8("__main__"))
+            if (main == 0L) return@withGIL false
+            bindings.PyObject_SetAttrStringN(main, internedUtf8("_pm_proxy_base"), type) == 0
+        }
+    }
 }
