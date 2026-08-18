@@ -287,4 +287,60 @@ class CycleCollectionTest {
             )
         }
     }
+
+    /**
+     * A Python subclass of the proxy heap type is deallocated through CPython's own
+     * `subtype_dealloc`, which untracks the instance *before* delegating to the base's
+     * `tp_dealloc` -- and [ProxyTypeFactory.tp_dealloc] untracks again, unconditionally. Whether
+     * that second untrack is safe decides whether the generated proxy classes can ever subclass
+     * this type, which is what `ROADMAP.md` §7 records as the open question blocking real cycle
+     * collection.
+     *
+     * The answer is yes, and CPython says so in the header this repository vendors:
+     * `internal/pycore_gc.h` -- *"See also the public PyObject_GC_UnTrack() which accept an object
+     * which is not tracked."* The internal variant asserts on it; the public one, which this code
+     * calls, is defined to tolerate it.
+     *
+     * A documented guarantee is not a run, so this exercises the path. The tracking assertion is
+     * the part that keeps the test from being vacuous: if the instance were never GC-tracked, no
+     * second untrack would happen and the test would pass without testing anything. It fails
+     * loudly instead.
+     */
+    @Test
+    fun aPythonSubclassOfTheProxyTypeSurvivesBeingUntrackedTwice() {
+        python.multiplatform.ffi.withGIL {
+            val proxyTypeAddr = ProxyTypeFactory.createProxyType()
+            assertTrue(proxyTypeAddr != 0L, "Proxy type creation failed")
+
+            // The type object reaches Python as an address, then back to an object through ctypes:
+            // there is no other route from a raw `PyTypeObject*` to a usable base class in a script.
+            val sys = bindings.PyImport_ImportModule("sys")
+            val typeObj = bindings.PyLong_FromLongLong(proxyTypeAddr)
+            bindings.PyObject_SetAttrString(sys, "_test_proxy_type_addr", typeObj)
+            bindings.Py_DecRef(typeObj)
+            bindings.Py_DecRef(sys)
+
+            val script = """
+import sys
+import ctypes
+import gc
+
+proxy_type = ctypes.cast(sys._test_proxy_type_addr, ctypes.py_object).value
+
+class MyProxy(proxy_type):
+    pass
+
+instance = MyProxy()
+
+# Without this the test proves nothing: an untracked instance is never untracked twice.
+if not gc.is_tracked(instance):
+    raise AssertionError('instance is not GC-tracked, so the double untrack never happens')
+
+del instance
+gc.collect()
+"""
+            val rc = bindings.PyRun_SimpleString(script)
+            assertEquals(0, rc, "the subclass did not survive collection -- see stderr for the Python side")
+        }
+    }
 }
