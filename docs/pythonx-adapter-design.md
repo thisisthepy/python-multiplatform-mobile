@@ -847,7 +847,7 @@ the string Python actually sent. Confirmed red first (`cannot import name 'pytho
 alongside it: the `String` case is what needed a second crossing path to be found at all, and `Int`
 would exercise nothing new.
 
-### 9.4 `pullRefresh`'s callback overload, `composed`, and the generic-type group — still not attempted
+### 9.4 `pullRefresh`'s callback overload and the generic-type group — still not attempted; `composed` — reached
 
 - **`pullRefresh`'s callback overload** (`androidx.compose.material.pullrefresh.PullRefreshKt
   .pullRefresh(Modifier, onPull: (Float) -> Float, onRelease: suspend (Float) -> Float, enabled:
@@ -864,19 +864,40 @@ would exercise nothing new.
   over-scroll at rest actually reaches `PullRefreshNestedScrollConnection`), which is a materially larger
   test harness than a bare tagged `Modifier` under a pointer. Not attempted here for that reason, not a
   suspend-shape reason.
-- **`composed`** looks reachable by a related but different mechanism from §9.2/§9.3: its `factory`
-  compiles to the *same* lowered shape (`Function3<Modifier, Composer, Integer, Modifier>`)
-  `PythonCallables` already crosses for every composable `content=` slot, so the missing piece is not
-  the crossing but a `@Composable` call site — which `ksp-fixtures/compose` already has the Compose
-  plugin to compile. A hand-written `@Composable fun pythonComposed(modifier: Modifier, factory:
-  PyObject): Modifier` threading the composer the way `PythonComposition` already does is the same
-  shape as §9.1's fix, applied to a composable call instead of a suspend one — and, unlike
-  `pythonLayoutIdProbe` above, it would not hit `BindingPolicy.isComposable`'s exclusion, because
-  nothing about that check is about *this* function: `pythonComposed` itself need not be `@Composable`
-  to thread a composer through to `factory`'s call site, the same way `PythonComposition` is the one
-  `@Composable` and `pythonPointerInput` — which calls into it — is not. Not attempted; still unverified
-  whether `composed`'s own contract (it is itself *not* `@Composable`, so its factory runs during
-  application, not composition) admits a composer at all.
+- **`composed`** — **attempted, reached, and proven.** Its `factory` compiles to the *same* lowered
+  shape (`Function3<Modifier, Composer, Integer, Modifier>`, confirmed by `javap -p
+  androidx.compose.ui.ComposedModifierKt`) `PythonCallables` already crosses for every composable
+  `content=` slot, so the missing piece was never the crossing but a call site — which
+  `ksp-fixtures/compose` already has the Compose plugin to compile. The verdict this section left open
+  — "still unverified whether `composed`'s own contract... admits a composer at all" — is answered
+  **yes**, and the premise in that sentence was backwards: `composed` itself is not `@Composable` (the
+  same `javap` output shows no synthetic `$composer`/`$changed` on the `composed` static method), which
+  does not make a composer *unavailable* to `factory` — it means `BindingPolicy.isComposable` (which
+  excludes only a declaration *itself* annotated `@Composable`) never sees `pythonComposed` and does not
+  exclude it, exactly as this paragraph predicted. `fixture.compose.pythonComposed`
+  (`ksp-fixtures/compose/src/desktopMain/kotlin/fixture/compose/PythonComposed.kt`) is a plain,
+  non-`@Composable` top-level function bound by KSP; its body is `modifier.composed { ... }`, and the
+  composable-typed lambda literal is where `currentComposer` resolves, exactly as `PythonComposition`'s
+  does. What "admits a composer" turned out to mean, and what needed proving rather than inferring from
+  bytecode, is whether that composer is wired into a *real, positionally-stable slot table* rather than
+  a placeholder that merely satisfies the type — `ComposedRenderTest
+  .theSameCompositionReusesTheRememberedSlotAcrossRecompositions` measures it: a `remember { }` inside
+  the `composed { }` lambda allocates once (`remembersAllocated == 1`) and is *reused* across six
+  forced recompositions of the same node, even though `PythonComposition` re-`exec`s the Python source
+  on every pass and so calls `pythonComposed` itself afresh each time, building a brand-new
+  `ComposedModifier` Kotlin object — the slot survives because `Modifier.composed`'s own
+  materialize-time group is positional, not object-identity-based, which is the mechanism that lets a
+  real `Modifier.clickable`'s internal `remember(interactionSource) { ... }` survive a modifier chain
+  rebuilt from scratch every recomposition. A placeholder composer could not have produced that
+  persistence. `ComposedRenderTest.aFactoryProducedModifierIsAppliedAndItsSizeCrosses` is the render
+  proof that the `Modifier` `factory` returns is the one actually measured, not a stub: a Python
+  `factory` calling the walked `size__Dp(receiver, 70.0)` measures a 70px-wide placeable, a second one
+  with `33.0` measures 33px, and a negative-control identity factory (`return receiver`, no resize)
+  measures 8px (`Text("x")`'s own intrinsic width) — ruling out both "the result is ignored" and "any
+  factory produces the same fixed size." Not solved: `factory`'s one Python reference is captured by
+  the closure and never released (no `RememberObserver` hook exists for a bare captured `PyObject` the
+  way `content=`'s `PythonCallableScope` has one) — the same documented, bounded shape as
+  `pythonDraggable`'s leak above, out of scope for this question.
 - **`swipeable`, `modifierLocalProvider`, `anchoredDraggable`** share a limit `pythonPointerInput`'s
   technique does not reach: the unspellable part is a **type parameter** (`T` in `SwipeableState<T>`,
   `ProvidableModifierLocal<T>`, `AnchoredDraggableState<T>`), not a suspend modifier. A hand-written
