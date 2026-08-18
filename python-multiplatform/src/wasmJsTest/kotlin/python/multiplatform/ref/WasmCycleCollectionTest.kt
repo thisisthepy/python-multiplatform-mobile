@@ -184,4 +184,59 @@ class WasmCycleCollectionTest {
             )
         }
     }
+
+    @Test
+    fun pythonSubclassCycleIsCollectedThroughKotlin() {
+        withGIL {
+            assertTrue(ProxyTypeFactory.installGcBase(), "installGcBase failed")
+
+            val script = """
+class MyProxy(_pm_proxy_base):
+    pass
+instance = MyProxy()
+"""
+            val rc = python.native.ffi.bindings.PyRun_SimpleString(Wasm.scratchUtf8(script))
+            if (rc != 0) {
+                python.native.ffi.bindings.PyErr_Print()
+            }
+            assertEquals(0, rc, "Python script failed")
+
+            val main = python.native.ffi.bindings.PyImport_ImportModule(Wasm.scratchUtf8("__main__"))
+            val instance = python.native.ffi.bindings.PyObject_GetAttrString(main, Wasm.scratchUtf8("instance"))
+
+            val node = WasmNode()
+            val handle = HandleTable.register(node).raw
+
+            // Assign the handle from Python
+            val handleObj = python.native.ffi.bindings.PyLong_FromLongLong(handle)
+            val rc1 = python.native.ffi.bindings.PyObject_SetAttrString(instance, Wasm.scratchUtf8("_pm_handle"), handleObj)
+            if (rc1 != 0) {
+                python.native.ffi.bindings.PyErr_Print()
+            }
+            python.native.ffi.bindings.Py_DecRef(handleObj)
+            assertEquals(0, rc1, "failed to set _pm_handle")
+
+            assertEquals(handle, ProxyType.peekHandle(instance), "_pm_handle did not write to the right offset")
+
+            // Complete the cycle on Kotlin side
+            node.ref = PyObject(assertNotNull(instance.toNativePointerFromRaw()), borrowed = false)
+            node.rawPtr = instance.toUInt().toLong()
+
+            assertNotNull(HandleTable.resolveRaw(handle), "setup failed")
+
+            // Delete the instance from Python globals so it is only held in the cycle
+            val rc2 = python.native.ffi.bindings.PyRun_SimpleString(Wasm.scratchUtf8("del instance\nimport gc\ngc.collect()"))
+            assertEquals(0, rc2, "gc.collect() script failed")
+
+            assertNull(
+                HandleTable.resolveRaw(handle),
+                "the cycle was not collected"
+            )
+            
+            // Give back the last ref 
+            node.ref?.close()
+            node.ref = null
+            python.native.ffi.bindings.Py_DecRef(main)
+        }
+    }
 }

@@ -20,10 +20,14 @@ import python.native.ffi.Wasm
 private const val PY_TP_CLEAR = 51
 private const val PY_TP_DEALLOC = 52
 private const val PY_TP_TRAVERSE = 71
+private const val PY_TP_MEMBERS = 72
 private const val PY_TP_FREE = 74
 
 /** `Py_TPFLAGS_BASETYPE` and `Py_TPFLAGS_HAVE_GC`. */
 private const val PY_TPFLAGS = (1 shl 10) or (1 shl 14)
+
+private const val PY_T_LONGLONG = 17
+private const val PY_RELATIVE_OFFSET = 8
 
 /**
  * `PyType_Spec` and `PyType_Slot` are 32-bit structures here, and that is the whole reason this
@@ -247,15 +251,35 @@ actual object ProxyTypeFactory {
         val clearFp = registerUpcall(ProxyTypeExportNames.CLEAR)
         val deallocFp = registerUpcall(ProxyTypeExportNames.DEALLOC)
 
-        // Four slots: traverse, clear, dealloc, sentinel. Allocated through CPython's malloc and
+        // Five slots: traverse, clear, dealloc, members, sentinel. Allocated through CPython's malloc and
         // never freed -- `PyType_FromSpec` copies the slots but keeps `spec->name`, so the name at
         // least has to outlive the call, and a single type per process makes the rest moot.
-        val slots = python.native.ffi.bindings.malloc(SLOT_SIZE * 4)
+        val slots = python.native.ffi.bindings.malloc(SLOT_SIZE * 5)
         if (slots == 0) throw OutOfMemoryError("malloc for PyType_Slot[] failed")
         writeSlot(slots, 0, PY_TP_TRAVERSE, traverseFp)
         writeSlot(slots, 1, PY_TP_CLEAR, clearFp)
         writeSlot(slots, 2, PY_TP_DEALLOC, deallocFp)
-        writeSlot(slots, 3, 0, 0)
+
+        // Slot 3: Py_tp_members (72) -- the handle slot, exposed to Python itself.
+        // `PyMemberDef` on wasm32:
+        // struct PyMemberDef { const char *name; int type; Py_ssize_t offset; int flags; const char *doc; };
+        // Wasm32: 20 bytes total (4 bytes each).
+        val membersAddr = python.native.ffi.bindings.malloc(20 * 2)
+        if (membersAddr == 0) throw OutOfMemoryError("malloc for PyMemberDef[] failed")
+        storeInt(membersAddr, Wasm.allocUtf8("_pm_handle")) // name
+        storeInt(membersAddr + 4, PY_T_LONGLONG)            // type
+        storeInt(membersAddr + 8, 0)                        // offset
+        storeInt(membersAddr + 12, PY_RELATIVE_OFFSET)      // flags
+        storeInt(membersAddr + 16, 0)                       // doc
+        // sentinel
+        storeInt(membersAddr + 20, 0)
+        storeInt(membersAddr + 24, 0)
+        storeInt(membersAddr + 28, 0)
+        storeInt(membersAddr + 32, 0)
+        storeInt(membersAddr + 36, 0)
+
+        writeSlot(slots, 3, PY_TP_MEMBERS, membersAddr)
+        writeSlot(slots, 4, 0, 0)
 
         val spec = python.native.ffi.bindings.malloc(SPEC_SIZE)
         if (spec == 0) throw OutOfMemoryError("malloc for PyType_Spec failed")
@@ -278,16 +302,15 @@ actual object ProxyTypeFactory {
         return type.toUInt().toLong()
     }
 
-    /**
-     * Not wired on wasm yet, and `ctypes`-based publication is not an option here regardless --
-     * `CLAUDE.md` already records wasm has no `ctypes`. [ProxyType.putHandle]/[ProxyType.peekHandle]
-     * give a *test* raw slot access; what is missing is a `Py_tp_members` slot (or a native setter
-     * `PythonProxySource` could call) plus a way to publish the type object itself into `__main__`
-     * without `ctypes.cast` -- `PyObject_SetAttrString` with the type's own address works and needs
-     * no `ctypes` (desktop's `installGcBase` does exactly that), so the gap here is the member slot,
-     * not the publication. See `ProxyTypeFactory`'s class doc and `ROADMAP.md` §7.
-     */
-    actual fun installGcBase(): Boolean = false
+    actual fun installGcBase(): Boolean {
+        val type = createProxyType()
+        if (type == 0L) return false
+        return python.multiplatform.ffi.withGIL {
+            val main = python.native.ffi.bindings.PyImport_AddModule(python.native.ffi.Wasm.internedUtf8("__main__"))
+            if (main == 0) return@withGIL false
+            python.native.ffi.bindings.PyObject_SetAttrString(main, python.native.ffi.Wasm.internedUtf8("_pm_proxy_base"), type.toInt()) == 0
+        }
+    }
 
     /**
      * Puts the Kotlin `@WasmExport` called [name] into CPython's `__indirect_function_table` and
