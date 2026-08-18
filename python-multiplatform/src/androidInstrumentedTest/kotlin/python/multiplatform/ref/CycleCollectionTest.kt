@@ -617,4 +617,94 @@ class CycleCollectionTest {
             disposeProxy(node)
         }
     }
+
+    /**
+     * Verifies that ProxyTypeFactory.installGcBase() publishes `_pm_proxy_base` into `__main__`.
+     */
+    @Test
+    fun testInstallGcBase() {
+        assertTrue(ProxyTypeFactory.installGcBase(), "ProxyTypeFactory.installGcBase() returned false")
+        withGIL {
+            val main = PythonOnDevice.withUtf8("__main__") { bindings.PyImport_AddModuleN(it) }
+            assertTrue(main != 0L, "could not get __main__")
+            val baseType = PythonOnDevice.withUtf8("_pm_proxy_base") {
+                bindings.PyObject_GetAttrStringN(main, it)
+            }
+            assertTrue(baseType != 0L, "_pm_proxy_base was not found in __main__")
+            assertEquals(
+                ProxyTypeFactory.createProxyType(), baseType,
+                "_pm_proxy_base in __main__ does not match ProxyTypeFactory.createProxyType()",
+            )
+            bindings.Py_DecRefN(baseType)
+        }
+    }
+
+    /**
+     * Verifies that a Python subclass of `_pm_proxy_base` sets `self._pm_handle` directly in Python
+     * via PyMemberDef and that CPython GC collects cycles formed through it.
+     */
+    @Test
+    fun testPythonSubclassSetsHandleAndCollects() {
+        assertTrue(ProxyTypeFactory.installGcBase(), "ProxyTypeFactory.installGcBase() returned false")
+        withGIL {
+            val main = PythonOnDevice.withUtf8("__main__") { bindings.PyImport_AddModuleN(it) }
+            assertTrue(main != 0L, "could not get __main__")
+            val globals = PythonOnDevice.withUtf8("__dict__") {
+                bindings.PyObject_GetAttrStringN(main, it)
+            }
+            assertTrue(globals != 0L, "could not get __main__.__dict__")
+
+
+            val script = """
+                import gc
+                class MySubclassProxy(_pm_proxy_base):
+                    pass
+                _test_subclass_inst = MySubclassProxy()
+            """.trimIndent()
+            val rc = PythonOnDevice.withUtf8(script) { bindings.PyRun_SimpleStringN(it) }
+            assertEquals(0, rc, "Python script creating subclass instance failed")
+
+            val pyObjPtr = PythonOnDevice.withUtf8("_test_subclass_inst") {
+                bindings.PyDict_GetItemStringN(globals, it)
+            }
+            assertTrue(pyObjPtr != 0L, "could not retrieve _test_subclass_inst")
+
+            val node = AndroidCycleNode()
+            val handle = HandleTable.register(node).raw
+
+            // Assign self._pm_handle = handle in Python
+            val setHandleScript = "_test_subclass_inst._pm_handle = $handle"
+            val setRc = PythonOnDevice.withUtf8(setHandleScript) { bindings.PyRun_SimpleStringN(it) }
+            assertEquals(0, setRc, "setting _pm_handle on subclass instance failed")
+
+            assertEquals(
+                handle, ProxyTypeFactory.handleOf(pyObjPtr),
+                "the handle assigned via self._pm_handle in Python did not reach relative type data",
+            )
+
+            // Connect cycle: node holds PyObject (which decrefs pyObjPtr when node is disposed or collected),
+            // and Python object holds handle (which resolves to node).
+            node.ref = PyObject(assertNotNull(pyObjPtr.toNativePointer()), borrowed = false)
+            node.rawPtr = pyObjPtr
+
+            // Remove global reference from __main__ so the cycle has no external references
+            PythonOnDevice.withUtf8("_test_subclass_inst") {
+                bindings.PyDict_DelItemStringN(globals, it)
+            }
+
+            val gcRc = PythonOnDevice.withUtf8("import gc; gc.collect()") {
+                bindings.PyRun_SimpleStringN(it)
+            }
+            assertEquals(0, gcRc, "gc.collect() failed")
+
+            assertNull(
+                HandleTable.resolveRaw(handle),
+                "the Python subclass cycle was not collected by GC",
+            )
+
+            bindings.Py_DecRefN(globals)
+            disposeProxy(node)
+        }
+    }
 }
+

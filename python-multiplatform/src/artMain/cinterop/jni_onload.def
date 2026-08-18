@@ -1052,7 +1052,7 @@ extern void PyObject_GC_UnTrack(void *op);
 typedef void (*pmp_freefunc)(void *);
 
 static jlong g_proxyType = 0;
-static pmp_type_slot g_proxySlots[4];
+static pmp_type_slot g_proxySlots[5];
 static pmp_type_spec g_proxySpec;
 
 static jclass g_proxyCallbacks = NULL;
@@ -1317,6 +1317,27 @@ static void pmp_proxy_dealloc(void *self) {
 }
 
 /*
+ * Equivalent to PyMemberDef from structmember.h.
+ * 40 bytes on 64-bit platforms (arm64-v8a, x86_64).
+ */
+typedef struct {
+    const char *name;
+    int type;
+    intptr_t offset;
+    int flags;
+    const char *doc;
+} pmp_member_def;
+
+/*
+ * Slot 3: Py_tp_members (72) -- the handle slot exposed as _pm_handle to Python.
+ * Py_T_LONG = 2, Py_RELATIVE_OFFSET = 8.
+ */
+static pmp_member_def g_proxyMembers[2] = {
+    {"_pm_handle", 2 /* Py_T_LONG */, 0 /* relative offset */, 8 /* Py_RELATIVE_OFFSET */, NULL},
+    {NULL, 0, 0, 0, NULL}
+};
+
+/*
  * Creates the proxy type once and returns its address.
  *
  * The spec, its slot array and the name are statics rather than heap allocations, because
@@ -1335,8 +1356,10 @@ static jlong proxy_create_type(JNIEnv *e, jclass c) {
     g_proxySlots[1].pfunc = (void *)&pmp_proxy_clear;
     g_proxySlots[2].slot = 52; /* Py_tp_dealloc */
     g_proxySlots[2].pfunc = (void *)&pmp_proxy_dealloc;
-    g_proxySlots[3].slot = 0;  /* sentinel */
-    g_proxySlots[3].pfunc = NULL;
+    g_proxySlots[3].slot = 72; /* Py_tp_members */
+    g_proxySlots[3].pfunc = (void *)g_proxyMembers;
+    g_proxySlots[4].slot = 0;  /* sentinel */
+    g_proxySlots[4].pfunc = NULL;
 
     g_proxySpec.name = "KotlinProxy";
     g_proxySpec.basicsize = -8; /* 8 bytes of relative type data: the handle */
