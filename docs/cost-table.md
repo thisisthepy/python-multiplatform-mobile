@@ -316,3 +316,32 @@ These also come through `Benchmark.printReport`, and they are **not comparable w
 | `WasmMarshallingOverheadTest` | `marshal 4000 B: Wasm.scratchUtf8` | 20,000 | — | — | 9420.60–9830.11 ns | — | — | — |
 
 <!-- COST-TABLE:GENERATED END -->
+
+## The React Native comparison's Android column is unquotable, and not for the reason assumed
+
+The cross-runtime comparison this table is read against
+(`/Volumes/macMini/rn-benchmark/COMPARISON.md`) has an Android column that cannot
+be quoted. Two solo runs on a quiet machine, one at the documented warmup and one
+at four times it, both ended with the benchmark refusing its own numbers:
+
+    boundary (Hermes+JSI+JNI+ART): NEVER SETTLED. Warmup 100000 is not justified by this run.
+    boundary (Hermes+JSI+JNI+ART): NEVER SETTLED. Warmup 400000 is not justified by this run.
+
+Two explanations are ruled out by that pair rather than argued away. Machine load
+is not it: the runs were alone, at load averages of 3.10 and 2.97, where the
+earlier failing run had ten to twelve. Warmup length is not it either: quadrupling
+it changed nothing, and the constant it started from has its own provenance -- the
+reference project's ART sweep put the plateau at ninety to a hundred thousand
+calls.
+
+What is left is visible in the sweep itself: adjacent repetitions differ by nearly
+a factor of two (851.88 ns at the thirty-fifth, 1625.86 ns at the thirty-seventh).
+That is the shape of scheduling jitter under an emulator, not of a runtime still
+warming up -- and if it is, the convergence criterion the benchmark applies (forty
+repetitions inside five per cent) is one an emulator may never satisfy no matter
+how long the warmup.
+
+So the next step is a physical device, or a deliberate decision about what
+convergence means on an emulator. Not a longer warmup. The numbers stay out of
+this table until one of those happens, and the benchmark enforces that itself by
+exiting non-zero and marking the whole report unquotable.
