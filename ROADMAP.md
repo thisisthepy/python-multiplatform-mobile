@@ -2843,24 +2843,33 @@ what is blocking it and what the next concrete step is.
    item is scoped to versions ≤3.14 by construction and shrinks as the default version moves.
 
 5. ~~`tp_traverse` is generated but not wired into CPython's actual `tp_traverse` slot; `tp_clear`
-   and Kotlin-side cycle closing are untouched.~~ **Closed for the slot itself** — `work/cycles`
-   (merged `aa5436d1`, 2026-08-14) wired the generated per-class traverse function into
-   `ProxyTypeFactory`'s `PyType_FromSpec` slot table with `tp_clear` and `tp_dealloc` alongside it;
-   `CycleCollectionTest`/`WasmCycleCollectionTest` prove a real cycle collects, re-run on this tree
-   2026-08-18 with the same result. **What replaces this item:** re-checking it for this task found
-   that `PythonProxySource` — the renderer that actually builds a production proxy class — never
-   constructs an instance of that type; every rendered class is a plain Python `_PmObject` that
-   cannot carry a custom `tp_traverse`. **(a) blocking it:** nothing recorded as a blocker, but the
-   `subtype_dealloc`/`PyObject_GC_UnTrack` double-untrack question below has to be answered before
-   attempting it, not assumed. **(b) next step:** for classes `ReflectedClass.hasTraverse` marks,
-   render them as instances of (or subclasses of) `ProxyTypeFactory`'s type instead of `_PmObject`
-   — which moves the handle out of `self._pm_handle` (a Python attribute, which the base type's
-   `tp_traverse`/`tp_clear` cannot see) and into the C type's reserved slot, rewriting every
-   `self._pm_handle` read site in `PythonProxySource` to match, and first checking empirically
-   whether a Python subclass of the `Py_TPFLAGS_HAVE_GC` heap type causes a double
-   `PyObject_GC_UnTrack` on `tp_dealloc` — `subtype_dealloc` already untracks before delegating to
-   the base's `tp_dealloc`, and `ProxyType.tp_dealloc` untracks again unconditionally. Kotlin-side
-   cycle closing (the handle table holding weakly) is separately still untouched;
+   and Kotlin-side cycle closing are untouched.~~ ~~`PythonProxySource` never constructs an instance
+   of that type; every rendered class was a plain Python `_PmObject` that could not carry a custom
+   `tp_traverse`.~~ **Both closed.** `work/cycles` (merged `aa5436d1`, 2026-08-14) wired the
+   generated per-class traverse function into `ProxyTypeFactory`'s `PyType_FromSpec` slot table
+   with `tp_clear` and `tp_dealloc` alongside it. `work/handleslot` (`99acd830`, 2026-08-18, merged
+   `a1fb825c`) then closed the renderer gap: `PythonProxySource.renderClass` now emits
+   `class $className(_PmGcObject):` instead of `_PmObject` whenever `ReflectedClass.hasTraverse`
+   is set and there is no metaclass (`PythonProxySource.kt:1168`,
+   `val gcEligible = metaclassName == null && cls.hasTraverse`), and `_PmGcObject`'s `_pm_handle`
+   is a member descriptor over the C type's reserved slot rather than a Python attribute
+   (`PythonProxySource.kt:728-758`), so `self._pm_handle = h` in the generated `__init__`/`_pm_own`
+   writes straight into the storage `tp_traverse`/`tp_clear` read — no call site needed to change.
+   Same-day follow-ups extended this from desktop-only to every target: `a5387511` (wasm, merged
+   `b479b407`), `1544f095` (Android, merged `0c41874d`), `581ec772` (the two cinterop/native
+   targets, merged `e063501f`) — all four ancestors of `develop` as of 2026-08-18.
+   The `subtype_dealloc`/`PyObject_GC_UnTrack` double-untrack question is answered, not assumed:
+   `CycleCollectionTest.aPythonSubclassOfTheProxyTypeSurvivesBeingUntrackedTwice`
+   (`desktopTest/.../ref/CycleCollectionTest.kt:658`) builds a Python subclass of the generated
+   proxy heap type, confirms `gc.is_tracked()` on the instance so the second untrack is actually
+   exercised, and drives it through `del` + `gc.collect()`. It passes: CPython's own vendored
+   header says so (`internal/pycore_gc.h`: *"See also the public PyObject_GC_UnTrack() which accept
+   an object which is not tracked"* — the internal variant asserts, the public one this code calls
+   is defined to tolerate it), and the test exercises rather than just cites that guarantee.
+   **What is still open:** Kotlin-side cycle closing — the handle table holds every entry with a
+   strong reference by construction (`HandleTable.kt:25`, "this table leaks by construction... a
+   strong entry here is a[nother reference in the cycle]"), so a cycle that runs entirely through
+   Kotlin objects (no Python-side edge for `tp_traverse` to report) is still not collectible.
    `docs/object-lifetime.md` has the mechanism and names the hard parts.
 
 6. **`PyValue`'s lazy conversion path.** (§7b) **Closed.** The per-type lifetime rule this item

@@ -781,7 +781,7 @@ object PythonProxySource {
                 # reason `__del__` binds its releaser that way: one less global lookup per argument.
                 if isinstance(_pm_v, _pm_owners):
                     _pm_h = _pm_v._pm_handle
-                    if _pm_h is None:
+                    if not _pm_h:
                         raise ValueError(
                             'this Kotlin object was already released; its handle cannot be sent '
                             'again, because the slot behind it may belong to something else now'
