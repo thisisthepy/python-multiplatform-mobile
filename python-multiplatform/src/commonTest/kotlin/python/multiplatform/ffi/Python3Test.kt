@@ -103,30 +103,6 @@ class Python3Test {
     }
 
     /**
-     * [Python3.runApp] used to be a silent no-op: its only statement was commented out, so it
-     * returned `Unit` without initialising anything or running anything, and a caller had no way
-     * to tell. Wiring it up needs `Py_BytesMain`, whose `(int argc, char **argv)` signature means
-     * an array-of-C-strings marshalling path that each of the four platforms does differently
-     * (ROADMAP §12), so until that exists the honest behaviour is to refuse.
-     *
-     * Red phase, observed: before the fix this failed with
-     * `Expected an exception of class UnsupportedOperationException to be thrown, but was
-     * completed successfully.` -- i.e. the no-op. A failure here now means either the refusal was
-     * removed without `Py_BytesMain` landing, or the real implementation landed and this test
-     * should be replaced by one that runs a script.
-     */
-    @Test
-    fun runAppRefusesRatherThanSilentlyDoingNothing() = PythonTestFixture.withInterpreter {
-        val failure = assertFailsWith<UnsupportedOperationException> {
-            Python3.runApp(arrayOf("python", "-c", "pass"))
-        }
-        assertTrue(
-            failure.message?.contains("Py_BytesMain") == true,
-            "The refusal should name what is missing, got: ${failure.message}"
-        )
-    }
-
-    /**
      * [Python3.runMain] used to be a landmine, and this test used to fix its refusal in place.
      * It runs a module now, so what is left here is the one property the refusal existed to
      * protect: **the interpreter this whole suite shares is still there afterwards.**

@@ -108,9 +108,11 @@ object Python3 {
         isInitialized = false
         // The checkpoint function dies with the interpreter; drop the pointer so a later
         // initialize() rebuilds it instead of calling through a dangling one. Same for the
-        // runMain helper, which is cached the same way and would dangle the same way.
+        // runMain/runApp helpers, which are cached the same way and would dangle the same way.
         checkpointCallable = null
         runModuleCallable = null
+        runTopLevelCallable = null
+        runFileCallable = null
         memScoped {
             Py_Finalize()
             // No error message is printable here, and that is a property of the C API rather than
@@ -366,52 +368,309 @@ def __pmp_run_module__(mod_name, argv):
     }
 
     /**
-     * Run Python script as an application (Automatically initializes Python).
+     * Runs [args] the way `python <args>` would parse and dispatch them, in an interpreter that
+     * **survives the call** — the same property [runMain] exists for, and for the same reason:
+     * `Py_BytesMain(argc, argv)` is CPython's CLI `main`, it reaches `Py_RunMain()`
+     * (`cpython/pylifecycle.h`), and that function's contract is to run and then finalize. There
+     * is no mode in which it leaves the runtime standing, so it can never be this function's
+     * implementation — wiring up its `(int argc, char **argv)` marshalling would only have bought
+     * a function with exactly the defect [runMain] was fixed to avoid. (ROADMAP §12 has the full
+     * history: the marshalling used to be recorded as the blocker, but it was never the real one.)
      *
-     * **Still refusing, and the reason recorded here previously was the smaller half of it.**
+     * ### The decided, deliberately smaller scope
      *
-     * **This used to do nothing at all** -- its only statement was commented out, and so is the
-     * `Py_BytesMain` `expect` declaration it would call (`EmbedAPI.kt`, two commented-out lines;
-     * `EmbedAPI.native.kt` additionally carries an `actual` for it that *looks* live but sits
-     * inside the file's leading nested block comment, so it is dead too). It neither initialized
-     * Python nor ran anything, and returned `Unit` regardless, so a caller could not tell.
-     * It has no caller in `src/` or `sample/`.
+     * `Py_BytesMain` also *parses* the command line — `-c`, `-m`, a script path, `-`, and a long
+     * tail of single-letter flags — and reimplementing all of that against a `PyConfig` this
+     * binding does not carry (struct layout is exactly what the Stable ABI does not promise) is
+     * not worth paying for options that mostly cannot mean anything here anyway. So this parses a
+     * deliberately reduced subset of the same grammar:
      *
-     * Two things block it, and they are not the same size:
+     * - **`-c <cmd>`** — runs `<cmd>` as a statement sequence in the embedder's own, persistent
+     *   `__main__` — the same namespace [exec] writes into. `sys.argv[0]` is `"-c"`, matching
+     *   CPython (`python3 -c "import sys;print(sys.argv)" a b` → `['-c', 'a', 'b']`, verified
+     *   against the system interpreter while designing this).
+     * - **`-m <module>`** — a straight delegation to [runMain], which already *is* `python -m`'s
+     *   implementation (`runpy.run_module(..., alter_sys=True)`). Nothing here duplicates it.
+     * - **a bare script path** — reads the file (through Python's own `open()`, not a new
+     *   per-platform Kotlin file API — `nativeMain` has no filesystem abstraction of its own, and
+     *   CPython already has one that works identically everywhere this binding runs) and runs it,
+     *   again in the embedder's persistent `__main__`. `sys.argv[0]` is the path exactly as
+     *   given — CPython does not resolve it (`cd /tmp && python3 argvtest.py` → `sys.argv[0] ==
+     *   'argvtest.py'`, not an absolute path; verified the same way).
+     * - **`--` followed by a path** — forces the next token to be read as a script path even if it
+     *   looks like an option, mirroring CPython's own observed behaviour: `python3 -- -c args`
+     *   does *not* run `-c` as a command, it tries to open a file literally named `-c`. This binding
+     *   does not carry `-c`/`-m` support past a leading `--`, since CPython's own parser does not
+     *   either once option scanning has been told to stop.
+     * - **`-`, and anything else starting with `-`** (`-E -I -S -s -B -O -OO -X -W -u -P` among
+     *   them, per the design that fixed this scope) — refused **by name** rather than silently
+     *   ignored. `-` means "read the program from stdin", which an embedded interpreter has no
+     *   sane default for. The rest are `PyConfig` fields (`isolated`, `use_environment`,
+     *   `site_import`, `user_site_directory`, `write_bytecode`, `optimization_level`, `Xoptions`,
+     *   warning filters, unbuffered I/O, `safe_path`) that only mean anything **before**
+     *   `Py_Initialize()` — this interpreter is already initialized by the time [runApp] is
+     *   called, so honouring them would mean either lying about what happened or silently doing
+     *   nothing, and the second one is exactly the defect this function used to have. Naming the
+     *   option in the refusal is deliberate: a caller who typed `-I` expecting isolation and got a
+     *   generic "unsupported" would not necessarily notice their isolation request was dropped.
+     * - **empty `args`** — refused the same way, since CPython's own default with nothing on the
+     *   command line is also to read from stdin (interactively, if it is a tty).
      *
-     * 1. `Py_BytesMain` takes `(int argc, char **argv)`, so wiring it up means marshalling an
-     *    array of C strings, which every platform in this build does differently. This is the
-     *    reason that was recorded, and it is the *cheap* one.
-     * 2. **`Py_BytesMain` finalizes the interpreter**, for the same reason [runMain]'s old body
-     *    did: it is the CLI's `main`, so it reaches `Py_RunMain()` (`cpython/pylifecycle.h`),
-     *    whose contract is to run and then finalize. Marshalling the argv would therefore have
-     *    bought a function with exactly the defect [runMain] was just fixed to avoid — the ROADMAP
-     *    entry that described this as one marshalling path away from working was wrong.
+     * Anything after the mode-selecting token (the command, the module name, or the script path)
+     * is passed through verbatim as `sys.argv[1:]` — no re-parsing, so an argument to the
+     * caller's own script that happens to start with `-` is never mistaken for one of the options
+     * above.
      *
-     * What is *not* blocked is the useful part of what a caller wants from this. `python -m mod`
-     * is [runMain], which now works. What `Py_BytesMain` adds on top is CPython's **command-line
-     * parser** — `-c`, `-m`, a script path, `-O`, `-X`, `PYTHONPATH` handling — and several of
-     * those are `PyConfig` fields that must be set *before* initialisation, i.e. they cannot mean
-     * anything for an already-running interpreter. Reimplementing that parser against a
-     * `PyConfig` this binding deliberately does not carry (struct layout is exactly what the
-     * Stable ABI does not promise -- see [initialize]) is the actual cost, and it is not paid
-     * here.
+     * ### `sys.exit()`, exceptions, and `sys.argv` restoration
      *
-     * `Python3Test.runAppRefusesRatherThanSilentlyDoingNothing` is the guard.
+     * Identical contract to [runMain], because it is the same design decision applied to a
+     * different execution path: `sys.exit(n)` is this function's return value, not a process
+     * exit (`sys.exit()`/`None`/falling off the end → `0`; integer `n` → `n`; anything else is
+     * written to `sys.stderr` and reported as `1`, mirroring CPython's `_Py_HandleSystemExit`).
+     * Any other exception propagates as a [PyException] with the interpreter left usable.
+     * `sys.argv` is set for the duration of the call and restored afterwards, on both the
+     * returning and the raising path.
      *
-     * @throws UnsupportedOperationException always.
+     * @param args the command-line arguments *after* the program name, e.g. `["-c", "print(1)"]`
+     *   or `["script.py", "--flag"]` — the same slice `Py_BytesMain(argc, argv)` would see as
+     *   `argv[1:]`.
+     * @return the exit status: 0 for a clean run, otherwise whatever the program passed to
+     *   `sys.exit()`.
+     * @throws IllegalArgumentException if `-c` or `-m` is given with no following argument.
+     * @throws UnsupportedOperationException for `-`, empty `args`, `--` with nothing after it, or
+     *   any other option that only has meaning before `Py_Initialize()`.
+     * @throws PyException if the program raises anything other than `SystemExit`, or if a `-m`
+     *   module cannot be found.
      */
-    fun runApp(argv: Array<String>): Nothing =
-        throw UnsupportedOperationException(
-            "Python3.runApp is not implemented: it needs Py_BytesMain(int argc, char **argv), " +
-                "which is still commented out because marshalling an array of C strings differs " +
-                "on every platform in this build -- and, more seriously, because Py_BytesMain " +
-                "reaches Py_RunMain() and therefore finalizes the interpreter, which is exactly " +
-                "the defect Python3.runMain was fixed to avoid. See ROADMAP §12. Use " +
-                "Python3.runMain(module, args) to run a module as __main__ in an interpreter " +
-                "that survives it. It previously returned silently without running " +
-                "${argv.joinToString(" ")}."
-        )
+    fun runApp(args: List<String>): Int {
+        if (args.isEmpty()) {
+            throw UnsupportedOperationException(
+                "Python3.runApp got no arguments: CPython's own default with nothing on the " +
+                    "command line is to read the program from stdin, and an embedded interpreter " +
+                    "has no sane default for that. Pass -c <cmd>, -m <module>, or a script path."
+            )
+        }
+        val first = args[0]
+        return when {
+            first == "-c" -> {
+                if (args.size < 2) throw IllegalArgumentException("Argument expected for the -c option")
+                val command = args[1]
+                runTopLevelHoldingGIL(command, "<string>", listOf("-c") + args.drop(2))
+            }
+            first == "-m" -> {
+                if (args.size < 2) throw IllegalArgumentException("Argument expected for the -m option")
+                runMain(args[1], args.drop(2))
+            }
+            first == "-" -> throw UnsupportedOperationException(
+                "Python3.runApp does not support '-' (reading the program from stdin); pass " +
+                    "-c <cmd>, -m <module>, or a script path instead."
+            )
+            first == "--" -> {
+                if (args.size < 2) throw UnsupportedOperationException(
+                    "Python3.runApp got '--' with no script path after it; reading the program " +
+                        "from stdin is not supported."
+                )
+                val scriptPath = args[1]
+                runFileHoldingGIL(scriptPath, listOf(scriptPath) + args.drop(2))
+            }
+            first.startsWith("-") -> throw UnsupportedOperationException(
+                "Python3.runApp refuses '$first': it is only meaningful before Py_Initialize() " +
+                    "sets up the interpreter (a PyConfig field), and this interpreter is already " +
+                    "running. Supported: -c <cmd>, -m <module>, a script path, or '--' followed " +
+                    "by one. See ROADMAP §12/§14b item 10."
+            )
+            else -> runFileHoldingGIL(first, listOf(first) + args.drop(1))
+        }
+    }
+
+    /** The cached `__pmp_run_toplevel__` helper compiled from [RUN_APP_SOURCE]. */
+    private var runTopLevelCallable: NativePointer? = null
+
+    /** The cached `__pmp_run_file__` helper compiled from [RUN_APP_SOURCE]. */
+    private var runFileCallable: NativePointer? = null
+
+    /**
+     * The Python side of [runApp]'s `-c` and script-path branches.
+     *
+     * Same reasoning as [RUN_MODULE_SOURCE]: every line here is a `try`/`finally` or an `except`,
+     * so writing it in Python is less code than re-deriving `PyErr_GivenExceptionMatches` against
+     * a `SystemExit` handle this binding exposes no accessor for.
+     *
+     * `__pmp_run_file__` reads the script through Python's own `open()` rather than a Kotlin file
+     * API deliberately — `nativeMain` has no cross-platform filesystem abstraction of its own
+     * (`iosMain`/`artMain` diverge below it), and CPython already has one that behaves identically
+     * on every target this binding runs on. `compile()` is given the raw `bytes` `open("rb")`
+     * returns, not a decoded `str`, so a PEP 263 encoding cookie in the script is still honoured —
+     * passing a `str` would have silently ignored one.
+     */
+    private const val RUN_APP_SOURCE = """
+import sys as _pmp_sys
+
+
+def __pmp_run_toplevel__(source, filename, argv):
+    _pmp_saved = _pmp_sys.argv if hasattr(_pmp_sys, "argv") else None
+    _pmp_sys.argv = list(argv)
+    try:
+        try:
+            _pmp_code = compile(source, filename, "exec")
+            exec(_pmp_code, _pmp_sys.modules["__main__"].__dict__)
+        except SystemExit as exc:
+            code = exc.code
+            if code is None:
+                return 0
+            if isinstance(code, int):
+                return code
+            try:
+                _pmp_sys.stderr.write(str(code) + "\n")
+                _pmp_sys.stderr.flush()
+            except Exception:
+                pass
+            return 1
+        return 0
+    finally:
+        if _pmp_saved is None:
+            try:
+                del _pmp_sys.argv
+            except AttributeError:
+                pass
+        else:
+            _pmp_sys.argv = _pmp_saved
+
+
+def __pmp_run_file__(path, argv):
+    with open(path, "rb") as _pmp_f:
+        _pmp_source = _pmp_f.read()
+    return __pmp_run_toplevel__(_pmp_source, path, argv)
+"""
+
+    /**
+     * Compiles [RUN_APP_SOURCE] once and caches both functions it defines, exactly as
+     * [runModuleHelperHoldingGIL] does for [RUN_MODULE_SOURCE].
+     *
+     * The caller must hold the GIL.
+     */
+    private fun runAppHelpersHoldingGIL(): Pair<NativePointer, NativePointer> {
+        runTopLevelCallable?.let { topLevel -> runFileCallable?.let { file -> return topLevel to file } }
+        val code = Py_CompileString(RUN_APP_SOURCE, "<python-multiplatform:runapp>", PY_FILE_INPUT)
+            ?: throw pyErrorOrGeneric("Failed to compile the runApp helper")
+        try {
+            val globals = PyDict_New() ?: throw pyErrorOrGeneric("Failed to allocate the runApp helper's globals")
+            try {
+                val evaluated = PyEval_EvalCode(code, globals, globals)
+                    ?: throw pyErrorOrGeneric("Failed to define the runApp helper")
+                Py_DecRef(evaluated)
+                // PyDict_GetItemString returns a borrowed reference, so take one of our own -- twice.
+                val topLevelBorrowed = PyDict_GetItemString(globals, "__pmp_run_toplevel__")
+                    ?: throw pyErrorOrGeneric("The runApp helper did not define __pmp_run_toplevel__")
+                Py_IncRef(topLevelBorrowed)
+                val fileBorrowed = PyDict_GetItemString(globals, "__pmp_run_file__")
+                    ?: throw pyErrorOrGeneric("The runApp helper did not define __pmp_run_file__")
+                Py_IncRef(fileBorrowed)
+                runTopLevelCallable = topLevelBorrowed
+                runFileCallable = fileBorrowed
+                return topLevelBorrowed to fileBorrowed
+            } finally {
+                Py_DecRef(globals)
+            }
+        } finally {
+            Py_DecRef(code)
+        }
+    }
+
+    /** Runs [runApp]'s `-c` branch: executes [source] (compiled under [filename]) in `__main__`. */
+    private fun runTopLevelHoldingGIL(source: String, filename: String, argv: List<String>): Int = withPython {
+        val (topLevel, _) = runAppHelpersHoldingGIL()
+        callRunAppHelperHoldingGIL(topLevel, listOf(source, filename), argv, "Python3.runApp(-c)")
+    }
+
+    /** Runs [runApp]'s script-path branch: reads and executes [path] in `__main__`. */
+    private fun runFileHoldingGIL(path: String, argv: List<String>): Int = withPython {
+        val (_, file) = runAppHelpersHoldingGIL()
+        callRunAppHelperHoldingGIL(file, listOf(path), argv, "Python3.runApp('$path')")
+    }
+
+    /**
+     * Builds a new Python list of strings out of [items]. Returns a new reference the caller must
+     * release with `Py_DecRef`. The caller must hold the GIL.
+     */
+    private fun buildPyStringListHoldingGIL(items: List<String>): NativePointer {
+        val list = PyList_New(0) ?: throw pyErrorOrGeneric("Failed to build a Python list")
+        try {
+            for (item in items) {
+                // PyUnicode_FromString: new reference. PyList_Append does *not* steal, so this is
+                // released either way.
+                val value = PyUnicode_FromString(item)
+                    ?: throw pyErrorOrGeneric("Failed to convert argument '$item'")
+                try {
+                    if (PyList_Append(list, value) != 0) {
+                        throw pyErrorOrGeneric("Failed to append argument '$item'")
+                    }
+                } finally {
+                    Py_DecRef(value)
+                }
+            }
+            return list
+        } catch (e: Throwable) {
+            Py_DecRef(list)
+            throw e
+        }
+    }
+
+    /**
+     * Calls [helper] with [leadingArgs] (converted to `str`) followed by [argv] (converted to a
+     * `list[str]`), and reads back the `int` it returns the same way [runMain] does — [helper]'s
+     * only non-`SystemExit` failure mode is an escaped exception, which arrives here as
+     * `PyObject_CallObject` returning `null` with the indicator set.
+     *
+     * The caller must hold the GIL.
+     */
+    private fun callRunAppHelperHoldingGIL(
+        helper: NativePointer,
+        leadingArgs: List<String>,
+        argv: List<String>,
+        label: String,
+    ): Int {
+        val argvList = buildPyStringListHoldingGIL(argv)
+        try {
+            // PyTuple_New: new reference. PyTuple_SetItem *steals* one reference per slot, and
+            // steals it even when it fails, so nothing set below is released again here.
+            val callArgs = PyTuple_New((leadingArgs.size + 1).toLong())
+                ?: throw pyErrorOrGeneric("Failed to build the argument tuple for $label")
+            try {
+                for ((index, value) in leadingArgs.withIndex()) {
+                    val item = PyUnicode_FromString(value)
+                        ?: throw pyErrorOrGeneric("Failed to convert argument '$value' for $label")
+                    if (PyTuple_SetItem(callArgs, index.toLong(), item) != 0) {
+                        throw pyErrorOrGeneric("Failed to build the argument tuple for $label")
+                    }
+                }
+                // The tuple takes a reference of its own; argvList is still ours to release below.
+                Py_IncRef(argvList)
+                if (PyTuple_SetItem(callArgs, leadingArgs.size.toLong(), argvList) != 0) {
+                    throw pyErrorOrGeneric("Failed to build the argument tuple for $label")
+                }
+
+                // PyObject_CallObject: new reference, or null with the indicator set. Anything the
+                // program raised other than SystemExit arrives here untouched, so the type and
+                // traceback are the program's own.
+                val result = PyObject_CallObject(helper, callArgs)
+                    ?: throw pyErrorOrGeneric("$label failed")
+                try {
+                    val status = PyLong_AsLongLong(result)
+                    if (status == -1L && PyErr_Occurred() != null) {
+                        throw pyErrorOrGeneric("Could not read the exit status of $label")
+                    }
+                    return status.toInt()
+                } finally {
+                    Py_DecRef(result)
+                }
+            } finally {
+                Py_DecRef(callArgs)
+            }
+        } finally {
+            Py_DecRef(argvList)
+        }
+    }
 
     /** `Py_file_input`, the compiler-mode token for a sequence of statements (as opposed to a single expression). */
     private const val PY_FILE_INPUT: Int = 257

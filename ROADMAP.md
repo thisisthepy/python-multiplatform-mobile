@@ -2216,29 +2216,58 @@ is the actual state of the Android object model, and that is the point of doing 
   because `runpy` resolves via `importlib.util.find_spec` and then `spec.loader.get_code(...)` —
   a `sys.modules` entry is not enough — and because an in-memory finder runs identically on iOS
   and Android, where the suite has no writable path it can agree on.
-- **`Python3.runApp` still refuses, and the reason recorded here was the smaller half of it.**
-  Its only statement was commented out, as is the `Py_BytesMain` `expect` it would call; it
-  returned `Unit` either way, so a caller could not tell.
+- ~~**`Python3.runApp` still refuses, and the reason recorded here was the smaller half of
+  it.**~~ **— done. It parses a deliberately reduced subset of CPython's command line and runs
+  it in an interpreter that survives the call.**
 
   This entry used to say the blocker was that `Py_BytesMain` takes `(int argc, char **argv)` and
   so needs an array-of-C-strings marshalling path that each of the four platforms does
   differently. That is true and it is the cheap half. **The half that was missed: `Py_BytesMain`
   finalizes the interpreter.** It is the CLI's `main`, so it reaches `Py_RunMain()` — same header,
   same contract. Marshalling the argv would have bought a function with exactly the defect
-  `runMain` was just fixed to avoid, which is why "one marshalling path away from working" was
-  the wrong description.
+  `runMain` was fixed to avoid, which is why "one marshalling path away from working" was the
+  wrong description, and why `Py_BytesMain` is still never called anywhere in this binding.
 
-  What is genuinely left is smaller than it looks, because the useful part is now elsewhere:
-  `python -m mod` is `runMain`, which works. What `Py_BytesMain` adds on top is CPython's
-  **command-line parser** — `-c`, `-m`, a script path, `-O`, `-X`, `PYTHONPATH` — and several of
-  those are `PyConfig` fields that must be set *before* initialisation, so they cannot mean
-  anything for an already-running interpreter. Reimplementing that parser against a `PyConfig`
-  this binding deliberately does not carry (struct layout is exactly what the Stable ABI does not
-  promise) is the actual cost. **Next step, if it is ever wanted:** decide which subset of the CLI
-  an embedder actually needs — most likely `-c` (→ `Python3.exec`) and `-m` (→ `runMain`) and
-  nothing else — and implement `runApp` as a parser over *that* subset, with anything requiring a
-  pre-init `PyConfig` field refused by name. Guard stays
-  `Python3Test.runAppRefusesRatherThanSilentlyDoingNothing`.
+  **The decided scope**, `fun runApp(args: List<String>): Int`, parsing `args` (the slice
+  `Py_BytesMain` would see as `argv[1:]`) itself rather than reimplementing CPython's parser
+  against a `PyConfig` this binding does not carry:
+
+  - `-c <cmd>` runs `cmd` in the embedder's own persistent `__main__` — the same namespace `exec`
+    writes into — with `sys.argv[0]` set to `"-c"`, matching CPython (verified against the system
+    interpreter: `python3 -c "...sys.argv..." a b` → `['-c', 'a', 'b']`).
+  - `-m <module>` is a straight delegation to `runMain`, which already *is* `python -m`'s
+    implementation. Nothing new was written for this branch.
+  - a bare script path is read via Python's own `open()` — not a new per-platform Kotlin file API,
+    since `nativeMain` has none of its own and CPython's already behaves identically on every
+    target — and run in the same persistent `__main__`. `sys.argv[0]` is the path exactly as
+    given, unresolved (verified: `cd /tmp && python3 argvtest.py` → `sys.argv[0] ==
+    'argvtest.py'`, not an absolute path).
+  - `--` followed by a path forces that token to be read as a script path even if it looks like an
+    option, mirroring CPython's own observed behaviour (`python3 -- -c args` tries to open a file
+    literally named `-c`, it does not run `-c` as a command).
+  - `-` (stdin) and anything else starting with `-` — `-E -I -S -s -B -O -OO -X -W -u -P` among
+    them — are refused **by name**, not silently ignored: they are `PyConfig` fields that only
+    mean something *before* `Py_Initialize()`, and this interpreter is already running by the time
+    `runApp` is called. Silently ignoring `-I` would run the caller's code under a security
+    posture (isolation) it did not actually get, which is worse than a loud refusal.
+  - empty `args` is refused the same way — CPython's own default with nothing on the command line
+    is also to read from stdin.
+
+  `sys.exit(n)` is a return value rather than a process exit, `sys.argv` is set for the duration
+  and restored afterwards (on both the returning and the raising path), and any other exception
+  propagates as a `PyException` with the interpreter left usable — the identical contract
+  `runMain` already has, applied to the `-c` and script-path paths through a second small Python
+  helper (`__pmp_run_toplevel__`/`__pmp_run_file__`, compiled once and cached the same way as
+  `runMain`'s `__pmp_run_module__`). `-m` needs no such helper: it calls `runMain` directly.
+
+  **Tests: 18 in `RunAppTest`**, replacing `Python3Test.runAppRefusesRatherThanSilentlyDoingNothing`
+  (superseded, per its own doc comment). Desktop 508 → 526, 0 failures, 1 skipped;
+  `compileKotlinAndroidNativeArm64` and `wasmJsTest` both clean (wasmJsNodeTest 460 → 468, 0
+  failures). **Red phase observed**: 15 of 18 new tests failed against the old refusing stub with
+  `java.lang.UnsupportedOperationException: Python3.runApp is not implemented yet: ...`; the
+  remaining 3 assert only the refusal shape itself (exception type, or a message check that the
+  stub's own "returned silently without running ..." text happened to satisfy), so they could not
+  distinguish red from green and are not evidence either way — the other 15 are.
 
   **Three commented-out places, not two**: `EmbedAPI.native.kt` also carries a full `Py_BytesMain`
   `actual` — with `memScoped`/`allocArray` marshalling already written — that *looks* live at
@@ -2887,17 +2916,17 @@ what is blocking it and what the next concrete step is.
    mechanical `jvmMain` move, and is not scoped here.
 
 10. ~~**`Python3.runMain` and `Python3.runApp` are landmines, not working functionality**~~
-    **— half closed. `runMain` works; `runApp` still refuses, for a reason that is now
-    understood.** (§12) The design decision this entry named as the blocker is made: a module runs
-    via `runpy.run_module(name, run_name="__main__", alter_sys=True)`, in a fresh `__main__`
+    **— done, both of them.** (§12) `runMain` runs a module via
+    `runpy.run_module(name, run_name="__main__", alter_sys=True)`, in a fresh `__main__`
     namespace, with `sys.argv` set for the duration and restored, and `sys.exit(n)` reported as
-    `runMain`'s `Int` return rather than acted on. Nothing on that path is a lifecycle function,
-    so the interpreter survives. **(a) still blocking `runApp`:** not argv marshalling, as this
-    entry used to say — `Py_BytesMain` reaches `Py_RunMain()` and therefore finalizes, so it could
-    never have been the implementation. What is left is CPython's command-line parser, part of
-    which is `PyConfig` fields that only mean something before initialisation. **(b) next step:**
-    decide which subset of the CLI an embedder needs (probably `-c` and `-m` and nothing else) and
-    implement `runApp` over that, refusing pre-init options by name. §12 has the detail.
+    its `Int` return rather than acted on. `runApp(args: List<String>): Int` parses the reduced
+    CLI subset decided in §12 — `-c`, `-m` (delegates to `runMain`), a script path, `--` followed
+    by one, with `-` and every pre-init-only `PyConfig` option (`-E -I -S -s -B -O -OO -X -W -u
+    -P` among them) refused by name — and runs it with the same `sys.exit`/`sys.argv` contract.
+    Neither path is a lifecycle function, so the interpreter survives both. `Py_BytesMain` is
+    still never called: it reaches `Py_RunMain()` and finalizes, which is what made "one
+    marshalling path away from working" the wrong description of what `runApp` needed. §12 has
+    the detail.
 
 11. **The iOS app bundle carries no Python standard library** — restated, because the previous
     wording ("the iOS *app* packaging path has no producer … no Gradle task creates it") was wrong
