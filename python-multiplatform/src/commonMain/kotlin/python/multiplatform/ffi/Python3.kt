@@ -107,8 +107,10 @@ object Python3 {
         // waits for it, so that case finishes safely before teardown begins.
         isInitialized = false
         // The checkpoint function dies with the interpreter; drop the pointer so a later
-        // initialize() rebuilds it instead of calling through a dangling one.
+        // initialize() rebuilds it instead of calling through a dangling one. Same for the
+        // runMain helper, which is cached the same way and would dangle the same way.
         checkpointCallable = null
+        runModuleCallable = null
         memScoped {
             Py_Finalize()
             // No error message is printable here, and that is a property of the C API rather than
@@ -128,46 +130,245 @@ object Python3 {
     }
 
     /**
-     * Run Python main module.
+     * Runs the module [moduleName] as `__main__`, the way `python -m <moduleName>` does, in an
+     * interpreter that is **still alive when this returns**.
      *
-     * **Not usable as written, and the TODO this replaces ("add error handling") understated it.**
-     * Reading the code against the C API contracts turns up three defects, none of which is an
-     * error-handling gap:
+     * ### What this is instead of
      *
-     * 1. `sys.argv[1] = ...` is an *assignment to an existing index*, so it needs `sys.argv` to
-     *    already have two entries. `Py_Initialize()` explicitly does not set `sys.argv` (its own
-     *    documentation says so), so this raises `IndexError` in an embedded interpreter --
-     *    silently, because `PyRun_SimpleString` prints and clears the indicator itself and its
-     *    return value is discarded here.
-     * 2. `Py_RunMain()` **always finalizes the interpreter**, whether it returns or exits. So the
-     *    interpreter is dead when this returns while [isInitialized] is still `true`, and the
-     *    next C API call from anywhere touches a torn-down runtime.
-     * 3. Its `Int` return is the process exit status and is thrown away, which is the part the
-     *    original TODO named.
+     * The body this replaces called `Py_RunMain()`, and the reason that is not a bug that can be
+     * patched is in the header: `Py_RunMain()` is declared in `cpython/pylifecycle.h` — a
+     * *lifecycle* function, and not part of the Limited API this binding otherwise targets — and
+     * its contract is to run whatever `PyConfig.run_command`/`run_module`/`run_filename` names
+     * **and then finalize Python**. There is no mode in which it leaves the runtime standing. So
+     * it destroyed the interpreter it was asked to run a module in, while [isInitialized] still
+     * said `true`. (`Py_BytesMain()` is not an escape either: it is the whole CLI `main`, and it
+     * reaches the same `Py_RunMain()`. See [runApp].) The same old body also did
+     * `sys.argv[1] = ...`, an assignment to an index that need not exist, through
+     * `PyRun_SimpleString`, which prints and clears the error indicator so the resulting
+     * `IndexError` was invisible.
      *
-     * Nothing in `src/` or `sample/` called it, so it was a landmine rather than a live failure --
-     * but a landmine that takes the whole runtime with it when someone finally steps on it, which
-     * is why it now refuses instead of running. Refusing is **not** the design decision the entry
-     * above describes; what "run a module" should mean for an *embedded* interpreter that must
-     * survive the call is still open in ROADMAP §12. This only stops the broken answer from
-     * shipping as if it were one.
+     * `PyImport_ImportModule(moduleName)` is the other obvious candidate and is *not* the same
+     * thing twice over: it runs the module body under its own `__name__`, so the
+     * `if __name__ == "__main__":` block that is usually the entire point does not fire, and it
+     * caches the module in `sys.modules`, so calling it a second time runs nothing at all.
      *
-     * `Python3Test.runMainRefusesRatherThanFinalizingTheSharedInterpreter` is the guard.
+     * ### What it does
      *
-     * @throws UnsupportedOperationException always.
+     * `runpy.run_module(moduleName, run_name="__main__", alter_sys=True)` — the standard library's
+     * own answer, and the machinery CPython's `-m` switch itself goes through
+     * (`runpy._run_module_as_main` shares `_get_module_details`/`_run_code` with it). It touches
+     * no lifecycle function, so nothing here can finalize anything. Concretely, `alter_sys=True`
+     * makes `runpy._run_module_code` wrap the execution in two context managers:
+     *
+     * - `_TempModule("__main__")` installs a **fresh** module as `sys.modules["__main__"]` for the
+     *   duration and puts the previous one back in `__exit__`. The module therefore gets a clean
+     *   `__main__` namespace, and the embedder's own `__main__` — the one [exec] writes into — is
+     *   neither read nor written, and is restored whether the module returns or raises.
+     * - `_ModifiedArgv0(spec.origin)` points `sys.argv[0]` at the module's file while it runs and
+     *   restores it afterwards, which is what `python -m` does.
+     *
+     * ### `sys.argv`
+     *
+     * `sys.argv` is set to `[moduleName] + `[args] for the duration and **put back afterwards**,
+     * including when the module raises. Two halves to that:
+     *
+     * - It has to be *set*, because `runpy`'s `_ModifiedArgv0.__enter__` reads `sys.argv[0]`
+     *   before writing it. An embedded interpreter is not guaranteed to have a usable one — this
+     *   is the same soft spot the old body fell into from the other side.
+     * - It has to be *restored*, because it is process-global state that the caller did not ask
+     *   to have rewritten. A module run is a nested activity here, not the process's reason for
+     *   existing.
+     *
+     * Element 0 is a placeholder: `runpy` overwrites it with the module's origin, so what the
+     * module actually observes is `[<module file>] + `[args], exactly as under `-m`.
+     *
+     * ### Exceptions, and `sys.exit()`
+     *
+     * An exception escaping the module body propagates as a [PyException] carrying the real
+     * Python type, message and traceback, and the interpreter stays usable — a failing module is
+     * an ordinary failure, not a poisoned runtime.
+     *
+     * `SystemExit` is deliberately **not** in that class. A module written to be run as `__main__`
+     * uses `sys.exit(n)` to say "I am done, and this is my status"; CPython's own command line
+     * agrees, catching `SystemExit` and turning it into the process exit status rather than
+     * printing a traceback. The half of that behaviour an embedder must not inherit is the
+     * *process* exit, so the status is returned instead of being acted on:
+     *
+     * - `sys.exit()` / `sys.exit(None)` / falling off the end of the module → `0`
+     * - `sys.exit(n)` for an integer `n` → `n`
+     * - `sys.exit(x)` for anything else → `x` is written to `sys.stderr` and `1` is returned,
+     *   which is what CPython's `_Py_HandleSystemExit` does with it
+     *
+     * ### Cost
+     *
+     * This is not in the same class as [exec] and should not be reached for in a loop: every call
+     * goes back through `importlib.util.find_spec`, obtains the module's code object again and
+     * builds a fresh namespace. `RunMainTest.runMainCostAgainstExec` prints the measured
+     * per-call cost of both side by side.
+     *
+     * `RunMainTest` is the guard; ROADMAP §12 records the decision.
+     *
+     * @param moduleName an absolute module or package name, as after `python -m`. A package runs
+     *   its `__main__` submodule, since that is what `runpy._get_module_details` resolves to.
+     * @param args the arguments the module should see as `sys.argv[1:]`.
+     * @return the exit status: 0 for a clean run, otherwise whatever the module passed to
+     *   `sys.exit()`.
+     * @throws PyException if the module cannot be found, or if it raises anything other than
+     *   `SystemExit`.
      */
-    fun runMain(moduleName: String): Nothing =
-        throw UnsupportedOperationException(
-            "Python3.runMain is not implemented. Its previous body called Py_RunMain(), which " +
-                "always finalizes the interpreter, so it destroyed the runtime it was asked to " +
-                "run a module in (and set sys.argv[1] on a sys.argv that Py_Initialize() never " +
-                "creates, raising IndexError invisibly). Running '$moduleName' the way an " +
-                "embedded interpreter can survive is an open design question -- see ROADMAP §12. " +
-                "Use Python3.exec/Python3.import in the meantime."
-        )
+    fun runMain(moduleName: String, args: List<String> = emptyList()): Int = withPython {
+        val helper = runModuleHelperHoldingGIL()
+
+        // The list the module will see as sys.argv. Element 0 is a placeholder that runpy
+        // replaces with the module's origin (_ModifiedArgv0); the rest is args verbatim.
+        // PyList_New: new reference.
+        val argv = PyList_New(0)
+            ?: throw pyErrorOrGeneric("Failed to build sys.argv for '$moduleName'")
+        try {
+            for (arg in listOf(moduleName) + args) {
+                // PyUnicode_FromString: new reference. PyList_Append does *not* steal, so this
+                // is released either way.
+                val item = PyUnicode_FromString(arg)
+                    ?: throw pyErrorOrGeneric("Failed to convert argument '$arg' for '$moduleName'")
+                try {
+                    if (PyList_Append(argv, item) != 0) {
+                        throw pyErrorOrGeneric("Failed to append argument '$arg' for '$moduleName'")
+                    }
+                } finally {
+                    Py_DecRef(item)
+                }
+            }
+
+            // PyTuple_New: new reference. PyTuple_SetItem *steals* one reference per slot, and
+            // steals it even when it fails, so nothing set below is released again here.
+            val callArgs = PyTuple_New(2)
+                ?: throw pyErrorOrGeneric("Failed to build the argument tuple for '$moduleName'")
+            try {
+                val name = PyUnicode_FromString(moduleName)
+                    ?: throw pyErrorOrGeneric("Failed to convert the module name '$moduleName'")
+                if (PyTuple_SetItem(callArgs, 0, name) != 0) {
+                    throw pyErrorOrGeneric("Failed to build the argument tuple for '$moduleName'")
+                }
+                // The tuple takes a reference of its own; `argv`'s is still ours to release in
+                // the outer finally.
+                Py_IncRef(argv)
+                if (PyTuple_SetItem(callArgs, 1, argv) != 0) {
+                    throw pyErrorOrGeneric("Failed to build the argument tuple for '$moduleName'")
+                }
+
+                // PyObject_CallObject: new reference, or null with the indicator set. Anything
+                // the module raised other than SystemExit arrives here -- the helper lets it
+                // through untouched, so the type and traceback are the module's own.
+                val result = PyObject_CallObject(helper, callArgs)
+                    ?: throw pyErrorOrGeneric("Running module '$moduleName' as __main__ failed")
+                try {
+                    val status = PyLong_AsLongLong(result)
+                    if (status == -1L && PyErr_Occurred() != null) {
+                        throw pyErrorOrGeneric("Could not read the exit status of '$moduleName'")
+                    }
+                    return@withPython status.toInt()
+                } finally {
+                    Py_DecRef(result)
+                }
+            } finally {
+                Py_DecRef(callArgs)
+            }
+        } finally {
+            Py_DecRef(argv)
+        }
+    }
+
+    /** The cached `__pmp_run_module__` helper compiled from [RUN_MODULE_SOURCE]. */
+    private var runModuleCallable: NativePointer? = null
+
+    /**
+     * The Python side of [runMain].
+     *
+     * It is written in Python rather than assembled out of C API calls because every line of it
+     * is a `try`/`finally` or an `except` — restoring `sys.argv` on both paths, and telling
+     * `SystemExit` apart from a real failure. Expressing that through the C API would mean
+     * `PyErr_GetRaisedException` plus a `PyErr_GivenExceptionMatches` against a `SystemExit` this
+     * binding exposes no `PyExc_*` handle for, then re-raising by hand — more code, and all of it
+     * in the one path that exists to report failures.
+     *
+     * What it deliberately does *not* do is catch anything but `SystemExit`: any other exception
+     * leaves the helper with the indicator set, so [runMain]'s `PyObject_CallObject` returns null
+     * and `pyErrorOrGeneric` builds a [PyException] out of the module's own error.
+     */
+    private const val RUN_MODULE_SOURCE = """
+import runpy as _pmp_runpy
+import sys as _pmp_sys
+
+
+def __pmp_run_module__(mod_name, argv):
+    _pmp_saved = _pmp_sys.argv if hasattr(_pmp_sys, "argv") else None
+    _pmp_sys.argv = list(argv)
+    try:
+        try:
+            _pmp_runpy.run_module(mod_name, run_name="__main__", alter_sys=True)
+        except SystemExit as exc:
+            code = exc.code
+            if code is None:
+                return 0
+            if isinstance(code, int):
+                return code
+            try:
+                _pmp_sys.stderr.write(str(code) + "\n")
+                _pmp_sys.stderr.flush()
+            except Exception:
+                pass
+            return 1
+        return 0
+    finally:
+        if _pmp_saved is None:
+            try:
+                del _pmp_sys.argv
+            except AttributeError:
+                pass
+        else:
+            _pmp_sys.argv = _pmp_saved
+"""
+
+    /**
+     * Compiles [RUN_MODULE_SOURCE] once into a private globals dict and keeps a strong reference
+     * to the resulting function, exactly as [checkpointCallableHoldingGIL] does — including the
+     * detail that a module-level `def` needs no `__builtins__` entry of its own, because frame
+     * setup falls back to the interpreter's builtins when the globals mapping has none.
+     *
+     * The private dict is released here; the function keeps it alive through `__globals__`.
+     *
+     * The caller must hold the GIL.
+     */
+    private fun runModuleHelperHoldingGIL(): NativePointer {
+        runModuleCallable?.let { return it }
+        val code = Py_CompileString(RUN_MODULE_SOURCE, "<python-multiplatform:runmain>", PY_FILE_INPUT)
+            ?: throw pyErrorOrGeneric("Failed to compile the runMain helper")
+        try {
+            val globals = PyDict_New() ?: throw pyErrorOrGeneric("Failed to allocate the runMain helper's globals")
+            try {
+                // This is where `import runpy` actually happens, so a build with no standard
+                // library reports it here rather than as a mysterious null further down.
+                val evaluated = PyEval_EvalCode(code, globals, globals)
+                    ?: throw pyErrorOrGeneric("Failed to define the runMain helper (is `runpy` importable?)")
+                Py_DecRef(evaluated)
+                // PyDict_GetItemString returns a borrowed reference, so take one of our own.
+                val borrowed = PyDict_GetItemString(globals, "__pmp_run_module__")
+                    ?: throw pyErrorOrGeneric("The runMain helper did not define __pmp_run_module__")
+                Py_IncRef(borrowed)
+                runModuleCallable = borrowed
+                return borrowed
+            } finally {
+                Py_DecRef(globals)
+            }
+        } finally {
+            Py_DecRef(code)
+        }
+    }
 
     /**
      * Run Python script as an application (Automatically initializes Python).
+     *
+     * **Still refusing, and the reason recorded here previously was the smaller half of it.**
      *
      * **This used to do nothing at all** -- its only statement was commented out, and so is the
      * `Py_BytesMain` `expect` declaration it would call (`EmbedAPI.kt`, two commented-out lines;
@@ -176,10 +377,25 @@ object Python3 {
      * Python nor ran anything, and returned `Unit` regardless, so a caller could not tell.
      * It has no caller in `src/` or `sample/`.
      *
-     * `Py_BytesMain` cannot simply be declared, either: it takes `(int argc, char **argv)`, so
-     * wiring it up means marshalling an array of C strings, which every platform in this build
-     * does differently. Recorded in ROADMAP §12 with what it would cost. Until that exists this
-     * refuses rather than pretending to have run something.
+     * Two things block it, and they are not the same size:
+     *
+     * 1. `Py_BytesMain` takes `(int argc, char **argv)`, so wiring it up means marshalling an
+     *    array of C strings, which every platform in this build does differently. This is the
+     *    reason that was recorded, and it is the *cheap* one.
+     * 2. **`Py_BytesMain` finalizes the interpreter**, for the same reason [runMain]'s old body
+     *    did: it is the CLI's `main`, so it reaches `Py_RunMain()` (`cpython/pylifecycle.h`),
+     *    whose contract is to run and then finalize. Marshalling the argv would therefore have
+     *    bought a function with exactly the defect [runMain] was just fixed to avoid — the ROADMAP
+     *    entry that described this as one marshalling path away from working was wrong.
+     *
+     * What is *not* blocked is the useful part of what a caller wants from this. `python -m mod`
+     * is [runMain], which now works. What `Py_BytesMain` adds on top is CPython's **command-line
+     * parser** — `-c`, `-m`, a script path, `-O`, `-X`, `PYTHONPATH` handling — and several of
+     * those are `PyConfig` fields that must be set *before* initialisation, i.e. they cannot mean
+     * anything for an already-running interpreter. Reimplementing that parser against a
+     * `PyConfig` this binding deliberately does not carry (struct layout is exactly what the
+     * Stable ABI does not promise -- see [initialize]) is the actual cost, and it is not paid
+     * here.
      *
      * `Python3Test.runAppRefusesRatherThanSilentlyDoingNothing` is the guard.
      *
@@ -189,8 +405,12 @@ object Python3 {
         throw UnsupportedOperationException(
             "Python3.runApp is not implemented: it needs Py_BytesMain(int argc, char **argv), " +
                 "which is still commented out because marshalling an array of C strings differs " +
-                "on every platform in this build -- see ROADMAP §12. It previously returned " +
-                "silently without running ${argv.joinToString(" ")}."
+                "on every platform in this build -- and, more seriously, because Py_BytesMain " +
+                "reaches Py_RunMain() and therefore finalizes the interpreter, which is exactly " +
+                "the defect Python3.runMain was fixed to avoid. See ROADMAP §12. Use " +
+                "Python3.runMain(module, args) to run a module as __main__ in an interpreter " +
+                "that survives it. It previously returned silently without running " +
+                "${argv.joinToString(" ")}."
         )
 
     /** `Py_file_input`, the compiler-mode token for a sequence of statements (as opposed to a single expression). */
