@@ -1,5 +1,6 @@
 package python.multiplatform.ffi.upcall
 
+import python.multiplatform.ffi.ProxyTypeFactory
 import python.multiplatform.ffi.PyObject
 import python.multiplatform.ffi.Python3
 import python.multiplatform.reflection.CallableKind
@@ -576,6 +577,10 @@ object PythonProxySource {
      * @return the source that was executed, so a caller can log or inspect exactly what ran.
      */
     fun install(rootModule: String = DEFAULT_ROOT_MODULE): String {
+        // Before the source that reads `_pm_proxy_base` out of `globals()` -- see [OWNED_HANDLE].
+        // A no-op false on every platform that has not wired a handle slot yet; see
+        // [ProxyTypeFactory.installGcBase]'s own doc for which one that is today.
+        ProxyTypeFactory.installGcBase()
         val source = render(UpcallTable.entries(), ClassLookup.all(), rootModule)
         Python3.exec(source)
         return source
@@ -735,6 +740,42 @@ object PythonProxySource {
                         )
                     return _pm_h
                 return _pm_v
+
+            # `_pm_proxy_base`, if a bootstrap has set it (see
+            # `python.multiplatform.ffi.ProxyTypeFactory.installGcBase`), is a real
+            # `Py_TPFLAGS_HAVE_GC` heap type whose `tp_traverse` can reach through a proxy's handle
+            # into the Kotlin object's own `PyObject`-typed fields -- which `_PmObject` above cannot
+            # do, being a plain Python class with no such slot. `_PmGcObject` is the base
+            # [renderClass] uses instead, for exactly the classes [ReflectedClass.hasTraverse] marks
+            # and only where nothing else about the class needs a metaclass (see that function).
+            #
+            # Deliberately NOT `class _PmGcObject(_pm_gc_base, _PmObject):` -- both bases add real
+            # instance storage of their own (`_PmObject.__slots__` is non-empty, and the C type
+            # appends its own handle slot), and CPython refuses two solid bases at once with
+            # "multiple bases have instance lay-out conflict". So a `_PmGcObject` instance is never
+            # an `_PmObject` and `_pm_unwrap` leaves one untouched -- it cannot be passed back to
+            # Kotlin as an *owned-result* argument the way a `_PmObject` instance can, which is a
+            # gap `ROADMAP.md` §7 records rather than closes here.
+            #
+            # No `__del__`: the base's own `tp_dealloc` already releases the handle (the same one
+            # `_PmObject.__del__` calls by hand), and CPython runs it unconditionally for a subclass
+            # that defines no finalizer of its own.
+            _pm_gc_base = globals().get('_pm_proxy_base')
+            if _pm_gc_base is not None:
+                class _PmGcObject(_pm_gc_base):
+                    __slots__ = ('_pm_type', '__weakref__')
+
+                    def __repr__(self):
+                        return (
+                            '<kotlin ' + (getattr(self, '_pm_type', None) or 'object') +
+                            ' handle=' + repr(getattr(self, '_pm_handle', None)) + '>'
+                        )
+            else:
+                # No bootstrap wired this platform's handle slot yet -- today, every platform but
+                # desktop. Falling back to `_PmObject` is exactly what every rendered class already
+                # did before this existed, so a class with `hasTraverse` set costs nothing extra here
+                # and simply keeps not collecting a Kotlin-side cycle, same as before.
+                _PmGcObject = _PmObject
     """.trimIndent()
 
     /**
@@ -1074,9 +1115,20 @@ object PythonProxySource {
             // it could not do before -- a `Counter` passed to a function taking one crossed as a
             // `PyObject` and failed the Kotlin cast. A class that has a metaclass gets the same base
             // from `_pm_owned_new` above instead of naming it here.
+            //
+            // `_PmGcObject` instead, when [cls] carries a generated `tp_traverse`
+            // ([ReflectedClass.hasTraverse]) *and* has no metaclass: those are the classes whose
+            // Kotlin-side fields can form a cycle CPython's collector needs to see through, and
+            // `_PmGcObject`'s own doc (in [OWNED_HANDLE]) is why the metaclass case is excluded --
+            // `_pm_owned_new` only ever adds `_PmObject`, and the two owners cannot be combined on
+            // one class. A class with statics but no traversable fields is unaffected either way.
+            val gcEligible = metaclassName == null && cls.hasTraverse
             appendLine(
-                if (metaclassName == null) "class $className(_PmObject):"
-                else "class $className(metaclass=$metaclassName):",
+                when {
+                    gcEligible -> "class $className(_PmGcObject):"
+                    metaclassName == null -> "class $className(_PmObject):"
+                    else -> "class $className(metaclass=$metaclassName):"
+                },
             )
             if (body.isEmpty()) appendLine("    pass") else append(body)
             appendLine()

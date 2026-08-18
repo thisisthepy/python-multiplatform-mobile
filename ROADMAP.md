@@ -638,28 +638,67 @@ registration is gone.
   `CycleCollectionTest` (desktop, Kotlin/Native, ART) and `WasmCycleCollectionTest` build a real
   `P -> proxy -> handle -> Kotlin -> PyObject -> P` cycle, drop it, call `gc.collect()`, and check
   the handle is gone — re-verified on this tree 2026-08-18 (both tests pass; see this section's
-  audit entry below). Kotlin-side cycle closing (the handle table holding weakly) is still
-  untouched, as is the item below this one, which this task found while re-checking the claim
-  above: **the production proxy classes `PythonProxySource` renders never construct an instance of
-  `ProxyTypeFactory`'s type.** Every rendered class (`class Counter(_PmObject):`) is a plain
-  Python class holding the `HandleTable` handle as an ordinary attribute; `_PmObject`'s only
-  release mechanism is `__del__`. `ProxyTypeFactory.createProxyType()` is called nowhere outside
-  `CycleCollectionTest`/`WasmCycleCollectionTest` (`grep -rn createProxyType` — every hit is a
-  `ProxyTypeFactory.kt` or a `*Test.kt`). So a *real* application cycle through a KSP-exposed
-  class's own proxy — as opposed to the hand-built proxy the cycle tests construct through direct
-  C-API calls — is not collected today: `_PmObject`'s type is an ordinary Python `class`, and a
-  pure-Python class cannot carry a custom `tp_traverse`, so CPython's default `subtype_traverse`
-  sees only the plain `int` handle and stops exactly where `docs/object-lifetime.md`'s "the
-  resolution" section says the fix has to reach past. Closing this needs the rendered classes (at
-  least the ones `ReflectedClass.hasTraverse` marks) to become instances of, or subclass,
-  `ProxyTypeFactory`'s type instead of `_PmObject` — which was not attempted here: the mechanical
-  work is real (new `_pm_h` storage in the C type's reserved slot instead of a Python attribute,
-  every `self._pm_handle` read site in `PythonProxySource` rewritten, and — the sharpest risk — a
-  Python subclass of a `Py_TPFLAGS_HAVE_GC` heap type routes `tp_dealloc` through CPython's
-  `subtype_dealloc`, which already calls `PyObject_GC_UnTrack` before delegating to the base's
-  `tp_dealloc`; `ProxyType.tp_dealloc` calls `PyObject_GC_UnTrack` again unconditionally, and
-  whether a second untrack is safe on a Python subclass was not tested here and needs checking
-  before this is attempted, not assumed).
+  audit entry below). ~~The production proxy classes `PythonProxySource` renders never construct an
+  instance of `ProxyTypeFactory`'s type.~~ **Closed on desktop, and only there** (`work/handleslot`,
+  2026-08-18). `dbf54e21` (same day, `work/untrack`) had already answered the risk this item used
+  to end on — a Python subclass of the heap type survives being `PyObject_GC_UnTrack`ed twice, so
+  `subtype_dealloc`'s own untrack ahead of `ProxyType.tp_dealloc`'s is safe — and had also found
+  that inheritance alone buys nothing: the handle has to reach the type's own storage before a
+  `tp_traverse` inherited through a Python subclass has anything to read, and nothing wrote it
+  there. That is what closes here, on desktop only:
+
+  - `ProxyTypeFactory` (desktop) grew a `Py_tp_members` slot: one `PyMemberDef` named `_pm_handle`,
+    `Py_T_LONG`, carrying `Py_RELATIVE_OFFSET` (CPython 3.12+, exactly the flag documented for a
+    type extending storage under multiple/deep inheritance — precisely this case). Offset 0 is the
+    same base `PyObject_GetTypeData` already computes for `tp_traverse`/`takeHandle`, so
+    `self._pm_handle = ...` on an instance of this type — including a further Python-level
+    subclass — writes the C slot directly, with **zero change** to the constructor line
+    `PythonProxySource` already renders.
+  - `ProxyTypeFactory.installGcBase()` (new `expect`/`actual`, `false` on every target but desktop)
+    publishes the type into `__main__` as `_pm_proxy_base` via `PyObject_SetAttrString` — the type's
+    own address is a valid `PyObject*`, so this needs no `ctypes` round trip (unlike the
+    proof-of-concept in `dbf54e21`'s test) and nothing new for wasm's missing `ctypes` to block.
+  - `PythonProxySource` gained `_PmGcObject`: `_pm_proxy_base` subclassed if the bootstrap set it,
+    else `_PmObject` (today's behaviour, unchanged, on every non-desktop target). `renderClass` uses
+    it instead of `_PmObject` exactly when `cls.hasTraverse` is true **and** the class has no
+    metaclass — `_pm_owned_new` only ever adds `_PmObject` to a metaclassed class's bases, and the
+    two owners cannot be combined (`class _PmGcObject(_pm_gc_base, _PmObject):` is a real
+    `TypeError: multiple bases have instance lay-out conflict`, both being solid bases). A class
+    with no traversable `PyObject` field, or one with a metaclass, renders exactly as it did before
+    — `RefHolderCycleCollectionTest.anOrdinaryClassWithNoPyObjectFieldsKeepsRenderingOnTheOldOwner`
+    pins `class Counter(_PmObject):` unchanged.
+  - Proved against a *real* KSP-exposed class, not the hand-built proxy the existing cycle tests
+    construct through direct C-API calls: `ksp-fixtures:app`'s new `RefHolderCycleCollectionTest`
+    installs the generated table, `exec`s the real generated `fixture.library.RefHolder` proxy, and
+    builds `_rh -> (opaque handle) -> Kotlin field -> [a plain list] -> _rh` — a cycle whose only
+    edge back to `_rh` lives on the Kotlin heap, unlike `ProxyHandleLifetimeTest`'s existing
+    `c.box -> box -> c`, which closes entirely through ordinary Python attributes `subtype_traverse`
+    already walks and so does not exercise this gap at all. Red before the fix
+    (`HandleTable.liveCount` stayed at `baseline + 1` after `gc.collect()` — the leak, observed, not
+    inferred), green after (three tests, 0 failed).
+  - A real, pre-existing, and unrelated bug surfaced while building that test and is **not fixed
+    here**: `_pm_unwrap` unwraps *any* `_PmObject`-derived argument to its raw `HandleTable` handle
+    before a call, which is correct for an owned-result argument but wrong for a `PyObject`-typed
+    Kotlin parameter — `_rh.primary = _rh` (as opposed to the list-wrapped version the test uses)
+    resolves to the underlying Kotlin object on the way in and fails the property's own cast
+    (`ClassCastException`, observed). Filed here rather than fixed because it is orthogonal to the
+    handle slot and was not this task's spec.
+  - **Left exactly where it was** on Android, iOS, androidNative and wasm: `installGcBase()` is a
+    literal `false`, `PythonProxySource` still falls back to `_PmObject` there, and nothing about
+    those four targets' `ProxyTypeFactory` changed. What each one still needs, per `ProxyTypeFactory`'s
+    now-updated class doc: Android already has `ProxyTypeFactory.setHandle` (a native function a
+    generated `__init__` could call — option (B)) but no Python-visible base to subclass and no
+    `__init__` rewrite to call it; iOS/androidNative's shared `nativeMain` factory has neither a
+    `Py_tp_members` slot nor a setter, and would need `PyMemberDef`/`PyType_Slot` filled in by
+    cinterop-generated structs rather than `sun.misc.Unsafe`, which is most of why desktop went
+    first; wasm has the `PyObject_SetAttrString` publication route available (no `ctypes` needed,
+    same as desktop) but is missing the `Py_tp_members` slot itself, and its `PyMemberDef`/
+    `PyType_Slot` are 20/8-byte 32-bit structs, not the 64-bit layout desktop's `Unsafe` code
+    assumes — the pointer-width trap `dbf54e21` already paid for once.
+  - Verified: `desktop 485/0`, `wasm 440/0` (browser 10, node 430), `ksp-fixtures:app:desktopTest`
+    64→67/0 (three new tests), `compileKotlinAndroidNativeArm64` and `compileDebugKotlinAndroid`
+    both green — `git diff --stat` touches only the five `ProxyTypeFactory.kt` files,
+    `PythonProxySource.kt`, and the one new test file.
 - ~~Companion-object members, interfaces, enums and annotation classes are not exposed.~~
   **Closed**, except annotation classes, which are now deliberately excluded — see below.
 - ~~The aggregator uses `Dependencies.ALL_FILES`, correct but reprocessed every build.~~

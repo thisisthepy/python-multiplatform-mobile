@@ -279,6 +279,17 @@ actual object ProxyTypeFactory {
     }
 
     /**
+     * Not wired on wasm yet, and `ctypes`-based publication is not an option here regardless --
+     * `CLAUDE.md` already records wasm has no `ctypes`. [ProxyType.putHandle]/[ProxyType.peekHandle]
+     * give a *test* raw slot access; what is missing is a `Py_tp_members` slot (or a native setter
+     * `PythonProxySource` could call) plus a way to publish the type object itself into `__main__`
+     * without `ctypes.cast` -- `PyObject_SetAttrString` with the type's own address works and needs
+     * no `ctypes` (desktop's `installGcBase` does exactly that), so the gap here is the member slot,
+     * not the publication. See `ProxyTypeFactory`'s class doc and `ROADMAP.md` §7.
+     */
+    actual fun installGcBase(): Boolean = false
+
+    /**
      * Puts the Kotlin `@WasmExport` called [name] into CPython's `__indirect_function_table` and
      * returns the index, which is the C function pointer.
      *

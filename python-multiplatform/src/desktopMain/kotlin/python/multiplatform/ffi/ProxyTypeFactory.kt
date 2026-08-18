@@ -11,6 +11,18 @@ import python.multiplatform.reflection.ClassLookup
 /** `Py_tp_free` from CPython's `typeslots.h`. Slot ids are ABI, not header-version-dependent. */
 private const val PY_TP_FREE = 74
 
+/** `Py_tp_members` from `typeslots.h`. */
+private const val PY_TP_MEMBERS = 72
+
+/** `Py_T_LONG` from `descrobject.h` -- an 8-byte signed integer member, the same width as the
+ *  handle slot [ProxyType.takeHandle] already reads and writes by hand. */
+private const val PY_T_LONG = 2
+
+/** `Py_RELATIVE_OFFSET` from `descrobject.h` (CPython 3.12+): the member's `offset` is relative to
+ *  the defining type's own extra storage rather than to byte 0 of the object, which is what makes
+ *  it safe under a Python subclass that adds fields of its own ahead of it in memory. */
+private const val PY_RELATIVE_OFFSET = 8
+
 object ProxyType {
 
     // Resolved once at class initialisation rather than per callback.
@@ -165,8 +177,8 @@ actual object ProxyTypeFactory {
         val putInt = unsafeClass.getMethod("putInt", Long::class.javaPrimitiveType, Int::class.javaPrimitiveType)
         val putLong = unsafeClass.getMethod("putLong", Long::class.javaPrimitiveType, Long::class.javaPrimitiveType)
 
-        // Four 16-byte PyType_Slot entries -- traverse, clear, dealloc, sentinel -- with room to
-        // spare, so adding a fifth does not silently write past the block.
+        // Room for eight 16-byte PyType_Slot entries; five are used -- traverse, clear, dealloc,
+        // members, sentinel -- with room to spare so a sixth does not silently write past the block.
         val slotsAddr = allocateMemory.invoke(theUnsafe, 16L * 8) as Long
         // Slot 0: Py_tp_traverse (71)
         putInt.invoke(theUnsafe, slotsAddr, 71)
@@ -185,9 +197,43 @@ actual object ProxyTypeFactory {
         val deallocStub = Panama.createUpcallStubI_V(MethodHandles.lookup().unreflect(ProxyType::class.java.getMethod("tp_dealloc", Long::class.javaPrimitiveType)))
         putLong.invoke(theUnsafe, slotsAddr + 40, deallocStub)
 
-        // Slot 3: sentinel
-        putInt.invoke(theUnsafe, slotsAddr + 48, 0)
-        putLong.invoke(theUnsafe, slotsAddr + 56, 0L)
+        // Slot 3: Py_tp_members (72) -- the handle slot, exposed to Python itself. `PyMemberDef` on
+        // every 64-bit target this ships for (macos-aarch64/x86_64, linux-x86_64, windows-x86_64):
+        //
+        //     struct PyMemberDef { const char *name; int type; Py_ssize_t offset; int flags;
+        //                          const char *doc; };
+        //
+        // name@0(8) type@8(4) [pad 4] offset@16(8) flags@24(4) [pad 4] doc@32(8) = 40 bytes,
+        // and the array needs a second, all-zero entry -- PyMemberDef's own required NUL-name
+        // terminator, the same contract PyMethodDef and PyType_Slot arrays already carry here.
+        //
+        // `Py_RELATIVE_OFFSET` (3.12+, `descrobject.h`) is what makes `offset = 0` mean "the start
+        // of *this type's* relative data" rather than "byte 0 of the object" -- the same base
+        // `PyObject_GetTypeData` computes in `takeHandle`/`tp_traverse` above, so a Python-level
+        // `self._pm_handle = h` on an instance of this type (or a subclass of it) writes exactly
+        // the 8 bytes those two already read and write by hand. Without the flag a member offset is
+        // absolute, and a Python subclass adding its own fields ahead of this one in memory would
+        // make every member on every base type in the MRO wrong by however much the subclass added
+        // -- which is precisely the multiple/deep-inheritance case this type exists to allow
+        // (`Py_TPFLAGS_BASETYPE`, and `work/untrack`'s proof that a subclass survives deallocation).
+        val membersAddr = allocateMemory.invoke(theUnsafe, 40L * 2) as Long
+        putLong.invoke(theUnsafe, membersAddr, Panama.allocateUtf8String("_pm_handle"))
+        putInt.invoke(theUnsafe, membersAddr + 8, PY_T_LONG)
+        putLong.invoke(theUnsafe, membersAddr + 16, 0L)
+        putInt.invoke(theUnsafe, membersAddr + 24, PY_RELATIVE_OFFSET)
+        putLong.invoke(theUnsafe, membersAddr + 32, 0L)
+        putLong.invoke(theUnsafe, membersAddr + 40, 0L) // sentinel: name
+        putInt.invoke(theUnsafe, membersAddr + 48, 0) // sentinel: type
+        putLong.invoke(theUnsafe, membersAddr + 56, 0L) // sentinel: offset
+        putInt.invoke(theUnsafe, membersAddr + 64, 0) // sentinel: flags
+        putLong.invoke(theUnsafe, membersAddr + 72, 0L) // sentinel: doc
+
+        putInt.invoke(theUnsafe, slotsAddr + 48, PY_TP_MEMBERS)
+        putLong.invoke(theUnsafe, slotsAddr + 56, membersAddr)
+
+        // Slot 4: sentinel
+        putInt.invoke(theUnsafe, slotsAddr + 64, 0)
+        putLong.invoke(theUnsafe, slotsAddr + 72, 0L)
 
         val specAddr = allocateMemory.invoke(theUnsafe, 32L) as Long
         putLong.invoke(theUnsafe, specAddr, Panama.allocateUtf8String("KotlinProxy"))
@@ -201,5 +247,26 @@ actual object ProxyTypeFactory {
             bindings.PyType_FromSpec(specAddr)
         }
         return ProxyType.proxyTypePtr
+    }
+
+    /**
+     * Publishes [createProxyType]'s type into `__main__` as `_pm_proxy_base`.
+     *
+     * `PyObject_SetAttrString` takes the type's own address directly as the value -- a
+     * `PyTypeObject*` is a valid `PyObject*`, its header is the same one every other object here
+     * has -- so this needs no `ctypes` round trip through an integer and back, unlike the
+     * once-off proof in `CycleCollectionTest`'s subclass-safety test. `PyObject_SetAttrString`
+     * does not steal the reference it is given; the type is never freed anyway (see
+     * [createProxyType]'s own spec/slots allocations, held for the process), so nothing here needs
+     * an extra incref to keep it alive under `__main__`.
+     */
+    actual fun installGcBase(): Boolean {
+        val type = createProxyType()
+        if (type == 0L) return false
+        return python.multiplatform.ffi.withGIL {
+            val main = bindings.PyImport_AddModule("__main__")
+            if (main == 0L) return@withGIL false
+            bindings.PyObject_SetAttrString(main, "_pm_proxy_base", type) == 0
+        }
     }
 }
