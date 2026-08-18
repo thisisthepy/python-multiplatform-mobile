@@ -458,6 +458,38 @@ class ArtifactScannerTest {
         assertEquals(1, names.count { it == "fixture.artifactvalueclass.Meters" }, "exactly one binding for Meters's one public constructor")
     }
 
+    // ---------------------------------------------------------------------------- properties
+
+    @Test
+    fun objectPropertiesAreBoundAsStaticGetters() {
+        val candidates = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass"))
+        val topLeft = candidates.singleOrNull { it.name == "fixture.artifactvalueclass.AbsoluteAlignment.TopLeft" }
+        assertNotNull(topLeft, "TopLeft not found!")
+        assertEquals(0, topLeft!!.arity)
+        assertEquals("STATIC_GETTER", topLeft.kind)
+        assertEquals(emptyList<String>(), topLeft.paramTags)
+        assertEquals("OBJECT", topLeft.returnTag)
+        assertEquals(
+            "{ (fixture.artifactvalueclass.AbsoluteAlignment.TopLeft) }",
+            topLeft.lambdaBody
+        )
+    }
+
+    @Test
+    fun interfaceCompanionPropertiesAreBoundWithoutCompanionInName() {
+        val candidates = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass"))
+        val center = candidates.singleOrNull { it.name == "fixture.artifactvalueclass.Alignment.Center" }
+        assertNotNull(center, "Center not found!")
+        assertEquals(0, center!!.arity)
+        assertEquals("STATIC_GETTER", center.kind)
+        assertEquals(emptyList<String>(), center.paramTags)
+        assertEquals("OBJECT", center.returnTag)
+        assertEquals(
+            "{ (fixture.artifactvalueclass.Alignment.Companion.Center) }",
+            center.lambdaBody
+        )
+    }
+
     // ------------------------------------------------------------------------------- overloads
 
     /**

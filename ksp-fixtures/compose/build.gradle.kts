@@ -91,6 +91,7 @@ pythonBindings {
             "androidx.compose.foundation.layout",
             "androidx.compose.ui.graphics",
             "androidx.compose.ui.res",
+            "androidx.compose.ui",
         ),
     )
     generateStubs.set(false)

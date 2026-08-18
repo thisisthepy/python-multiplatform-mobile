@@ -342,7 +342,8 @@ internal object ArtifactScanner {
                 functions = functionsOf(metadata.kmClass).filterNot { it.isExtension },
                 ownerNode = node,
                 classpath = classpath,
-            ) + constructorCandidates(metadata.kmClass, node, classpath)
+            ) + constructorCandidates(metadata.kmClass, node, classpath) +
+                objectConstantCandidates(metadata.kmClass, node, classpath)
             is KotlinClassMetadata.FileFacade -> kotlinCandidates(
                 owner = kotlinPackageNameOverrideOf(node) ?: packageNameOf(node.name),
                 ownerIsClass = false,
@@ -587,6 +588,127 @@ internal object ArtifactScanner {
      * constructor, and the compiler lowers it through the private box the same as it would inside the
      * declaring module -- nothing here ever spells `<init>` or reads its access flags.
      */
+    /**
+     * Public properties of an `object` declaration or a companion, bound as zero-argument getters.
+     *
+     * These are the declarations Python reaches as `Alignment.Center` -- a singleton instance behind
+     * a name, not a function. Nothing bound them before, which is why two downstream files sat empty
+     * with a note saying no bound declaration produces an object handle. This is that declaration.
+     *
+     * **A companion loses `Companion` from its bound name and keeps it in its call.** Kotlin source
+     * writes `Alignment.Center`, and that is the name a caller expects; the JVM holds the value on
+     * `Alignment.Companion`, and that is what the generated body has to say. The two differ, so both
+     * are computed rather than one derived from the other.
+     *
+     * A property whose *return type's* class is not public is declined even when the property is,
+     * because the generated body names that type's owner and could not be compiled outside its
+     * module. The property's own visibility is checked as well, and so is the owner's.
+     */
+    private fun objectConstantCandidates(
+        kmClass: kotlin.metadata.KmClass,
+        ownerNode: ClassNode,
+        classpath: ArtifactClasspath,
+    ): List<Candidate> {
+        if (kmClass.visibility != Visibility.PUBLIC) return emptyList()
+        val qualified = binaryNameToQualified(ownerNode.name)
+
+        // An `object` declaration holds its values on itself.
+        val ownProperties = if (ownerNode.fields.any { it.name == "INSTANCE" && it.access.hasFlag(Opcodes.ACC_STATIC) }) {
+            constantsOf(kmClass, ownerNode, boundOwner = qualified, callOwner = qualified, classpath)
+        } else {
+            emptyList()
+        }
+
+        // A companion's values are reached through the outer class, and the walk never meets the
+        // companion itself: `scan` skips every binary name containing `$`, so `Outer$Companion` is
+        // never read as an entry. It is loaded from here instead, by the name the outer class's own
+        // metadata gives it -- which is also why the bound name can drop `Companion` while the
+        // generated call keeps it.
+        val companionProperties = kmClass.companionObject?.let { companionName ->
+            val companionNode = classpath.classNode(ownerNode.name + "\$" + companionName) ?: return@let null
+            val companionMetadata = kotlinClassMetadataOf(companionNode) as? KotlinClassMetadata.Class ?: return@let null
+            if (companionMetadata.kmClass.visibility != Visibility.PUBLIC) return@let null
+            constantsOf(
+                companionMetadata.kmClass,
+                companionNode,
+                boundOwner = qualified,
+                callOwner = "$qualified.$companionName",
+                classpath,
+            )
+        }.orEmpty()
+
+        return ownProperties + companionProperties
+    }
+
+    /**
+     * Public, receiverless properties of a singleton holder, as zero-argument getters.
+     *
+     * These are the declarations Python reaches as `Alignment.Center` -- a value behind a name, not
+     * a function. Nothing bound them before, which is why two files downstream sat empty under a
+     * note saying no bound declaration produces an object handle. This is that declaration.
+     *
+     * [boundOwner] and [callOwner] differ for a companion and are therefore both passed: a caller
+     * writes `Alignment.Center`, and the generated body has to say `Alignment.Companion.Center`.
+     *
+     * A property whose *return type* is not public is declined even when the property is, because
+     * the body names that type and could not compile outside its module.
+     */
+    private fun constantsOf(
+        kmClass: kotlin.metadata.KmClass,
+        declaringNode: ClassNode,
+        boundOwner: String,
+        callOwner: String,
+        classpath: ArtifactClasspath,
+    ): List<Candidate> = kmClass.properties.mapNotNull { property ->
+        if (property.visibility != Visibility.PUBLIC) return@mapNotNull null
+        if (property.receiverParameterType != null) return@mapNotNull null
+        // A `@Composable get()` reads the composition, so its value does not exist outside one --
+        // `MaterialTheme.colorScheme` is the shape. The generated body is an ordinary lambda, and
+        // Kotlin rejects the call there: "@Composable invocations can only happen from the context
+        // of a @Composable function". Found by generating them and watching the fixture fail to
+        // compile, which is also why the check reads the getter's own annotations rather than the
+        // property's -- metadata does not carry them for a release build.
+        val getterName = "get" + property.name.replaceFirstChar { it.uppercase() }
+        if (declaringNode.methods.any { it.name == getterName && isComposable(it) }) return@mapNotNull null
+        val returnModel = kotlinTypeModelOf(property.returnType, classpath) ?: return@mapNotNull null
+        val returnType = resolveKotlinType(property.returnType, classpath, BoundaryDirection.RETURN)
+            ?: return@mapNotNull null
+        val classifier = property.returnType.classifier as? KmClassifier.Class
+        val returnMetadata = classifier?.name?.let { classpath.classNode(it) }
+            ?.let { kotlinClassMetadataOf(it) } as? KotlinClassMetadata.Class
+        if (returnMetadata != null && returnMetadata.kmClass.visibility != Visibility.PUBLIC) return@mapNotNull null
+
+        val name = "$boundOwner.${property.name}"
+        val call = "$callOwner.${property.name}"
+        Candidate(
+            callable = ArtifactCallable(
+                name = name,
+                arity = 0,
+                paramTags = emptyList(),
+                returnTag = returnType.tag,
+                lambdaBody = "{ ${returnType.wrapReturn(call)} }",
+                returnTypeName = kotlinClassifierNameOf(property.returnType),
+                returnSupertypes = returnSupertypesOf(property.returnType, returnType.tag, classpath),
+                paramNames = emptyList(),
+                paramTypeNames = emptyList(),
+                paramHasDefault = emptyList(),
+                kind = "STATIC_GETTER",
+            ),
+            declaration = DeclarationModel(
+                simpleName = property.name,
+                owner = boundOwner,
+                ownerIsClass = true,
+                receiver = null,
+                parameters = emptyList(),
+                returnType = returnModel,
+                isComposable = false,
+                isSuspend = false,
+                bindingName = name,
+                returnBoundaryTag = returnType.tag,
+            ),
+        )
+    }
+
     private fun constructorCandidates(
         kmClass: kotlin.metadata.KmClass,
         ownerNode: ClassNode,
@@ -603,6 +725,12 @@ internal object ArtifactScanner {
         // Value class constructors are what this branch intends to bind. Normal class constructors
         // overshadow their proxy type's Python class or collide with factory functions.
         if (!kmClass.isValue) return emptyList()
+        // A generic one cannot be called without naming its type argument, and Python has no way to
+        // supply one: `SessionMutex()` does not compile, it needs `SessionMutex<T>()`. Surfaced by
+        // widening the walked packages, which brought the first generic value class into range --
+        // the same unspellable-type-parameter limit the modifier wrappers already work around by
+        // fixing a concrete type.
+        if (kmClass.typeParameters.isNotEmpty()) return emptyList()
 
         val owner = packageNameOf(ownerNode.name)
         return constructorsOf(kmClass, ownerNode.name).mapNotNull { function ->

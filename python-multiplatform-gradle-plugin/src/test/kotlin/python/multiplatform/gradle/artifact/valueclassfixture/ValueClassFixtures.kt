@@ -122,3 +122,14 @@ fun withSuspendCallback(action: suspend () -> Unit): Int = if (action === action
 value class Seconds(val raw: Long) {
     val doubled: Long get() = raw * 2
 }
+
+interface Alignment {
+    companion object {
+        val Center: Alignment = object : Alignment {}
+        val TopStart: Alignment = object : Alignment {}
+    }
+}
+
+object AbsoluteAlignment {
+    val TopLeft: Alignment = object : Alignment {}
+}
