@@ -26,3 +26,5 @@ import androidx.compose.ui.layout.layoutId
  * Python calls.
  */
 fun pythonLayoutIdString(modifier: Modifier, id: String): Modifier = modifier.layoutId(id)
+
+fun pythonLayoutIdInt(modifier: Modifier, id: Int): Modifier = modifier.layoutId(id)
