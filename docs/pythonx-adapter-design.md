@@ -957,7 +957,23 @@ tests should move to the non-deprecated overload in the same commit.
 
 Seven components remain unjudgeable in this harness, and the reasons why:
 
-1. **`Typography` / `Shapes` / `dynamicLightColorScheme`** (`typography.py`, `shape.py`, `dynamic_color.py`): `Typography` and `Shapes` are data classes, and since `ArtifactScanner` drops constructors, they are completely excluded from the Python bindings. `ColorScheme` is exported because it has a top-level factory function, but calling it fails at runtime because its 36 parameters exceed the 31-bit default omission limit. `dynamicLightColorScheme` is an Android-only API and absent from the desktop jar. None can be instantiated from Python.
+1. **`Typography` / `Shapes` / `dynamicLightColorScheme`** (`typography.py`, `shape.py`, `dynamic_color.py`): `Typography` and `Shapes` are ordinary (non-`value`) classes, not data classes, and `ArtifactScanner.constructorCandidates` used to bind only `value`-class constructors -- both were simply never scanned, not declined. That gate is now general: every public, non-abstract, non-generic class's constructor is attempted, and `ArtifactScanner.dropCollidingConstructors` declines one only when it would shadow a bound factory function or a same-named constant (`TextStyle.Default` is the case that forced the second rule -- see `ArtifactScannerTest.aTypographyOrShapesConstructorBindsButATextStyleConstructorDoesNot`). Neither `Typography` nor `Shapes` has that problem, so `Typography(…)` and `Shapes(…)` are both callable from Python now. Neither is convenient, though: `Typography` declares 15 constructor parameters, over `ArtifactScanner.MAX_OMITTABLE_PARAMETERS` (6)'s cap on how many defaulted parameters a generated call is willing to omit (`§4.5`, `2^n` presence branches per omission set), so every `Typography(…)` call must name all 15 -- `M3ProofRenderTest.typographyChangesFontRender` does exactly that. `Shapes`' 5 parameters stay under the cap. `ColorScheme` is exported because it has a top-level factory function, but calling it fails at runtime because its 36 parameters exceed the 31-bit default omission limit. `dynamicLightColorScheme` is an Android-only API and absent from the desktop jar.
+
+   **What widening the gate costs, measured rather than assumed.** Comparing the bound-name sets
+   generated for `ksp-fixtures:compose` before and after, the corpus goes from 1417 to 1497 names.
+   Seven of the additions are paid for: these were bound before, as value-class constructors, and
+   the constant-collision rule now declines them --
+   `androidx.compose.ui.unit.Dp`, `androidx.compose.ui.unit.TextUnitType`,
+   `androidx.compose.ui.text.font.FontStyle`, `androidx.compose.ui.text.style.BaselineShift`,
+   `androidx.compose.ui.draw.BlurredEdgeTreatment`,
+   `androidx.compose.ui.hapticfeedback.HapticFeedbackType` and
+   `androidx.compose.ui.input.pointer.PointerButton`. In every one of the seven the constructor
+   takes an opaque `Int`/`Float` and the constants it would shadow (`Dp.Hairline`,
+   `FontStyle.Italic`, `HapticFeedbackType.LongPress`, ...) are the names a Python caller actually
+   wants, so the trade is worth taking -- but it *is* a trade, and `Dp(8.0)` stops being callable
+   from Python. What would remove the trade rather than choose a side is making a bound bare name
+   serve as both a callable and a namespace; that is an adapter change, not a scanner one, and is
+   not attempted here.
 2. **`DatePicker` / `TimePicker` / `SwipeToDismiss` / `BottomSheet`** (`date_picker.py`, `time_picker.py`, `swipe_to_dismiss.py`, `bottom_sheet.py`): Previously thought to be blocked by complex state objects. However, testing confirms that their state factory functions (`remember_date_picker_state`, `remember_time_picker_state`, `remember_swipe_to_dismiss_box_state`) **are** successfully bound and exported. Passing them from Python to the respective composables works flawlessly in the render harness.
 3. **`DropdownMenu`** (`menus.py`): Renders in a separate popup window layer. As confirmed by tests, `ImageComposeScene.render()` fundamentally does not capture these detached layers, resulting in 0 distinct colors despite being fully functional.
 

@@ -666,4 +666,129 @@ class ArtifactScannerTest {
         }
         return declined.distinctBy { it.first }
     }
+
+    /**
+     * `docs/pythonx-adapter-design.md` §10's `Typography`/`Shapes` casualty, closed, and pinned
+     * against the structural rule that closed it rather than against the two hard-coded class names
+     * an earlier attempt used.
+     *
+     * `Typography` and `Shapes` are ordinary (non-`value`) classes with 15 and 5 constructor
+     * parameters respectively, and [ArtifactScanner.constructorCandidates] used to bind only
+     * `value`-class constructors. Widening it to every public class opened them both.
+     *
+     * `TextStyle` was the measured reason it could not stay unconditional: `TextStyle` also
+     * publishes a constant under a dotted continuation of its own name (`TextStyle.Default`, an
+     * `object`/companion property [ArtifactScanner.objectConstantCandidates] binds independently),
+     * and a constructor bound to the bare name `TextStyle` would claim it as a callable, making
+     * `TextStyle.Default` unreachable. `Typography` and `Shapes` publish no such constant.
+     * [ArtifactScanner.dropCollidingConstructors] is where that fact is now decided, in place of a
+     * name list that would have needed one more line per class someone next wants opened --
+     * [aFocusRequesterConstructorIsDroppedBecauseItWouldShadowFocusRequesterDefault] pins that rule
+     * directly. `TextStyle` itself is pinned here only by outcome (no bound constructor, `Default`
+     * still reachable): in the jar this measures, every one of `TextStyle`'s own constructors turns
+     * out to be `@Deprecated(level = HIDDEN)` -- backed by a JVM-`private` implementation behind a
+     * synthetic public bridge metadata's descriptor does not match -- so
+     * [ArtifactScanner.constructorCandidates]'s separate bytecode cross-check (found by this same
+     * widening, against `PointerInputChange`) already filters every one of them out before
+     * [ArtifactScanner.dropCollidingConstructors] would have had a candidate to drop. Both checks
+     * close `TextStyle`; only the second is what this test can attribute to a specific mechanism.
+     */
+    @Test
+    fun aTypographyOrShapesConstructorBindsButATextStyleConstructorDoesNot() {
+        val gradleCaches = listOf(
+            File(System.getProperty("user.home"), ".gradle/caches/modules-2/files-2.1"),
+            File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
+        ).firstOrNull { it.isDirectory }
+        if (gradleCaches == null) return // no local Gradle cache found at either known location
+
+        fun jarUnder(group: String, artifact: String): File? = gradleCaches.resolve(group).resolve(artifact)
+            .walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+
+        val material3Jar = jarUnder("org.jetbrains.compose.material3", "material3-desktop") ?: return
+        val uiTextJar = jarUnder("org.jetbrains.compose.ui", "ui-text-desktop") ?: return
+        val classpath = listOfNotNull(
+            material3Jar,
+            uiTextJar,
+            jarUnder("org.jetbrains.compose.ui", "ui-desktop"),
+            jarUnder("org.jetbrains.compose.ui", "ui-geometry-desktop"),
+            jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop"),
+            jarUnder("org.jetbrains.compose.ui", "ui-unit-desktop"),
+            jarUnder("org.jetbrains.compose.ui", "ui-util-desktop"),
+            jarUnder("org.jetbrains.compose.runtime", "runtime-desktop"),
+            jarUnder("org.jetbrains.compose.foundation", "foundation-desktop"),
+            jarUnder("org.jetbrains.compose.foundation", "foundation-layout-desktop"),
+            jarUnder("org.jetbrains.compose.material", "material-desktop"),
+            jarUnder("org.jetbrains.compose.collection-internal", "collection-desktop"),
+            jarUnder("org.jetbrains.compose.annotation-internal", "annotation-desktop"),
+        )
+
+        val material3Names = ArtifactScanner.scanJar(material3Jar, classpath = classpath).map { it.name }
+        assertTrue(
+            "androidx.compose.material3.Typography" in material3Names,
+            "Typography's own constructor should bind: ${material3Names.filter { "Typography" in it }}",
+        )
+        assertTrue(
+            "androidx.compose.material3.Shapes" in material3Names,
+            "Shapes' own constructor should bind: ${material3Names.filter { "Shapes" in it }}",
+        )
+
+        val textStyleCallables = ArtifactScanner.scanJar(uiTextJar, classpath = classpath)
+            .filter { it.name.startsWith("androidx.compose.ui.text.TextStyle") }
+        assertTrue(
+            textStyleCallables.none { it.name == "androidx.compose.ui.text.TextStyle" },
+            "TextStyle's own constructor must stay declined, or it would shadow TextStyle.Default: $textStyleCallables",
+        )
+        assertTrue(
+            textStyleCallables.any { it.name == "androidx.compose.ui.text.TextStyle.Default" && it.kind == "STATIC_GETTER" },
+            "TextStyle.Default is the constant a bound TextStyle constructor would make unreachable: $textStyleCallables",
+        )
+    }
+
+    /**
+     * [ArtifactScanner.dropCollidingConstructors]'s constant-collision rule, exercised end to end
+     * against a real class -- unlike `TextStyle` above, `FocusRequester` has exactly one public
+     * constructor (`FocusRequester()`, no parameters, not deprecated), so this is the rule actually
+     * doing the work rather than the bytecode cross-check pre-empting it.
+     */
+    @Test
+    fun aFocusRequesterConstructorIsDroppedBecauseItWouldShadowFocusRequesterDefault() {
+        val gradleCaches = listOf(
+            File(System.getProperty("user.home"), ".gradle/caches/modules-2/files-2.1"),
+            File("/Volumes/macMini/caches/.gradle/caches/modules-2/files-2.1"),
+        ).firstOrNull { it.isDirectory }
+        if (gradleCaches == null) return // no local Gradle cache found at either known location
+
+        fun jarUnder(group: String, artifact: String): File? = gradleCaches.resolve(group).resolve(artifact)
+            .walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".jar") && "sources" !in it.name }
+
+        val uiJar = jarUnder("org.jetbrains.compose.ui", "ui-desktop") ?: return
+        val classpath = listOfNotNull(
+            uiJar,
+            jarUnder("org.jetbrains.compose.ui", "ui-geometry-desktop"),
+            jarUnder("org.jetbrains.compose.ui", "ui-graphics-desktop"),
+            jarUnder("org.jetbrains.compose.ui", "ui-unit-desktop"),
+            jarUnder("org.jetbrains.compose.ui", "ui-util-desktop"),
+            jarUnder("org.jetbrains.compose.runtime", "runtime-desktop"),
+        )
+
+        val bound = ArtifactScanner.scanJar(uiJar, classpath = classpath)
+            .filter { it.name.startsWith("androidx.compose.ui.focus.FocusRequester") }
+        assertTrue(
+            bound.none { it.name == "androidx.compose.ui.focus.FocusRequester" },
+            "FocusRequester's own constructor must stay declined: $bound",
+        )
+        assertTrue(
+            bound.any { it.name == "androidx.compose.ui.focus.FocusRequester.Default" && it.kind == "STATIC_GETTER" },
+            "FocusRequester.Default is the constant a bound constructor would shadow: $bound",
+        )
+
+        val declined = ArtifactScanner.scanDeclarations(uiJar, classpath = classpath)
+            .filter { it.simpleName == "FocusRequester" && it.owner == "androidx.compose.ui.focus" }
+        assertTrue(declined.isNotEmpty(), "expected FocusRequester's own constructor to have been scanned")
+        assertTrue(declined.all { it.bindingName == null }, declined.toString())
+        assertTrue(
+            declined.all { it.declineReason == "constructor name collides with a constant this class publishes under its own name" },
+            declined.map { it.declineReason }.toString(),
+        )
+    }
 }

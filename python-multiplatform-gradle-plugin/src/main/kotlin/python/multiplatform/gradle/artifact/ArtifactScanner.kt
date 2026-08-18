@@ -231,38 +231,54 @@ internal object ArtifactScanner {
     }
 
     /**
-     * Rule: If a bare name is already taken by a function candidate, discard any constructor
-     * candidates with the same bare name.
-     * 
-     * Why this rule: Top-level factory functions (like `BitmapPainter`) are already what
-     * Python users call. Introducing a constructor with the exact same name causes a collision,
-     * which forces both into `name__<types>` mangling and breaks existing Python code.
-     * Dropping the constructor candidate preserves the factory function under its bare name,
-     * while still binding value class constructors (like `Meters`) that have no collision.
-     * 
-     * This must run BEFORE [applyDefaultOmission] so the constructor's presence doesn't cause
-     * the factory function to lose its omittable defaults.
+     * Two rules, both "a constructor cannot claim a name something else bound needs", and both
+     * caught here rather than by restricting *which classes* [constructorCandidates] attempts:
+     *
+     * 1. **Exact-name collision with a factory function.** A top-level factory function (like
+     *    `BitmapPainter`) is already what Python users call. A constructor sharing that exact bare
+     *    name would force both into `name__<types>` mangling and break existing Python code, so the
+     *    constructor yields.
+     * 2. **Prefix collision with a constant the class itself publishes.** [objectConstantCandidates]
+     *    binds `TextStyle.Default` under the dotted name `"TextStyle.Default"`, which needs the bare
+     *    name `TextStyle` free to act as the namespace that constant hangs off of. A constructor
+     *    bound to `TextStyle` claims that name as a callable instead, and `TextStyle.Default` becomes
+     *    unreachable. `TextStyle` has this problem and `Typography`/`Shapes` do not, which is the
+     *    measured fact this rule generalises (`ArtifactScannerTest
+     *    .aFocusRequesterConstructorIsDroppedBecauseItWouldShadowFocusRequesterDefault` pins the rule
+     *    itself against a class where it is the one doing the work; `TextStyle` gets closed by the
+     *    other check below instead, see [constructorCandidates]) -- replacing what used to be two
+     *    hard-coded class names in [constructorCandidates] with a structural check that does not grow
+     *    a line per class someone wants opened next.
+     *
+     * Both must run BEFORE [applyDefaultOmission] so a dropped constructor's presence doesn't cost
+     * the surviving bound declaration its omittable defaults.
      */
     private fun dropCollidingConstructors(candidates: List<Candidate>): List<Candidate> {
         val (bound, declined) = candidates.partition { it.callable != null }
         val byName = bound.groupBy { it.callable!!.name }
-        val constructorDrops = mutableSetOf<Candidate>()
-        for ((name, group) in byName) {
-            if (name == "ColorScheme") {
-                java.io.File("/Volumes/macMini/worktrees/ctors/ct4_cs.txt").appendText("ColorScheme candidates: ${group.map { it.isConstructor to it.declaration.owner + "." + it.declaration.simpleName }}\n")
-            }
+        val boundNames = byName.keys
+
+        val dropReasons = mutableMapOf<Candidate, String>()
+        for (group in byName.values) {
             if (group.any { !it.isConstructor }) {
-                constructorDrops.addAll(group.filter { it.isConstructor })
+                group.filter { it.isConstructor }.forEach {
+                    dropReasons.putIfAbsent(it, "constructor name collides with a factory function")
+                }
             }
         }
-        val remainingBound = bound.filter { it !in constructorDrops }
-        val newlyDeclined = constructorDrops.map { candidate ->
+        for (candidate in bound) {
+            if (!candidate.isConstructor) continue
+            val name = candidate.callable!!.name
+            if (boundNames.any { it != name && it.startsWith("$name.") }) {
+                dropReasons.putIfAbsent(candidate, "constructor name collides with a constant this class publishes under its own name")
+            }
+        }
+
+        val remainingBound = bound.filter { it !in dropReasons }
+        val newlyDeclined = dropReasons.map { (candidate, reason) ->
             candidate.copy(
                 callable = null,
-                declaration = candidate.declaration.copy(
-                    bindingName = null,
-                    declineReason = "constructor name collides with a factory function",
-                ),
+                declaration = candidate.declaration.copy(bindingName = null, declineReason = reason),
             )
         }
         return remainingBound + declined + newlyDeclined
@@ -723,9 +739,14 @@ internal object ArtifactScanner {
         // constructor's own visibility separately.
         if (ownerNode.access.hasFlag(Opcodes.ACC_ABSTRACT)) return emptyList()
         if (kmClass.visibility != Visibility.PUBLIC) return emptyList()
-        // Value class constructors are what this branch intends to bind. Normal class constructors
-        // overshadow their proxy type's Python class or collide with factory functions.
-        if (!kmClass.isValue) return emptyList()
+        // Every public class's constructor is attempted, value class or not -- what a constructor
+        // could overshadow (a factory function already claiming the bare name, or a constant this
+        // same class publishes under a dotted continuation of it, `TextStyle.Default`) is a fact
+        // about the *whole walk*, not about this class in isolation, so it is caught once, after the
+        // walk, by [dropCollidingConstructors] -- not by guessing which classes are safe here. This
+        // used to special-case two class names (`Typography`, `Shapes`) for the same reason `Meters`
+        // needs none: neither publishes a same-named constant, and [dropCollidingConstructors] now
+        // says so structurally instead of by name.
         // A generic one cannot be called without naming its type argument, and Python has no way to
         // supply one: `SessionMutex()` does not compile, it needs `SessionMutex<T>()`. Surfaced by
         // widening the walked packages, which brought the first generic value class into range --
@@ -733,12 +754,36 @@ internal object ArtifactScanner {
         // fixing a concrete type.
         if (kmClass.typeParameters.isNotEmpty()) return emptyList()
 
+        // `@Deprecated(level = DeprecationLevel.HIDDEN)` on a constructor keeps its *metadata* entry
+        // (for binary compatibility, ABI consumers still need to see it existed) while the compiler
+        // makes the constructor it actually describes JVM-`private` and publishes only a synthetic
+        // `$default`-masked bridge (`DefaultConstructorMarker` trailing) as the public one -- with a
+        // *different* descriptor metadata never records. Found widening constructor binding past
+        // value classes to `androidx.compose.ui.input.pointer.PointerInputChange`, whose old
+        // `consumed: ConsumedData` constructor is exactly this shape: `e: None of the following
+        // candidates is applicable` against a generated call naming a constructor Kotlin source can
+        // no longer resolve.
+        //
+        // Checked for an **ordinary class only**. A value class's own box constructor is the other
+        // case this object's KDoc already warns bytecode cannot judge -- "the compiler makes the
+        // *box's* `<init>` private on purpose, to push every external caller through
+        // `constructor-impl`/`box-impl` instead" -- so the same bytecode check that catches a
+        // hidden-deprecated ordinary constructor would wrongly decline every public value class
+        // constructor, `Meters` included. `kmClass.isValue` is exactly the fact that tells these two
+        // "the real `<init>` is not the one this metadata entry means" cases apart.
         val owner = packageNameOf(ownerNode.name)
-        return constructorsOf(kmClass, ownerNode.name).mapNotNull { function ->
-            val (paramDescriptors, _) = splitMethodDescriptor(function.jvmSignature.descriptor)
-            candidateFromFunction(owner, false, function, classpath, paramDescriptors, isComposable = false)?.copy(isConstructor = true)
-        }
+        return constructorsOf(kmClass, ownerNode.name)
+            .filter { kmClass.isValue || it.jvmSignature.descriptor in realPublicInitDescriptorsOf(ownerNode) }
+            .mapNotNull { function ->
+                val (paramDescriptors, _) = splitMethodDescriptor(function.jvmSignature.descriptor)
+                candidateFromFunction(owner, false, function, classpath, paramDescriptors, isComposable = false)?.copy(isConstructor = true)
+            }
     }
+
+    private fun realPublicInitDescriptorsOf(ownerNode: ClassNode): Set<String> =
+        ownerNode.methods
+            .filter { it.name == "<init>" && it.access.hasFlag(Opcodes.ACC_PUBLIC) && !it.access.hasFlag(Opcodes.ACC_SYNTHETIC) }
+            .mapTo(mutableSetOf()) { it.desc }
 
     /**
      * Whether this JVM method is a `@Composable`.

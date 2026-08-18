@@ -738,7 +738,6 @@ class M3ProofRenderTest {
         )
         assertTrue(timePickerInk > 0, "TimePicker should render")
 
-        // 4. SwipeToDismissBox
         val swipeInk = inkOf(
             """
             from pythonx.compose.material3 import SwipeToDismissBox, remember_swipe_to_dismiss_box_state, Text
@@ -751,6 +750,36 @@ class M3ProofRenderTest {
             width = 200, height = 100,
         )
         assertTrue(swipeInk > 0, "SwipeToDismissBox should render")
+    }
+
+    @Test
+    fun typographyChangesFontRender() {
+        val baseInk = pixelsOf(
+            """
+            from pythonx.compose.material3 import MaterialTheme, Text
+            MaterialTheme(content=lambda: Text("A"))
+            """.trimIndent(),
+            width = 50, height = 50
+        )
+        val customInk = pixelsOf(
+            """
+            from pythonx.compose.material3 import MaterialTheme, Text, Typography
+            from pythonx.compose.ui.text import TextStyle
+            
+            ts = TextStyle.Default
+            typo = Typography(ts, ts, ts, ts, ts, ts, ts, ts, ts, ts, ts, ts, ts, ts, ts)
+            
+            MaterialTheme(typography=typo, content=lambda: Text("A"))
+            """.trimIndent(),
+            width = 50, height = 50
+        )
+        
+        val baseColors = baseInk.filter { it != BACKGROUND }.toSet()
+        val customColors = customInk.filter { it != BACKGROUND }.toSet()
+        
+        assertTrue(baseColors.isNotEmpty(), "Base text must render")
+        assertTrue(customColors.isNotEmpty(), "Custom text must render")
+        assertTrue(baseColors != customColors, "MaterialTheme with custom Typography must change the text color/style")
     }
 
     @Test
