@@ -957,6 +957,49 @@ state object and never closed -- and that is stated in its own documentation rat
 later. `DraggableLeakTest` already pins the shape of that leak and the reason interning cannot reach
 it.
 
-`swipeable` and `modifierLocalProvider` are unchanged: the same technique applies, one wrapper per
-concrete type, and nobody has needed one yet.
+`modifierLocalProvider` is unchanged: the same technique applies, one wrapper per concrete type, and
+nobody has needed one yet. `swipeable` is now bound too -- see §9.6.
+
+### §9.6 `swipeable`, through a concrete type, and a second slot that needed dodging entirely
+
+`swipeable` (`androidx.compose.material.SwipeableKt.swipeable-pPrIpRY`) has the same unspellable-`T`
+shape `anchoredDraggable` does -- `javap -p` against the real Compose Material 1.7.0 desktop jar (no
+sources jar for this version) confirms the table's signature exactly:
+
+    <T> Modifier swipeable-pPrIpRY(Modifier, SwipeableState<T>, Map<Float, ? extends T> anchors,
+        Orientation, boolean enabled, boolean reverseDirection, MutableInteractionSource,
+        Function2<? super T, ? super T, ? extends ThresholdConfig> thresholds,
+        ResistanceConfig, float velocityThreshold)
+
+`fixture.compose.pythonSwipeableString` fixes `T` to `String`, the same choice and the same reason as
+`anchoredDraggable`'s wrapper. It is a plain top-level function, bound by KSP exactly like
+`pythonAnchoredDraggableString`; `Modifier.swipeable` itself stays declined, correctly.
+
+`thresholds: (T, T) -> ThresholdConfig` is where this wrapper is not a copy of `anchoredDraggable`'s.
+It is a **value-returning** function slot -- it must produce a `ThresholdConfig`, not `Unit` -- and §10
+already measured that a value-returning slot (`() -> Float`) is refused by the dispatcher where a
+`() -> Unit` slot is accepted. Substituting a `PyObject` here would hit that same refusal, and even if
+it didn't, the callable would have to construct a `ThresholdConfig`, itself unspellable from Python.
+So `thresholds` never crosses to Python at all: `pythonSwipeableString` takes a `thresholdFraction:
+Float` -- an ordinary marshalled value, not a callable -- and Kotlin closes over it to build the lambda
+itself, `{ _, _ -> FractionalThreshold(thresholdFraction) }`. Nothing about `FractionalThreshold` uses
+the `(T, T)` pair it is handed, so fixing the fraction ahead of time loses nothing the real slot would
+have used them for. `SwipeableState`'s own `confirmStateChange: (T) -> Boolean` is a second
+value-returning slot, sidestepped the same way `anchoredDraggable`'s `confirmValueChange` is: `Python`
+is invoked as a one-way notification and the Kotlin lambda always returns `true`, never carrying a
+Python return value back into Compose.
+
+Proven the same way: `SwipeableRenderTest` drives a real drag past the fractional threshold and asserts,
+in Python, that `_on_value_change` received `"end"` (not a stub), and that a press outside the box
+invokes nothing. Ink moves 58 to 28 pixels, 72 pixels change. Confirmed red first: with
+`PythonSwipeable.kt` removed, both tests fail with `cannot import name 'pythonSwipeableString'`;
+restored, both pass.
+
+Same unfixed lifetime as the other two: `onValueChange` is held by the `SwipeableState` and never
+closed; `DraggableLeakTest` already pins the shape of that leak family and is not repeated here.
+
+`Modifier.swipeable` and the `SwipeableState` constructor it built on are themselves
+`@Deprecated` in this Compose version (`w:`, not `e:` -- "Material's Swipeable has been replaced by
+Foundation's AnchoredDraggable APIs"), which is why `@OptIn(ExperimentalMaterialApi::class)` alone was
+enough to compile; the deprecation did not need suppressing to reach green.
 
