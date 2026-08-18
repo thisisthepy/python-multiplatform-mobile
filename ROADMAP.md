@@ -2041,34 +2041,99 @@ is the actual state of the Android object model, and that is the point of doing 
     `PyObject_GetAttrString`'s new reference with `borrowed = true`. Measured at exactly +50 over
     50 calls — the inverse of §1's defect, in the fixture every functional test is built on.
     `OwnershipLeakTest.theTestFixtureDoesNotLeakMainGlobals` is the guard.
-- **`Python3.runMain` is not usable as written**, and "add error handling" (the TODO it carried)
-  understated it. `sys.argv[1] = ...` assigns to an existing index, but `Py_Initialize()` does not
-  set `sys.argv`, so it raises `IndexError` — invisibly, because `PyRun_SimpleString` prints and
-  clears the indicator and its return value is discarded. Worse, `Py_RunMain()` **always finalizes
-  the interpreter**, so on return the runtime is gone while `Python3.isInitialized` is still
-  `true`. Its `Int` exit status is also discarded. No caller in `src/` or `sample/`, so it is a
-  landmine, not a live failure. Fixing it is a design decision: what should "run a module" mean
-  for an embedded interpreter that has to survive the call?
+- ~~**`Python3.runMain` is not usable as written**~~ **— done. It runs a module as `__main__`
+  through `runpy`, and the interpreter is alive when it returns.**
 
-  **The design question is still open; the landmine is not.** Both `runMain` and `runApp` now
-  return `Nothing` and throw `UnsupportedOperationException` naming what is missing, so stepping
-  on either is a clear failure at the call site instead of a destroyed runtime or a silent no-op.
-  Guards: `Python3Test.runMainRefusesRatherThanFinalizingTheSharedInterpreter` and
-  `.runAppRefusesRatherThanSilentlyDoingNothing` (desktop 360 → 362, 0 failures, 1 skipped).
-  Refusing is deliberately *not* an answer to the design question — it only stops the broken
-  answer from shipping as if it were one.
+  `fun runMain(moduleName: String, args: List<String> = emptyList()): Int`. The design question
+  this entry left open — what "run a module" should mean for an embedded interpreter that has to
+  survive the call — is answered as: *the module executes in a fresh `__main__` namespace, sees
+  the argv it was given, and its exit status comes back as a value.*
 
-  One asymmetry worth recording, because it shaped how these were tested: the `runApp` red phase
-  is safe to observe and was observed (`Expected an exception of class
-  java.lang.UnsupportedOperationException to be thrown, but was completed successfully.`), while
-  the `runMain` one is not. Calling the pre-fix `runMain` reaches `Py_RunMain()`, which with no
-  `PyConfig.run_*` set enters the REPL on the process's stdin and finalizes the interpreter the
-  whole suite shares — it hangs the worker or crashes every class scheduled after it. The red
-  phase for it was therefore reasoned about, not triggered, and the test says so at the test.
-- **`Python3.runApp` does nothing at all** — its only statement is commented out, as is the
-  `Py_BytesMain` `expect` it would call. It returns `Unit` either way, so a caller cannot tell.
-  Declaring `Py_BytesMain` is not a one-liner: it takes `(int argc, char **argv)`, so it needs an
-  array-of-C-strings marshalling path, which each of the four platforms does differently.
+  **Why not the two obvious candidates.**
+  - `Py_RunMain()` is declared in `cpython/pylifecycle.h` — a lifecycle function, and **not part
+    of the Limited API** this binding otherwise targets. Its contract is to run whatever
+    `PyConfig.run_command`/`run_module`/`run_filename` names *and then finalize Python*; there is
+    no mode in which it leaves the runtime standing. Nothing an embedder calls can be built on it.
+    (Checked in the vendored 3.14.7 header, `include/cpython/pylifecycle.h:28`.)
+  - `PyImport_ImportModule(name)` fails the requirement twice: the body runs under the module's
+    *own* `__name__`, so the `if __name__ == "__main__":` block that is usually the entire point
+    never fires, and the result is cached in `sys.modules`, so a second call runs nothing at all.
+    `RunMainTest.runMainRunsTheModuleAgainOnASecondCall` fixes the second half of that.
+
+  **What it does instead: `runpy.run_module(name, run_name="__main__", alter_sys=True)`** — the
+  standard library's own answer, and the machinery `python -m` itself goes through
+  (`runpy._run_module_as_main` shares `_get_module_details`/`_run_code` with `run_module`). It
+  touches no lifecycle function, so nothing on this path can finalize anything. Read out of the
+  vendored `runpy.py`, `alter_sys=True` puts the execution inside two context managers:
+  `_TempModule("__main__")`, which installs a **fresh** module as `sys.modules["__main__"]` for
+  the duration and puts the previous one back in `__exit__`; and `_ModifiedArgv0(spec.origin)`,
+  which points `sys.argv[0]` at the module's file and restores it. Both are `with` blocks, so the
+  restore happens on the raising path too. That is what makes the embedder's own `__main__` — the
+  one `Python3.exec` writes into — neither read nor written by the module.
+
+  **`sys.argv` is set for the duration and put back.** It has to be set, because
+  `_ModifiedArgv0.__enter__` *reads* `sys.argv[0]` before writing it, and an embedded interpreter
+  is not guaranteed a usable one (the same soft spot the old body fell into from the other side).
+  It has to be restored, because it is process-global state the caller did not ask to have
+  rewritten — a module run is a nested activity here, not the process's reason for existing.
+  Guards: `RunMainTest.theModuleSeesTheArgumentsItWasGivenAndArgvIsRestoredAfterwards` and
+  `.argvIsRestoredEvenWhenTheModuleRaises`.
+
+  **`sys.exit()` is a return value, not an exception.** Decided, not inherited: a module written
+  to be run as `__main__` uses `sys.exit(n)` to report a status, and CPython's own command line
+  treats it that way — `Py_RunMain` catches `SystemExit` and turns it into the process exit status
+  rather than printing a traceback. The half an embedder must *not* inherit is the process exit.
+  So `sys.exit()`/`sys.exit(None)`/falling off the end → `0`; `sys.exit(n)` for integer `n` → `n`;
+  `sys.exit(x)` for anything else → `x` written to `sys.stderr` and `1` returned, mirroring
+  `_Py_HandleSystemExit`. Everything *other* than `SystemExit` propagates as a `PyException`
+  carrying the module's real type, message and traceback, with the interpreter still usable.
+
+  **Implementation note.** The Python half is a cached module-level `def` compiled once with
+  `Py_CompileString`/`PyEval_EvalCode` into a private globals dict — the same shape as the
+  eval-loop checkpoint helper in the same file, including relying on frame setup falling back to
+  the interpreter's builtins when the globals mapping has none. It is Python rather than C API
+  calls because every line of it is a `try`/`finally` or an `except`, and telling `SystemExit`
+  apart through the C API would need a `PyExc_SystemExit` handle this binding exposes no
+  accessor for. `Python3.finalize()` drops the cached pointer alongside `checkpointCallable`.
+
+  **Tests: 12 new in `RunMainTest`**, plus the old refusal guard
+  `Python3Test.runMainRefusesRatherThanFinalizingTheSharedInterpreter` rewritten as
+  `.runMainRunsAModuleWithoutFinalizingTheSharedInterpreter` (the refusal is gone; the property
+  it protected is kept). Desktop 485 → 497, 0 failures,
+  1 skipped; `ksp-fixtures:app` 64/0 unchanged. **Red phase observed**: all 12 failed with
+  `java.lang.UnsupportedOperationException: Python3.runMain is not implemented...` before the
+  body landed. The one red phase still not runnable is the *pre-refusal* body's — `Py_RunMain()`
+  with no `PyConfig.run_*` set enters the REPL on the process's stdin and finalizes the shared
+  interpreter, hanging the worker or crashing every class scheduled after it.
+
+  The tests register their modules through an in-memory meta-path finder rather than files,
+  because `runpy` resolves via `importlib.util.find_spec` and then `spec.loader.get_code(...)` —
+  a `sys.modules` entry is not enough — and because an in-memory finder runs identically on iOS
+  and Android, where the suite has no writable path it can agree on.
+- **`Python3.runApp` still refuses, and the reason recorded here was the smaller half of it.**
+  Its only statement was commented out, as is the `Py_BytesMain` `expect` it would call; it
+  returned `Unit` either way, so a caller could not tell.
+
+  This entry used to say the blocker was that `Py_BytesMain` takes `(int argc, char **argv)` and
+  so needs an array-of-C-strings marshalling path that each of the four platforms does
+  differently. That is true and it is the cheap half. **The half that was missed: `Py_BytesMain`
+  finalizes the interpreter.** It is the CLI's `main`, so it reaches `Py_RunMain()` — same header,
+  same contract. Marshalling the argv would have bought a function with exactly the defect
+  `runMain` was just fixed to avoid, which is why "one marshalling path away from working" was
+  the wrong description.
+
+  What is genuinely left is smaller than it looks, because the useful part is now elsewhere:
+  `python -m mod` is `runMain`, which works. What `Py_BytesMain` adds on top is CPython's
+  **command-line parser** — `-c`, `-m`, a script path, `-O`, `-X`, `PYTHONPATH` — and several of
+  those are `PyConfig` fields that must be set *before* initialisation, so they cannot mean
+  anything for an already-running interpreter. Reimplementing that parser against a `PyConfig`
+  this binding deliberately does not carry (struct layout is exactly what the Stable ABI does not
+  promise) is the actual cost. **Next step, if it is ever wanted:** decide which subset of the CLI
+  an embedder actually needs — most likely `-c` (→ `Python3.exec`) and `-m` (→ `runMain`) and
+  nothing else — and implement `runApp` as a parser over *that* subset, with anything requiring a
+  pre-init `PyConfig` field refused by name. Guard stays
+  `Python3Test.runAppRefusesRatherThanSilentlyDoingNothing`.
+
   **Three commented-out places, not two**: `EmbedAPI.native.kt` also carries a full `Py_BytesMain`
   `actual` — with `memScoped`/`allocArray` marshalling already written — that *looks* live at
   lines 67-74 but sits inside the nested block comment spanning lines 46-128, so it compiles to
@@ -2715,13 +2780,18 @@ what is blocking it and what the next concrete step is.
    desktop uses), which is a design change to `bindings.kt`'s calling-convention selection, not a
    mechanical `jvmMain` move, and is not scoped here.
 
-10. **`Python3.runMain` and `Python3.runApp` are landmines, not working functionality**, despite
-    both being public API surface. (§12) `runMain` raises an invisible `IndexError` and then
-    finalizes the interpreter out from under `isInitialized`; `runApp`'s body is entirely commented
-    out. **(a) blocking it:** a design decision — what "run a module"/"run an app" should mean for
-    an *embedded* interpreter that has to survive the call, which neither function was written
-    against. **(b) next step:** decide that shape, then fix both; §12 has the itemised defects in
-    each.
+10. ~~**`Python3.runMain` and `Python3.runApp` are landmines, not working functionality**~~
+    **— half closed. `runMain` works; `runApp` still refuses, for a reason that is now
+    understood.** (§12) The design decision this entry named as the blocker is made: a module runs
+    via `runpy.run_module(name, run_name="__main__", alter_sys=True)`, in a fresh `__main__`
+    namespace, with `sys.argv` set for the duration and restored, and `sys.exit(n)` reported as
+    `runMain`'s `Int` return rather than acted on. Nothing on that path is a lifecycle function,
+    so the interpreter survives. **(a) still blocking `runApp`:** not argv marshalling, as this
+    entry used to say — `Py_BytesMain` reaches `Py_RunMain()` and therefore finalizes, so it could
+    never have been the implementation. What is left is CPython's command-line parser, part of
+    which is `PyConfig` fields that only mean something before initialisation. **(b) next step:**
+    decide which subset of the CLI an embedder needs (probably `-c` and `-m` and nothing else) and
+    implement `runApp` over that, refusing pre-init options by name. §12 has the detail.
 
 11. **The iOS app bundle carries no Python standard library** — restated, because the previous
     wording ("the iOS *app* packaging path has no producer … no Gradle task creates it") was wrong

@@ -127,35 +127,37 @@ class Python3Test {
     }
 
     /**
-     * [Python3.runMain] used to be a landmine. `sys.argv[1] = ...` assigns to an existing index,
-     * but `Py_Initialize()` does not set `sys.argv`, so it raised `IndexError` invisibly
-     * (`PyRun_SimpleString` prints and clears the indicator, and its return was discarded); then
-     * `Py_RunMain()` -- which **always finalizes the interpreter** -- ran, leaving the process
-     * with a torn-down runtime while [Python3.isInitialized] still said `true`. Its `Int` exit
-     * status was discarded too. Nothing in `src/` or `sample/` called it.
+     * [Python3.runMain] used to be a landmine, and this test used to fix its refusal in place.
+     * It runs a module now, so what is left here is the one property the refusal existed to
+     * protect: **the interpreter this whole suite shares is still there afterwards.**
      *
-     * What "run a module" should mean for an *embedded* interpreter that has to survive the call
-     * is a design decision recorded in ROADMAP §12; refusing is not that decision, it is the
-     * removal of the landmine.
+     * The history, because it is the reason the property is worth a test of its own: the original
+     * body did `sys.argv[1] = ...` -- an assignment to an index that need not exist -- through
+     * `PyRun_SimpleString`, which prints and clears the error indicator, so the resulting
+     * `IndexError` was invisible; and then called `Py_RunMain()`, which **always finalizes the
+     * interpreter**, leaving the process with a torn-down runtime while [Python3.isInitialized]
+     * still said `true`. Nothing in `src/` or `sample/` called it, so it never fired.
      *
-     * **Red phase not executed, deliberately.** Calling the pre-fix body reaches `Py_RunMain()`,
-     * which with no `PyConfig.run_*` set enters the REPL on the process's stdin and finalizes the
-     * interpreter this whole suite shares -- it would either hang the test worker or crash every
-     * class scheduled after it (the exact failure `DesktopPythonTest`'s header records). That
-     * hazard is the thing under test, so it was reasoned about rather than triggered on a machine
-     * running other agents' builds. The pre-fix code path is quoted above from the source it
-     * replaced.
+     * The replacement goes through `runpy.run_module(..., run_name="__main__", alter_sys=True)`,
+     * which touches no lifecycle function at all. `RunMainTest` covers what it does; this covers
+     * what it must not do.
+     *
+     * Red phase: the refusal it replaces threw `UnsupportedOperationException` from every call,
+     * so this failed with that exception before the implementation landed (observed alongside the
+     * twelve `RunMainTest` cases). The pre-*refusal* body's red phase is still the one thing here
+     * that cannot be run -- `Py_RunMain()` with no `PyConfig.run_*` set enters the REPL on the
+     * process's stdin and finalizes the shared interpreter, which hangs the worker or crashes
+     * every class scheduled after it.
      */
     @Test
-    fun runMainRefusesRatherThanFinalizingTheSharedInterpreter() = PythonTestFixture.withInterpreter {
-        val failure = assertFailsWith<UnsupportedOperationException> {
-            Python3.runMain("json.tool")
-        }
-        assertTrue(
-            failure.message?.contains("Py_RunMain") == true,
-            "The refusal should name why it cannot run, got: ${failure.message}"
-        )
-        // The point of refusing: the interpreter the rest of the suite shares is still there.
+    fun runMainRunsAModuleWithoutFinalizingTheSharedInterpreter() = PythonTestFixture.withInterpreter {
+        // `json.tool` reads stdin when run with no arguments, so it is not the module to run
+        // here; `this` (the Zen of Python) is a stdlib module whose whole body is a side effect
+        // and which needs nothing from argv.
+        val status = Python3.runMain("this")
+
+        assertEquals(0, status, "a module that runs to completion exits 0")
+        // The point the refusal was protecting: the interpreter the rest of the suite shares.
         assertTrue(Python3.isInitialized)
         assertEquals("2", PythonTestFixture.eval("1 + 1").toString())
     }
