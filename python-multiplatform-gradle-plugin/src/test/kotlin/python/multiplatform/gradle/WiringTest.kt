@@ -176,4 +176,26 @@ class WiringTest {
         assertEquals("app", inferRole(hasApplicationPlugin = false, hasAndroidApplicationPlugin = true))
         assertEquals("library", inferRole(hasApplicationPlugin = false, hasAndroidApplicationPlugin = false))
     }
+
+    @Test
+    fun wasmProxyExportsTaskIsConfiguredWhenWasmJsMainSourceSetExists() {
+        val project = org.gradle.testfixtures.ProjectBuilder.builder().build()
+        val container = project.container(DummySourceSet::class.java) { name -> DummySourceSet(name, project) }
+        container.create("wasmJsMain")
+        project.extensions.add("kotlin", DummyKotlinExt(container))
+
+        PythonBindingsPlugin().configureWasmProxyExports(project)
+
+        val task = project.tasks.findByName("generateWasmProxyExports")
+        kotlin.test.assertNotNull(task, "generateWasmProxyExports task should be registered when wasmJsMain exists")
+        kotlin.test.assertTrue(task is GenerateWasmProxyExportsTask)
+    }
 }
+
+class DummySourceSet(private val name: String, private val project: org.gradle.api.Project) : org.gradle.api.Named {
+    override fun getName(): String = name
+    fun getKotlin(): org.gradle.api.file.SourceDirectorySet =
+        project.objects.sourceDirectorySet(name, "$name Kotlin sources")
+}
+
+class DummyKotlinExt(val sourceSets: org.gradle.api.NamedDomainObjectContainer<DummySourceSet>)
