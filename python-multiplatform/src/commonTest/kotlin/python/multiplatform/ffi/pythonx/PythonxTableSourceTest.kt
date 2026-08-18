@@ -121,6 +121,47 @@ class PythonxTableSourceTest {
     }
 
     /**
+     * `PythonCallables.Fragment`'s `body` slot renders as the `PyObject` sentinel, not `kotlin.Any`.
+     *
+     * `886a8e8f` fixed the argument-direction unwrapping bug for KSP-produced entries
+     * (`PythonProxySource.argValues`/`PY_OBJECT`) and noted a latent instance of the same defect:
+     * `pythonx.runtime.newFunction`'s `body` parameter was declared `kotlin.Any`, but the entry's own
+     * callable does `args[0] as PyObject`. `argValues` only skips `_pm_unwrap` for a slot declared
+     * *exactly* `python.multiplatform.ffi.PyObject`, so `kotlin.Any` there meant a proxy handed to
+     * `body` through a rendered `PythonProxySource` call site would be unwrapped to its raw handle
+     * and fail that cast -- `PythonCallablesProxyArgumentTest` (`desktopTest`) reproduces it against
+     * the unfixed name and pins the corrected behaviour with a live interpreter.
+     *
+     * This is the row-level half of that fix, with no interpreter: the *only* row `PythonxAdapter`
+     * emits for this declaration must carry the `PyObject` name for slot 0, or the argument-direction
+     * fix does not reach it at all. It is a no-op for `PythonxAdapter`'s own runtime today --
+     * `PythonxAdapter._make_function` is `pythonx.runtime.newFunction`'s only caller, and it invokes
+     * through `_boundary()['invoke']` directly by resolved handle, never through `_TABLE`/`_coerce`,
+     * so nothing in `_KOTLIN_PRIMITIVES` or `_is_value_class_over_primitive` ever inspects this row's
+     * `param_type_names` -- but the row is exactly what a future caller reached through `_coerce`
+     * would see, so it has to say the true thing regardless of who is asking today.
+     */
+    @Test
+    fun theNewFunctionFragmentDeclaresItsBodySlotAsThePyObjectSentinelNotAny() {
+        val rendered = PythonxAdapter.renderTable(PythonCallables.Fragment.entries())
+        assertTrue(
+            rendered.contains(
+                "('pythonx.runtime.newFunction', 5, 'FUNCTION', False, " +
+                    "('body', 'jvmArity', 'composable', 'argTags', 'internKey'), " +
+                    "('OBJECT', 'INT', 'BOOLEAN', 'STRING', 'STRING'), " +
+                    "('python.multiplatform.ffi.PyObject', 'kotlin.Int', 'kotlin.Boolean', " +
+                    "'kotlin.String', 'kotlin.String'), ",
+            ),
+            rendered,
+        )
+        assertFalse(
+            rendered.contains("('kotlin.Any', 'kotlin.Int', 'kotlin.Boolean'"),
+            "the body slot must not go back to declaring kotlin.Any, which argValues does not " +
+                "recognise as the PyObject sentinel",
+        )
+    }
+
+    /**
      * [PythonxAdapter.SOURCE] with its comments and docstrings removed.
      *
      * The distinction is the whole point of the test above: the *documentation* names `Modifier`

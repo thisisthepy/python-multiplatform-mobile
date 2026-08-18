@@ -676,13 +676,35 @@ registration is gone.
     already walks and so does not exercise this gap at all. Red before the fix
     (`HandleTable.liveCount` stayed at `baseline + 1` after `gc.collect()` — the leak, observed, not
     inferred), green after (three tests, 0 failed).
-  - A real, pre-existing, and unrelated bug surfaced while building that test and is **not fixed
+  - ~~A real, pre-existing, and unrelated bug surfaced while building that test and is **not fixed
     here**: `_pm_unwrap` unwraps *any* `_PmObject`-derived argument to its raw `HandleTable` handle
     before a call, which is correct for an owned-result argument but wrong for a `PyObject`-typed
     Kotlin parameter — `_rh.primary = _rh` (as opposed to the list-wrapped version the test uses)
     resolves to the underlying Kotlin object on the way in and fails the property's own cast
     (`ClassCastException`, observed). Filed here rather than fixed because it is orthogonal to the
-    handle slot and was not this task's spec.
+    handle slot and was not this task's spec.~~ **Fixed** (`886a8e8f`): `PythonProxySource.argValues`
+    now unwraps a `TypeTag.OBJECT` argument only when the parameter's *declared* type is not
+    `python.multiplatform.ffi.PyObject`, read off `ExposedCallable.paramTypeNames[i]` — the same
+    field the return direction already used for this ambiguity — instead of testing the value's
+    shape. `ProxyObjectArgumentTest` (`ksp-fixtures:app`) pins both `_rh.primary = _rh` and the
+    mirror-image case a base-class test had been hiding by accident (a traversable class's proxy is
+    never an `_PmObject`, so testing only that base meant every proxy of a class with a `PyObject`
+    field skipped unwrapping regardless of what its parameter declared).
+    One instance was left latent and has since been fixed too, in this branch:
+    `PythonCallables.Fragment`'s `pythonx.runtime.newFunction` declared its `body` slot
+    `paramTypeNames[0] = "kotlin.Any"` while its callable does `args[0] as PyObject` — the same
+    defect from the other type name, reachable only through a caller that does not exist in this
+    repository (`PythonxAdapter._make_function` calls `newFunction` by resolved handle directly,
+    never through a `PythonProxySource`-rendered wrapper). Reproduced deliberately by building that
+    caller (`PythonCallablesProxyArgumentTest`, `desktopTest`: registers `PythonCallables.Fragment`
+    into the same `UpcallTable` as a real proxy class and calls the rendered
+    `pythonx.runtime.newFunction` with a proxy in `body`) — before the fix it raised
+    `RuntimeError: class ...ProxyCounter cannot be cast to class ...PyObject`, observed, not
+    inferred. Fixed by declaring `body` as `python.multiplatform.ffi.PyObject`;
+    `PythonxTableSourceTest` pins the corrected row. Checked before committing to the fix: nothing
+    dispatches this entry through `PythonxAdapter`'s own `_coerce`/`_TABLE` allowlist (it is always
+    invoked by literal resolved handle), so the changed declared type does not move any Python-side
+    behaviour that exists today — it only fixes the row a future `_coerce`-routed caller would see.
   - **Left exactly where it was** on Android, iOS, androidNative and wasm: `installGcBase()` is a
     literal `false`, `PythonProxySource` still falls back to `_PmObject` there, and nothing about
     those four targets' `ProxyTypeFactory` changed. What each one still needs, per `ProxyTypeFactory`'s
@@ -722,7 +744,28 @@ registration is gone.
     both green (androidNative has no test device attached in this environment, so only compiled,
     per this file's own standing note on §11.1's device constraint). `git diff --stat` touches only
     `ProxyTypeFactory.kt` (nativeMain) and the one test file.
-  - **Still open**: Android and wasm, per the per-target notes above — unchanged by this round.
+  - ~~**Still open**: Android and wasm, per the per-target notes above — unchanged by this round.~~
+    **Both are closed too** (`a5387511` for wasm, `1544f095` for Android — both landed before the
+    iOS/androidNative round above, and this section was never updated to carry them forward; caught
+    while auditing this file against the code rather than the commit log). Verified by reading the
+    current source, not by re-running the commits' own numbers: `wasmJsMain/ProxyTypeFactory.kt`'s
+    `createProxyType()` fills the `Py_tp_members` slot with `PY_T_LONGLONG` for `_pm_handle` (eight
+    bytes on wasm32, where a plain `long` is only four — the corruption `a5387511` traces losing the
+    top half of the handle on assignment), and its `installGcBase()` publishes `_pm_proxy_base` via
+    `PyObject_SetAttrString` exactly as desktop's does, no longer a literal `false`.
+    `artMain/cinterop/jni_onload.def` declares the same member (`"_pm_handle", Py_T_LONG,
+    Py_RELATIVE_OFFSET`, wired at `Py_tp_members` slot 3) as a real C struct compiled against the
+    JNI headers, and `androidMain/ProxyTypeFactory.kt`'s `installGcBase()` is a real
+    `createProxyType()` + `PyObject_SetAttrStringN` call, not a stub. `Py_T_LONG` rather than
+    `Py_T_LONGLONG` is correct here and not the wasm bug repeating: Android is a 64-bit-only target,
+    where C `long` is already eight bytes.
+    **So the handle slot is now real on all five targets** (desktop, wasm, Android, iOS,
+    androidNative). The one gap left is the one `581ec772` already named:
+    androidNative compiles (`compileKotlinAndroidNativeArm64`,
+    `compileTestKotlinAndroidNativeArm64`) but has never run its tests on a device or emulator in
+    this environment — nothing attached, same standing constraint as §11.1. Desktop, wasm, Android
+    (emulator) and iOS simulator all have a green test run cited in this section; androidNative does
+    not.
 - ~~Companion-object members, interfaces, enums and annotation classes are not exposed.~~
   **Closed**, except annotation classes, which are now deliberately excluded — see below.
 - ~~The aggregator uses `Dependencies.ALL_FILES`, correct but reprocessed every build.~~
@@ -3809,6 +3852,45 @@ and needs **`kotlin-metadata-jvm`**.
 **`androidx.compose.material3` is on the far side of that line.** §5b is right that the artefact walker
 is the mechanism that reaches it; what this pass establishes is that reaching it needs a metadata
 reader, not more descriptor cases.
+
+**A `kotlin-metadata-jvm` reader has since been written** (`python-multiplatform-gradle-plugin/.../
+artifact/KotlinMetadata.kt`) and `pythonx.compose.material3` is a real, walked module today —
+`ksp-fixtures/compose`'s `M3ProofRenderTest.kt` imports from it and drives components through it, not
+through a hand-written wrapper. §16 above is otherwise silent on this, so it is recorded here rather
+than left implied: reaching material3 is done, generating **calls** for it (not just names) needed the
+reader this section says it needed, and it now has one.
+
+**Whether those bindings actually draw anything was audited component by component
+(`8813d8f1`, `1363b445`, `c6f73da2`, 2026-08-18), against 27 components downstream that had been
+zero-byte stubs.** Verified against `M3ProofRenderTest.kt` and `docs/pythonx-adapter-design.md` §10
+(both updated by the same round) rather than the commit messages alone: 24 of the 27 render
+correctly, in three batches — ten (`horizontalDividerDrawsALine...` through
+`tabRowComposesItsTabsAnd...`), ten more (`checkboxRendersItsChecked...` through
+`searchBarComposesItsContent`), and four more found on re-examination of the seven originally called
+unjudgeable — `DatePicker`, `TimePicker` and `SwipeToDismissBox` have positive assertions in
+`stateObjectsArePassedToComposables` (each driven through the `remember_*_state` factory already
+present in the walked table under its snake-cased name); the fourth, `BottomSheet`, is not a distinct
+assertion in that test file but is named explicitly in §10 item 2 of the design doc as bound the same
+way, which is where the "four" the commit message counts is actually enumerated. Three remain
+genuinely unreachable, each pinned by its own test rather than inferred: `DropdownMenu` composes into
+a Popup layer `ImageComposeScene` never captures (`popupLayersAreNotCapturedByImageComposeScene` — 0
+pixels, observed); the dynamic `ColorScheme` factory is Android-only and not in the desktop jar at
+all, and the class name itself resolves to a proxy type whose constructor wants a handle rather than
+colour arguments, which is the error actually raised
+(`colorSchemeResolvesToItsProxyTypeRatherThanAnythingCallable`); `Typography` and the shape scheme are
+not declined by any filter — they are simply absent from the walked table, because `ArtifactScanner`
+does not collect class constructors, which is a scanner gap rather than a property of either type.
+
+**Of the three Compose modifiers declined for an unspellable generic type parameter
+(`docs/pythonx-adapter-design.md` §9.4: `swipeable`, `modifierLocalProvider`, `anchoredDraggable` —
+`SwipeableState<T>`, `ProvidableModifierLocal<T>`, `AnchoredDraggableState<T>`), two are now bound.**
+Verified by reading the wrappers, not just the design doc: `fixture.compose
+.pythonAnchoredDraggableString` (`ksp-fixtures/compose/.../PythonAnchoredDraggable.kt`, `8d4fd6a4`) and
+`fixture.compose.pythonSwipeableString` (`.../PythonSwipeable.kt`, `f3b680fa`) each fix the generic
+parameter to a concrete `String`, exactly the move the identifier wrapper made for `layoutId`'s
+`kotlin.Any` — one hand-written wrapper per concrete type, not a fix to the underlying generic
+surface, which both files' own KDoc says outright. `modifierLocalProvider` is the one of the three
+still declined; §9.5 of the design doc says so and nothing in this codebase contradicts it.
 
 Also unbound today, and for the same "no Kotlin type name to cast to" reason (`boundaryTypeOf` returns
 `null` rather than falling back to `TypeTag.OBJECT`): every parameter or return that is not a

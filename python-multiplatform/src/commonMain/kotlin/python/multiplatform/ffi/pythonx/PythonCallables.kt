@@ -279,8 +279,15 @@ object PythonCallables {
                 paramTypes = listOf(TypeTag.OBJECT, TypeTag.INT, TypeTag.BOOLEAN, TypeTag.STRING, TypeTag.STRING),
                 returnType = TypeTag.INT,
                 paramNames = listOf("body", "jvmArity", "composable", "argTags", "internKey"),
+                // `body` is declared as the Python object type here, not `kotlin.Any` -- the
+                // callable below does `args[0] as PyObject`, and `PythonProxySource.argValues`
+                // (`PY_OBJECT`) unwraps every OBJECT slot to its raw handle *except* one declared
+                // exactly this name. `kotlin.Any` would make a proxy passed as `body` through a
+                // rendered call site get unwrapped to the Kotlin object behind it, and fail this
+                // cast -- `PythonCallablesProxyArgumentTest` pins the reproduction and the fix.
                 paramTypeNames = listOf(
-                    "kotlin.Any", "kotlin.Int", "kotlin.Boolean", "kotlin.String", "kotlin.String",
+                    "python.multiplatform.ffi.PyObject", "kotlin.Int", "kotlin.Boolean", "kotlin.String",
+                    "kotlin.String",
                 ),
                 paramHasDefault = listOf(false, false, false, false, false),
                 callable = { args ->
