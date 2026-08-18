@@ -10,8 +10,6 @@ internal value class NativeAddressValue(val ptr: JNIPointer): AddressValue {
 }
 @HighOverheadNativeCall
 actual fun NativePointer.toAddressValue(): AddressValue = NativeAddressValue(toPlatformPointer())
-actual inline fun NativePointer.toRawValue(): Long = toPlatformPointer()
-inline fun NativePointer.toPlatformPointer(): JNIPointer = this.address as JNIPointer
 @HighOverheadNativeCall
 actual fun AddressValue.toNativePointer(): NativePointer = NativePointer((this as NativeAddressValue).ptr)
 /**

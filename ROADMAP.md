@@ -831,15 +831,47 @@ counterpart type to convert into — but not for the reason given here.
 
 **No longer a performance item.** `invokeExact` was reached on desktop without it (1015.95 ns →
 2.65 ns), so what remains is maintenance debt: 380 Android + 315 desktop hand-written
-declarations, against ~350 if the 330 `actual`s lived once in `jvmMain` over 14 shape functions.
+declarations.
 
 The duplication has caused real bugs — desktop's `find()` carried the symbol name separately
 from the `actual`, which is how `Py_RunMain` came to be bound to `Py_FinalizeEx`.
 
-The recipe is verified: remove `inline` from the `commonMain` `expect` (132 of 147 already carry
-a compiler warning saying inlining gains nothing there), delete the two platform `actual`s, add
-one in `jvmMain`. Keeping `inline` on an intermediate-source-set `expect` crashes Kotlin 2.0.20
-with `Internal error in file lowering`.
+**Attempted at scale (2026-08-18, `work/jvmmain`) and the "~330 → 14 shapes" estimate above does
+not hold.** `EmbedAPI.android.kt`/`EmbedAPI.desktop.kt` were parsed (not grepped — a hand-rolled
+parser that walks brace/paren balance and `if`/`else` continuations, checked against the 314
+`commonMain` `expect` declarations) and every `actual` body compared by exact text after
+normalizing whitespace. Of 314 common declarations, **3 have literally identical bodies**:
+`toAddressValue`, `toRawValue`, `AddressValue.toNativePointer`. The other 311 differ for a
+structural reason, not a cosmetic one — Android's JNI dispatch needs a symbol name per calling
+convention (`PyErr_ClearN`/`PyErr_ClearF` vs desktop's unsuffixed Panama handle `PyErr_Clear`) and
+often a `preferFastNative` branch besides, so almost every wrapper's body names a different callee
+on each platform. That is "different wiring" in exactly the sense this document already warns
+about — not a case the recipe was wrong to rule out, but evidence the duplication is smaller than
+it looks from the outside.
+
+Of the 3 identical wrappers, only **1 was actually movable**: `toRawValue`, moved to
+`jvmMain/kotlin/python/native/ffi/EmbedAPI.jvm.kt` along with the `toPlatformPointer()` helper it
+calls (itself hoisted, since `jvmMain` code cannot reference a symbol that only exists in a leaf
+source set — `androidMain`'s `toPlatformPointer(): JNIPointer` and desktop's `toPlatformPointer():
+Long` are the same behavior under the `JNIPointer = Long` typealias, so hoisting changed nothing
+observable). The other two, despite identical wrapper text, both construct or unwrap
+`NativeAddressValue` — a class whose `toString()` genuinely differs per platform
+(`"JNIPointer(raw=0x…)"` on Android vs `"NativeAddress(0x…)"` on desktop, and Android's uses signed
+`ptr.toString(16)` where desktop's uses `ptr.toULong().toString(16)`). Hoisting the wrapper would
+require also hoisting that class, which would force one platform's `toString()` to change —
+disallowed by "동작이 바뀌면 안 된다." They stay duplicated, correctly.
+
+**The recipe (remove `inline` from the `commonMain` `expect`, delete the two platform `actual`s,
+add one in `jvmMain`) is confirmed safe, not just asserted.** It was applied to `toRawValue` and
+compiled clean on both `compileKotlinDesktop` and `compileDebugKotlinAndroid`. The Kotlin 2.0.20
+`Internal error in file lowering` crash this section used to warn about **did not reproduce even
+with `inline` deliberately left in place** on this function (tested and reverted) — for this
+specific case at least, the risk turned out to be smaller than documented, though the sample size
+is one trivial no-argument function and the crash may still be real for a shape not tried here.
+Test counts unchanged (`desktopTest` 485/0/1, `ksp-fixtures:app:desktopTest` 64/0 — note these are
+higher than a `484/0/1` figure recorded elsewhere in this document, which was stale before this
+task started, not a regression this task caused; verified by re-running the suite with the change
+stashed out). `compileKotlinAndroidNativeArm64` unaffected (this item is JVM-only).
 
 ## 9. Free-threading
 
@@ -2663,15 +2695,25 @@ what is blocking it and what the next concrete step is.
    `python-multiplatform-gradle-plugin`, mirroring how it already generates the `installGeneratedUpcallTable`
    `actual` per leaf (§13).
 
-9. **`jvmMain` unification (§8) is verified but not applied.** Removing `inline` from the
-   `commonMain` `expect`s and collapsing ~330 duplicated Android/desktop `actual`s into ~14 shape
-   functions in `jvmMain` is no longer a performance question (`invokeExact` already got the
-   speed-up without it) — it is maintenance debt, evidenced by real bugs the duplication has
-   already caused (desktop's `find()` binding `Py_RunMain` to `Py_FinalizeEx`). **(a) blocking it:**
-   nothing — the recipe is written and verified, just not carried out at scale. **(b) next step:**
-   do the mechanical migration; §8 has the exact steps (remove `inline`, delete the two platform
-   `actual`s, add one in `jvmMain`) and the Kotlin 2.0.20 compiler-crash trap to avoid (`inline` on
-   an intermediate-source-set `expect` triggers `Internal error in file lowering`).
+9. ~~`jvmMain` unification (§8) is verified but not applied.~~ **Attempted at scale, 2026-08-18
+   (`work/jvmmain`).** The premise — ~330 duplicated `actual`s collapsing into ~14 shared shape
+   functions — did not survive contact with an exact per-declaration comparison: of 314 common
+   `EmbedAPI.android.kt`/`EmbedAPI.desktop.kt` declarations, only 3 have literally identical
+   bodies, because Android's JNI dispatch names a different callee per calling convention
+   (`PyErr_ClearN`/`PyErr_ClearF` vs desktop's unsuffixed Panama handle) on almost every wrapper —
+   real wiring divergence, not cosmetic duplication. Of those 3, only 1 (`toRawValue`) was actually
+   movable without changing behavior; the other 2 depend on `NativeAddressValue`, whose `toString()`
+   differs by platform, so hoisting them would force a behavior change. `toRawValue` and its
+   `toPlatformPointer()` helper now live in `jvmMain/kotlin/python/native/ffi/EmbedAPI.jvm.kt`. The
+   recipe itself (remove `inline` from the `commonMain` `expect`, single `actual` in `jvmMain`) is
+   confirmed safe — compiles clean on both JVM leaves, and the documented Kotlin 2.0.20
+   `Internal error in file lowering` crash did not reproduce even with `inline` deliberately left
+   in for this function, tested and reverted. **(a) blocking it:** nothing left to do — the
+   remaining 380+315 duplicated declarations are duplicated because they are not, in fact, the same
+   code. **(b) next step:** none recommended; re-opening this would mean unifying the JNI
+   convention-selection machinery itself (giving Android's dispatch the same unsuffixed names
+   desktop uses), which is a design change to `bindings.kt`'s calling-convention selection, not a
+   mechanical `jvmMain` move, and is not scoped here.
 
 10. **`Python3.runMain` and `Python3.runApp` are landmines, not working functionality**, despite
     both being public API surface. (§12) `runMain` raises an invisible `IndexError` and then
