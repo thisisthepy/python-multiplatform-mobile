@@ -714,6 +714,93 @@ class M3ProofRenderTest {
         )
     }
 
+    // ── 22. Typography and Shapes ─────────────────────────────────────────────
+
+    @Test
+    fun stateObjectsArePassedToComposables() {
+        // 2. DatePicker
+        val datePickerInk = inkOf(
+            """
+            from pythonx.compose.material3 import DatePicker, remember_date_picker_state
+            DatePicker(state=remember_date_picker_state())
+            """.trimIndent(),
+            width = 400, height = 400,
+        )
+        assertTrue(datePickerInk > 0, "DatePicker should render")
+        
+        // 3. TimePicker
+        val timePickerInk = inkOf(
+            """
+            from pythonx.compose.material3 import TimePicker, remember_time_picker_state
+            TimePicker(state=remember_time_picker_state())
+            """.trimIndent(),
+            width = 400, height = 400,
+        )
+        assertTrue(timePickerInk > 0, "TimePicker should render")
+
+        // 4. SwipeToDismissBox
+        val swipeInk = inkOf(
+            """
+            from pythonx.compose.material3 import SwipeToDismissBox, remember_swipe_to_dismiss_box_state, Text
+            SwipeToDismissBox(
+                state=remember_swipe_to_dismiss_box_state(),
+                background_content=lambda: Text("bg"),
+                content=lambda: Text("fg")
+            )
+            """.trimIndent(),
+            width = 200, height = 100,
+        )
+        assertTrue(swipeInk > 0, "SwipeToDismissBox should render")
+    }
+
+    @Test
+    fun popupLayersAreNotCapturedByImageComposeScene() {
+        // DropdownMenu creates a Popup which ImageComposeScene does not capture.
+        val popupInk = inkOf(
+            """
+            from pythonx.compose.material3 import DropdownMenu, Text
+            DropdownMenu(
+                expanded=True,
+                on_dismiss_request=lambda: None,
+                content=lambda: Text("Menu Item")
+            )
+            """.trimIndent(),
+            width = 200, height = 200,
+        )
+        println("compose render: DropdownMenu -> $popupInk pixels")
+        // If it's not captured, popupInk will be 0
+        assertEquals(0, popupInk, "DropdownMenu should not be captured by ImageComposeScene")
+    }
+
+    /**
+     * `ColorScheme` is unreachable, and the message says which of the two reasons reaches Python
+     * first.
+     *
+     * The documented reason is arithmetic: the factory takes thirty-six colour parameters and the
+     * omission mask holds thirty-one bits, so it cannot be called with defaults. That is true of
+     * `lightColorScheme`. But the *name* `ColorScheme` resolves to the class, and a bound class is
+     * a proxy type whose constructor wants the handle of an existing Kotlin instance -- so calling
+     * it bare fails one step earlier than the parameter count, asking for `handle`.
+     *
+     * Pinned as observed rather than as expected. When this message changes, something about how
+     * classes bind changed with it.
+     */
+    @Test
+    fun colorSchemeResolvesToItsProxyTypeRatherThanAnythingCallable() {
+        val error = try {
+            Python3.exec("from pythonx.compose.material3 import ColorScheme; ColorScheme()")
+            null
+        } catch (e: Throwable) {
+            e.message ?: ""
+        }
+        println("compose render: ColorScheme() -> ${error?.take(120)}")
+        assertTrue(error != null, "ColorScheme() succeeded but nothing in the table can build one")
+        assertTrue(
+            error.contains("handle"),
+            "expected the proxy type's own constructor to ask for a handle, got: $error",
+        )
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private fun inkOf(body: String, width: Int = 200, height: Int = 60): Int =
