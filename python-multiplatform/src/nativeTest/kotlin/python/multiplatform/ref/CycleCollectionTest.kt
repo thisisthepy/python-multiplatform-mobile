@@ -588,4 +588,86 @@ class CycleCollectionTest {
             disposeProxy(node)
         }
     }
+
+    /**
+     * `ROADMAP.md` §7's remaining gap on this source set, and what every test above does not
+     * cover: not whether the collector can reach through a handle *Kotlin* poked into
+     * `PyObject_GetTypeData` by hand (every test above does exactly that), but whether a plain
+     * Python attribute assignment -- `self._pm_handle = h`, the line a generated proxy's
+     * `__init__` already emits unchanged -- lands in the same C slot at all.
+     *
+     * Before [ProxyTypeFactory.installGcBase] published a `Py_tp_members` descriptor here, the
+     * type had no Python-visible way to reach that storage: `_pm_proxy_base` did not exist in
+     * `__main__`, so a subclass could not be built, and even a hand-built one would have had the
+     * assignment land in an ordinary instance attribute -- invisible to `tp_traverse`, which reads
+     * only the type's own relative storage. That is indistinguishable from outside a plain
+     * "the cycle was never closed" failure, which is exactly why the type-data read below checks
+     * the write directly rather than trusting the collection outcome alone to say what happened.
+     */
+    @Test
+    fun aHandleWrittenFromPythonClosesACycleThroughAKotlinField() = PythonTestFixture.withInterpreter {
+        withGIL {
+            assertTrue(
+                ProxyTypeFactory.installGcBase(),
+                "installGcBase() must publish _pm_proxy_base so a Python class can subclass the " +
+                    "cycle-collecting heap type",
+            )
+            val proxyTypeAddr = ProxyTypeFactory.createProxyType()
+            val proxyType = assertNotNull(proxyTypeAddr.toCPointer<PyTypeObject>())
+
+            val node = CycleNode()
+            val handle = HandleTable.register(node).raw
+
+            // The write under test: not Kotlin poking PyObject_GetTypeData (every test above
+            // does that), but a plain Python attribute assignment on a subclass of the published
+            // base -- the exact line PythonProxySource's generated __init__ emits.
+            val rc = PyRun_SimpleString(
+                """
+                import sys
+                class _PmHandleTestProxy(sys.modules['__main__']._pm_proxy_base):
+                    __slots__ = ()
+                _pm_handle_test_obj = _PmHandleTestProxy()
+                _pm_handle_test_obj._pm_handle = $handle
+                """.trimIndent(),
+            )
+            assertEquals(0, rc, "the Python-side subclass or the self._pm_handle write failed")
+
+            val main = assertNotNull(PyImport_ImportModule("__main__"), "no __main__")
+            val pyObjPtr = assertNotNull(
+                PyObject_GetAttrString(main, "_pm_handle_test_obj"),
+                "the Python-constructed instance was not found in __main__",
+            )
+            Py_DecRef(main) // PyImport_ImportModule: new reference
+
+            // Read the slot directly, independent of tp_traverse -- this is what makes the
+            // assertion below about the *write* landing correctly, not merely about the
+            // collector's eventual behaviour, which could pass for an unrelated reason.
+            val typeData: CPointer<LongVar> =
+                assertNotNull(PyObject_GetTypeData(pyObjPtr, proxyType), "no type data on the instance")
+                    .reinterpret()
+            assertEquals(
+                handle, typeData.pointed.value,
+                "self._pm_handle = $handle did not write the C slot Py_tp_members exposes -- it " +
+                    "must have landed somewhere tp_traverse cannot see",
+            )
+
+            // Close the loop from the Kotlin side: the node now holds the Python object that
+            // holds it. PyObject_GetAttrString handed back a new reference, so this is the same
+            // ownership shape every other test here gives PyObject.
+            node.ref = PyObject(assertNotNull(pyObjPtr.toLong().toNativePointer()), borrowed = false)
+            node.rawPtr = pyObjPtr.toLong()
+
+            val gcRc = PyRun_SimpleString("del _pm_handle_test_obj\nimport gc; gc.collect()")
+            assertEquals(0, gcRc, "gc.collect() did not run")
+
+            assertNull(
+                HandleTable.resolveRaw(handle),
+                "the cycle was not collected: a handle Python itself wrote via self._pm_handle " +
+                    "was not visible to tp_traverse, which means the member descriptor and the " +
+                    "traverse slot are not reading the same storage",
+            )
+
+            disposeProxy(node)
+        }
+    }
 }

@@ -699,6 +699,30 @@ registration is gone.
     64→67/0 (three new tests), `compileKotlinAndroidNativeArm64` and `compileDebugKotlinAndroid`
     both green — `git diff --stat` touches only the five `ProxyTypeFactory.kt` files,
     `PythonProxySource.kt`, and the one new test file.
+  - **Closed on iOS and androidNative too** (`work/hs-native`, 2026-08-18), confirming the desktop
+    doc's own prediction that the two cinterop targets would be *easier* than desktop rather than
+    harder: `PyType_Spec`/`PyType_Slot`/`PyMemberDef` come out of cinterop as real structs with
+    named fields, so `nativeMain`'s `ProxyTypeFactory.createProxyType()` fills in a `Py_tp_members`
+    slot — `_pm_handle`, `Py_T_LONG`, `Py_RELATIVE_OFFSET` — by field assignment instead of
+    `sun.misc.Unsafe` offset arithmetic, and `installGcBase()` publishes the type into `__main__`
+    exactly as desktop's does (`PyObject_SetAttrString` on the type's own address, no `ctypes`).
+    Because `nativeMain` is shared, this is one implementation for both targets rather than two.
+  - Proved with a native test rather than a KSP fixture — `ksp-fixtures/app` has no iOS leaf, so
+    the RefHolder-through-KSP route the desktop proof used does not reach this platform. Instead
+    `nativeTest/.../CycleCollectionTest.kt` gained
+    `aHandleWrittenFromPythonClosesACycleThroughAKotlinField`: it publishes `_pm_proxy_base`,
+    defines a Python subclass (`__slots__ = ()`, so no `__dict__` to fall back to), and writes
+    `self._pm_handle = h` — the exact line a generated `__init__` emits — then reads the C slot
+    directly (`PyObject_GetTypeData`) to confirm the write landed there rather than merely
+    succeeding as an ordinary attribute, before closing a cycle through a Kotlin field and
+    collecting it. Red before the fix (`installGcBase()` returning `false` fails the first
+    assertion), green after — `iosSimulatorArm64Test` 429/0 (verified as the same run, not
+    inferred: the new test's own `<testcase>` entry carries no failure or error node), `desktop
+    500/0` unchanged, `compileKotlinAndroidNativeArm64` and `compileTestKotlinAndroidNativeArm64`
+    both green (androidNative has no test device attached in this environment, so only compiled,
+    per this file's own standing note on §11.1's device constraint). `git diff --stat` touches only
+    `ProxyTypeFactory.kt` (nativeMain) and the one test file.
+  - **Still open**: Android and wasm, per the per-target notes above — unchanged by this round.
 - ~~Companion-object members, interfaces, enums and annotation classes are not exposed.~~
   **Closed**, except annotation classes, which are now deliberately excluded — see below.
 - ~~The aggregator uses `Dependencies.ALL_FILES`, correct but reprocessed every build.~~
