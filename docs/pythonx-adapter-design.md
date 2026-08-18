@@ -957,8 +957,7 @@ state object and never closed -- and that is stated in its own documentation rat
 later. `DraggableLeakTest` already pins the shape of that leak and the reason interning cannot reach
 it.
 
-`modifierLocalProvider` is unchanged: the same technique applies, one wrapper per concrete type, and
-nobody has needed one yet. `swipeable` is now bound too -- see §9.6.
+`modifierLocalProvider` is now bound too: the same technique applies (one wrapper per concrete type). See §9.7 for details on its lifetime and validation. `swipeable` is now bound too -- see §9.6.
 
 ### §9.6 `swipeable`, through a concrete type, and a second slot that needed dodging entirely
 
@@ -1003,3 +1002,10 @@ closed; `DraggableLeakTest` already pins the shape of that leak family and is no
 Foundation's AnchoredDraggable APIs"), which is why `@OptIn(ExperimentalMaterialApi::class)` alone was
 enough to compile; the deprecation did not need suppressing to reach green.
 
+### §9.7 `modifierLocalProvider` and `modifierLocalConsumer`, providing structural proofs
+
+The last outstanding generic `T` rejection in §9.2 was `modifierLocalProvider`. It is now bound using the same concrete type wrapper technique (for `String`), exposing `pythonModifierLocalProviderString` and `pythonModifierLocalConsumerString`.
+
+This binding provides a proof that values actually traverse the composition structural tree: the value is provided in a parent composable and read in a child composable. The test (`ModifierLocalRenderTest`) confirms that the child consumer reads the provided value across the layout tree, and includes a negative control proving that when unprovided or detached, the consumer reads the `defaultValue`.
+
+Same unfixed lifetime as the others: the `onRead` callback passed to `pythonModifierLocalConsumerString` is held by the consumer block and never closed.
