@@ -18,7 +18,7 @@ value class NativePointer internal constructor(val address: Any) {
 }
 @HighOverheadNativeCall
 expect fun NativePointer.toAddressValue(): AddressValue
-expect inline fun NativePointer.toRawValue(): Long
+expect fun NativePointer.toRawValue(): Long
 @HighOverheadNativeCall
 expect fun AddressValue.toNativePointer(): NativePointer
 @HighOverheadNativeCall

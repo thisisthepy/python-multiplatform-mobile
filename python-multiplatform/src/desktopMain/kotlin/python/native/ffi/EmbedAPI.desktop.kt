@@ -12,8 +12,6 @@ internal value class NativeAddressValue(val ptr: Long): AddressValue {
 }
 @HighOverheadNativeCall
 actual fun NativePointer.toAddressValue(): AddressValue = NativeAddressValue(toPlatformPointer())
-actual inline fun NativePointer.toRawValue(): Long = toPlatformPointer()
-inline fun NativePointer.toPlatformPointer(): Long = this.address as Long
 @HighOverheadNativeCall
 actual fun AddressValue.toNativePointer(): NativePointer = NativePointer((this as NativeAddressValue).ptr)
 @HighOverheadNativeCall
