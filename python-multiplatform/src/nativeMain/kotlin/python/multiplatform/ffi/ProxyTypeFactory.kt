@@ -288,4 +288,11 @@ actual object ProxyTypeFactory {
         proxyTypeAddress = type?.toLong() ?: 0L
         return proxyTypeAddress
     }
+
+    /**
+     * Not wired on iOS/androidNative yet: the type has no `Py_tp_members` slot exposing the handle
+     * to Python, so there is nothing for a generated `__init__`'s `self._pm_handle = ...` to reach
+     * even if a proxy did subclass this type. See `ProxyTypeFactory`'s class doc and `ROADMAP.md` §7.
+     */
+    actual fun installGcBase(): Boolean = false
 }

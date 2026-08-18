@@ -168,4 +168,12 @@ actual object ProxyTypeFactory {
      * because `PyObject_GetTypeData` on a foreign object has no defined answer to report.
      */
     fun setHandle(proxy: Long, handle: Long) = bindings.proxySetHandle(proxy, handle)
+
+    /**
+     * Not wired on Android yet. [setHandle] already gives a *test* a way to put a handle into an
+     * instance of this type -- what is missing is a Python-visible base a *generated* proxy could
+     * subclass and a way for the rendered `__init__` to reach [setHandle] instead of assigning
+     * `self._pm_handle`. See `ProxyTypeFactory`'s class doc and `ROADMAP.md` §7.
+     */
+    actual fun installGcBase(): Boolean = false
 }
