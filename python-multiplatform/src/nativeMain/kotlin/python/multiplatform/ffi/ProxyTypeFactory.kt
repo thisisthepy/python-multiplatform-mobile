@@ -7,6 +7,7 @@ import python.multiplatform.reflection.ClassLookup
 import python.multiplatform.reflection.HandleTable
 import python.multiplatform.reflection.ObjectReference
 import python.native.ffi.bindings.PyObject as CPyObject
+import python.native.ffi.bindings.PyMemberDef
 import python.native.ffi.bindings.PyTypeObject
 import python.native.ffi.bindings.PyType_FromSpec
 import python.native.ffi.bindings.PyType_Slot
@@ -17,9 +18,26 @@ import python.native.ffi.bindings.PyObject_Type
 import python.native.ffi.bindings.PyType_GetSlot
 import python.native.ffi.bindings.Py_DecRef
 import python.native.ffi.bindings.visitproc
+import python.native.ffi.PyImport_AddModule
+import python.native.ffi.PyObject_SetAttrString
+import python.native.ffi.toNativePointer
 
 /** `Py_tp_free` from CPython's `typeslots.h`. Slot ids are ABI, not header-version-dependent. */
 private const val PY_TP_FREE = 74
+
+/** `Py_tp_members` from CPython's `typeslots.h`. */
+private const val PY_TP_MEMBERS = 72
+
+/** `Py_T_LONG` from `descrobject.h` -- an 8-byte signed integer member, the same width as the
+ *  handle slot [handleSlot] already reads and writes by hand. */
+private const val PY_T_LONG = 2
+
+/** `Py_RELATIVE_OFFSET` from `descrobject.h` (CPython 3.12+): the member's `offset` is relative to
+ *  the type's own extra storage -- the same base [PyObject_GetTypeData] already computes for
+ *  [handleSlot] -- rather than to byte 0 of the object, which is what keeps it correct under a
+ *  Python subclass that adds fields of its own ahead of it in memory (`Py_TPFLAGS_BASETYPE`, and
+ *  precisely the multiple/deep-inheritance case this type exists to allow). */
+private const val PY_RELATIVE_OFFSET = 8
 
 /**
  * The proxy type, as a raw address, or 0 before [ProxyTypeFactory.createProxyType] has run.
@@ -65,6 +83,38 @@ internal fun allocPermanentCString(s: String): CPointer<ByteVar> {
     for (i in bytes.indices) buffer[i] = bytes[i]
     buffer[bytes.size] = 0
     return buffer
+}
+
+/**
+ * A two-entry `PyMemberDef` array on [nativeHeap], never freed -- `PyType_FromSpec` keeps the
+ * `Py_tp_members` slot's pointer rather than copying it, the same reason [allocPermanentCString]
+ * is permanent.
+ *
+ * The first entry is the handle slot itself: `_pm_handle`, [PY_T_LONG] (the same 8-byte width
+ * [handleSlot] already reads and writes), `offset = 0` with [PY_RELATIVE_OFFSET] set -- the same
+ * base [PyObject_GetTypeData] computes for [handleSlot] and [proxyTraverse] -- so a Python-level
+ * `self._pm_handle = h` on an instance of this type, or of a further Python subclass, writes
+ * exactly the 8 bytes those two already touch by hand. No `doc`, and no `READONLY` flag: the
+ * generated `__init__` this exists for assigns the attribute, so the descriptor must accept a
+ * write, not merely expose a read.
+ *
+ * The second entry is `PyMemberDef`'s own required all-zero terminator -- the same contract the
+ * `PyType_Slot` array in [createProxyType] and the `PyMethodDef` arrays in `UpcallEntry` already
+ * carry.
+ */
+private fun allocHandleMemberDefs(): CPointer<PyMemberDef> {
+    val members = nativeHeap.allocArray<PyMemberDef>(2)
+    members[0].name = allocPermanentCString("_pm_handle")
+    members[0].type = PY_T_LONG
+    members[0].offset = 0L
+    members[0].flags = PY_RELATIVE_OFFSET
+    members[0].doc = null
+    members[1].name = null
+    members[1].type = 0
+    members[1].offset = 0L
+    members[1].flags = 0
+    members[1].doc = null
+    return members
 }
 
 /**
@@ -263,7 +313,7 @@ actual object ProxyTypeFactory {
     actual fun createProxyType(): Long {
         if (proxyTypeAddress != 0L) return proxyTypeAddress
 
-        val slots = nativeHeap.allocArray<PyType_Slot>(4)
+        val slots = nativeHeap.allocArray<PyType_Slot>(5)
         // Slot ids from CPython's typeslots.h; they are ABI, not header-version-dependent.
         slots[0].slot = 71 // Py_tp_traverse
         slots[0].pfunc = staticCFunction(::proxyTraverse)
@@ -271,8 +321,10 @@ actual object ProxyTypeFactory {
         slots[1].pfunc = staticCFunction(::proxyClear)
         slots[2].slot = 52 // Py_tp_dealloc
         slots[2].pfunc = staticCFunction(::proxyDealloc)
-        slots[3].slot = 0 // sentinel
-        slots[3].pfunc = null
+        slots[3].slot = PY_TP_MEMBERS
+        slots[3].pfunc = allocHandleMemberDefs()
+        slots[4].slot = 0 // sentinel
+        slots[4].pfunc = null
 
         val spec = nativeHeap.alloc<PyType_Spec>()
         spec.name = allocPermanentCString("KotlinProxy")
@@ -290,9 +342,19 @@ actual object ProxyTypeFactory {
     }
 
     /**
-     * Not wired on iOS/androidNative yet: the type has no `Py_tp_members` slot exposing the handle
-     * to Python, so there is nothing for a generated `__init__`'s `self._pm_handle = ...` to reach
-     * even if a proxy did subclass this type. See `ProxyTypeFactory`'s class doc and `ROADMAP.md` §7.
+     * Publishes [createProxyType]'s type into `__main__` as `_pm_proxy_base`, the same route
+     * `desktopMain`'s `installGcBase` uses: the type's own address is a valid `PyObject*`, so
+     * `PyObject_SetAttrString` needs no `ctypes` round trip, and the type is never freed (its spec
+     * and slots are permanent [nativeHeap] allocations, held for the process) so nothing here needs
+     * an extra incref to keep it alive under `__main__`.
      */
-    actual fun installGcBase(): Boolean = false
+    actual fun installGcBase(): Boolean {
+        val type = createProxyType()
+        if (type == 0L) return false
+        val typePointer = type.toNativePointer() ?: return false
+        return withGIL {
+            val main = PyImport_AddModule("__main__") ?: return@withGIL false
+            PyObject_SetAttrString(main, "_pm_proxy_base", typePointer) == 0
+        }
+    }
 }

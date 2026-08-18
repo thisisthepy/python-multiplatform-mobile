@@ -1,8 +1,8 @@
 package python.multiplatform.ffi
 
 /**
- * Builds the cycle-collecting heap type, and -- on the one target this has been carried all the
- * way through -- puts a real base class in Python's hands for a generated proxy to subclass.
+ * Builds the cycle-collecting heap type, and -- on the targets this has been carried all the way
+ * through -- puts a real base class in Python's hands for a generated proxy to subclass.
  *
  * `createProxyType()` alone was never the gap: `ROADMAP.md` §7 records that the type it builds has
  * carried `tp_traverse`/`tp_clear`/`tp_dealloc` since `work/cycles` and that a real cycle collects
@@ -23,12 +23,13 @@ expect object ProxyTypeFactory {
      * Publishes [createProxyType]'s type into `__main__` as `_pm_proxy_base`, so a generated proxy
      * class can subclass a real `Py_TPFLAGS_HAVE_GC` type instead of a plain Python one.
      *
-     * `true` only on desktop today. Every other target answers `false` and touches nothing else --
-     * [python.multiplatform.ffi.upcall.PythonProxySource] reads `_pm_proxy_base` out of `globals()`
-     * at `exec` time and falls back to `_PmObject` when it is absent, which is this codebase's
-     * existing behaviour on every platform. Wiring a target in means giving its `ProxyTypeFactory` a
-     * `PyMemberDef`-carrying handle slot (or an equivalent) and an `installGcBase` that publishes
-     * the type the same way; `ROADMAP.md` §7 has the per-target notes on what that needs.
+     * `true` on desktop, iOS and androidNative. Android and wasm still answer `false` and touch
+     * nothing else -- [python.multiplatform.ffi.upcall.PythonProxySource] reads `_pm_proxy_base`
+     * out of `globals()` at `exec` time and falls back to `_PmObject` when it is absent, which is
+     * this codebase's existing behaviour there. Wiring a target in means giving its
+     * `ProxyTypeFactory` a `PyMemberDef`-carrying handle slot (or an equivalent) and an
+     * `installGcBase` that publishes the type the same way; `ROADMAP.md` §7 has the per-target
+     * notes on what that needs.
      */
     fun installGcBase(): Boolean
 }
