@@ -721,26 +721,6 @@ object PythonProxySource {
                         return type.__new__(_pm_m, _pm_n, _pm_b, _pm_ns, **_pm_kw)
                 return type.__new__(_pm_m, _pm_n, _pm_b + (_PmObject,), _pm_ns, **_pm_kw)
 
-            def _pm_unwrap(_pm_v):
-                # What an owner is worth on the wire: the handle inside it. Everything else is
-                # passed through untouched, which is what keeps a bare handle working for every
-                # caller written against the raw contract, and what lets an ordinary Python object
-                # reach a `PyObject` parameter.
-                #
-                # `isinstance` rather than a `getattr(v, '_pm_handle', v)` probe: the miss is the
-                # ordinary Python object, and a missing attribute is a raised-and-discarded
-                # AttributeError -- the same shape of cost the module `__getattr__` hook was
-                # replaced for, at 551-587 ns a time.
-                if isinstance(_pm_v, _PmObject):
-                    _pm_h = _pm_v._pm_handle
-                    if _pm_h is None:
-                        raise ValueError(
-                            'this Kotlin object was already released; its handle cannot be sent '
-                            'again, because the slot behind it may belong to something else now'
-                        )
-                    return _pm_h
-                return _pm_v
-
             # `_pm_proxy_base`, if a bootstrap has set it (see
             # `python.multiplatform.ffi.ProxyTypeFactory.installGcBase`), is a real
             # `Py_TPFLAGS_HAVE_GC` heap type whose `tp_traverse` can reach through a proxy's handle
@@ -753,9 +733,9 @@ object PythonProxySource {
             # instance storage of their own (`_PmObject.__slots__` is non-empty, and the C type
             # appends its own handle slot), and CPython refuses two solid bases at once with
             # "multiple bases have instance lay-out conflict". So a `_PmGcObject` instance is never
-            # an `_PmObject` and `_pm_unwrap` leaves one untouched -- it cannot be passed back to
-            # Kotlin as an *owned-result* argument the way a `_PmObject` instance can, which is a
-            # gap `ROADMAP.md` §7 records rather than closes here.
+            # an `_PmObject`, which is why `_pm_unwrap` below names both: testing only the one meant
+            # a proxy of a class with a `PyObject` field could not be passed back to Kotlin as an
+            # *owned-result* argument at all, whatever its parameter was declared as.
             #
             # No `__del__`: the base's own `tp_dealloc` already releases the handle (the same one
             # `_PmObject.__del__` calls by hand), and CPython runs it unconditionally for a subclass
@@ -776,6 +756,39 @@ object PythonProxySource {
                 # did before this existed, so a class with `hasTraverse` set costs nothing extra here
                 # and simply keeps not collecting a Kotlin-side cycle, same as before.
                 _PmGcObject = _PmObject
+
+            def _pm_unwrap(_pm_v, _pm_owners=(_PmObject, _PmGcObject)):
+                # What an owner is worth on the wire: the handle inside it. Everything else is
+                # passed through untouched, which is what keeps a bare handle working for every
+                # caller written against the raw contract, and what lets an ordinary Python object
+                # reach a `PyObject` parameter.
+                #
+                # **Whether a call site reaches this at all is decided when it is rendered**, from
+                # the parameter's declared Kotlin type, not from the shape of the value: a proxy is
+                # a legitimate argument to a `PyObject` parameter *and* to a parameter declared as
+                # the Kotlin class it stands for, and only the declaration says which one this is.
+                # See `PythonProxySource.argValues`.
+                #
+                # Both owners, because the decision is no longer made here. `_PmGcObject` is not an
+                # `_PmObject` -- CPython refuses two solid bases -- so testing the one name meant
+                # every proxy of a class with a `PyObject` field went through untouched whatever its
+                # parameter said, which is the same defect from the other end.
+                #
+                # `isinstance` rather than a `getattr(v, '_pm_handle', v)` probe: the miss is the
+                # ordinary Python object, and a missing attribute is a raised-and-discarded
+                # AttributeError -- the same shape of cost the module `__getattr__` hook was
+                # replaced for, at 551-587 ns a time. The owners are a default argument for the same
+                # reason `__del__` binds its releaser that way: one less global lookup per argument.
+                if isinstance(_pm_v, _pm_owners):
+                    _pm_h = _pm_v._pm_handle
+                    if _pm_h is None:
+                        raise ValueError(
+                            'this Kotlin object was already released; its handle cannot be sent '
+                            'again, because the slot behind it may belong to something else now'
+                        )
+                    return _pm_h
+                return _pm_v
+
     """.trimIndent()
 
     /**
@@ -793,17 +806,47 @@ object PythonProxySource {
     private fun params(arity: Int): List<String> = (0 until arity).map { "a$it" }
 
     /**
-     * [params], with every [TypeTag.OBJECT] slot unwrapped back to the handle it carries.
+     * [params], with every [TypeTag.OBJECT] slot that is *carrying a handle* unwrapped back to it.
      *
      * The other half of ownership: wrapping a result is pointless if the wrapper cannot be passed
      * back in, and `size(padding(m, 16.0), 24.0)` does exactly that. Only OBJECT slots are
-     * unwrapped -- no other tag can be carrying an owner, and `_pm_unwrap` on a float would be a
+     * considered -- no other tag can be carrying an owner, and `_pm_unwrap` on a float would be a
      * Python call per argument for nothing.
+     *
+     * ### Why the tag alone is not enough
+     *
+     * [TypeTag.OBJECT] is two things at once in the argument direction, exactly as [ownedTypeOf]
+     * describes it in the result direction: [UpcallTrampoline]'s `toKotlinObject` reads an `int` as
+     * a [python.multiplatform.reflection.HandleTable] handle and reads anything else as the Python
+     * object itself, on its way to a parameter declared [python.multiplatform.ffi.PyObject]. So
+     * unwrapping *every* OBJECT argument sends the Kotlin object behind a proxy to a parameter that
+     * asked for the proxy, and the entry's own `args[i] as PyObject` cast fails on it --
+     * `fixture.app.ProxyObjectArgumentTest` observes both halves of that, and `99acd830` filed it.
+     *
+     * The value cannot decide this, because a proxy is a legitimate argument to either kind of
+     * parameter: `_rh.primary = _rh` and `describeHolder(_rh)` pass the same object and want
+     * opposite treatment. [ExposedCallable.paramTypeNames] is the declaration, and it is the only
+     * thing that distinguishes them.
+     *
+     * An empty [ExposedCallable.paramTypeNames] is "the producer did not say", not "it is a
+     * PyObject": every hand-written fragment in this repository is that shape, and so is any
+     * producer not yet taught to fill it. Silence keeps the unwrapping contract that predates the
+     * field, which is what `OwnedResultLifetimeTest`'s chain counts.
+     *
+     * `kotlin.Any` is deliberately **not** treated like `PyObject` here, though [ownedTypeOf]
+     * refuses to own a result named that. The two questions differ: a *result* named `Any` is a
+     * runtime value that may or may not be a handle and cannot be told apart, whereas an *argument*
+     * slot declared `Any` accepts the Kotlin object a proxy stands for, so unwrapping it is well
+     * defined rather than a guess.
      */
     private fun argValues(entry: ExposedCallable): List<String> =
         params(entry.arity).mapIndexed { i, name ->
-            if (entry.paramTypes[i] == TypeTag.OBJECT) "_pm_unwrap($name)" else name
+            val declared = entry.paramTypeNames.getOrNull(i)
+            if (entry.paramTypes[i] == TypeTag.OBJECT && declared != PY_OBJECT) "_pm_unwrap($name)" else name
         }
+
+    /** The one declared parameter type that means "hand this call the Python object itself". */
+    private const val PY_OBJECT = "python.multiplatform.ffi.PyObject"
 
     /**
      * The Kotlin type name a result should be owned as, or `null` if it must reach Python exactly
@@ -836,7 +879,7 @@ object PythonProxySource {
      * [ownedTypeOf] refuses to guess about.
      */
     private val NOT_A_HANDLE = setOf(
-        "python.multiplatform.ffi.PyObject",
+        PY_OBJECT,
         "kotlin.Any",
     )
 

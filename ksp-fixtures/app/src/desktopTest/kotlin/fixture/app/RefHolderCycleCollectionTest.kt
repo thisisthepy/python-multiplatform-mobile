@@ -36,11 +36,13 @@ import kotlin.test.assertTrue
  * The edge `list -> _rh` is ordinary and every collector already walks it; the edge that decides
  * this test is `_rh -> (opaque handle) -> Kotlin field -> list`, which no Python-visible attribute
  * carries. (A direct `_rh.primary = _rh` was tried first and hit a different, pre-existing bug:
- * `_pm_unwrap` unwraps *any* `_PmObject`-derived argument to its raw handle before a call, which
+ * `_pm_unwrap` unwrapped *any* `_PmObject`-derived argument to its raw handle before a call, which
  * is right for an owned-result argument but wrong for a `PyObject`-typed parameter -- passing `_rh`
  * itself resolved to the underlying Kotlin object and failed the property's own cast. That bug is
- * independent of this one and is not fixed here; wrapping the back-reference in a plain `list`
- * avoids it entirely, since a `list` is never an `_PmObject` and so is never unwrapped.)
+ * fixed and [ProxyObjectArgumentTest] pins both sides of it: the unwrapping decision is now made
+ * when the call is rendered, from the parameter's declared Kotlin type. The `list` stays here
+ * regardless -- it is what makes the cycle's only edge back to `_rh` live on the Kotlin heap, which
+ * is the whole point of this test and is not something the direct assignment would show.)
  */
 class RefHolderCycleCollectionTest {
 
