@@ -376,4 +376,43 @@ class PyiRenderingTest {
         val files = renderPythonicStubs(listOf(orphan), manifest)
         assertTrue(files.keys.none { it.endsWith(".pyi") }, files.keys.toString())
     }
+
+    @Test
+    fun aStaticGetterIsRenderedAsAPropertyNotAFunction() {
+        val staticGetter = DeclarationModel(
+            simpleName = "Start",
+            owner = "androidx.compose.foundation.layout.Arrangement",
+            ownerIsClass = true,
+            receiver = null,
+            parameters = emptyList(),
+            returnType = KotlinTypeModel("androidx.compose.foundation.layout.Arrangement.Horizontal"),
+            returnBoundaryTag = "OBJECT",
+            bindingName = "androidx.compose.foundation.layout.Arrangement.Start",
+            kind = "STATIC_GETTER",
+        )
+        
+        val manifestWithArrangement = StubManifest(
+            modules = mapOf("pythonx.compose.layout" to "androidx.compose.foundation.layout"),
+            rawPrimitiveValueClasses = emptySet(),
+        )
+
+        val files = renderPythonicStubs(listOf(staticGetter), manifestWithArrangement)
+        val layout = files.getValue("pythonx/compose/layout/__init__.pyi")
+        
+        // Should not be a def
+        assertFalse("def Start(" in layout, "STATIC_GETTER should not be a function: $layout")
+        
+        // Should be a variable annotation in the class body. Arrangement class should exist.
+        assertTrue("class Arrangement:" in layout, layout)
+        assertTrue("    Start: ClassVar[Arrangement.Horizontal]" in layout, layout)
+
+        // The annotation is only worth emitting if the name it uses resolves. This module has no
+        // receiver methods, which is the only thing that used to pull `ClassVar` into the import
+        // line -- a module whose sole binding is a constant would have emitted an annotation
+        // referring to a name it never imported.
+        assertTrue(
+            layout.lineSequence().any { it.startsWith("from typing import ") && "ClassVar" in it },
+            layout,
+        )
+    }
 }

@@ -57,6 +57,12 @@ internal fun renderKotlinFqnStubs(declarations: List<DeclarationModel>): Map<Str
 
 private fun renderKotlinFqnDef(declaration: DeclarationModel): String {
     val leaf = declaration.bindingName!!.substringAfterLast('.')
+    if (declaration.kind == "STATIC_GETTER") {
+        return buildString {
+            appendLine("$leaf: ${boundaryAnnotation(declaration.returnBoundaryTag)}")
+            append("\"\"\"Kotlin: ${kotlinSignatureOf(declaration)}\"\"\"")
+        }
+    }
     val parameters = mutableListOf<String>()
     // The extension receiver is the runtime's `a0`; naming it after the receiver's Kotlin type would
     // suggest a keyword that does not exist, so it gets one fixed positional name.
@@ -134,6 +140,10 @@ internal fun renderPythonicStubs(declarations: List<DeclarationModel>, manifest:
     // `PaddingValues` would be referenced by `pythonx.compose.ui` and defined nowhere.
     val referenced = LinkedHashSet<String>()
     placed.forEach { (_, declaration) ->
+        // A constant is spelled `Owner.NAME`, so the owner has to be declared even when nothing
+        // else in this module mentions its type. Only for a constant: a companion *function* is
+        // rendered at module level and needs no class to hang off.
+        if (declaration.ownerIsClass && declaration.kind == "STATIC_GETTER") referenced += declaration.owner
         declaration.receiver?.let { referenced += it.qualifiedName }
         declaration.parameters.forEach { referenced += PythonTypes.render(it.type, allowlist).referencedClasses }
         referenced += PythonTypes.render(declaration.returnType, allowlist).referencedClasses
@@ -175,16 +185,18 @@ private class ClassNodeTree {
     private var attributes: List<String> = emptyList()
     private var protocolPrefix: String = ""
     private var constructors: List<String> = emptyList()
+    private var properties: List<Pair<String, String>> = emptyList()
 
-    fun put(path: List<String>, attributes: List<String>, protocolPrefix: String, constructors: List<String>) {
+    fun put(path: List<String>, attributes: List<String>, protocolPrefix: String, constructors: List<String>, properties: List<Pair<String, String>> = emptyList()) {
         if (path.isEmpty()) return
         val child = children.getOrPut(path.first()) { ClassNodeTree() }
         if (path.size == 1) {
             child.attributes = attributes
             child.protocolPrefix = protocolPrefix
             child.constructors = constructors
+            child.properties = properties
         } else {
-            child.put(path.drop(1), attributes, protocolPrefix, constructors)
+            child.put(path.drop(1), attributes, protocolPrefix, constructors, properties)
         }
     }
 
@@ -193,11 +205,14 @@ private class ClassNodeTree {
             out.appendLine("${indent}class $name:")
             val inner = "$indent    "
             child.constructors.forEach { out.appendLine("$inner$it") }
-            if (child.attributes.isEmpty() && child.children.isEmpty() && child.constructors.isEmpty()) {
+            if (child.attributes.isEmpty() && child.children.isEmpty() && child.constructors.isEmpty() && child.properties.isEmpty()) {
                 // Referred to but carrying nothing this build bound. Declared rather than left to an
                 // import from nowhere: the annotation has to resolve for the stub to have any effect
                 // at all (§6.1).
                 out.appendLine("$inner...")
+            }
+            child.properties.forEach { (propName, propType) ->
+                out.appendLine("$inner$propName: ClassVar[$propType]")
             }
             child.attributes.forEach { attribute ->
                 // §4.4: `ClassVar` is not load-bearing for inference -- a plain annotation gives
@@ -229,10 +244,21 @@ private fun renderPythonicModule(
 
     // `(receiver class, python name)` -- §4.4's "one Protocol class per (receiver, name) pair", the
     // cost that section states outright: ~507 of them across corpus A, 130 for `Modifier` alone.
-    val methods = declarations.filter { it.receiver != null }
+    val methods = declarations.filter { it.receiver != null && it.kind != "STATIC_GETTER" }
         .groupBy { it.receiver!!.qualifiedName to PythonNames.functionName(it.simpleName, it.isComposable) }
-    val functions = declarations.filter { it.receiver == null }
+
+    val allReceiverless = declarations.filter { it.receiver == null }
         .groupBy { PythonNames.functionName(it.simpleName, it.isComposable) }
+
+    val functions = allReceiverless.filterValues { group -> group.size > 1 || group.single().kind != "STATIC_GETTER" }
+
+    val topLevelProperties = allReceiverless.filterValues { group -> group.size == 1 && group.single().kind == "STATIC_GETTER" }
+        .mapValues { it.value.single() }
+
+    val classProperties = topLevelProperties.values.filter { it.ownerIsClass }
+        .groupBy { it.owner }
+
+    val moduleProperties = topLevelProperties.values.filter { !it.ownerIsClass }
 
     fun signature(declaration: DeclarationModel): String {
         val rendered = declaration.parameters.map { PythonTypes.render(it.type, allowlist) }
@@ -327,6 +353,17 @@ private fun renderPythonicModule(
         dispatch[pythonName] = ordered.map { it.bindingName!! }
     }
 
+    // Module-level properties
+    moduleProperties.forEach { declaration ->
+        val pythonName = PythonNames.functionName(declaration.simpleName, declaration.isComposable)
+        val rendered = PythonTypes.render(declaration.returnType, allowlist)
+        typingImports += rendered.typingImports
+        referencedClasses += rendered.referencedClasses
+        body.appendLine("$pythonName: ${rendered.expression}")
+        dispatch[pythonName] = listOf(declaration.bindingName!!)
+    }
+    if (moduleProperties.isNotEmpty()) body.appendLine()
+
     // Nested classes stay nested. `@Metadata` spells `Alignment.Horizontal` with a dot, so splitting
     // the qualified name on the last one made `Alignment` look like a package and produced a
     // `pythonx/compose/ui/Alignment/` directory for a class that has no module. The tree is built
@@ -335,17 +372,30 @@ private fun renderPythonicModule(
     val tree = ClassNodeTree()
     ownedClasses.forEach { qualified ->
         val path = pythonClassPathOf(qualified)
+
+        val props = classProperties[qualified].orEmpty().map { declaration ->
+            val pythonName = PythonNames.functionName(declaration.simpleName, declaration.isComposable)
+            val rendered = PythonTypes.render(declaration.returnType, allowlist)
+            typingImports += rendered.typingImports
+            referencedClasses += rendered.referencedClasses
+            dispatch["$path.$pythonName"] = listOf(declaration.bindingName!!)
+            pythonName to rendered.expression
+        }.sortedBy { it.first }
+
         tree.put(
             path = path.split('.'),
             attributes = methods.keys.filter { it.first == qualified }.map { it.second }.sorted(),
             protocolPrefix = "_" + path.replace(".", "_"),
             constructors = constructors[path].orEmpty(),
+            properties = props,
         )
     }
     val classes = StringBuilder().also { tree.renderInto(it, indent = "") }
 
     if (protocols.isNotEmpty()) typingImports += "Protocol"
-    if (methods.isNotEmpty()) typingImports += "ClassVar"
+    // Both a bound method (rendered as a Protocol-typed attribute) and a bound constant use it, and
+    // a module can carry only the second -- `Arrangement` is nothing but constants.
+    if (methods.isNotEmpty() || classProperties.isNotEmpty()) typingImports += "ClassVar"
     val emitted = protocols.toString() + body.toString() + classes.toString()
     if ("@overload" in emitted) typingImports += "overload"
 

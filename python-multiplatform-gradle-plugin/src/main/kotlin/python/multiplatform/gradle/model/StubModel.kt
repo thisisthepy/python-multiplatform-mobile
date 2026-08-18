@@ -80,6 +80,7 @@ internal data class DeclarationModel(
     val parameterNamesKnown: Boolean = true,
     val isComposable: Boolean = false,
     val isSuspend: Boolean = false,
+    val kind: String = "FUNCTION",
 ) : Serializable
 
 /** @param name `null` when the producer could not read one (§3.2); never a synthesised `arg0`. */
