@@ -1,6 +1,8 @@
 package python.multiplatform.gradle.artifact
 
+import kotlin.metadata.KmClass
 import kotlin.metadata.KmClassifier
+import kotlin.metadata.KmConstructor
 import kotlin.metadata.KmDeclarationContainer
 import kotlin.metadata.KmFunction
 import kotlin.metadata.KmType
@@ -530,6 +532,42 @@ internal data class ResolvedFunction(
 /** The name given to the extension-receiver slot. Deliberately not a Python identifier: a receiver
  * is positional in Kotlin too, so nothing should be able to address it by keyword. */
 internal const val RECEIVER_PARAMETER_NAME = "<receiver>"
+
+/**
+ * A class's own public constructors, shaped as [ResolvedFunction] so [ArtifactScanner]'s existing
+ * top-level-function path binds them with no code of its own: a constructor's [ResolvedFunction
+ * .kotlinName] is the class's simple name and its [ResolvedFunction.returnType] is the class itself,
+ * so the call [candidateFromFunction] already writes for a non-extension declaration -- `$owner.
+ * ${'$'}{function.kotlinName}(args)` -- comes out as `androidx.compose.material3.Typography(args)`,
+ * which is exactly how Kotlin spells a fully-qualified constructor call. No `isConstructor` branch
+ * needed anywhere downstream.
+ *
+ * `<init>` never reaches [ArtifactScanner.kotlinCandidates]: that function's own `ACC_STATIC` filter
+ * excludes it, a constructor never being `static`. That gap -- not a judgement about the class -- is
+ * why `Typography` and `Shapes` were absent rather than declined; see this object's KDoc §10.
+ *
+ * @param ownerInternalName the class's own ASM binary name (`androidx/compose/material3/Typography`),
+ *   used both as the returned type's classifier and, split on `/`, as the class's simple name.
+ */
+internal fun constructorsOf(kmClass: KmClass, ownerInternalName: String): List<ResolvedFunction> {
+    val simpleName = ownerInternalName.substringAfterLast('/')
+    val classType = KmType().apply { classifier = KmClassifier.Class(ownerInternalName) }
+    return kmClass.constructors.mapNotNull { resolvedConstructorOrNull(it, simpleName, classType) }
+}
+
+private fun resolvedConstructorOrNull(constructor: KmConstructor, simpleName: String, classType: KmType): ResolvedFunction? {
+    if (constructor.visibility != Visibility.PUBLIC) return null
+    val signature = constructor.signature ?: return null
+    return ResolvedFunction(
+        kotlinName = simpleName,
+        isExtension = false,
+        allParameterTypes = constructor.valueParameters.map { it.type },
+        returnType = classType,
+        jvmSignature = signature,
+        allParameterNames = constructor.valueParameters.map { it.name },
+        allParameterDefaults = constructor.valueParameters.map { it.declaresDefaultValue },
+    )
+}
 
 /**
  * The Kotlin package a facade's declarations really live in, when it is not the JVM one.

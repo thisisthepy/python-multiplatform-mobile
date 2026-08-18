@@ -3,9 +3,12 @@ package python.multiplatform.gradle.artifact
 import kotlin.metadata.KmClassifier
 import kotlin.metadata.KmType
 import kotlin.metadata.KmVariance
+import kotlin.metadata.Visibility
 import kotlin.metadata.isNullable
 import kotlin.metadata.isSuspend
+import kotlin.metadata.isValue
 import kotlin.metadata.jvm.KotlinClassMetadata
+import kotlin.metadata.visibility
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
 import python.multiplatform.gradle.model.DeclarationModel
@@ -151,6 +154,7 @@ internal data class Candidate(
      * that constructor drops it, which is correct, because by then the body is settled.
      */
     val plan: ArtifactScanner.DefaultOmissionPlan? = null,
+    val isConstructor: Boolean = false,
 )
 
 internal object ArtifactScanner {
@@ -223,7 +227,45 @@ internal object ArtifactScanner {
         //
         // Defaults first: [disambiguateOverloads] renames entries, and the sibling test needs the
         // Kotlin name they still share.
-        return assignThunkIndices(disambiguateOverloads(applyDefaultOmission(entries)))
+        return assignThunkIndices(disambiguateOverloads(applyDefaultOmission(dropCollidingConstructors(entries))))
+    }
+
+    /**
+     * Rule: If a bare name is already taken by a function candidate, discard any constructor
+     * candidates with the same bare name.
+     * 
+     * Why this rule: Top-level factory functions (like `BitmapPainter`) are already what
+     * Python users call. Introducing a constructor with the exact same name causes a collision,
+     * which forces both into `name__<types>` mangling and breaks existing Python code.
+     * Dropping the constructor candidate preserves the factory function under its bare name,
+     * while still binding value class constructors (like `Meters`) that have no collision.
+     * 
+     * This must run BEFORE [applyDefaultOmission] so the constructor's presence doesn't cause
+     * the factory function to lose its omittable defaults.
+     */
+    private fun dropCollidingConstructors(candidates: List<Candidate>): List<Candidate> {
+        val (bound, declined) = candidates.partition { it.callable != null }
+        val byName = bound.groupBy { it.callable!!.name }
+        val constructorDrops = mutableSetOf<Candidate>()
+        for ((name, group) in byName) {
+            if (name == "ColorScheme") {
+                java.io.File("/Volumes/macMini/worktrees/ctors/ct4_cs.txt").appendText("ColorScheme candidates: ${group.map { it.isConstructor to it.declaration.owner + "." + it.declaration.simpleName }}\n")
+            }
+            if (group.any { !it.isConstructor }) {
+                constructorDrops.addAll(group.filter { it.isConstructor })
+            }
+        }
+        val remainingBound = bound.filter { it !in constructorDrops }
+        val newlyDeclined = constructorDrops.map { candidate ->
+            candidate.copy(
+                callable = null,
+                declaration = candidate.declaration.copy(
+                    bindingName = null,
+                    declineReason = "constructor name collides with a factory function",
+                ),
+            )
+        }
+        return remainingBound + declined + newlyDeclined
     }
 
     /**
@@ -300,7 +342,7 @@ internal object ArtifactScanner {
                 functions = functionsOf(metadata.kmClass).filterNot { it.isExtension },
                 ownerNode = node,
                 classpath = classpath,
-            )
+            ) + constructorCandidates(metadata.kmClass, node, classpath)
             is KotlinClassMetadata.FileFacade -> kotlinCandidates(
                 owner = kotlinPackageNameOverrideOf(node) ?: packageNameOf(node.name),
                 ownerIsClass = false,
@@ -389,11 +431,12 @@ internal object ArtifactScanner {
         // through so that `docs/pyi-generation-design.md` §2.2's "what is declined stays visible"
         // survives this stage too.
         val (bound, declined) = candidates.partition { it.callable != null }
+
         val disambiguated = bound.groupBy { it.callable!!.name }.values.flatMap { group ->
             if (group.size == 1) return@flatMap group
             val scheme = schemes.firstOrNull { scheme -> group.mapTo(HashSet()) { scheme(it.callable!!) }.size == group.size }
                 ?: return@flatMap group.map { candidate ->
-                    Candidate(
+                    candidate.copy(
                         callable = null,
                         declaration = candidate.declaration.copy(
                             bindingName = null,
@@ -403,7 +446,7 @@ internal object ArtifactScanner {
                 }
             group.map { candidate ->
                 val name = "${candidate.callable!!.name}__${scheme(candidate.callable)}"
-                Candidate(
+                candidate.copy(
                     callable = candidate.callable.copy(name = name),
                     declaration = candidate.declaration.copy(bindingName = name),
                 )
@@ -506,6 +549,66 @@ internal object ArtifactScanner {
                 }
                 candidateFromFunction(owner, ownerIsClass, function, classpath, paramDescriptors, isComposable(method))
             }
+    }
+
+    /**
+     * A class's own public constructors, bound the same way a top-level function is: [constructorsOf]
+     * gives each one a [ResolvedFunction] whose name is the class and whose "return type" is the
+     * class itself, so the ordinary non-extension call [candidateFromFunction] already writes --
+     * `owner.SimpleName(args)` -- is a valid fully-qualified constructor call with no change to that
+     * function. `owner` here is the **package**, not the class (contrast [kotlinCandidates]'s own
+     * `owner`, which for this same [ownerNode] is the class): a constructor is not a static member of
+     * its class, it is the name a caller writes in the class's place, so it publishes the way a
+     * top-level function does -- see `docs/pyi-generation-design.md` §2.2's `DeclarationModel.owner`
+     * KDoc for why that distinction is what selects the `sys.modules` entry a binding lands on.
+     *
+     * `<init>` is filtered out of [kotlinCandidates] by that function's own `ACC_STATIC` check (a
+     * constructor is never `static`), so nothing here duplicates a declaration that path already
+     * handles.
+     *
+     * ### Why this never looks at [ownerNode]'s own `<init>` bytecode
+     *
+     * Every other producer in this file cross-checks a [ResolvedFunction] against the real
+     * `MethodNode`: the JVM parameter count can exceed the declared one (a composable's synthetic
+     * slots, a value class's own member with an implicit unboxed receiver), and only the bytecode
+     * says so. A constructor has no such gap -- `KmConstructor.signature`'s descriptor is compiled
+     * *from* `valueParameters`, so [ResolvedFunction.allParameterTypes] and the descriptor
+     * [candidateFromFunction] needs can both come from the one [KmConstructor], with nothing left for
+     * a `MethodNode` to add.
+     *
+     * Looking one up would actively break value classes. `@JvmInline value class Meters(val value:
+     * Double)` declares its constructor with no visibility modifier -- Kotlin-public, same as any
+     * other -- but `javap` on the compiled box shows `private fixture.artifactvalueclass.Meters
+     * (double)`: the compiler makes the *box's* `<init>` private on purpose, to push every external
+     * caller through `constructor-impl`/`box-impl` instead. Matching against `ACC_PUBLIC` bytecode
+     * would decline every value class's constructor for a visibility the *language* never gave it --
+     * caught by [aValueClasssOwnConstructorRoundTripsThroughItsUnderlyingPrimitive] running red
+     * first. Generated Kotlin source is unaffected either way: `Meters(3.0)` is source calling a
+     * constructor, and the compiler lowers it through the private box the same as it would inside the
+     * declaring module -- nothing here ever spells `<init>` or reads its access flags.
+     */
+    private fun constructorCandidates(
+        kmClass: kotlin.metadata.KmClass,
+        ownerNode: ClassNode,
+        classpath: ArtifactClasspath,
+    ): List<Candidate> {
+        // An abstract class cannot be instantiated -- `Cannot create an instance of an abstract
+        // class` would appear in the generated fragment. An internal class's name cannot be spelled
+        // in source outside its module -- the same rule `resolvedFunctionOrNull` applies to
+        // individual functions via their visibility. Both are checked on the *class*, not the
+        // constructor: `constructorsOf` / `resolvedConstructorOrNull` already checks the
+        // constructor's own visibility separately.
+        if (ownerNode.access.hasFlag(Opcodes.ACC_ABSTRACT)) return emptyList()
+        if (kmClass.visibility != Visibility.PUBLIC) return emptyList()
+        // Value class constructors are what this branch intends to bind. Normal class constructors
+        // overshadow their proxy type's Python class or collide with factory functions.
+        if (!kmClass.isValue) return emptyList()
+
+        val owner = packageNameOf(ownerNode.name)
+        return constructorsOf(kmClass, ownerNode.name).mapNotNull { function ->
+            val (paramDescriptors, _) = splitMethodDescriptor(function.jvmSignature.descriptor)
+            candidateFromFunction(owner, false, function, classpath, paramDescriptors, isComposable = false)?.copy(isConstructor = true)
+        }
     }
 
     /**

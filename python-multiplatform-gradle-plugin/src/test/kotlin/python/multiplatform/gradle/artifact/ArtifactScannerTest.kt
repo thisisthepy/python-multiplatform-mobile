@@ -246,11 +246,29 @@ class ArtifactScannerTest {
      * constructor the walker *is* allowed to call: a JVM parameter (the unboxed receiver) with no
      * declared Kotlin parameter behind it. Declined by the arity check in `ArtifactScanner
      * .kotlinCandidates`, not by [aPublicValueClassRoundTripsThroughItsUnderlyingPrimitive]'s
-     * constructor-visibility check -- both have to hold for a value class to be usable at all. */
+     * constructor-visibility check -- both have to hold for a value class to be usable at all.
+     *
+     * `Seconds` has a public constructor and a public accessor (`raw`), so its constructor is now
+     * bound under the name `fixture.artifactvalueclass.Seconds` -- exactly as `Meters` is. The one
+     * thing that stays absent is `doubled`: a value-class own member whose implicit unboxed receiver
+     * has no declared Kotlin parameter, declined by the arity check regardless of visibility. */
     @Test
     fun aValueClasssOwnMemberIsDeclinedForItsImplicitReceiverNotItsVisibility() {
-        val names = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass.Seconds")).map { it.name }
-        assertEquals(emptyList(), names, "Seconds.doubled is a true member: its receiver has no declared Kotlin parameter to bind")
+        val entries = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass.Seconds"))
+        val names = entries.map { it.name }
+        // The constructor binding is present -- Seconds has a public constructor + public accessor.
+        assertEquals(
+            listOf("fixture.artifactvalueclass.Seconds"), names,
+            "Seconds constructor must be bound; Seconds.doubled must not (implicit receiver, arity mismatch)",
+        )
+        val seconds = entries.single()
+        assertEquals(1, seconds.arity)
+        assertEquals(listOf("INT"), seconds.paramTags, "Seconds wraps a Long")
+        assertEquals("INT", seconds.returnTag, "round-trips through its underlying Long")
+        assertEquals(
+            "{ args -> ((fixture.artifactvalueclass.Seconds((args[0] as Long))).raw) }",
+            seconds.lambdaBody,
+        )
     }
 
     /** Same Kotlin name, unrelated JVM shape (one mangled by a value-class parameter, one not):
@@ -387,6 +405,57 @@ class ArtifactScannerTest {
                 ".artifact_ext_fixture_artifactvalueclass_lengthened((args[1] as Double))) }",
             lengthened.lambdaBody,
         )
+    }
+
+    // ---------------------------------------------------------------------------- constructors
+
+    /**
+     * A class's own public primary constructor, bound the same way a top-level function is:
+     * `Rope(Double): Rope`'s shape, and [Rope]'s own KDoc records why this used to be entirely
+     * absent -- `ArtifactScanner.kotlinCandidates`'s `ACC_STATIC` filter drops `<init>` along with
+     * every instance method, and nothing else ever picked it back up. `docs/pythonx-adapter-design.md`
+     * §10 names `Typography`/`Shapes` as the real-world casualty: not declined, simply never scanned.
+     */
+    @Test
+    fun aClasssOwnPublicConstructorIsBoundUnderTheClassName() {
+        val rope = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass"))
+            .single { it.name == "fixture.artifactvalueclass.Meters" }
+        assertEquals(1, rope.arity)
+        assertEquals(listOf("FLOAT"), rope.paramTags)
+        assertEquals("FLOAT", rope.returnTag, "Meters wraps a Double and unwraps back to one")
+        assertNull(rope.receiverTypeName, "a constructor is not an extension")
+        assertEquals(
+            "{ args -> ((fixture.artifactvalueclass.Meters((args[0] as Double))).value) }",
+            rope.lambdaBody,
+            "a fully-qualified constructor call is valid Kotlin, exactly like a fully-qualified function call",
+        )
+    }
+
+    /** A value class's own constructor round-trips through its underlying primitive on the way back
+     * out, the same as any other declaration returning [Meters] -- `Meters` is not special-cased,
+     * it goes through [ArtifactScanner.candidateFromFunction] unchanged. */
+    @Test
+    fun aValueClasssOwnConstructorRoundTripsThroughItsUnderlyingPrimitive() {
+        val meters = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass"))
+            .single { it.name == "fixture.artifactvalueclass.Meters" }
+        assertEquals(1, meters.arity)
+        assertEquals(listOf("FLOAT"), meters.paramTags)
+        assertEquals("FLOAT", meters.returnTag, "Meters wraps a Double and unwraps back to one")
+        assertEquals(
+            "{ args -> ((fixture.artifactvalueclass.Meters((args[0] as Double))).value) }",
+            meters.lambdaBody,
+        )
+    }
+
+    /** `<init>` never reaches [ArtifactScanner.kotlinCandidates]'s own binder -- that path's
+     * `ACC_STATIC` filter excludes every constructor, so nothing about [constructorCandidates] is a
+     * duplicate of it. Pinned by absence: no `fixture.artifactvalueclass.Rope.<init>`-shaped name of
+     * any kind reaches the table through the ordinary function path. */
+    @Test
+    fun aConstructorIsNeverAlsoBoundAsAnOrdinaryStaticMember() {
+        val names = ArtifactScanner.scanJar(fixtureClasses, includePrefixes = listOf("fixture.artifactvalueclass")).map { it.name }
+        assertTrue(names.none { "<init>" in it }, names.toString())
+        assertEquals(1, names.count { it == "fixture.artifactvalueclass.Meters" }, "exactly one binding for Meters's one public constructor")
     }
 
     // ------------------------------------------------------------------------------- overloads
