@@ -1,0 +1,445 @@
+package fixture.compose
+
+import androidx.compose.ui.ImageComposeScene
+import androidx.compose.ui.unit.Density
+import org.jetbrains.skia.Bitmap
+import python.multiplatform.ffi.Python3
+import python.multiplatform.ffi.pythonx.PythonxAdapter
+import python.multiplatform.generated.artifacts.ArtifactTable
+import python.multiplatform.reflection.UpcallTable
+import python.native.ffi.UpcallStub
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+/**
+ * **Proof pass for the 27 zero-byte material3 stubs.**
+ *
+ * The adaptation layer's artefact table produces declarations from the walked jar; these tests
+ * establish whether each component actually renders pixels when called from Python, using the same
+ * evidence model as [ComposableRenderTest]:
+ *
+ * - A scene whose Python body calls the component has ink (non-background pixels > 0).
+ * - A scene whose Python body is `pass` or an empty equivalent has none (or fewer).
+ * - Where the component fills the entire scene with its own surface (FAB, TopAppBar, Scaffold,
+ *   TabRow), distinct-colour counting is used instead of ink counting — the same approach
+ *   [listItemComposesItsHeadlineContentUnderItsSnakeCasedName] uses for ListItem.
+ *
+ * Components judged here (10 of 27):
+ * 1. HorizontalDivider — leaf, no required param
+ * 2. RadioButton — selected: Boolean, onClick: Function0
+ * 3. LinearProgressIndicator — progress: () -> Float (determinate; the indeterminate overload
+ *    animates forever and hangs the scene, see that test)
+ * 4. CircularProgressIndicator — progress: () -> Float, same reason
+ * 5. Surface — content: @Composable () -> Unit
+ * 6. Scaffold — content: @Composable (PaddingValues) -> Unit (fills scene — colour-set comparison)
+ * 7. Slider — value: Float, onValueChange: (Float) -> Unit (pixel-set comparison)
+ * 8. TopAppBar — title: @Composable () -> Unit (fills scene — colour-set comparison)
+ * 9. FloatingActionButton — onClick: Function0, content: @Composable () -> Unit (colour-set)
+ * 10. Tab + TabRow — selected/onClick/text inside TabRow (colour-set)
+ */
+class M3ProofRenderTest {
+
+    @BeforeTest
+    fun installProducers() {
+        Python3.initialize(silent = true)
+        UpcallTable.clear()
+        UpcallTable.install(ArtifactTable.fragments)
+        Python3.exec(
+            """
+            import ctypes
+
+            _pm_resolve = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_char_p)(${UpcallStub.resolveHandleStubAddr})
+            _pm_invoke = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.c_long, ctypes.py_object)(
+                ${UpcallStub.invokeWithArgsStubAddr}
+            )
+            _pm_release = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_long)(${UpcallStub.releaseObjectStubAddr})
+            """.trimIndent(),
+        )
+        PythonxAdapter.install()
+    }
+
+    @AfterTest
+    fun cleanup() {
+        UpcallTable.clear()
+    }
+
+    // ── 1. HorizontalDivider ──────────────────────────────────────────────────
+
+    /**
+     * HorizontalDivider — leaf, every parameter defaulted. Must draw a visible line on a 200x10
+     * scene; pass must draw nothing.
+     */
+    @Test
+    fun horizontalDividerDrawsALineWithNoArguments() {
+        val drawn = inkOf(
+            """
+            from pythonx.compose.material3 import HorizontalDivider
+            HorizontalDivider()
+            """.trimIndent(),
+            width = 200, height = 10,
+        )
+        val blank = inkOf("pass", width = 200, height = 10)
+        println("compose render: HorizontalDivider() -> $drawn non-background pixels, pass -> $blank")
+        assertEquals(0, blank, "empty composition must draw nothing")
+        assertTrue(drawn > 0, "HorizontalDivider() drew nothing")
+    }
+
+    // ── 2. RadioButton ───────────────────────────────────────────────────────
+
+    /**
+     * RadioButton — selected=True paints a filled ring, selected=False paints only a ring.
+     * Both must draw; and the filled variant (selected) must have more ink than the hollow one.
+     */
+    @Test
+    fun radioButtonRendersItsSelectedAndDeselectedStates() {
+        val selected = inkOf(
+            """
+            from pythonx.compose.material3 import RadioButton
+            RadioButton(selected=True, on_click=lambda: None)
+            """.trimIndent(),
+        )
+        val deselected = inkOf(
+            """
+            from pythonx.compose.material3 import RadioButton
+            RadioButton(selected=False, on_click=lambda: None)
+            """.trimIndent(),
+        )
+        println("compose render: RadioButton selected=$selected px, deselected=$deselected px")
+        assertTrue(selected > 0, "RadioButton(selected=True) drew nothing")
+        assertTrue(deselected > 0, "RadioButton(selected=False) drew nothing")
+        assertTrue(
+            selected > deselected,
+            "selected RadioButton should have more ink (filled centre dot) than deselected: $deselected vs $selected",
+        )
+    }
+
+    // ── 3. LinearProgressIndicator ───────────────────────────────────────────
+
+    /**
+     * `LinearProgressIndicator(progress=...)` -- the *determinate* overload, and the argument-taking
+     * one, which is why it is the one worth binding.
+     *
+     * The zero-argument overload cannot be tested through this harness at all, and that is a
+     * property of the component rather than of the binding: an indeterminate indicator runs an
+     * infinite transition, so the composition never goes idle and [ImageComposeScene.render] never
+     * returns. Found by thread dump after a suite hung for thirty-seven minutes with seven seconds
+     * of CPU -- blocked, not slow. Anything else that animates forever will do the same here.
+     *
+     * The determinate form is reached with a plain float, not a lambda, and that is itself a
+     * finding: the walked table has three overloads, and the current one takes `progress` as
+     * `() -> Float`. Passing a Python callable for it is rejected by the overload dispatcher --
+     * *"no overload of LinearProgressIndicator accepts these arguments"* -- even though a callable
+     * is accepted for `on_click`, which is `Function0<Unit>`. So a value-returning function slot
+     * does not accept a Python callable today, while a Unit-returning one does. Pinned by
+     * [aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable] rather than left as a note.
+     *
+     * The float overload this uses is the deprecated one. It is what the binding can reach, and
+     * reaching it still proves the component renders what it is given.
+     */
+    @Test
+    fun linearProgressIndicatorDrawsAtItsGivenProgress() {
+        val drawn = inkOf(
+            """
+            from pythonx.compose.material3 import LinearProgressIndicator
+            LinearProgressIndicator(progress=0.75)
+            """.trimIndent(),
+            width = 200, height = 8,
+        )
+        val blank = inkOf("pass", width = 200, height = 8)
+        println("compose render: LinearProgressIndicator(progress=0.75) -> $drawn px, pass -> $blank")
+        assertEquals(0, blank, "empty composition must draw nothing")
+        assertTrue(drawn > 0, "LinearProgressIndicator(progress=0.75) drew nothing")
+    }
+
+    // ── 4. CircularProgressIndicator ─────────────────────────────────────────
+
+    /**
+     * `CircularProgressIndicator(progress=...)`, determinate for the same reason the linear one is:
+     * the indeterminate overload never lets the composition go idle. See that test for what that
+     * costs anyone who tries it.
+     */
+    @Test
+    fun circularProgressIndicatorDrawsAtItsGivenProgress() {
+        val drawn = inkOf(
+            """
+            from pythonx.compose.material3 import CircularProgressIndicator
+            CircularProgressIndicator(progress=0.75)
+            """.trimIndent(),
+        )
+        val blank = inkOf("pass")
+        println("compose render: CircularProgressIndicator(progress=0.75) -> $drawn px, pass -> $blank")
+        assertEquals(0, blank, "empty composition must draw nothing")
+        assertTrue(drawn > 0, "CircularProgressIndicator(progress=0.75) drew nothing")
+    }
+
+    /**
+     * The gap [linearProgressIndicatorDrawsAtItsGivenProgress] found, pinned so it cannot be fixed
+     * silently: a slot typed `() -> Float` refuses a Python callable, and the dispatcher says so by
+     * listing every candidate. When this test starts failing, the dispatcher has learned to coerce
+     * a callable into a value-returning function slot -- and the two progress tests above should
+     * move to the non-deprecated overload on the same commit.
+     */
+    @Test
+    fun aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable() {
+        val error = try {
+            inkOf(
+                """
+                from pythonx.compose.material3 import LinearProgressIndicator
+                LinearProgressIndicator(progress=lambda: 0.75)
+                """.trimIndent(),
+                width = 200, height = 8,
+            )
+            null
+        } catch (e: Throwable) {
+            e.message ?: ""
+        }
+        println("compose render: LinearProgressIndicator(progress=lambda) -> ${error?.take(80)}")
+        assertTrue(error != null, "a callable is now accepted for `() -> Float` -- see this test's doc")
+        assertTrue(
+            error.contains("no overload of LinearProgressIndicator accepts these arguments"),
+            "expected the dispatcher's own rejection, got: $error",
+        )
+    }
+
+    // ── 5. Surface ───────────────────────────────────────────────────────────
+
+    /**
+     * Surface — content: @Composable () -> Unit (Function2, arity 0, same shape as MaterialTheme).
+     * Surface's own container background does not fill the full 200x60 scene at its default size,
+     * so ink-counting works: with Text inside vs empty content gives different non-zero ink.
+     */
+    @Test
+    fun surfaceComposesItsContentLambda() {
+        val drawn = inkOf(
+            """
+            from pythonx.compose.material3 import Surface, Text
+            Surface(content=lambda: Text('hi'))
+            """.trimIndent(),
+        )
+        val empty = inkOf(
+            """
+            from pythonx.compose.material3 import Surface
+            Surface(content=lambda: None)
+            """.trimIndent(),
+        )
+        println("compose render: Surface(content=Text('hi')) -> $drawn px, empty -> $empty px")
+        assertTrue(drawn > 0, "Surface with Text('hi') drew nothing")
+        assertTrue(drawn > empty, "Surface content lambda never reached Compose: $empty vs $drawn")
+    }
+
+    // ── 6. Scaffold ──────────────────────────────────────────────────────────
+
+    /**
+     * Scaffold — content: @Composable (PaddingValues) -> Unit. Scaffold fills the scene with its
+     * own surface, so ink-counting cannot distinguish content from no content (both max out at
+     * scene pixels). Distinct-colour counting (same approach as ListItem) is the right tool: the
+     * glyph colour is not the container fill, so Text inside adds a new colour to the set.
+     */
+    @Test
+    fun scaffoldComposesItsContentWithPaddingValues() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import Scaffold, Text
+            Scaffold(content=lambda padding: Text('hi'))
+            """.trimIndent(),
+            width = 200, height = 120,
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import Scaffold
+            Scaffold(content=lambda padding: None)
+            """.trimIndent(),
+            width = 200, height = 120,
+        )
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: Scaffold(content=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+                "empty -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "Scaffold with empty content must still draw its container")
+        assertTrue(
+            drawnColors != emptyColors,
+            "Scaffold content lambda added no new colour: $emptyColors vs $drawnColors",
+        )
+    }
+
+    // ── 7. Slider ────────────────────────────────────────────────────────────
+
+    /**
+     * Slider — value: Float, onValueChange: (Float) -> Unit, both required.
+     * Slider(0.0) places the thumb at the left end; Slider(1.0) at the right. The thumb is the
+     * only element that moves, so the two pixel sets must differ — same argument
+     * [ComposableRenderTest.theStringPythonWroteIsTheStringComposeDrew] uses for Text length.
+     */
+    @Test
+    fun sliderDrawsAtItsGivenValue() {
+        val left = pixelsOf(
+            """
+            from pythonx.compose.material3 import Slider
+            Slider(0.0, on_value_change=lambda v: None)
+            """.trimIndent(),
+            width = 200, height = 48,
+        )
+        val right = pixelsOf(
+            """
+            from pythonx.compose.material3 import Slider
+            Slider(1.0, on_value_change=lambda v: None)
+            """.trimIndent(),
+            width = 200, height = 48,
+        )
+        val ink = left.count { it != BACKGROUND }
+        println("compose render: Slider(0.0) -> $ink px; pixel sets differ: ${!left.contentEquals(right)}")
+        assertTrue(ink > 0, "Slider drew nothing at value=0.0")
+        assertTrue(
+            !left.contentEquals(right),
+            "Slider(0.0) and Slider(1.0) produced identical pixels — the value argument was not read",
+        )
+    }
+
+    // ── 8. TopAppBar ─────────────────────────────────────────────────────────
+
+    /**
+     * TopAppBar — title: @Composable () -> Unit (Function2, arity 0), required.
+     * TopAppBar fills the full scene with its own container, so ink counting gives the same
+     * result with or without a title. Distinct-colour counting finds the glyph colour.
+     */
+    @Test
+    fun topAppBarComposesItsTitleLambda() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import TopAppBar, Text
+            TopAppBar(title=lambda: Text('hi'))
+            """.trimIndent(),
+            width = 200, height = 64,
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import TopAppBar
+            TopAppBar(title=lambda: None)
+            """.trimIndent(),
+            width = 200, height = 64,
+        )
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: TopAppBar(title=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+                "empty -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "TopAppBar with empty title must still draw its container")
+        assertTrue(
+            drawnColors != emptyColors,
+            "TopAppBar title lambda added no new colour: $emptyColors vs $drawnColors",
+        )
+    }
+
+    // ── 9. FloatingActionButton ───────────────────────────────────────────────
+
+    /**
+     * FloatingActionButton — onClick: Function0, content: @Composable () -> Unit, both required.
+     * The FAB always draws its own container surface, which in a 200x60 scene fills nearly the
+     * full height. Distinct-colour counting finds the glyph colour added by Text inside.
+     */
+    @Test
+    fun floatingActionButtonComposesItsClickHandlerAndContent() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import FloatingActionButton, Text
+            FloatingActionButton(on_click=lambda: None, content=lambda: Text('hi'))
+            """.trimIndent(),
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import FloatingActionButton
+            FloatingActionButton(on_click=lambda: None, content=lambda: None)
+            """.trimIndent(),
+        )
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: FAB(content=Text('hi')) -> ${drawnColors.size} distinct colors, " +
+                "empty -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "FloatingActionButton must draw its container even with no content")
+        assertTrue(
+            drawnColors != emptyColors,
+            "FAB content lambda added no new colour over the bare container: $emptyColors vs $drawnColors",
+        )
+    }
+
+    // ── 10. Tab + TabRow ──────────────────────────────────────────────────────
+
+    /**
+     * TabRow — selectedTabIndex: Int, tabs: @Composable () -> Unit.
+     * Tab — selected: Boolean, onClick: Function0, text: @Composable () -> Unit.
+     *
+     * TabRow fills the scene with its indicator and background, so distinct-colour counting is
+     * again the right tool. Tab's text slot carries the glyph colour.
+     */
+    @Test
+    fun tabRowComposesItsTabsAndTabRendersItsTextSlot() {
+        val drawnPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import TabRow, Tab, Text
+            TabRow(
+                selected_tab_index=0,
+                tabs=lambda: Tab(
+                    selected=True,
+                    on_click=lambda: None,
+                    text=lambda: Text('Hi'),
+                ),
+            )
+            """.trimIndent(),
+            width = 200, height = 48,
+        )
+        val emptyPixels = pixelsOf(
+            """
+            from pythonx.compose.material3 import TabRow, Tab
+            TabRow(
+                selected_tab_index=0,
+                tabs=lambda: Tab(
+                    selected=True,
+                    on_click=lambda: None,
+                    text=lambda: None,
+                ),
+            )
+            """.trimIndent(),
+            width = 200, height = 48,
+        )
+        val drawnColors = drawnPixels.filter { it != BACKGROUND }.toSet()
+        val emptyColors = emptyPixels.filter { it != BACKGROUND }.toSet()
+        println(
+            "compose render: TabRow(Tab(text=Text('Hi'))) -> ${drawnColors.size} distinct colors, " +
+                "empty text -> ${emptyColors.size} distinct colors",
+        )
+        assertTrue(emptyColors.isNotEmpty(), "TabRow with empty Tab must still draw its indicator and container")
+        assertTrue(
+            drawnColors != emptyColors,
+            "Tab text lambda added no new colour over the bare tab/row: $emptyColors vs $drawnColors",
+        )
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private fun inkOf(body: String, width: Int = 200, height: Int = 60): Int =
+        pixelsOf(body, width, height).count { it != BACKGROUND }
+
+    private fun pixelsOf(body: String, width: Int = 200, height: Int = 60): IntArray {
+        val scene = ImageComposeScene(width = width, height = height, density = Density(1f)) {
+            PythonComposition(body)
+        }
+        try {
+            val bitmap = Bitmap.makeFromImage(scene.render())
+            return IntArray(width * height) { bitmap.getColor(it % width, it / width) }
+        } finally {
+            scene.close()
+        }
+    }
+
+    private companion object {
+        const val BACKGROUND = 0
+    }
+}
