@@ -1431,30 +1431,62 @@ object PythonxAdapter {
 
         # --------------------------------------------------------------------------- modules (§2.3)
 
+        def _read_constant(decl):
+            '''The current value of a `kind == 'STATIC_GETTER'` declaration -- invoked, not called.
+
+            The body `_Binding.__call__` would run for a zero-argument call, minus the call: `args`
+            is always empty (`CallableKind.STATIC_GETTER.hasReceiver` is `False` and the scanner
+            gives it no parameters either), so there is nothing to `_bind`.
+            '''
+            return _wrap(
+                _boundary()['invoke'](decl.bound_handle(), ()),
+                decl.return_type_name if decl.return_tag == 'OBJECT' else None,
+            )
+
+
         def _adapt(kotlin_package, python_name):
+            '''The value or callable [python_name] means in [kotlin_package], and whether `_module_
+            getattr` may freeze it into the module dict.
+
+            A `kind == 'STATIC_GETTER'` decl is read rather than called (see `_read_constant`) and
+            is never cacheable: `ArtifactScanner.constantsOf` binds every public property of an
+            `object`/companion it can reach, `var` included, and carries nothing that says which are
+            which. A `var`'s value can change between two reads -- an object holding a mutable
+            counter, say -- so the generic "resolved once, then a module-dict hit" cache every other
+            adapted name gets here is refused for this one kind, and every read re-enters Kotlin.
+            '''
             decls = _BY_PACKAGE.get(kotlin_package, {}).get(python_name)
             if decls:
-                return _callable_for(python_name, decls)
+                if len(decls) == 1 and decls[0].kind == 'STATIC_GETTER':
+                    return _read_constant(decls[0]), False
+                return _callable_for(python_name, decls), True
             qualified = kotlin_package + '.' + python_name
             if python_name[:1].isupper() and (qualified in _BY_RECEIVER or qualified in _PROXY_TYPES):
                 # A type, not a declaration: `pythonx.compose.ui.Modifier` is the receiver proxy.
-                return _proxy_type(qualified)
+                return _proxy_type(qualified), True
             candidate = kotlin_package + '.' + to_kotlin_name(python_name)
             if candidate in _TABLE:
-                return _Binding(_TABLE[candidate])
-            return None
+                decl = _TABLE[candidate]
+                if decl.kind == 'STATIC_GETTER':
+                    return _read_constant(decl), False
+                return _Binding(decl), True
+            return None, False
 
 
         def _module_getattr(module, kotlin_package):
             def __getattr__(name):
                 if name.startswith('__') and name.endswith('__'):
                     raise AttributeError(name)
-                adapted = _adapt(kotlin_package, name)
+                adapted, cacheable = _adapt(kotlin_package, name)
                 if adapted is None:
                     raise AttributeError(
                         "module '" + module.__name__ + "' has no attribute '" + name +
                         "' (nothing named that is exposed from Kotlin package " + kotlin_package + ')'
                     )
+                if not cacheable:
+                    # A live property (see `_adapt`): every read has to re-enter Kotlin, so the name
+                    # is deliberately left out of the module dict and this hook runs again next time.
+                    return adapted
                 # Adapted once. Every later read is an ordinary module-dict hit and this never runs again
                 # for this name -- which is why the 551-587 ns figure for a live-property `__getattr__`
                 # does not price this one.

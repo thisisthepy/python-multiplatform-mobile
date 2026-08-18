@@ -39,13 +39,13 @@ import kotlin.test.assertTrue
  *
  * ### Two things this test had to get right, and both are facts rather than details
  *
- * **The constant is *called*, not read.** `Arrangement.Start()` -- with the parentheses. The
- * adaptation layer renders every declaration as a callable and does not branch on
- * [python.multiplatform.reflection.CallableKind], so a static getter arrives as a zero-argument
- * function rather than an attribute. Reading it without calling it passes the function object
- * itself, and the dispatcher refuses with *"expected a Horizontal handle"*. Exposing these as
- * attributes is the next step and is not done here; the `kind` column that would drive it is
- * already carried.
+ * **The constant is *read*, not called.** `Arrangement.Start` -- no parentheses. The adaptation
+ * layer branches on [python.multiplatform.reflection.CallableKind]: a
+ * [python.multiplatform.reflection.CallableKind.STATIC_GETTER] is invoked once by `PythonxAdapter`
+ * itself and handed back as a value, so `Arrangement.$constant()` -- the spelling this test used
+ * before the branch existed -- now raises `TypeError: '...' object is not callable` instead of
+ * returning the right thing for the wrong reason. Read without being called, the value round-trips
+ * as `Arrangement.Start` does in Kotlin.
  *
  * **The row is given a width.** A `Row` wraps its content, so with no width constraint there is no
  * spare space and every arrangement puts the child in the same place -- the `Start` assertion passed
@@ -105,7 +105,7 @@ class ObjectConstantRenderTest {
 
         Row(
             modifier=width__Dp(emptyModifier(), 80.0),
-            horizontal_arrangement=Arrangement.$constant(),
+            horizontal_arrangement=Arrangement.$constant,
             content=lambda scope: Text('X'),
         )
     """.trimIndent()

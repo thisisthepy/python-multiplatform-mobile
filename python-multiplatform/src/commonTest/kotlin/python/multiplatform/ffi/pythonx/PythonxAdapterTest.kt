@@ -435,6 +435,70 @@ class PythonxAdapterTest {
     }
 
     /**
+     * `kind == STATIC_GETTER`: `Arrangement.Start` is a value, read as an attribute, and read
+     * **fresh every time** rather than cached the way every other adapted name is.
+     *
+     * `Arrangement` itself is a submodule here, not a proxy class -- `_PACKAGES_SEEN` picks up
+     * `androidx.compose.foundation.layout.Arrangement` from the getter's own package, and `_Finder`
+     * resolves `from ... import Arrangement` to it before `pythonx.compose.foundation.layout`'s
+     * `__getattr__` is ever consulted. `.Start` is then that submodule's own attribute read.
+     *
+     * The no-cache claim is checked the same way `anAttributeIsAdaptedOnceAndThenLivesInTheModuleDict`
+     * checks the opposite one, except through `ComposeShapedFragment.calls`, because the returned
+     * value has no Python-visible identity to compare -- `_wrap` builds a fresh proxy instance every
+     * call regardless of whether the underlying Kotlin object is one singleton or two. Two Python
+     * reads of `Arrangement.Start` have to leave two entries in `calls`; a cache would leave one.
+     */
+    @Test
+    fun aStaticGetterIsReadAsAnAttributeAndReadFreshEveryTime() = withAdapter {
+        Python3.exec(
+            """
+            from pythonx.compose.foundation.layout import Arrangement, describe_horizontal
+            _px = {}
+            _first = Arrangement.Start
+            _second = Arrangement.Start
+            _px['first'] = describe_horizontal(_first)
+            _px['second'] = describe_horizontal(_second)
+            _px['end'] = describe_horizontal(Arrangement.End)
+            """.trimIndent(),
+        )
+
+        assertEquals("Start", eval("_px['first']"))
+        assertEquals("Start", eval("_px['second']"))
+        assertEquals("End", eval("_px['end']"))
+        assertEquals(
+            listOf("Arrangement.Start", "Arrangement.Start", "Arrangement.End"),
+            ComposeShapedFragment.calls,
+            "a static getter is read, not cached: each Python-level read must re-enter Kotlin",
+        )
+    }
+
+    /**
+     * The regression this whole change is about: `Arrangement.Start()`, the spelling
+     * `ObjectConstantRenderTest` needed before `kind` was branched on, must no longer work -- a
+     * static getter's value is not a callable, and a caller that still writes the parentheses
+     * should see a clear `TypeError` rather than a silently wrong answer.
+     */
+    @Test
+    fun aStaticGetterIsNotCallable() = withAdapter {
+        Python3.exec(
+            """
+            from pythonx.compose.foundation.layout import Arrangement
+            try:
+                Arrangement.Start()
+                _px = 'called'
+            except TypeError as e:
+                _px = str(e)
+            """.trimIndent(),
+        )
+
+        assertTrue(
+            eval("_px") != "called",
+            "a static getter's value must refuse to be called",
+        )
+    }
+
+    /**
      * Publishes this target's raw entry points, installs `pythonx`, and runs [block].
      *
      * `PythonProxySource.install()` is deliberately **not** called: `pythonx` reaches the boundary

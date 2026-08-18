@@ -37,6 +37,7 @@ import python.multiplatform.reflection.TypeTag
  * | `toURLString` | a name the snake -> camel rule **cannot** invert; the index has to carry it |
  * | `paddingFromBaseline__TextUnit` | the value-class reject list: a packed wrapper must refuse a raw number |
  * | `emptyModifier` | where a chain starts. Compose has no bound declaration for this; see [EMPTY_MODIFIER] |
+ * | `Arrangement.Start` / `.End` | `kind = STATIC_GETTER`: a value behind a name, read as an attribute and not called |
  */
 object ComposeShapedFragment : FunctionTableFragment {
 
@@ -69,6 +70,10 @@ object ComposeShapedFragment : FunctionTableFragment {
     private const val PADDING_VALUES = "androidx.compose.foundation.layout.PaddingValues"
 
     private const val TEXT_UNIT = "androidx.compose.ui.unit.TextUnit"
+
+    private const val ARRANGEMENT = "androidx.compose.foundation.layout.Arrangement"
+
+    private const val HORIZONTAL = "$ARRANGEMENT.Horizontal"
 
     override fun entries(): List<ExposedCallable> = listOf(
         ExposedCallable(
@@ -221,6 +226,50 @@ object ComposeShapedFragment : FunctionTableFragment {
             paramTypeNames = listOf("kotlin.String"),
             returnTypeName = "kotlin.String",
         ) { args -> "url:" + (args[0] as String) },
+        // `kind = STATIC_GETTER`: what `ArtifactScanner.objectConstantCandidates` binds for
+        // `Arrangement.Start` -- a value behind a name, not a function, and the walker never sees a
+        // `val` and a `var` differently, so nothing here promises this is read once. `calls` records
+        // one entry per Kotlin-side invocation, which is what a test needs to tell "read fresh every
+        // time" apart from "resolved once and cached in the module dict", the fate every other
+        // adapted name gets.
+        ExposedCallable(
+            name = "$ARRANGEMENT.Start",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.OBJECT,
+            kind = CallableKind.STATIC_GETTER,
+            paramNames = emptyList(),
+            paramTypeNames = emptyList(),
+            returnTypeName = HORIZONTAL,
+        ) {
+            calls += "Arrangement.Start"
+            StubHorizontal("Start")
+        },
+        ExposedCallable(
+            name = "$ARRANGEMENT.End",
+            arity = 0,
+            paramTypes = emptyList(),
+            returnType = TypeTag.OBJECT,
+            kind = CallableKind.STATIC_GETTER,
+            paramNames = emptyList(),
+            paramTypeNames = emptyList(),
+            returnTypeName = HORIZONTAL,
+        ) {
+            calls += "Arrangement.End"
+            StubHorizontal("End")
+        },
+        // Unwraps the handle a STATIC_GETTER read hands back, the same way `describeModifier` does
+        // for a chain -- there is no other way from Python to tell `Arrangement.Start` from
+        // `Arrangement.End` once each is a bare proxy instance.
+        ExposedCallable(
+            name = "androidx.compose.foundation.layout.describeHorizontal",
+            arity = 1,
+            paramTypes = listOf(TypeTag.OBJECT),
+            returnType = TypeTag.STRING,
+            paramNames = listOf("horizontal"),
+            paramTypeNames = listOf(HORIZONTAL),
+            returnTypeName = "kotlin.String",
+        ) { args -> (args[0] as StubHorizontal).label },
     )
 
     private fun dp(value: Any?): String = (value as Double).toString()
@@ -301,3 +350,8 @@ class StubModifier private constructor(private val elements: List<String>) {
 
 /** An ordinary object parameter, so that two arity-2 overloads can be told apart by type alone. */
 class StubPaddingValues(val label: String)
+
+/** What `ComposeShapedFragment`'s `Arrangement.Start`/`.End` hand back: an opaque handle a test can
+ * only tell apart by round-tripping through `describeHorizontal`, the same way a real `Horizontal`
+ * would be. */
+class StubHorizontal(val label: String)
