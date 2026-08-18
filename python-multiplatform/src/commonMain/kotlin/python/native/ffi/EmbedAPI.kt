@@ -2860,6 +2860,97 @@ expect fun PyIter_Next(o: NativePointer): NativePointer?
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Section 27
+// Type Objects
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/**
+ *  *Part of the Stable ABI.*
+ *
+ * Return true if *a* is a subtype of *b*.
+ *
+ * This function only checks for actual subtypes, which means that
+ * "__subclasscheck__()" is not called on *b*.  Call
+ * "PyObject_IsSubclass()" to do the same check that "issubclass()"
+ * would do.
+ */
+expect inline fun PyType_IsSubtype(a: NativePointer, b: NativePointer): Int
+
+/**
+ *  *Part of the Stable ABI.*
+ *
+ * Finalize a type object.  This should be called on all type objects
+ * to finish their initialization.  This function is responsible for
+ * adding inherited slots from a type’s base class.  Return "0" on
+ * success, or return "-1" and sets an exception on error.
+ *
+ * Note:
+ *
+ *   If some of the base classes implements the GC protocol and the
+ *   provided type does not include the "Py_TPFLAGS_HAVE_GC" in its
+ *   flags, then the GC protocol will be automatically implemented
+ *   from its parents. On the contrary, if the type being created does
+ *   include "Py_TPFLAGS_HAVE_GC" in its flags then it **must**
+ *   implement the GC protocol itself by at least implementing the
+ *   "tp_traverse" handle.
+*/
+expect inline fun PyType_Ready(type: NativePointer): Int
+
+/**
+ *  *Return value: New reference.*
+ *  *Part of the Stable ABI since version 3.11.*
+ *
+ * Return the type’s name. Equivalent to getting the type’s "__name__"
+ * attribute.
+ *
+ * Added in version 3.11.
+ */
+expect fun PyType_GetName(type: NativePointer): NativePointer?
+
+/**
+ *  *Part of the Stable ABI since version 3.13.*
+ *
+ * Return the type’s fully qualified name. Equivalent to
+ * "f"{type.__module__}.{type.__qualname__}"", or "type.__qualname__"
+ * if "type.__module__" is not a string or is equal to ""builtins"".
+ *
+ * Added in version 3.13.
+ */
+expect fun PyType_GetFullyQualifiedName(type: NativePointer): NativePointer?
+
+/**
+ *  *Part of the Stable ABI since version 3.13.*
+ *
+ * Return the type’s module name. Equivalent to getting the
+ * "type.__module__" attribute.
+ *
+ * Added in version 3.13.
+ */
+expect fun PyType_GetModuleName(type: NativePointer): NativePointer?
+
+/**
+ *  *Part of the Stable ABI since version 3.10.*
+ *
+ * Return the module object associated with the given type when the
+ * type was created using "PyType_FromModuleAndSpec()".
+ *
+ * If no module is associated with the given type, sets "TypeError"
+ * and returns "NULL".
+ *
+ * This function is usually used to get the module in which a method
+ * is defined. Note that in such a method,
+ * "PyType_GetModule(Py_TYPE(self))" may not return the intended
+ * result. "Py_TYPE(self)" may be a *subclass* of the intended class,
+ * and subclasses are not necessarily defined in the same module as
+ * their superclass. See "PyCMethod" to get the class that defines the
+ * method. See "PyType_GetModuleByDef()" for cases when "PyCMethod"
+ * cannot be used.
+ *
+ * Added in version 3.9.
+ */
+expect fun PyType_GetModule(type: NativePointer): NativePointer?
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Section 16
 // Integer Objects
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -3472,6 +3563,24 @@ expect fun PyUnicode_InternFromString(str: String): NativePointer?
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Section 28
+// Tuple Objects
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// NOTE: section numbers are append order, not the C API documentation's chapter order.
+// Sections 1-26 follow the docs; 27 (Type Objects), 28 (Tuple Objects) and 29 (Module Objects)
+// were added when they were first needed and so sit after Weak Reference Objects instead of at
+// their documented positions (Type before Integer Objects, Tuple before List Objects, Module
+// before Iterator Objects). Renumbering is a ~370-line pure-comment move with no behavioural
+// effect, and it conflicts with anything else editing this file; the target order is recorded in
+// ROADMAP §12 instead. Navigate this file by function name, not by section number.
+expect fun PyTuple_New(len: Long): NativePointer?
+expect inline fun PyTuple_Size(p: NativePointer): Long
+expect fun PyTuple_GetItem(p: NativePointer, pos: Long): NativePointer?
+expect fun PyTuple_GetSlice(p: NativePointer, low: Long, high: Long): NativePointer?
+expect inline fun PyTuple_SetItem(p: NativePointer, pos: Long, o: NativePointer): Int
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Section 22
 // List Objects
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -3879,6 +3988,80 @@ expect inline fun PySet_Clear(set: NativePointer): Int
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Section 29
+// Module Objects
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// NOTE: this section was added after 27/28; see the ordering note above. Nothing is outstanding.
+/**
+ *  *Part of the Stable ABI.*
+ *
+ * Return *module*'s "__name__" value.  This is equivalent to
+ * "module.__name__" and, unlike "PyModule_GetNameObject()", returns
+ * the value already decoded as a UTF-8 encoded "const char*" rather
+ * than a "PyObject*" -- so, unlike most of this ABI subset's string
+ * accessors, decoding it costs no separate `PyUnicode_AsUTF8()` call.
+ * "NULL" on failure (e.g. if *module* is not a module object).
+ */
+expect inline fun PyModule_GetName(module: NativePointer): String?
+
+/**
+ *  *Return value: Borrowed reference.*
+ *  *Part of the Stable ABI.*
+ *
+ * Return the dictionary object that implements *module*'s namespace;
+ * this object is the same as the "__dict__" attribute of the module
+ * object.  Raises a "SystemError" and returns "NULL" if *module* is
+ * not a module object.
+ */
+expect fun PyModule_GetDict(module: NativePointer): NativePointer?
+
+/**
+ *  *Return value: New reference.*
+ *  *Part of the Stable ABI.*
+ *
+ * Return the name of the file from which *module* was loaded using
+ * *module*'s "__file__" attribute, as a "PyObject*".  Raise
+ * "SystemError" and return "NULL" if *module* is not a module
+ * object; raise "AttributeError" and return "NULL" if the module
+ * has no "__file__" attribute (typically a built-in or frozen
+ * module).
+ */
+expect fun PyModule_GetFilenameObject(module: NativePointer): NativePointer?
+
+
+//
+//    // 기타
+//    private val pyRunSimpleStringHandle: MethodHandle
+//    private val pyEvalGetBuiltinsHandle: MethodHandle
+//
+//    // 모듈 및 객체 관리
+//    private val pyImportImportModuleHandle: MethodHandle
+//    private val pyObjectGetAttrStringHandle: MethodHandle
+//    private val pyObjectHasAttrStringHandle: MethodHandle
+//    private val pyObjectCallObjectHandle: MethodHandle
+//    private val pyObjectCallFunctionObjArgsHandle: MethodHandle
+//    private val pyIncRefHandle: MethodHandle
+//    private val pyDecRefHandle: MethodHandle
+//
+//    // 타입 변환
+//    private val pyLongFromLongHandle: MethodHandle
+//    private val pyLongAsLongHandle: MethodHandle
+//    private val pyFloatFromDoubleHandle: MethodHandle
+//    private val pyFloatAsDoubleHandle: MethodHandle
+//    private val pyUnicodeFromStringHandle: MethodHandle
+//    private val pyUnicodeAsUTF8Handle: MethodHandle
+//
+//    // 컬렉션
+//    private val pyListNewHandle: MethodHandle
+//    private val pyListSizeHandle: MethodHandle
+//    private val pyListGetItemHandle: MethodHandle
+//    private val pyListSetItemHandle: MethodHandle
+//    private val pyTupleNewHandle: MethodHandle
+//    private val pyTupleSizeHandle: MethodHandle
+//    private val pyTupleGetItemHandle: MethodHandle
+//    private val pyTupleSetItemHandle: MethodHandle
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Section 25
 // Iterator Objects
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -3976,186 +4159,3 @@ expect fun PyWeakref_GetRef(ref: NativePointer): NativePointer?
  */
 expect inline fun PyObject_ClearWeakRefs(o: NativePointer)
 
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Section 27
-// Type Objects
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-/**
- *  *Part of the Stable ABI.*
- *
- * Return true if *a* is a subtype of *b*.
- *
- * This function only checks for actual subtypes, which means that
- * "__subclasscheck__()" is not called on *b*.  Call
- * "PyObject_IsSubclass()" to do the same check that "issubclass()"
- * would do.
- */
-expect inline fun PyType_IsSubtype(a: NativePointer, b: NativePointer): Int
-
-/**
- *  *Part of the Stable ABI.*
- *
- * Finalize a type object.  This should be called on all type objects
- * to finish their initialization.  This function is responsible for
- * adding inherited slots from a type’s base class.  Return "0" on
- * success, or return "-1" and sets an exception on error.
- *
- * Note:
- *
- *   If some of the base classes implements the GC protocol and the
- *   provided type does not include the "Py_TPFLAGS_HAVE_GC" in its
- *   flags, then the GC protocol will be automatically implemented
- *   from its parents. On the contrary, if the type being created does
- *   include "Py_TPFLAGS_HAVE_GC" in its flags then it **must**
- *   implement the GC protocol itself by at least implementing the
- *   "tp_traverse" handle.
-*/
-expect inline fun PyType_Ready(type: NativePointer): Int
-
-/**
- *  *Return value: New reference.*
- *  *Part of the Stable ABI since version 3.11.*
- *
- * Return the type’s name. Equivalent to getting the type’s "__name__"
- * attribute.
- *
- * Added in version 3.11.
- */
-expect fun PyType_GetName(type: NativePointer): NativePointer?
-
-/**
- *  *Part of the Stable ABI since version 3.13.*
- *
- * Return the type’s fully qualified name. Equivalent to
- * "f"{type.__module__}.{type.__qualname__}"", or "type.__qualname__"
- * if "type.__module__" is not a string or is equal to ""builtins"".
- *
- * Added in version 3.13.
- */
-expect fun PyType_GetFullyQualifiedName(type: NativePointer): NativePointer?
-
-/**
- *  *Part of the Stable ABI since version 3.13.*
- *
- * Return the type’s module name. Equivalent to getting the
- * "type.__module__" attribute.
- *
- * Added in version 3.13.
- */
-expect fun PyType_GetModuleName(type: NativePointer): NativePointer?
-
-/**
- *  *Part of the Stable ABI since version 3.10.*
- *
- * Return the module object associated with the given type when the
- * type was created using "PyType_FromModuleAndSpec()".
- *
- * If no module is associated with the given type, sets "TypeError"
- * and returns "NULL".
- *
- * This function is usually used to get the module in which a method
- * is defined. Note that in such a method,
- * "PyType_GetModule(Py_TYPE(self))" may not return the intended
- * result. "Py_TYPE(self)" may be a *subclass* of the intended class,
- * and subclasses are not necessarily defined in the same module as
- * their superclass. See "PyCMethod" to get the class that defines the
- * method. See "PyType_GetModuleByDef()" for cases when "PyCMethod"
- * cannot be used.
- *
- * Added in version 3.9.
- */
-expect fun PyType_GetModule(type: NativePointer): NativePointer?
-
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Section 28
-// Tuple Objects
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// NOTE: section numbers are append order, not the C API documentation's chapter order.
-// Sections 1-26 follow the docs; 27 (Type Objects), 28 (Tuple Objects) and 29 (Module Objects)
-// were added when they were first needed and so sit after Weak Reference Objects instead of at
-// their documented positions (Type before Integer Objects, Tuple before List Objects, Module
-// before Iterator Objects). Renumbering is a ~370-line pure-comment move with no behavioural
-// effect, and it conflicts with anything else editing this file; the target order is recorded in
-// ROADMAP §12 instead. Navigate this file by function name, not by section number.
-expect fun PyTuple_New(len: Long): NativePointer?
-expect inline fun PyTuple_Size(p: NativePointer): Long
-expect fun PyTuple_GetItem(p: NativePointer, pos: Long): NativePointer?
-expect fun PyTuple_GetSlice(p: NativePointer, low: Long, high: Long): NativePointer?
-expect inline fun PyTuple_SetItem(p: NativePointer, pos: Long, o: NativePointer): Int
-
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Section 29
-// Module Objects
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// NOTE: this section was added after 27/28; see the ordering note above. Nothing is outstanding.
-/**
- *  *Part of the Stable ABI.*
- *
- * Return *module*'s "__name__" value.  This is equivalent to
- * "module.__name__" and, unlike "PyModule_GetNameObject()", returns
- * the value already decoded as a UTF-8 encoded "const char*" rather
- * than a "PyObject*" -- so, unlike most of this ABI subset's string
- * accessors, decoding it costs no separate `PyUnicode_AsUTF8()` call.
- * "NULL" on failure (e.g. if *module* is not a module object).
- */
-expect inline fun PyModule_GetName(module: NativePointer): String?
-
-/**
- *  *Return value: Borrowed reference.*
- *  *Part of the Stable ABI.*
- *
- * Return the dictionary object that implements *module*'s namespace;
- * this object is the same as the "__dict__" attribute of the module
- * object.  Raises a "SystemError" and returns "NULL" if *module* is
- * not a module object.
- */
-expect fun PyModule_GetDict(module: NativePointer): NativePointer?
-
-/**
- *  *Return value: New reference.*
- *  *Part of the Stable ABI.*
- *
- * Return the name of the file from which *module* was loaded using
- * *module*'s "__file__" attribute, as a "PyObject*".  Raise
- * "SystemError" and return "NULL" if *module* is not a module
- * object; raise "AttributeError" and return "NULL" if the module
- * has no "__file__" attribute (typically a built-in or frozen
- * module).
- */
-expect fun PyModule_GetFilenameObject(module: NativePointer): NativePointer?
-
-
-//
-//    // 기타
-//    private val pyRunSimpleStringHandle: MethodHandle
-//    private val pyEvalGetBuiltinsHandle: MethodHandle
-//
-//    // 모듈 및 객체 관리
-//    private val pyImportImportModuleHandle: MethodHandle
-//    private val pyObjectGetAttrStringHandle: MethodHandle
-//    private val pyObjectHasAttrStringHandle: MethodHandle
-//    private val pyObjectCallObjectHandle: MethodHandle
-//    private val pyObjectCallFunctionObjArgsHandle: MethodHandle
-//    private val pyIncRefHandle: MethodHandle
-//    private val pyDecRefHandle: MethodHandle
-//
-//    // 타입 변환
-//    private val pyLongFromLongHandle: MethodHandle
-//    private val pyLongAsLongHandle: MethodHandle
-//    private val pyFloatFromDoubleHandle: MethodHandle
-//    private val pyFloatAsDoubleHandle: MethodHandle
-//    private val pyUnicodeFromStringHandle: MethodHandle
-//    private val pyUnicodeAsUTF8Handle: MethodHandle
-//
-//    // 컬렉션
-//    private val pyListNewHandle: MethodHandle
-//    private val pyListSizeHandle: MethodHandle
-//    private val pyListGetItemHandle: MethodHandle
-//    private val pyListSetItemHandle: MethodHandle
-//    private val pyTupleNewHandle: MethodHandle
-//    private val pyTupleSizeHandle: MethodHandle
-//    private val pyTupleGetItemHandle: MethodHandle
-//    private val pyTupleSetItemHandle: MethodHandle
