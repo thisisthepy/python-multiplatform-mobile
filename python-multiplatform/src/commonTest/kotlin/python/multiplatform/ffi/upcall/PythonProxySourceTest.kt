@@ -48,6 +48,7 @@ class PythonProxySourceTest {
         name: String,
         arity: Int = 0,
         paramTypes: List<TypeTag> = List(arity) { TypeTag.OBJECT },
+        paramTypeNames: List<String> = emptyList(),
         returnTypeName: String? = "p.Link",
         kind: CallableKind = CallableKind.FUNCTION,
         isSuspend: Boolean = false,
@@ -56,6 +57,7 @@ class PythonProxySourceTest {
         arity = arity,
         paramTypes = paramTypes,
         returnType = TypeTag.OBJECT,
+        paramTypeNames = paramTypeNames,
         returnTypeName = returnTypeName,
         kind = kind,
         isSuspend = isSuspend,
@@ -617,6 +619,73 @@ class PythonProxySourceTest {
             source.contains("_pm_unwrap(a1)"),
             "only an OBJECT-tagged parameter can be carrying a handle; unwrapping a float is cost " +
                 "for nothing",
+        )
+    }
+
+    @Test
+    fun aParameterDeclaredAsAPyObjectIsNotUnwrapped() {
+        // `99acd830`'s open defect. `TypeTag.OBJECT` is two things at once in the *argument*
+        // direction too: `UpcallTrampoline.toKotlinObject` reads an `int` as a `HandleTable` handle
+        // and anything else as the Python object itself. So unwrapping a proxy handed to a parameter
+        // the producer declared as `PyObject` sends the Kotlin object behind the handle, and the
+        // entry's own `args[i] as PyObject` cast fails -- `fixture.app.ProxyObjectArgumentTest`
+        // observes exactly that. The declared type is the only thing that can decide this; the value
+        // cannot, because a proxy is a legitimate argument to either kind of parameter.
+        val source = PythonProxySource.render(
+            listOf(
+                objectEntry(
+                    "p.echo",
+                    arity = 1,
+                    paramTypeNames = listOf("python.multiplatform.ffi.PyObject"),
+                ),
+            ),
+        )
+
+        assertContains(source, "_pm_invoke(_pm_h_0, (a0,))")
+        assertFalse(
+            source.contains("_pm_unwrap(a0)"),
+            "a PyObject-typed parameter wants the Python object, so there is nothing to unwrap",
+        )
+    }
+
+    @Test
+    fun aParameterDeclaredAsAKotlinTypeIsStillUnwrapped() {
+        // The other side of the same decision, and the reason it cannot be "stop unwrapping":
+        // `chain.link`'s parameter is declared `chain.ChainLink`, and `OwnedResultLifetimeTest`
+        // counts the handles that route roots and releases.
+        val source = PythonProxySource.render(
+            listOf(objectEntry("p.link", arity = 1, paramTypeNames = listOf("p.Link"))),
+        )
+
+        assertContains(source, "_pm_invoke(_pm_h_0, (_pm_unwrap(a0),))")
+    }
+
+    @Test
+    fun aParameterWhoseProducerNamedNoTypeKeepsBeingUnwrapped() {
+        // Every hand-written fragment in this repository and every producer not yet taught to fill
+        // `paramTypeNames` is this shape. Silence is not "it is a PyObject" -- it is "nothing said",
+        // and the contract that existed before anything said is the unwrapping one.
+        val source = PythonProxySource.render(listOf(objectEntry("p.opaque", arity = 1)))
+
+        assertContains(source, "_pm_invoke(_pm_h_0, (_pm_unwrap(a0),))")
+    }
+
+    @Test
+    fun bothOwnersAreUnwrappableSoTheDeclaredTypeIsTheOnlyThingThatDecides() {
+        // `_PmGcObject` is deliberately *not* an `_PmObject` -- two solid bases cannot be combined --
+        // so an `isinstance(v, _PmObject)` test silently answered "leave it alone" for every proxy of
+        // a class with a `PyObject` field, whatever its parameter was declared as. That is the same
+        // defect from the other end: `fixture.app.ProxyObjectArgumentTest` observes a `RefHolder`
+        // proxy reaching a `RefHolder`-typed parameter as a `PyObject`. Now that the decision is made
+        // when the call is rendered, `_pm_unwrap` is only reached where unwrapping is wanted, and it
+        // has to be able to do it for either owner.
+        val source = PythonProxySource.render(listOf(objectEntry("p.link", arity = 1)))
+
+        assertContains(source, "isinstance(_pm_v, _pm_owners)")
+        assertContains(source, "_pm_owners=(_PmObject, _PmGcObject)")
+        assertTrue(
+            source.indexOf("_PmGcObject") < source.indexOf("def _pm_unwrap("),
+            "the owners tuple is bound as a default argument, so both names must already exist",
         )
     }
 
