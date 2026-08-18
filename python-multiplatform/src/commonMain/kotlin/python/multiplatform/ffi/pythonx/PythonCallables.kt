@@ -99,11 +99,34 @@ import python.multiplatform.reflection.TypeTag
  * nested `content` re-supplying **both** its wrappers on every pass, so nothing Compose holds goes
  * untouched. That test is the guard a sweep would be built on.
  *
- * It is not built, and the reason is a shape nothing has measured: a slot Compose *retains across a
+ * It is not built, and the reason was a shape nothing had measured: a slot Compose *retains across a
  * re-supply*. `LaunchedEffect(key) { block }` keeps the block it has when `key` is unchanged, so a
  * pass supplying a different wrapper would leave the retained one untouched and still live -- and a
  * wrapper released while Compose still calls it is `agent-rules` §14's failure, arriving somewhere
- * else. Interning bounds the case that actually recurs; the sweep waits for that measurement.
+ * else. Interning bounds the case that actually recurs; the sweep needed that measurement first.
+ *
+ * **That measurement now exists, and the verdict is that a same-pass sweep is unsafe.**
+ * `:ksp-fixtures:compose`'s `RetainedSlotSweepPreconditionTest
+ * .aRetainingSlotKeepsPassZerosWrapperWhileLaterPassesCrossAndGoUntouched` drives a real
+ * `remember(key)` (the mechanism `LaunchedEffect(key)` is built on) with a constant key across six
+ * recompositions of one composition, each supplying a callable with a distinct capture -- so each
+ * pass crosses a genuinely different wrapper, exactly `aCapturedValueThatChangesIsADifferentCallable
+ * AndIsNotShared`'s shape. Measured over those six passes: `remember(key)` returns pass 0's wrapper
+ * on every one of them (confirmed against the real Compose runtime, not assumed from its docs), while
+ * [PythonCallableScope.liveCount] grows by exactly one new wrapper per pass and
+ * [PythonCallableScope.reuseCount] stays at zero throughout -- meaning pass 0's wrapper is *never
+ * touched again* (neither rebuilt nor reused) from pass 1 on, which is precisely the criterion a
+ * same-pass "untouched" sweep would release it under. Pass 0's underlying Python callable's own
+ * refcount is confirmed unmoved across all six passes, so the reference the scope is holding for it
+ * is real, single, and still exactly what `remember(key)` is still hands out on the last pass -- not
+ * already gone, which is why releasing it would be worse than the current leak rather than merely
+ * redundant.
+ *
+ * So: **a sweep keyed on "built or reused this pass" must not be built as the only criterion.** It
+ * would release a wrapper a retaining slot is still returning, the first time a composition contains
+ * one. Closing the leak this file otherwise documents needs the sweep to also recognise (or otherwise
+ * exempt) a retained slot's wrapper -- which this measurement did not attempt, since implementing the
+ * sweep was not its task.
  *
  * ### Double release
  *

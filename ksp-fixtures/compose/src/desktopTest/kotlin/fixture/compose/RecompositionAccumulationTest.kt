@@ -308,12 +308,14 @@ class RecompositionAccumulationTest {
      * exists as the **guard** rather than as the sweep: it is what would go red first if that
      * changed, and it should be read before anything releases a wrapper before disposal.
      *
-     * There is a second shape it says nothing about, and it is the one that would have to be settled
-     * first: a slot Compose **retains across a re-supply**. `LaunchedEffect(key) { block }` keeps the
-     * block it already has when `key` is unchanged and drops the new one, so a pass that supplies a
-     * *different* wrapper -- a lambda whose capture moved -- leaves the retained one untouched and
-     * still live. Nothing in this module binds such a declaration today and nothing here measures
-     * one; a sweep would have to.
+     * There is a second shape this test says nothing about: a slot Compose **retains across a
+     * re-supply**. `LaunchedEffect(key) { block }` keeps the block it already has when `key` is
+     * unchanged and drops the new one, so a pass that supplies a *different* wrapper -- a lambda
+     * whose capture moved -- leaves the retained one untouched and still live. Nothing in this module
+     * binds such a declaration today, so `RetainedSlotSweepPreconditionTest` measures it directly
+     * against `remember(key)` instead (the mechanism `LaunchedEffect(key)` is built on) -- and finds
+     * the shape unsafe for a same-pass sweep: see `PythonCallables.kt`'s "release point" section for
+     * the numbers and the verdict.
      *
      * The reason to want it at all is
      * [aCapturedValueThatChangesIsADifferentCallableAndIsNotShared]: interning bounds a repeated
