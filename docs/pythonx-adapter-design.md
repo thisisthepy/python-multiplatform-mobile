@@ -679,10 +679,10 @@ Collected, in the order that unblocks the most.
 `FunctionSlotBindingTest.mostFunctionTypedModifierExtensionsAreNoLongerDeclinedForBeingFunctionTyped`
 were run against the real Compose 1.7.0 desktop jars (`ANDROID_HOME=... ./gradlew
 :python-multiplatform-gradle-plugin:test --tests ...`, 2026-08-17) to get the *current* decline list
-by name rather than assume the count in either test's own KDoc is still current. It is not: **eight**
+by name rather than assume the count in either test's own KDoc is still current. It is not: **nine**
 public top-level `Modifier` extensions have zero binding overload today, not the "44"/"8" figures
-recorded when those tests were written. Two more names (`pullRefresh`, `contextMenuOpenDetector`) have
-a declined *overload* beside a bound one and so are not in this list — a caller can already reach
+recorded when those tests were written. One more name (`pullRefresh`) has
+a declined *overload* beside a bound one and so is not in this list — a caller can already reach
 `pullRefresh(modifier, state, enabled)`, just not the callback-based overload.
 
 | name | JVM signature (`javap -p`, Compose 1.7.0) | decline reason (`ArtifactScanner`, measured) |
@@ -695,15 +695,15 @@ a declined *overload* beside a bound one and so are not in this list — a calle
 | `modifierLocalProvider` | `modifierLocalProvider<T>(Modifier, ProvidableModifierLocal<T>, () -> T)` | same: `() -> T`'s `T` has no name |
 | `anchoredDraggable` | `anchoredDraggable<T>(Modifier, AnchoredDraggableState<T>, ...)` | not function-typed at all — the *required* `state` parameter's own type carries the unnameable `T`, so `resolveKotlinType` answers "no boundary type" before the function-slot grammar is ever asked |
 | `layoutId` | `layoutId(Modifier, layoutId: Any)` | not function-typed — `resolveKotlinType` has no boundary type for a bare `kotlin.Any`/`java.lang.Object` parameter (no hint of which `TypeTag` an arbitrary Python value crossing there should marshal as) |
+| `contextMenuOpenDetector` | `contextMenuOpenDetector(Modifier, key: Any?, enabled: Boolean, onOpen: (Offset)->Unit)` | not function-typed — same as `layoutId`, `resolveKotlinType` has no boundary type for `kotlin.Any` |
 
-So the eight split into three unrelated limits, not one:
+So the nine split into three unrelated limits, not one:
 
 - **suspend lambda** (`pointerInput`, `dragAndDropSource`, `draggable`, and `pullRefresh`'s declined
   overload) — §9.1 opens one of these.
 - **generic type parameter with no spellable name** (`swipeable`, `modifierLocalProvider`,
   `anchoredDraggable`) — a walker limit, not a suspend one; see §9.2.
-- **compile-model mismatch** (`composed`) and **unconstrained parameter type** (`layoutId`) — one
-  declaration each, see §9.2.
+- **compile-model mismatch** (`composed`) and **unconstrained parameter type** (`layoutId`, `contextMenuOpenDetector`) — see §9.2.
 
 ### 9.1 `Modifier.pointerInput` — judged reachable, and reached
 
