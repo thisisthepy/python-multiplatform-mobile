@@ -936,10 +936,9 @@ tests should move to the non-deprecated overload in the same commit.
 
 Seven components remain unjudgeable in this harness, and the reasons why:
 
-1. **`DropdownMenu`** (`menus.py`): Renders in a separate popup window layer, which `ImageComposeScene.render()` does not capture in this basic test setup (always returned 0 distinct colors).
-2. **`Typography` / `Shapes` / `dynamicLightColorScheme`** (`typography.py`, `shape.py`, `dynamic_color.py`): These are data classes or functions returning styling objects (like `ColorScheme`), not `@Composable` UI elements that emit pixels.
-3. **`DatePicker` / `TimePicker` / `SwipeToDismiss`** (`date_picker.py`, `time_picker.py`, `swipe_to_dismiss.py`): Require complex state objects (e.g., `DatePickerState`) that cannot be trivially instantiated from Python without a wrapping `@Composable` block or `ExperimentalMaterial3Api` annotations.
-4. **`BottomSheetScaffold` / `ModalBottomSheet`** (`bottom_sheet.py`): Require complex nested slot parameters (e.g., `sheetContent`) and internal states (`SheetState`) that do not easily render in an isolated visual harness.
+1. **`Typography` / `Shapes` / `dynamicLightColorScheme`** (`typography.py`, `shape.py`, `dynamic_color.py`): `Typography` and `Shapes` are data classes, and since `ArtifactScanner` drops constructors, they are completely excluded from the Python bindings. `ColorScheme` is exported because it has a top-level factory function, but calling it fails at runtime because its 36 parameters exceed the 31-bit default omission limit. `dynamicLightColorScheme` is an Android-only API and absent from the desktop jar. None can be instantiated from Python.
+2. **`DatePicker` / `TimePicker` / `SwipeToDismiss` / `BottomSheet`** (`date_picker.py`, `time_picker.py`, `swipe_to_dismiss.py`, `bottom_sheet.py`): Previously thought to be blocked by complex state objects. However, testing confirms that their state factory functions (`remember_date_picker_state`, `remember_time_picker_state`, `remember_swipe_to_dismiss_box_state`) **are** successfully bound and exported. Passing them from Python to the respective composables works flawlessly in the render harness.
+3. **`DropdownMenu`** (`menus.py`): Renders in a separate popup window layer. As confirmed by tests, `ImageComposeScene.render()` fundamentally does not capture these detached layers, resulting in 0 distinct colors despite being fully functional.
 
 ### §9.5 `anchoredDraggable`, through a concrete type
 
