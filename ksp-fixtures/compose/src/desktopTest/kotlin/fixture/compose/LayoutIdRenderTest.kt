@@ -120,6 +120,51 @@ class LayoutIdRenderTest {
         }
     }
 
+    /** The positive claim: tagging with an integer from Python and probing for the same int
+     * places the ink at the left (x in [0,20)). */
+    @Test
+    fun aMatchingLayoutIdIntPlacesTheChildAtTheLeft() {
+        val pixels = pixelsOfInt(taggedBodyInt(42), expectTag = 42)
+        assertTrue(inkAt(pixels, 0, 20), "no ink in the left region -- the matching tag was not placed there")
+        assertTrue(!inkAt(pixels, 60, 80), "ink in the right region even though the tag matched")
+    }
+
+    /** The negative control for int tag. */
+    @Test
+    fun aMismatchedLayoutIdIntPlacesTheChildAtTheRight() {
+        val pixels = pixelsOfInt(taggedBodyInt(42), expectTag = 99)
+        assertTrue(inkAt(pixels, 60, 80), "no ink in the right region -- a mismatched tag was not detected")
+        assertTrue(!inkAt(pixels, 0, 20), "ink in the left region even though the tag did not match")
+    }
+
+    private fun taggedBodyInt(tag: Int) = """
+        from fixture.compose import emptyModifier, pythonLayoutIdInt
+        from androidx.compose.foundation.layout import size__Dp
+        from pythonx.compose.material3 import Text
+
+        _m = pythonLayoutIdInt(size__Dp(emptyModifier(), 20.0), $tag)
+        Text("X", modifier=_m)
+    """.trimIndent()
+
+    private fun pixelsOfInt(body: String, expectTag: Int): IntArray {
+        val scene = ImageComposeScene(width = SCENE, height = SCENE, density = Density(1f)) {
+            Layout(content = { PythonComposition(body) }) { measurables, constraints ->
+                val measurable = measurables.first()
+                val placeable = measurable.measure(constraints)
+                val x = if (measurable.layoutId == expectTag) 0 else 60
+                layout(SCENE, SCENE) {
+                    placeable.placeRelative(x, 0)
+                }
+            }
+        }
+        try {
+            val bitmap = Bitmap.makeFromImage(scene.render())
+            return IntArray(SCENE * SCENE) { bitmap.getColor(it % SCENE, it / SCENE) }
+        } finally {
+            scene.close()
+        }
+    }
+
     /** Whether any pixel in the vertical band `[xStart, xEnd)` is not background -- the child is
      * placed at y=0, so any row in that band suffices. */
     private fun inkAt(pixels: IntArray, xStart: Int, xEnd: Int): Boolean =
