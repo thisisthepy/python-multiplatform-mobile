@@ -78,6 +78,8 @@ class ReturnSupertypeTest {
             includePrefixes = listOf("androidx.compose.ui.graphics"),
             classpath = composeClasspath(),
         )
+        // BitmapPainter's constructor is not bound (only value class constructors are), so its
+        // top-level factory function survives without ambiguity and carries return ancestry.
         val painter = entries.first { it.name == "androidx.compose.ui.graphics.painter.BitmapPainter" }
         assertEquals("androidx.compose.ui.graphics.painter.BitmapPainter", painter.returnTypeName)
         assertEquals(listOf("androidx.compose.ui.graphics.painter.Painter"), painter.returnSupertypes)
