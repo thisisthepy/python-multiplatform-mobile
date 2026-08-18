@@ -18,11 +18,13 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinNativeLink
 import org.jetbrains.kotlin.konan.target.Family
 import org.jetbrains.kotlin.konan.target.KonanTarget.*
 import org.jetbrains.kotlin.konan.target.linker
+import python.multiplatform.gradle.GenerateWasmProxyExportsTask
 
 
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.library)
+    id("io.github.thisisthepy.python.multiplatform.bindings") apply false
     id("com.codingfeline.buildkonfig").version("0.15.2")
     //id("org.jetbrains.dokka")
     id("maven-publish")
@@ -870,6 +872,10 @@ val generateDesktopReachabilityMetadata by tasks.registering(GenerateReachabilit
     relativePath.set(nativeImageMetadataPath)
     outputDirectory.set(layout.buildDirectory.dir("generated/native-image-metadata/desktop"))
 }
+val generateWasmProxyExports = tasks.register<GenerateWasmProxyExportsTask>("generateWasmProxyExports") {
+    packageName.set("python.multiplatform.generated.wasm")
+    outputDirectory.set(layout.buildDirectory.dir("generated/wasmProxyExports/test"))
+}
 
 kotlin {
     // ROADMAP §10. The target is a leaf directly under `commonMain` -- deliberately not under an
@@ -1256,7 +1262,9 @@ kotlin {
         // against CPython's own wasm exports.
         val wasmJsMain by getting
         wasmJsMain.dependsOn(commonMain)
-        val wasmJsTest by getting
+        val wasmJsTest by getting {
+            kotlin.srcDir(generateWasmProxyExports.map { it.outputDirectory })
+        }
         wasmJsTest.dependsOn(commonTest)
 
         val artMain by creating {
