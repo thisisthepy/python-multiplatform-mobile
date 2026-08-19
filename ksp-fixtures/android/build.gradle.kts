@@ -51,6 +51,14 @@ kotlin {
                 implementation(libs.kotlin.test.junit)
             }
         }
+        val androidInstrumentedTest by getting {
+            dependencies {
+                implementation(libs.kotlin.test)
+                implementation(libs.kotlin.test.junit)
+                implementation(libs.androidx.test.junit)
+                implementation("androidx.test:runner:1.6.2")
+            }
+        }
     }
 }
 
@@ -60,6 +68,7 @@ android {
 
     defaultConfig {
         minSdk = libs.versions.android.minSdk.get().toInt()
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     compileOptions {

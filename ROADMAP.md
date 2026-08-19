@@ -2896,21 +2896,11 @@ what is blocking it and what the next concrete step is.
    outright rather than converting it to a `ByteArray` copy is the one piece of the type table
    left unimplemented, and it is recorded as such in §7b rather than as a gap here.
 
-7. **`ksp-fixtures/android`'s `jvmTest` is 8 tests, not exercised on a real device**, and more
-   generally, the Android `Cleaner`/`PhantomReference` split (§4) below API 33 "is not covered
-   yet" by any test. **(a) blocking it:** needs a device or emulator below API 33 to exercise the
-   `PhantomReference` fallback path specifically — the emulators available in this environment
-   skew toward API 26/36 (CLAUDE.md), and 26 is itself ≥ the API 33 cutoff only in the wrong
-   direction (26 < 33, so it *should* already exercise the fallback — worth checking whether it
-   actually does before assuming this needs new hardware).
-
-   **The second half of this is closed, and it did not need hardware.** The premise was that the
-   fallback could only be reached from a device below API 33. Nothing in a `PhantomReference` drain
-   loop is Android-specific, so it moved to `jvmMain` and `desktopTest` reaches it on every build —
-   which immediately found a defect that had been there the whole time. What is *not* closed is the
-   `androidMain` wiring around it: no test still asserts which of the two paths a given API level
-   takes, and that part does need a device. `ksp-fixtures/android`'s 8 `jvmTest`s are also still
-   not exercised on one.
+7. **`ksp-fixtures/android`'s `jvmTest` 8 tests on device & API Level Path Assertions.** **Closed.**
+   - **API Level Path Assertions (`AndroidCleanerPathTest.kt`):** An instrumented test suite in `python-multiplatform/src/androidInstrumentedTest` reads `Build.VERSION.SDK_INT` and asserts exact path selection and runtime behavior across API levels:
+     - On **API 26** (`pmp_api26` - Android 8.0 < 33): `cleanable` field is `null` (reflecting on missing `java.lang.ref.Cleaner` throws `NoClassDefFoundError`), `fallback` (`PhantomCleanerRegistry.Cleanable`) is populated, `PhantomCleanerRegistry.outstanding` increments by 1, `PhantomCleanerRegistry.draining` is `true`, and `PhantomCleanerRegistry.drained` increments upon GC reclamation. This verified that the `PhantomReference` fallback path is reached and fully functional on API < 33. The premise that "needs new hardware" was incorrect: the `pmp_api26` AVD was already present and executed the fallback path.
+     - On **API 36** (`pmp_api36` - Android 16 >= 33): `cleanable` (`java.lang.ref.Cleaner.Cleanable`) is populated, `fallback` is `null`, and `PhantomCleanerRegistry` is completely bypassed (`drained` and `outstanding` do not increment).
+   - **`ksp-fixtures/android` Device Verification:** Configured `androidInstrumentedTest` source set and `testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"` in `ksp-fixtures/android/build.gradle.kts` and added `src/androidInstrumentedTest/kotlin/fixture/android/GeneratedAndroidTableTest.kt`. All 8 upcall table tests ran on device (`pmp_api26`) and passed (8/0/0).
 
 8. ~~wasm's `ProxyTypeExports.kt`-shaped trampoline generation is manual.~~ **Closed 2026-08-18 (`112b54d0`), plugin wiring completed.**
    `GenerateWasmProxyExportsTask` (`python-multiplatform-gradle-plugin`) generates the three `@WasmExport` proxy type slot trampolines (`pmp_tp_traverse`, `pmp_tp_clear`, `pmp_tp_dealloc`) from `WasmProxyExportsRendering.kt`. The hand-written test fixture `ProxyTypeExports.kt` was deleted in `112b54d0` and replaced by the task output in `:python-multiplatform:wasmJsTest`. `PythonBindingsPlugin` now automatically registers `generateWasmProxyExports` and wires its output directory to `wasmJsMain` for consumers (including `:sample`). Note that `UpcallExports.kt` / `WasmExports.kt` remain hand-written for `pmp_invoke` (the general upcall dispatcher), which is distinct from the CPython proxy type slots.
