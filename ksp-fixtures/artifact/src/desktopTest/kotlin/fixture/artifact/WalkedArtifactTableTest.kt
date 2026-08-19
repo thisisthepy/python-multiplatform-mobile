@@ -54,7 +54,11 @@ class WalkedArtifactTableTest {
         assertEquals(
             listOf(
                 // `:ksp-fixtures:artifact-valueclass`, built for exactly one proof: see that
-                // module's `build.gradle.kts`.
+                // module's `build.gradle.kts`. `Meters` is the value class's own constructor,
+                // bound since `e2d75100` -- this list predates that and was never updated, which
+                // nothing noticed because `ksp-fixtures:artifact` is not in the usual verification
+                // set. `ArtifactScannerTest` pins the same constructor from the plugin side.
+                "fixture.valueclass.Meters",
                 "fixture.valueclass.sumMeters",
                 "junit.runner.BaseTestRunner.getFilteredTrace",
                 "junit.runner.BaseTestRunner.getPreference__String",

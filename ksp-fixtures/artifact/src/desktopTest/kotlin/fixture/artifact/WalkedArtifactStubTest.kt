@@ -194,10 +194,20 @@ class WalkedArtifactStubTest {
             .filter { it.endsWith("__init__.pyi") && !it.startsWith("pythonx/") }
             .flatMap { path ->
                 val module = path.removeSuffix("/__init__.pyi").replace('/', '.')
-                Regex("""^def ([A-Za-z0-9_]+)\(""", RegexOption.MULTILINE)
-                    .findAll(stub(path))
-                    .map { "$module.${it.groupValues[1]}" }
-                    .toList()
+                val source = stub(path)
+                // Two shapes, because a table key is not always a call. A `STATIC_GETTER` -- a
+                // constant an object or companion publishes, `Arrangement.Start` -- is read as an
+                // attribute rather than called (`46be0212`), so `ac8e4708` renders it as a value
+                // annotation instead of a `def`. Matching only `def` would call every such key
+                // unstubbed, which is what this assertion reported after that change: the stub is
+                // there, it just is not a function. Both shapes are stubs; neither may be missing.
+                val functions = Regex("""^def ([A-Za-z0-9_]+)\(""", RegexOption.MULTILINE)
+                    .findAll(source)
+                    .map { it.groupValues[1] }
+                val constants = Regex("""^([A-Za-z0-9_]+): """, RegexOption.MULTILINE)
+                    .findAll(source)
+                    .map { it.groupValues[1] }
+                (functions + constants).map { "$module.$it" }.toList()
             }
             .toSet()
 

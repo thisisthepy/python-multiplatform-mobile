@@ -277,6 +277,20 @@ grep 하면 그 거부를 못 본다 — 그러면 머지된 줄 알고 **옛 �
 **`git checkout -- <디렉터리>` 를 쓰지 마라.** 커밋되지 않은 에이전트 작업은 복구 대상이 없어 그대로
 사라진다. 그렇게 9개 파일을 날린 적이 있다(에이전트를 재개시켜 복구했다).
 
+### 검증 대상에서 `ksp-fixtures` 를 빼먹지 않는다
+
+`:python-multiplatform-gradle-plugin:test` 만 돌리면 **생성기가 만든 것을 실제로 쓰는 쪽**은
+검증되지 않는다. 픽스처 모듈이 셋이고, 셋 다 서로 다른 것을 잡는다.
+
+    :ksp-fixtures:app:desktopTest        업콜·프록시 런타임
+    :ksp-fixtures:compose:desktopTest    Compose 바인딩과 렌더 증명
+    :ksp-fixtures:artifact:desktopTest   아티팩트 워커와 `.pyi` 스텁
+
+**`artifact` 를 빼먹어 두 개가 빨간 채로 develop 에 들어갔다.** 하나는 값 클래스 생성자를 묶기
+시작한 `e2d75100` 이 기대 목록을 갱신하지 않은 것이고(며칠 갔다), 다른 하나는 상수를 함수 대신
+값으로 스텁하게 바꾼 `ac8e4708` 이 "모든 테이블 키는 스텁되어야 한다" 불변식의 `def` 전용 매칭을
+갱신하지 않은 것이다. 둘 다 플러그인 단위 테스트로는 절대 보이지 않는다.
+
 ### 검증에 androidNative 컴파일을 포함한다
 
 `nativeMain` 은 iOS 와 androidNative 가 공유한다. **iOS 만 확인하면 androidNative 가 깨진 채로 지나간다** —
