@@ -72,6 +72,22 @@ object PythonBootstrap {
         // System.getenv delegates to this same native environment (unlike the JVM's cached no-arg
         // map), which is why PythonHomeCheck can read back what is set here.
         Os.setenv(PYTHONHOME, staging.prefix.absolutePath, true)
+        // `tempfile` asks `os.environ` for TMPDIR/TEMP/TMP, then falls back to `/tmp`, `/var/tmp`,
+        // `/usr/tmp` and finally `os.getcwd()`. None of those hardcoded paths exist inside an app
+        // sandbox and the cwd of an Android process is `/`, so with nothing set every candidate is
+        // refused and `tempfile.mkstemp()` raises `[Errno 2] No usable temporary directory found`.
+        // That is not a test-only inconvenience: `tempfile` is what the standard library itself
+        // reaches for, so an embedder's Python code hits it the first time it needs a scratch file.
+        //
+        // The cache directory rather than filesDir, because that is the one Android is allowed to
+        // reclaim under storage pressure, which is what a temporary directory is for. Set through
+        // the same `Os.setenv` PYTHONHOME uses and for the same reason: CPython reads it with
+        // getenv(3) and cannot see a JVM system property. Not overwritten if the host app already
+        // set one -- an embedder that pointed TMPDIR somewhere deliberately keeps it.
+        if (Os.getenv(TMPDIR).isNullOrEmpty()) {
+            val cache = context.cacheDir.also { it.mkdirs() }
+            Os.setenv(TMPDIR, cache.absolutePath, true)
+        }
         // Unpacked and *registered* here, put on sys.path by Python3.initialize below. The split
         // is not a preference: reading assets needs this Context and sys.path does not exist until
         // Py_Initialize() has run, so the two halves cannot happen at the same moment. See
@@ -372,6 +388,7 @@ object PythonBootstrap {
     }
 
     private const val PYTHONHOME = "PYTHONHOME"
+    private const val TMPDIR = "TMPDIR"
     private const val STAMP_NAME = ".python-multiplatform-stdlib"
     private const val PAYLOAD_STAMP_NAME = ".python-multiplatform-payload"
 

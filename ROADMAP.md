@@ -2276,6 +2276,23 @@ is the actual state of the Android object model, and that is the point of doing 
   `EmbedAPI.native.kt` open one at the top that swallows an entire duplicate "Section 1"; the live
   declarations are the later copies. Read either file with a nesting-aware scan before concluding
   a declaration exists, or the duplicate `Py_FinalizeEx`/`Py_RunMain` pairs will mislead.
+- **Android had no usable temporary directory, and `tempfile` is not optional plumbing.** Found by
+  running `:python-multiplatform:connectedDebugAndroidTest` on `pmp_api26` after `runApp` landed:
+  492 tests, 3 failures, all `[Errno 2] No usable temporary directory found in ['/tmp',
+  '/var/tmp', '/usr/tmp', '/']`. `tempfile` asks `os.environ` for `TMPDIR`/`TEMP`/`TMP`, then
+  falls back to those hardcoded paths and finally `os.getcwd()`; none of the paths exist in an app
+  sandbox and an Android process's cwd is `/`. `PythonBootstrap.initialize` now sets `TMPDIR` to
+  `context.cacheDir` through the same `Os.setenv` `PYTHONHOME` uses — the cache directory
+  specifically, because that is the one Android may reclaim under storage pressure — and leaves an
+  embedder's own `TMPDIR` alone if one is already set. `PythonBootstrapTest
+  .initializeLeavesTempfileUsable` pins it; 493/0 after.
+
+  **iOS and androidNative are unverified for the same question.** Neither sets `TMPDIR`, and
+  nothing outside `RunAppTest`/`PythonBootstrapTest` exercises `tempfile` anywhere. wasm passes it
+  (471/0, and `RunAppTest` is `commonTest`), so wasm's temp path works; the simulator probably
+  inherits the host's real `/tmp`, but "probably" is not a measurement and no iOS run has been
+  taken since `runApp` landed.
+
 - **`Python3.finalize` reports no error detail**, and cannot: `Py_Finalize()` returns void and
   there is no interpreter left to hold an error indicator afterwards. The one improvement
   available is `Py_FinalizeEx()`'s `int` (0, or -1 when flushing buffered data failed). Left

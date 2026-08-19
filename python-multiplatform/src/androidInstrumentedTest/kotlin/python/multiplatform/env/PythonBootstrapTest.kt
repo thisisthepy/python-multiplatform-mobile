@@ -276,6 +276,34 @@ class PythonBootstrapTest {
         assertEquals("6", Python3.eval("sum([1, 2, 3])", 258, globals, globals).toString())
     }
 
+    /**
+     * `tempfile.mkstemp()` is not optional plumbing -- it is what the standard library itself
+     * reaches for whenever embedded Python code needs a scratch file. `tempfile.gettempdir()`
+     * (via `_candidate_tempdir_list()`) tries `TMPDIR`/`TEMP`/`TMP` from `os.environ` first, then
+     * the hardcoded `/tmp`, `/var/tmp`, `/usr/tmp`, then `os.getcwd()` as a last resort. None of
+     * the hardcoded paths exist inside an Android app's sandbox, and the instrumentation
+     * process's cwd is `/`, not app-private storage -- so with nothing set, every candidate is
+     * refused and `tempfile.mkstemp()` raises `FileNotFoundError: [Errno 2] No usable temporary
+     * directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/']`.
+     */
+    @Test
+    fun initializeLeavesTempfileUsable() {
+        PythonBootstrap.initialize(context, silent = true)
+
+        Python3.exec(
+            "import tempfile as _pmp_bootstrap_tempfile, os as _pmp_bootstrap_os\n" +
+                "_pmp_bootstrap_fd, __pmp_bootstrap_tmp_path__ = _pmp_bootstrap_tempfile.mkstemp()\n" +
+                "_pmp_bootstrap_os.close(_pmp_bootstrap_fd)\n"
+        )
+        val globals = Python3.import("__main__").dict
+        val path = Python3.eval("__pmp_bootstrap_tmp_path__", 258, globals, globals).toString()
+        try {
+            assertTrue(File(path).isFile, "tempfile.mkstemp() reported '$path' but no such file exists")
+        } finally {
+            Python3.exec("import os; os.remove(__pmp_bootstrap_tmp_path__)")
+        }
+    }
+
     private companion object {
         const val TAG = "PythonBootstrapTest"
     }
