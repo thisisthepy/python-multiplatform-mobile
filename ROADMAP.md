@@ -3996,11 +3996,44 @@ Not verified, and each is a real next step rather than a caveat:
    (that module's `build.gradle.kts`). A second *JVM* target would exercise the plural wiring and
    prove nothing about the walk; a second *real* target is a Kotlin/Native one, and walking its
    `.klib` is 16e, which is investigated and not implemented. **(b) next step:** 16e, not this.
-2. **`PythonProxySource` needs `_pm_resolve`/`_pm_invoke` bound**, which is per-platform and, in this
-   repository, exists only in `python-multiplatform`'s own **test** source
+2. ~~**`PythonProxySource` needs `_pm_resolve`/`_pm_invoke` bound**, which is per-platform and, in
+   this repository, exists only in `python-multiplatform`'s own **test** source
    (`UpcallEntryBridge.desktop.kt`). `ksp-fixtures/artifact` rebuilds the two `ctypes.CFUNCTYPE`s by
    hand from the public `UpcallStub` addresses. A consumer has no supported route to this today; that
-   is the gap, not the fixture's workaround.
+   is the gap, not the fixture's workaround.~~ **Closed for desktop, and the same route now compiles
+   for every other in-repo target.** `python.multiplatform.ffi.upcall.UpcallBootstrap` (`commonMain`,
+   `expect object { fun publishToGlobals(): Boolean }`) is the consumer-facing entry point that did
+   not exist before. `WalkedArtifactPythonImportTest` calls it and the hand-rolled
+   `ctypes.CFUNCTYPE`/`UpcallStub` workaround is gone from that file — `git log -p` on this commit is
+   the proof, and `UpcallBootstrapTest` (`commonTest`) pins the contract (`_pm_resolve`, `_pm_invoke`,
+   `_pm_release`, `_pm_cancel` all present after one call; a second call rebinds cleanly rather than
+   refusing or failing).
+
+   What each `actual` does was mostly already sitting in production code, unused by anything a
+   consumer could reach:
+
+   | target | `actual` | what it calls |
+   |---|---|---|
+   | desktop | new (`UpcallBootstrap.desktop.kt`) | `ctypes.CFUNCTYPE` over `UpcallStub`'s Panama stubs — the same four addresses the removed workaround used, just no longer hand-assembled per call site |
+   | androidNative, iOS (`nativeMain`) | new, one line | `python.native.ffi.UpcallEntry.publish` — a complete `PyMethodDef` bootstrap that has existed in `nativeMain` production code all along; nothing outside this module's own tests ever called it |
+   | Android/ART (`androidMain`) | new, one line | the same `UpcallEntry.publish`, backed by the JNI shim already built into `jni_onload.def` — ships inside the library's own `.so`, no extra consumer wiring |
+   | wasmJs | new, one line | `python.native.ffi.UpcallEntry.publish` (`wasmJsMain`) over the one `@WasmExport`ed dispatcher |
+
+   **wasmJs has one real remaining requirement, and it is the consumer's, not the library's.**
+   `@WasmExport` is honoured only in the compilation that produces the final `.wasm`, so the library
+   cannot declare `pmp_invoke` on a consumer's behalf — every wasmJs consumer must still write the
+   three-line delegating export `wasmJsTest/UpcallExports.kt` shows, or `UpcallEntry.publish` throws
+   `IllegalStateException` at the `pmpRegisterUpcall` call inside `publishToGlobals()`. This is
+   structural (`docs/upcall-async-design.md` §12.4's finding still holds for the export itself, even
+   though the *bootstrap* it blocked is no longer the gap) and not something a future revision of
+   this entry can close without changing what `@WasmExport` means.
+
+   No entry point published by any target other than desktop's is a stub: every `actual` above
+   delegates to code this repository already built, tested from its own suite, and shipped — only the
+   one-line public wrapper and (for wasmJs) the `commonMain` `expect`/desktop `actual` pair were
+   missing. `androidMain`'s and `nativeMain`'s `UpcallBootstrap.*.kt` files are ~310 bytes because
+   `UpcallEntry.publish` already does the real work; that is the same shape `UpcallBootstrap.kt`
+   itself is, not a sign either is unfinished.
 3. **The generated source directory is wired reflectively.** `kotlin.sourceSets.getByName(name).kotlin
    .srcDir(task)` goes through `Class.getMethod`, for the same reason `setKspArg` does. Both ends of
    the chain are Gradle types (`NamedDomainObjectContainer`, `SourceDirectorySet`); only `getKotlin()`

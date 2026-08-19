@@ -2,11 +2,11 @@ package fixture.artifact
 
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.upcall.PythonProxySource
+import python.multiplatform.ffi.upcall.UpcallBootstrap
 import python.multiplatform.generated.FunctionTable
 import python.multiplatform.generated.artifacts.ArtifactTable
 import python.multiplatform.reflection.HandleTable
 import python.multiplatform.reflection.UpcallTable
-import python.native.ffi.UpcallStub
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -75,24 +75,7 @@ class WalkedArtifactComposeModifierTest {
         Python3.initialize(silent = true)
         UpcallTable.clear()
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
-        Python3.exec(
-            """
-            import ctypes
-
-            _pm_resolve = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_char_p)(${UpcallStub.resolveHandleStubAddr})
-            _pm_invoke = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.c_long, ctypes.py_object)(
-                ${UpcallStub.invokeWithArgsStubAddr}
-            )
-            # What a proxy's tp_dealloc (this class's `_PmObject.__del__`) calls -- without this
-            # bound, `_pm_releaser()` in `PythonProxySource.support` falls back to `_pm_no_release`
-            # and every owned result in this fixture leaks its handle silently, the same shape of
-            # bug this file exists to catch, just one layer further down in the bootstrap than the
-            # KSP producer fix this file is otherwise about.
-            _pm_release = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_long)(
-                ${UpcallStub.releaseObjectStubAddr}
-            )
-            """.trimIndent(),
-        )
+        check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
     }
 

@@ -2,10 +2,10 @@ package fixture.artifact
 
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.upcall.PythonProxySource
+import python.multiplatform.ffi.upcall.UpcallBootstrap
 import python.multiplatform.generated.FunctionTable
 import python.multiplatform.generated.artifacts.ArtifactTable
 import python.multiplatform.reflection.UpcallTable
-import python.native.ffi.UpcallStub
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -22,10 +22,11 @@ import kotlin.test.assertEquals
  * JUnit's own package path, and `id()` answers `"4.13.2"` -- a string that exists nowhere except
  * inside `junit/runner/Version.class`.
  *
- * The two names the generated proxies need (`_pm_resolve`, `_pm_invoke`) are bound the way
- * `python-multiplatform`'s own desktop tests bind them: `ctypes.CFUNCTYPE` over the Panama upcall
- * stubs `UpcallStub` already builds. That part is per-platform and is not what this test is about;
- * it is here because a consumer module has no other route to it today (see ROADMAP §16).
+ * The four names the generated proxies need (`_pm_resolve`, `_pm_invoke`, `_pm_release`,
+ * `_pm_cancel`) are bound through [UpcallBootstrap.publishToGlobals] -- the public, per-platform
+ * entry point a consumer outside this repository can call. It is what closes ROADMAP §16f's gap:
+ * before it existed, this same install had to hand-rebuild `ctypes.CFUNCTYPE`s over `UpcallStub`'s
+ * addresses, which only `python-multiplatform`'s own test source knew how to do.
  */
 class WalkedArtifactPythonImportTest {
 
@@ -34,16 +35,7 @@ class WalkedArtifactPythonImportTest {
         Python3.initialize(silent = true)
         UpcallTable.clear()
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
-        Python3.exec(
-            """
-            import ctypes
-
-            _pm_resolve = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_char_p)(${UpcallStub.resolveHandleStubAddr})
-            _pm_invoke = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.c_long, ctypes.py_object)(
-                ${UpcallStub.invokeWithArgsStubAddr}
-            )
-            """.trimIndent(),
-        )
+        check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
     }
 
