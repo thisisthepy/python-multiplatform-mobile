@@ -3949,7 +3949,7 @@ primitive, `String`, `ByteArray` or `void`. `Ljava/util/List;` has no Kotlin spe
 constructors and fields are unbound too — those need a `ReflectedClass` and a receiver handle, which is
 `PythonProxySource`'s existing class-rendering path and a separate step.
 
-### 16e. klib — investigated, not implemented, and the answer is *easier* than the jar
+### 16e. klib — implemented and wired, and this heading was stale for longer than the work took
 
 §5b left this open: "On iOS, androidNative and wasm the artefacts are klibs, and whether the same walk
 is possible there — and what a Kotlin declaration from a klib can be bound to at runtime with no JVM
@@ -3977,14 +3977,36 @@ binary, and the klib is on its compile classpath, so calling a klib declaration 
 call — no reflection, nothing that a closed world or a missing JVM would break. The JVM path is the
 awkward one, not the Native path.
 
-Not done here, and the reasons are scope rather than difficulty:
+**Both of the reasons this section gave for not doing it were solved by the way it was eventually
+done, and the section was never updated.** Checked against the code rather than against this
+document:
 
-- It puts `kotlin-compiler-embeddable` (~60 MB) on the plugin's classpath, versioned against the
-  consumer's Kotlin rather than the plugin's.
-- `@ExperimentalLibraryAbiReader` has no compatibility promise; the seam would have to be behind an
-  interface the way `FragmentDiscovery` is.
-- A Native consumer needs the per-platform `_pm_resolve`/`_pm_invoke` bootstrap that the desktop test
-  builds by hand out of `UpcallStub`, and no consumer-facing route to it exists yet (see 16f).
+- `KlibScanner` (`python-multiplatform-gradle-plugin/.../artifact/KlibScanner.kt`) does the walk,
+  `@OptIn(ExperimentalLibraryAbiReader::class)` and all.
+- It is **not** on the plugin's own classpath at run time. `PythonArtifactBindingsTask` and
+  `PythonStubsTask` both reach it through `WorkerExecutor.scanKlibIsolated`, which runs
+  `KlibScanWorkAction` in an isolated worker classloader whose classpath (`klibReaderClasspath`)
+  is supplied per build. `PythonArtifactBindingsTask`'s KDoc records why: calling `KlibScanner`
+  in the task's own classloader throws `NoSuchMethodError` in a real build. That worker boundary
+  is the interface seam this section asked for, and it is stronger than one — an interface would
+  still have put the 60 MB artefact on one classpath, and this does not.
+- `KlibScannerTest` covers it against two real klibs: `kotlin-stdlib`'s, out of the pinned
+  Kotlin/Native distribution, and `kotlinx-coroutines-core-androidnativearm64:1.8.1`, a real
+  third-party download.
+
+What is genuinely still open is narrower than what was written here, and worth stating exactly:
+
+- **The in-process test path is pinned to one Kotlin version.** `KlibScannerTest` reads klibs from
+  `kotlin-native-prebuilt-macos-aarch64-2.0.20`, and calls `KlibScanner` directly rather than
+  through a worker, because a test JVM has no worker to hand a classpath to. Reading a klib
+  produced by a *newer* Kotlin than the one the plugin was compiled against fails there with
+  `org.jetbrains.kotlin.protobuf.InvalidProtocolBufferException` — observed while attempting this
+  section, against this repository's own `2.4.20-Beta2` klibs. **This is a property of the test
+  path, not of the product path**, which is exactly what `klibReaderClasspath` exists to avoid;
+  but nothing currently asserts that the product path survives a version skew the test path does
+  not, and that assertion is the next concrete step.
+- A Native consumer needs the per-platform `_pm_resolve`/`_pm_invoke` bootstrap — **closed**, see
+  16f item 2 and `UpcallBootstrap`.
 
 ### 16f. What is verified, and what is not
 
@@ -4012,7 +4034,9 @@ Not verified, and each is a real next step rather than a caveat:
    has one target on purpose — "the walker reads jars, and jars are what a JVM target resolves"
    (that module's `build.gradle.kts`). A second *JVM* target would exercise the plural wiring and
    prove nothing about the walk; a second *real* target is a Kotlin/Native one, and walking its
-   `.klib` is 16e, which is investigated and not implemented. **(b) next step:** 16e, not this.
+   `.klib` is 16e -- which turned out to be implemented and wired through an isolated worker
+   already, as that section now records. **(b) next step:** a fixture module with a Kotlin/Native
+   target and a klib on its compile classpath, not more scanner work.
 2. ~~**`PythonProxySource` needs `_pm_resolve`/`_pm_invoke` bound**, which is per-platform and, in
    this repository, exists only in `python-multiplatform`'s own **test** source
    (`UpcallEntryBridge.desktop.kt`). `ksp-fixtures/artifact` rebuilds the two `ctypes.CFUNCTYPE`s by
