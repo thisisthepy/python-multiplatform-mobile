@@ -4,6 +4,7 @@ import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.ListProperty
+import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
 import python.multiplatform.gradle.artifact.PythonArtifactBindingsTask
 import python.multiplatform.gradle.stubs.PythonStubsTask
@@ -177,6 +178,25 @@ interface PythonBindingsExtension {
     val artifactSourceSet: Property<String>
 
     /**
+     * More than one target's worth of the same thing: resolvable configuration name -> Kotlin
+     * source set name, e.g. `"desktopCompileClasspath" to "desktopMain"`.
+     *
+     * [artifactConfiguration]/[artifactSourceSet] name exactly one pair and stay supported -- a
+     * build that sets them keeps its task named `generatePythonArtifactBindings`, unsuffixed, so
+     * nothing that already invokes that task by name breaks. Every *additional* pair gets a task
+     * named after its source set, because two tasks cannot share a name and the source set is what
+     * distinguishes their output directories already.
+     *
+     * Still named by hand rather than derived, for the reason [artifactConfiguration] gives: this
+     * plugin carries no Kotlin Gradle Plugin types, so it cannot ask a target what its compile
+     * classpath is called. What changes here is only that the answer no longer has to be singular.
+     * The naming convention a caller can rely on is `<target>CompileClasspath` -> `<target>Main`
+     * for a plain Kotlin target; Android's variant-aware configurations do not follow it, which is
+     * exactly why this stays a map the caller writes rather than something derived.
+     */
+    val artifactTargets: MapProperty<String, String>
+
+    /**
      * Whether to emit `.pyi` stubs for the walked artefacts -- `docs/pyi-generation-design.md`.
      *
      * Defaults to true wherever the walker itself is registered, and is a no-op everywhere else:
@@ -289,53 +309,66 @@ class PythonBindingsPlugin : Plugin<Project> {
      * are set, so a build that only wants KSP pays nothing: no task, no configuration resolution and
      * no generated source directory.
      */
-    private fun configureArtifactBindings(project: Project, extension: PythonBindingsExtension) {
+    internal fun configureArtifactBindings(project: Project, extension: PythonBindingsExtension) {
         val includes = extension.artifactIncludePackages.getOrElse(emptyList())
         if (includes.isEmpty()) return
-        val configurationName = extension.artifactConfiguration.orNull
-            ?: error(
-                "pythonBindings.artifactIncludePackages is set but artifactConfiguration is not: " +
-                    "name the resolvable configuration to walk, e.g. \"desktopCompileClasspath\".",
-            )
-        val sourceSetName = extension.artifactSourceSet.orNull
-            ?: error(
-                "pythonBindings.artifactIncludePackages is set but artifactSourceSet is not: " +
-                    "name the Kotlin source set the generated fragments compile into, e.g. \"desktopMain\".",
-            )
+        
+        val singleConfig = extension.artifactConfiguration.orNull
+        val singleSourceSet = extension.artifactSourceSet.orNull
+        val targets = extension.artifactTargets.getOrElse(emptyMap()).toMutableMap()
+        if (singleConfig != null && singleSourceSet != null) {
+            targets[singleConfig] = singleSourceSet
+        }
 
-        val configuration = project.configurations.findByName(configurationName)
-            ?: error("no configuration named '$configurationName' in ${project.path}")
-        val klibReader = klibReaderClasspath(project)
-        // `incoming.artifacts` rather than the configuration's own file collection: it is the only
-        // route that carries each file's *coordinates* alongside it, and a fragment has to be named
-        // after the artefact rather than after whatever the cache called the file.
-        val resolved = configuration.incoming.artifacts
-
-        val task = project.tasks.register(
-            "generatePythonArtifactBindings",
-            PythonArtifactBindingsTask::class.java,
-        ) {
-            group = "python"
-            description = "Walks resolved artefacts and emits Python bindings for their declarations."
-            artifacts.from(resolved.artifactFiles)
-            coordinatesByFileName.set(
-                resolved.resolvedArtifacts.map { set ->
-                    set.associate { it.file.name to it.id.componentIdentifier.displayName }
-                },
-            )
-            includePrefixes.set(includes)
-            klibReaderClasspath.from(klibReader)
-            outputDirectory.set(
-                project.layout.buildDirectory.dir("generated/pythonArtifactBindings/$sourceSetName"),
-            )
-            thunkDirectory.set(
-                project.layout.buildDirectory.dir("generated/pythonComposableThunks/$sourceSetName"),
+        if (targets.isEmpty()) {
+            error(
+                "pythonBindings.artifactIncludePackages is set but no targets are configured: " +
+                    "set artifactConfiguration/artifactSourceSet or artifactTargets."
             )
         }
 
-        addKotlinSourceDirectory(project, sourceSetName, task)
-        addThunkClasspath(project, sourceSetName, task)
-        configureStubGeneration(project, extension, resolved, includes, sourceSetName, klibReader)
+        val klibReader = klibReaderClasspath(project)
+
+        for ((configurationName, sourceSetName) in targets) {
+            val configuration = project.configurations.findByName(configurationName)
+                ?: error("no configuration named '$configurationName' in ${project.path}")
+            
+            // `incoming.artifacts` rather than the configuration's own file collection: it is the only
+            // route that carries each file's *coordinates* alongside it, and a fragment has to be named
+            // after the artefact rather than after whatever the cache called the file.
+            val resolved = configuration.incoming.artifacts
+
+            val taskSuffix = sourceSetName.replaceFirstChar { it.uppercaseChar() }
+            val isLegacyName = targets.size == 1 && configurationName == singleConfig
+
+            val bindingsTaskName = if (isLegacyName) "generatePythonArtifactBindings" else "generatePythonArtifactBindings$taskSuffix"
+
+            val task = project.tasks.register(
+                bindingsTaskName,
+                PythonArtifactBindingsTask::class.java,
+            ) {
+                group = "python"
+                description = "Walks resolved artefacts and emits Python bindings for their declarations."
+                artifacts.from(resolved.artifactFiles)
+                coordinatesByFileName.set(
+                    resolved.resolvedArtifacts.map { set ->
+                        set.associate { it.file.name to it.id.componentIdentifier.displayName }
+                    },
+                )
+                includePrefixes.set(includes)
+                this.klibReaderClasspath.from(klibReader)
+                outputDirectory.set(
+                    project.layout.buildDirectory.dir("generated/pythonArtifactBindings/$sourceSetName"),
+                )
+                thunkDirectory.set(
+                    project.layout.buildDirectory.dir("generated/pythonComposableThunks/$sourceSetName"),
+                )
+            }
+
+            addKotlinSourceDirectory(project, sourceSetName, task)
+            addThunkClasspath(project, sourceSetName, task)
+            configureStubGeneration(project, extension, resolved, includes, sourceSetName, klibReader, isLegacyName, taskSuffix)
+        }
     }
 
     /**
@@ -459,9 +492,12 @@ class PythonBindingsPlugin : Plugin<Project> {
         includes: List<String>,
         sourceSetName: String,
         klibReader: org.gradle.api.artifacts.Configuration,
+        isLegacyName: Boolean,
+        taskSuffix: String,
     ) {
         if (!extension.generateStubs.getOrElse(true)) return
-        val task = project.tasks.register("generatePythonStubs", PythonStubsTask::class.java) {
+        val stubTaskName = if (isLegacyName) "generatePythonStubs" else "generatePythonStubs$taskSuffix"
+        val task = project.tasks.register(stubTaskName, PythonStubsTask::class.java) {
             group = "python"
             description = "Emits .pyi stubs for the declarations the artefact walker bound."
             artifacts.from(resolved.artifactFiles)

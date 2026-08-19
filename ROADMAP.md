@@ -3976,10 +3976,26 @@ Verified: one target (`desktop`/JVM), one configuration (`desktopCompileClasspat
 
 Not verified, and each is a real next step rather than a caveat:
 
-1. **More than one target.** `artifactConfiguration`/`artifactSourceSet` are single-valued and named by
-   hand. Deriving them per target means asking the Kotlin Gradle Plugin what a target's compile
-   classpath is called, and this plugin deliberately carries no KGP types — the same constraint that
-   made `TEST_WORD` a name matcher. A per-target map is the shape, and it is untried.
+1. ~~**More than one target.** `artifactConfiguration`/`artifactSourceSet` are single-valued and named by
+   hand.~~ **The wiring half is done; what is left is not the wiring.** `artifactTargets`
+   (`MapProperty<String, String>`, configuration name → source set name) makes the answer plural.
+   The singular pair still works and, when it is the only pair, still gets the unsuffixed
+   `generatePythonArtifactBindings`/`generatePythonStubs` names an existing build already invokes;
+   every additional pair gets a task named after its source set, which is what already distinguishes
+   the output directories. Setting both folds the singular pair into the map rather than registering
+   it twice. `ArtifactTargetsWiringTest` pins all three properties; neutering the map read fails
+   exactly the two multi-pair cases and leaves the back-compat one green.
+
+   Deriving the map is still refused, for the reason this entry gave and one more measured since:
+   this plugin carries no KGP types (the constraint that made `TEST_WORD` a name matcher), and
+   Android's variant-aware configuration names do not follow the `<target>CompileClasspath` →
+   `<target>Main` convention a derivation would have to assume. The caller writes the map.
+
+   **(a) what is still blocking a second target end-to-end:** not this wiring. `ksp-fixtures/artifact`
+   has one target on purpose — "the walker reads jars, and jars are what a JVM target resolves"
+   (that module's `build.gradle.kts`). A second *JVM* target would exercise the plural wiring and
+   prove nothing about the walk; a second *real* target is a Kotlin/Native one, and walking its
+   `.klib` is 16e, which is investigated and not implemented. **(b) next step:** 16e, not this.
 2. **`PythonProxySource` needs `_pm_resolve`/`_pm_invoke` bound**, which is per-platform and, in this
    repository, exists only in `python-multiplatform`'s own **test** source
    (`UpcallEntryBridge.desktop.kt`). `ksp-fixtures/artifact` rebuilds the two `ctypes.CFUNCTYPE`s by
