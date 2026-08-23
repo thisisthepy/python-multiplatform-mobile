@@ -160,7 +160,7 @@ grep 에 걸린 것은 프롬프트와 설정 JSON 안의 단어였다.
 외장 SSD 로 옮긴 뒤 디스크 제약이 풀렸다 (2026-08 재측정):
 
 ```
-디스크 여유   335 GB  (/Volumes/macMini)   이전 5.6 GB 에서 해소
+디스크 여유   164 GB  (/Volumes/macMini)   2026-08-23 실측
 RAM          16 GB
 코어          8
 ```
@@ -172,6 +172,26 @@ RAM          16 GB
 | 빌드·테스트를 도는 에이전트 | **3~4** (worktree 격리, Gradle/Kotlin 데몬 메모리가 한계) |
 | 읽기 · 분석 · 문서만 하는 에이전트 | 추가로 3~4 |
 | Android / iOS 기기 테스트 | **1** — 에뮬레이터가 2대뿐이고 패키지명이 같아 동시 설치가 충돌한다 |
+
+### worktree 의 `build/` 는 쌓이기만 한다 — 주기적으로 지운다
+
+**worktree 86 개가 외장 349 GB 중 267 GB 를 먹어 여유가 4.6 GB 까지 떨어진 적이 있다** (2026-08-23,
+다른 세션이 디스크가 없어 막혀서 알게 됐다). 그중 대부분은 소스가 아니라 **각 worktree 가 따로 만든
+`build/`** 다 — 표본에서 worktree 크기의 53~74% 였다.
+
+    find /Volumes/macMini/worktrees -maxdepth 3 -type d -name build -not -path '*/build/*' -print0       | xargs -0 -n 20 rm -rf
+
+이것만으로 **159 GB 가 회수**됐고(4 GB → 164 GB), 소스·git 상태·브랜치는 그대로 남는다.
+지우기 전에 확인할 것:
+
+- **활성 빌드가 없어야 한다.** Gradle/Kotlin 데몬이 파일을 잡고 있으면 지우다 만 상태가 된다.
+  데몬은 `pkill -f GradleDaemon` 으로 내려도 다음 빌드에서 다시 뜬다.
+  4일 8시간 묵은 `aapt2` 가 살아 있던 적이 있으니 **떠 있다고 해서 빌드 중인 것은 아니다** — `etime` 을 봐라.
+- **각 worktree 에 커밋 안 된 변경이 없어야 한다.** `build/` 만 지우면 소스는 안 건드리지만,
+  확인 자체는 해 두는 편이 낫다.
+
+worktree 자체를 지우는 것은 그다음 단계다. 브랜치가 develop 에 머지돼 있으면 잃을 것이 없지만,
+`build/` 삭제만으로 대개 충분하다.
 
 **worktree 는 반드시 외장에 만든다** (`/Volumes/macMini/worktrees/<이름>`). 내부 SSD 에 만들면 금방 찬다.
 
