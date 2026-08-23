@@ -2287,11 +2287,22 @@ is the actual state of the Android object model, and that is the point of doing 
   embedder's own `TMPDIR` alone if one is already set. `PythonBootstrapTest
   .initializeLeavesTempfileUsable` pins it; 493/0 after.
 
-  **iOS and androidNative are unverified for the same question.** Neither sets `TMPDIR`, and
-  nothing outside `RunAppTest`/`PythonBootstrapTest` exercises `tempfile` anywhere. wasm passes it
-  (471/0, and `RunAppTest` is `commonTest`), so wasm's temp path works; the simulator probably
-  inherits the host's real `/tmp`, but "probably" is not a measurement and no iOS run has been
-  taken since `runApp` landed.
+  **iOS and androidNative were checked rather than fixed, and neither needed fixing.** The three
+  `RunAppTest` cases that failed on Android are the ones that write and run a temporary script, so
+  they are the probe: `iosSimulatorArm64Test` 457/0 with `RunAppTest` 19/19 including both
+  `scriptPath...` cases, and `androidNativeArm64Test` 460/0 on `emulator-5554`. Both re-run on
+  this tree rather than taken from a report.
+
+  Why each is unaffected, which is what stops this from being luck:
+  - **iOS**, on the simulator, resolves `/tmp` to the host's, so `tempfile`'s hardcoded first
+    candidate exists. **This says nothing about a device.** A real iOS app is sandboxed the way an
+    Android app is, and the answer there is `NSTemporaryDirectory()`; nothing in this repository
+    has run on one, so the entry below about the iOS app bundle owns that question.
+  - **androidNative** runs its tests through `adb shell`, which sets `TMPDIR=/data/local/tmp` in
+    the environment CPython inherits. That is a property of the *test harness*, not of the target:
+    an androidNative binary shipped inside an app would have neither `/tmp` nor that variable, and
+    would need the same fix `PythonBootstrap` applies. Recorded here rather than left implied,
+    because "the suite is green" would otherwise read as "the target is covered".
 
 - **`Python3.finalize` reports no error detail**, and cannot: `Py_Finalize()` returns void and
   there is no interpreter left to hold an error indicator afterwards. The one improvement
