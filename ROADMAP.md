@@ -3997,6 +3997,25 @@ document:
 
 What is genuinely still open is narrower than what was written here, and worth stating exactly:
 
+- **Nothing distinguishes "read the klib and found nothing bindable" from "failed to read it".**
+  This is the sharp form of the item below, and it was found while trying to close it.
+  `:ksp-fixtures:klib-artifact` *is* the product-path exercise — it walks
+  `androidNativeArm64CompileKlibraries` through `PythonBindingsPlugin`, therefore through
+  `WorkerExecutor.scanKlibIsolated` and its per-build reader classpath, against klibs this build
+  produced with Kotlin `2.4.20-Beta2`. `:generatePythonArtifactBindings` and `:generatePythonStubs`
+  both succeed on it (`EXIT=0`, 2026-08-23).
+
+  But the output is an **empty** `ArtifactTable.fragments`, and empty is the *correct* answer for
+  the namespace it walks: `WalkedKlibArtifactTableTest` pins zero deliberately, because
+  `kotlinx.coroutines`' public surface is `CoroutineScope`/`Job`/`Flow`-typed extensions plus
+  `@PublishedApi internal` declarations, none of them bindable. The stub task emits nothing either.
+  **A successful run and a silently failed read therefore produce identical artefacts**, and the
+  green build is not the assertion it looks like.
+
+  **(a) blocking it:** nothing. **(b) next step, and it is cheap:** give that fixture one namespace
+  that yields at least one binding, or assert that the scan's *decline* list is non-empty. Either
+  separates the two cases, and neither needs the TestKit machinery the next item describes.
+
 - **The in-process test path is pinned to one Kotlin version.** `KlibScannerTest` reads klibs from
   `kotlin-native-prebuilt-macos-aarch64-2.0.20`, and calls `KlibScanner` directly rather than
   through a worker, because a test JVM has no worker to hand a classpath to. Reading a klib
@@ -4005,7 +4024,13 @@ What is genuinely still open is narrower than what was written here, and worth s
   section, against this repository's own `2.4.20-Beta2` klibs. **This is a property of the test
   path, not of the product path**, which is exactly what `klibReaderClasspath` exists to avoid;
   but nothing currently asserts that the product path survives a version skew the test path does
-  not, and that assertion is the next concrete step.
+  not.
+
+  Driving the worker path from JUnit is not the route to that assertion: `ProjectBuilder`'s
+  `WorkerExecutor` is a stub whose `submit()` throws `UnsupportedOperationException`, so it would
+  take `gradleTestKit()`, a temporary project directory and a `GradleRunner` run — infrastructure
+  this plugin has none of, for one assertion. The fixture route above exercises the same code for
+  a fraction of that.
 - A Native consumer needs the per-platform `_pm_resolve`/`_pm_invoke` bootstrap — **closed**, see
   16f item 2 and `UpcallBootstrap`.
 
