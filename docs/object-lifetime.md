@@ -18,9 +18,13 @@ one too few leaks, and releasing one too many frees an object still in use — t
 somewhere unrelated, which is how the interpreter corruption during the lifetime work first
 appeared, as a segfault inside `Py_Finalize` far from its cause.
 
-The wrapper's own release is currently **explicit only**. GC-driven release is implemented but
+~~The wrapper's own release is currently **explicit only**. GC-driven release is implemented but
 blocked: `Python3.initialize()` still holds the GIL, so a cleaner thread calling
-`PyGILState_Ensure` blocks forever. See ROADMAP §1 and §4.
+`PyGILState_Ensure` blocks forever.~~ **Unblocked.** ROADMAP §1 closed: `Python3.initialize()` now
+parks its thread state with `PyEval_SaveThread()`, so a cleaner thread's `PyGILState_Ensure`
+attaches instead of blocking. ROADMAP §4 closed on top of that — GC-driven release is verified on
+both collectors (desktop `java.lang.ref.Cleaner`, iOS `createCleaner`), and Android below API 33
+takes the `PhantomReference` fallback. See ROADMAP §1 and §4.
 
 ## Python holding Kotlin — the handle table
 
@@ -135,15 +139,24 @@ cycles" instead of solving it. We are not in that position.
 
 ### What is still hard
 
-**`tp_traverse` runs during collection.** CPython requires it not to allocate and not to run
+~~**`tp_traverse` runs during collection.** CPython requires it not to allocate and not to run
 arbitrary code, and ours has to call into the JVM. The generated traverse must be restricted to
 field reads and `visit` calls — no allocation, no user code, no locking beyond what is already
-held.
+held.~~ **Built and tested this way.** `ProxyTypeFactory`'s `tp_traverse` (every target) calls only
+the generated `traverse` function and `visit`; `CycleCollectionTest`/`WasmCycleCollectionTest`/
+`RefHolderCycleCollectionTest` exercise it through a real `gc.collect()`.
 
-**`tp_clear` has to mutate Kotlin state.** Breaking the cycle means nulling `K`'s `PyObject`
+~~**`tp_clear` has to mutate Kotlin state.** Breaking the cycle means nulling `K`'s `PyObject`
 fields from inside a collection. A `val` field cannot be cleared at all, so either exposed
 reference-holding fields must be `var`, or clearing goes through a generated accessor that
-knows how.
+knows how.~~ **Solved a different way than this section predicted — no field mutation needed.**
+`ProxyTypeFactory.tp_clear` (`desktopMain/.../ProxyTypeFactory.kt:96-108`, mirrored on every other
+target) does not touch `K`'s fields at all; it calls `HandleTable.release()` on `PK`'s handle and
+nothing else, deliberately not `close()`-ing the held `PyObject`s (the code comment there explains
+why: CPython's own cyclic collector, not this callback, is what reclaims the other side, and
+calling `close()` here would double-free). Breaking `PK -> [handle] -> K`'s strong root is enough
+to let the JVM collect `K` once CPython's collector also breaks `P`'s incoming edge — no `var`, no
+generated clearing accessor, and no Kotlin-side field ever needed to be nulled.
 
 **Cycles that close on the Kotlin side.** `K1 -> P -> K2 -> K1` needs the JVM's collector to see
 through `P`, and there is no traverse hook on that side. Worse, the handle map holds `K2`

@@ -244,11 +244,16 @@ Verification actually run: `compileKotlinAndroidNativeArm64`, `compileDebugKotli
 `libmultiplatform_python3.14.so` has 317 undefined `Py*` symbols and every one of them is defined
 in the shipped `libpython3.13.so` (`objdump -T`); desktop 171 tests, 0 failed.
 
-**Not yet run: the device suite.** §2's own measure is how far the 168 `commonTest` cases get on
+~~**Not yet run: the device suite.** §2's own measure is how far the 168 `commonTest` cases get on
 `pmp_api26`/`pmp_api36`, and that has not been re-run since this change — another agent held the
 emulators. The registration surface is complete and internally consistent; whether the suite
 advances past the 12th case is unmeasured. **Do not close this item on the strength of the
-consistency check alone** — that is the same mistake as closing it on `AssembledApiTest`.
+consistency check alone** — that is the same mistake as closing it on `AssembledApiTest`.~~
+**Since run, repeatedly, and past far more than the 12th case.** The "Android had no usable
+temporary directory" entry below records `connectedDebugAndroidTest` at 492/3 then 493/0 on
+`pmp_api26`; §14b item 7 records `AndroidCleanerPathTest` on both `pmp_api26` and `pmp_api36`; §7's
+"Android landed next" records `UpcallEntryTest` at 251/0 on both API levels. The device suite is
+not merely unblocked — it has run clean, several times, on both emulators.
 
 Earlier in this section: four were migrated first (`PyImport_AddModule`, `PyErr_SetString`,
 `PyObject_SetAttrString`, `PyObject_DelAttrString`), which moved the suite from 10 tests to 12.
@@ -341,12 +346,20 @@ other one. It held a defect the whole time, and the shape of that defect is the 
 move — the drain loop caught `InterruptedException` alone, so one throwing release killed the
 thread and every later release leaked in silence.
 
-**Two things still cannot be freed**: wrappers outliving `Py_Finalize()` are skipped
-deliberately, leaving stale pointers if the interpreter is restarted; and cross-boundary cycles
-through a *real* application proxy still leak — §7's `tp_traverse` slot wiring exists and is
-tested on every target (`ProxyTypeFactory`), but nothing yet makes a production-generated proxy
-class an instance of that type, so the mechanism and the object model it needs to protect are not
-yet connected. See §7's "What is not done".
+**One thing still cannot be freed**: wrappers outliving `Py_Finalize()` are skipped
+deliberately, leaving stale pointers if the interpreter is restarted.
+
+~~And cross-boundary cycles through a *real* application proxy still leak — §7's `tp_traverse`
+slot wiring exists and is tested on every target (`ProxyTypeFactory`), but nothing yet makes a
+production-generated proxy class an instance of that type, so the mechanism and the object model
+it needs to protect are not yet connected. See §7's "What is not done".~~ **Closed by
+`work/handleslot` (`99acd830`, 2026-08-18, merged `a1fb825c`)** — `PythonProxySource.renderClass`
+now bases a generated class on `_PmGcObject`, which subclasses `_pm_proxy_base`
+(`ProxyTypeFactory.createProxyType()`'s published type), whenever `ReflectedClass.hasTraverse` is
+set. Production proxies are instances of the traversable type; see §7's account (the paragraph
+after `CycleCollectionTest.aPythonSubclassOfTheProxyTypeSurvivesBeingUntrackedTwice`) and §14b
+item 5. Cycles that close entirely on the Kotlin side (no Python-side edge for `tp_traverse` to
+report) are the part that remains open — `docs/object-lifetime.md` has it.
 
 **The third — the exception window — was not structural, and is closed.** "A raw pointer leaks
 if an exception lands between the C call returning it and the wrapper taking ownership"
@@ -639,8 +652,10 @@ registration is gone.
   `P -> proxy -> handle -> Kotlin -> PyObject -> P` cycle, drop it, call `gc.collect()`, and check
   the handle is gone — re-verified on this tree 2026-08-18 (both tests pass; see this section's
   audit entry below). ~~The production proxy classes `PythonProxySource` renders never construct an
-  instance of `ProxyTypeFactory`'s type.~~ **Closed on desktop, and only there** (`work/handleslot`,
-  2026-08-18). `dbf54e21` (same day, `work/untrack`) had already answered the risk this item used
+  instance of `ProxyTypeFactory`'s type.~~ **Closed on desktop first** (`work/handleslot`,
+  2026-08-18), **and by the end of the same day on every other target too — see the "Both are
+  closed too" and "Closed on iOS and androidNative too" entries below; this heading undersold the
+  scope even as it was being written.** `dbf54e21` (same day, `work/untrack`) had already answered the risk this item used
   to end on — a Python subclass of the heap type survives being `PyObject_GC_UnTrack`ed twice, so
   `subtype_dealloc`'s own untrack ahead of `ProxyType.tp_dealloc`'s is safe — and had also found
   that inheritance alone buys nothing: the handle has to reach the type's own storage before a
@@ -771,9 +786,10 @@ registration is gone.
 - ~~The aggregator uses `Dependencies.ALL_FILES`, correct but reprocessed every build.~~
   **Measured, and the aggregator turned out not to be the cause** — see below.
 - ~~No convenience Gradle plugin; user modules wire KSP per target by hand.~~
-  **Closed:** `python-multiplatform-gradle-plugin/`, applied by id — **except on Android**, where
-  applying it is a configuration-time crash until AGP moves to 8.10. See §13; it is a version pin,
-  not a plugin defect, and it affects every Android consumer rather than only the sample.
+  **Closed:** `python-multiplatform-gradle-plugin/`, applied by id. ~~**Except on Android**, where
+  applying it is a configuration-time crash until AGP moves to 8.10.~~ **Fixed too, same day** —
+  `gradle/libs.versions.toml` pins AGP `8.10.1` (KSP 2.3.11's declared minimum) and Gradle `8.11.1`;
+  see "The convenience plugin could not be applied to an Android module — closed" in §13.
 
 **Was:** entirely unimplemented — `ClassLookup.kt`, `ObjectReference.kt` and `ReflectedClass.kt`
 held 1–3 lines each, and this was README's only unchecked box.
@@ -858,15 +874,22 @@ exercised end to end in `ksp-fixtures`). This section used to say the *rest* —
 `work/cycles` (merged `aa5436d1`, 2026-08-14): `ProxyTypeFactory.createProxyType()` now builds a
 real `Py_TPFLAGS_HAVE_GC` heap type on every target with those two slots (plus `tp_dealloc`) wired
 to exactly this generated function, and `CycleCollectionTest`/`WasmCycleCollectionTest` prove a
-real cycle collects (re-run on this tree 2026-08-18: both pass). Re-verifying that claim for this
+real cycle collects (re-run on this tree 2026-08-18: both pass). ~~Re-verifying that claim for this
 task surfaced the part that is genuinely still open and is *not* what this section used to
 describe: **nothing routes a production proxy through that type.** `PythonProxySource` — the
 renderer `install()` actually `exec`s — builds every class on a plain Python `_PmObject` base, and
-`ProxyTypeFactory.createProxyType()` is called from no non-test code on any target. See the struck
-entry above ("What is not done") for the specifics and the concrete risk (`subtype_dealloc`'s
-GC-untrack ordering) that has to be checked before attempting it. Cycles that close on the Kotlin
-side (the handle table holding weakly) are separately still untouched, as `docs/object-lifetime.md`
-already recorded.
+`ProxyTypeFactory.createProxyType()` is called from no non-test code on any target.~~ **Closed by
+`work/handleslot` (`99acd830`, 2026-08-18, merged `a1fb825c`), the same day this was written.**
+`PythonProxySource.renderClass` now emits `class $className(_PmGcObject):` instead of `_PmObject`
+whenever `ReflectedClass.hasTraverse` is set and there is no metaclass
+(`PythonProxySource.kt:1168`, `val gcEligible = metaclassName == null && cls.hasTraverse`), and
+`_PmGcObject` subclasses `_pm_proxy_base`, which every platform's `ProxyTypeFactory.createProxyType()`
+publishes into `__main__` (`ProxyTypeFactory.kt:23`, and the per-platform `actual`s at
+`desktopMain/.../ProxyTypeFactory.kt:253`, `androidMain/.../ProxyTypeFactory.kt:174`,
+`nativeMain/.../ProxyTypeFactory.kt:345`, `wasmJsMain/.../ProxyTypeFactory.kt:311`) — see §14b
+item 5 for the full account, including the `subtype_dealloc` double-untrack test. Cycles that close
+on the Kotlin side (the handle table holding weakly) are separately still untouched, as
+`docs/object-lifetime.md` already recorded.
 
 Cost is not yet measured. The table lookup is an array index and is not the expense; the
 boundary is. Note that iOS and androidNative have no boundary here at all — Python and Kotlin
@@ -1575,9 +1598,14 @@ wiring, and it turned up three constraints worth carrying forward:
   inferred: the identical annotation on the identical function exports from `wasmJsTest` and does
   not from `wasmJsMain`, whose klib is linked in — the test binary's export section came out with
   `startUnitTests` in it and nothing else. **A library cannot export its own trampolines.** The
-  executable module must declare three delegating lines; `wasmJsTest/.../ProxyTypeExports.kt` is
+  executable module must declare three delegating lines; `wasmJsTest/.../ProxyTypeExports.kt` was
   that file, kept in the suite precisely so the tests exercise the path an application takes.
-  Generating it from `python-multiplatform-gradle-plugin` is the obvious next step and is not done.
+  ~~Generating it from `python-multiplatform-gradle-plugin` is the obvious next step and is not
+  done.~~ **Closed 2026-08-18 (`112b54d0`).** `GenerateWasmProxyExportsTask`
+  (`python-multiplatform-gradle-plugin/src/main/kotlin/python/multiplatform/gradle/GenerateWasmProxyExportsTask.kt`)
+  generates the three delegating lines from a slot list; `PythonBindingsPlugin.kt:710` registers it
+  and wires its output into `wasmJsMain` automatically. `ProxyTypeExports.kt` was deleted in the
+  same commit — see §14b item 8.
 - **Registration needs the Kotlin instance's raw exports, and only the generated entry module has
   them.** `cpython.mjs` cannot fetch them: it is imported *by* Kotlin's import object, so importing
   the entry module back would be an ES cycle across a top-level await. So `build.gradle.kts` appends
@@ -2059,7 +2087,9 @@ No other drifting constant or configuration-time side effect was found in
 ## 11b. Android does not run the object-model tests
 
 **Closed.** `androidInstrumentedTest` depends on `commonTest` and both emulators run the full
-suite: 176 tests each, where discovery used to be 19. Eight failures remain, tracked in §2.
+suite: 176 tests each, where discovery used to be 19. ~~Eight failures remain, tracked in §2.~~
+**Those eight are fixed too** — §2's own closing measurement, reached after this section's, has
+both emulators at 213 tests with zero failures.
 
 Wiring it up immediately paid for itself — the suite died on its 2nd test, then its 12th, and the
 two defects behind that (an unpackaged stdlib and a hardcoded `RegisterNatives` count) had been
@@ -2742,8 +2772,11 @@ pthread ART has never seen — attaches and detaches rather than silently return
 `UpcallEntryTest` (`androidInstrumentedTest`) is green on `pmp_api26` and `pmp_api36`, 251 tests
 each, 0 failed; `docs/upcall-design.md`'s "Android's boundary runs the other way round" has the rest.
 
-**What is still open.** wasm — a `@WasmExport` plus `Table.set` (3.1 ns, measured in §11).
-Per-platform detail is in `docs/upcall-design.md`'s "What each platform still owes". The generated
+~~**What is still open.** wasm — a `@WasmExport` plus `Table.set` (3.1 ns, measured in §11).
+Per-platform detail is in `docs/upcall-design.md`'s "What each platform still owes".~~ **Closed.**
+wasm's general upcall entry (`UpcallEntry.kt`, `wasmJsMain/kotlin/python/native/ffi/`) publishes
+five `PyCFunction` objects over the one `@WasmExport`/`Table.set` shape this note describes, and
+`docs/upcall-design.md:207` now marks that row "already proven" rather than owed. The generated
 proxy type that would let Python write `obj.method(x)` instead of going through `_pm_bind` is §7's
 remaining half.
 
@@ -3376,13 +3409,11 @@ Bundles, and 100 ms once per install did not justify that surface.
    the repo root because it's a separate included build — needs a documented publish step, not a
    code change.~~ **fixed, §15g** — one root task (`publishAllToMavenLocal`) now reaches all
    three; found while doing it that the three publish under two different versions, not one.
-4. No distribution channel exists for the CPython stdlib prefix a consumer's `PYTHONHOME` needs —
+4. ~~No distribution channel exists for the CPython stdlib prefix a consumer's `PYTHONHOME` needs —
    confirmed to be the *only* remaining blocker for a plain-JVM consumer once 1–2 are fixed.
    Packaging/documenting one is real follow-up work, not done here. **Android is not affected**:
    §15d ships the stdlib inside the AAR, and an external Android consumer now runs. This item is
-   desktop-only.
-   code change.
-4. ~~No distribution channel exists for the CPython stdlib prefix a consumer's `PYTHONHOME` needs~~
+   desktop-only.~~
    — **fixed, §15h.** It was confirmed to be the *only* remaining blocker for a plain-JVM consumer
    once 1–2 were fixed, and it is now a `stagePythonHome` task on the bindings plugin: §15c's own
    external consumer runs, printing the same `56`, with no `PYTHONHOME` set by hand and nothing
@@ -4105,5 +4136,10 @@ Not verified, and each is a real next step rather than a caveat:
    .srcDir(task)` goes through `Class.getMethod`, for the same reason `setKspArg` does. Both ends of
    the chain are Gradle types (`NamedDomainObjectContainer`, `SourceDirectorySet`); only `getKotlin()`
    is reflected. A KGP change there fails loudly at configuration time.
-4. **No `aar`, no klib, no project classes directory.** Anything that is not a `.jar` is skipped
-   silently.
+4. ~~**No `aar`, no klib, no project classes directory.** Anything that is not a `.jar` is skipped
+   silently.~~ **The klib half closed by 16e.** `PythonArtifactBindingsTask` now routes `.klib`
+   files through `KlibScanner` via the isolated worker (`PythonArtifactBindingsTask.kt:118-131`,
+   `filter { it.name.endsWith(".jar") || it.name.endsWith(".klib") }`); its own KDoc states the
+   remaining scope precisely: "A resolved artefact that is not a `.jar` or `.klib` — an `aar`, a
+   project's classes directory — is skipped silently" (`PythonArtifactBindingsTask.kt:28-29`).
+   `aar` and project classes directories remain genuinely unhandled.

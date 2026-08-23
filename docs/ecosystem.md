@@ -647,9 +647,16 @@ things in it change what this section says:
   `hasExtensionReceiverParameter`, value parameters and Kotlin (unerased) types. There is no facade
   problem because a klib records the Kotlin declaration; and since a generated fragment is Kotlin
   source compiled into the consumer's own binary with the klib on its compile classpath, the *call*
-  is an ordinary Kotlin call with no reflection. The open question that remains is not feasibility
-  but cost: `@ExperimentalLibraryAbiReader`, and a ~60 MB compiler artefact on the plugin classpath
-  versioned against the consumer's Kotlin rather than the plugin's.
+  is an ordinary Kotlin call with no reflection. ~~The open question that remains is not
+  feasibility but cost: `@ExperimentalLibraryAbiReader`, and a ~60 MB compiler artefact on the
+  plugin classpath versioned against the consumer's Kotlin rather than the plugin's.~~ **The cost
+  question is answered too, and not by shrinking it — by moving it off the plugin's classpath.**
+  ROADMAP §16e/16f: `KlibScanner` runs inside an isolated Gradle worker
+  (`WorkerExecutor.scanKlibIsolated`) whose classpath is supplied per build rather than baked into
+  the plugin jar, because calling it from the plugin's own classloader throws `NoSuchMethodError`
+  against a real consumer's `kotlin-util-klib` — a correctness fix that also happens to keep the
+  ~60 MB artefact off a build that never walks a klib. `PythonArtifactBindingsTask` is wired to it
+  and covered by `KlibScannerTest` against two real klibs.
 
 **Dynamic binding is a removed option, not a missing one.** The 2024 design document
 (*PyComposeUI*, the open-source contest report) specifies a dynamic binder — Java/Kotlin
