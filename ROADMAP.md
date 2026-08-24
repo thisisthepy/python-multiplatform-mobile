@@ -2816,6 +2816,40 @@ failures = sum(int(ET.parse(f).getroot().attrib.get("failures", 0)) for f in fil
 skipped = sum(int(ET.parse(f).getroot().attrib.get("skipped", 0)) for f in files)
 ```
 
+### 14a-1. The state at the deadline — 2026-08-24, every path re-run from a clean results directory
+
+Taken in one pass on `develop` @ `115370e6`, `--rerun` throughout, each results directory deleted
+before its task ran. This exists because the failure this document keeps having is not a wrong
+number, it is a number nobody re-took: the entry below is from 2026-08-13 and every sweep since
+has found something stale.
+
+| path | count | fail | note |
+|---|---|---|---|
+| `:python-multiplatform:desktopTest` | **529** | 0 | 1 skipped |
+| `:python-multiplatform:wasmJsNodeTest` | **471** | 0 | |
+| `:python-multiplatform:wasmJsBrowserTest` | **10** | 0 | |
+| `:python-multiplatform:iosSimulatorArm64Test` | **457** | 0 | |
+| `:python-multiplatform:connectedDebugAndroidTest` | **495** | 0 | `pmp_api26` |
+| `:python-multiplatform:androidNativeArm64Test` | **460** | 0 | `pmp_api26`, on device |
+| `:python-multiplatform-gradle-plugin:test` | **175** | 0 | |
+| `:ksp-fixtures:app:desktopTest` | **70** | 0 | |
+| `:ksp-fixtures:compose:desktopTest` | **99** | 0 | |
+| `:ksp-fixtures:artifact:desktopTest` | **36** | 0 | |
+| `:ksp-fixtures:android:connectedDebugAndroidTest` | **8** | 0 | first device run was 2026-08-20 |
+| `compileKotlinAndroidNativeArm64` | — | — | no `e:` lines |
+
+**`ksp-fixtures:artifact` is in that list for a reason.** It was red on `develop` for days because
+the verification set in use was plugin + app + compose, and two failures sat behind that gap: a
+pinned list that `e2d75100` outdated, and a stub-shape canary that `ac8e4708` outdated. All three
+fixture modules are the set; CLAUDE.md now says so.
+
+**Sibling repositories, same pass:** `toolchain` 98 + `tcl` 9, `pypackpack` `packpack` 135 +
+`cli` 26, `pythonx-compose` 71 — all 0 failures.
+
+**The three external consumers, which no in-repo test can stand in for**, run against a
+`publishToMavenLocal` of all three producers: `consumer-plugin-test` and `consumer-plugin-android`
+build clean, and `consumer-test` runs and prints `Result from Python: 56`.
+
 **As last verified, 2026-08-13**, immediately after merging `develop` into this branch, from a
 cleaned results directory, for the five paths that need no device (§14b explains why 3 and 4 were
 not run here — this audit was instructed not to use devices):
