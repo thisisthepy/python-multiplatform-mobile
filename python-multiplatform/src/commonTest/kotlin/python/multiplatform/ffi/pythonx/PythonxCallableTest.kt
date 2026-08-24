@@ -77,8 +77,8 @@ class PythonxCallableTest {
     fun aPythonLambdaCrossesAsAKotlinFunctionAndRunsInsideItsContainer() = withComposer {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import Column
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Column
+            from androidx.compose.material3 import Text
             Column(content=lambda: Text('hi'))
             """.trimIndent(),
         )
@@ -106,8 +106,8 @@ class PythonxCallableTest {
     fun theContentSeesTheComposerItsContainerHandedIt() = withComposer {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import Column
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Column
+            from androidx.compose.material3 import Text
             Column(content=lambda: Text('hi'))
             """.trimIndent(),
         )
@@ -136,7 +136,7 @@ class PythonxCallableTest {
             """
             import sys
             import pythonx
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
 
             def _px_body():
                 Text('hi')
@@ -151,7 +151,7 @@ class PythonxCallableTest {
             try {
                 Python3.exec(
                     """
-                    from pythonx.compose.foundation.layout import Column
+                    from androidx.compose.foundation.layout import Column
                     Column(content=_px_body)
                     _px_held = sys.getrefcount(_px_body)
                     """.trimIndent(),
@@ -192,8 +192,8 @@ class PythonxCallableTest {
             assertFails {
                 Python3.exec(
                     """
-                    from pythonx.compose.foundation.layout import Column
-                    from pythonx.compose.material3 import Text
+                    from androidx.compose.foundation.layout import Column
+                    from androidx.compose.material3 import Text
                     Column(content=lambda: Text('hi'))
                     """.trimIndent(),
                 )
@@ -227,7 +227,7 @@ class PythonxCallableTest {
                 Python3.exec(
                     """
                     import pythonx
-                    from pythonx.compose.material3 import Button
+                    from androidx.compose.material3 import Button
                     _px_clicked = []
                     Button(on_click=lambda: _px_clicked.append(1))
                     """.trimIndent(),
@@ -284,8 +284,8 @@ class PythonxCallableTest {
                 Python3.exec(
                     """
                     import pythonx
-                    from pythonx.compose.foundation.layout import Column
-                    from pythonx.compose.material3 import Text
+                    from androidx.compose.foundation.layout import Column
+                    from androidx.compose.material3 import Text
                     for _ in range(REPS):
                         Column(content=lambda: Text('hi'))
                     """.trimIndent().replace("REPS", REPETITIONS.toString()),
@@ -320,7 +320,7 @@ class PythonxCallableTest {
             try {
                 Python3.exec(
                     """
-                    from pythonx.compose.foundation.layout import Column
+                    from androidx.compose.foundation.layout import Column
                     _px_captured = []
                     def _px_make(n):
                         return lambda: _px_captured.append(n)
@@ -361,7 +361,7 @@ class PythonxCallableTest {
     fun aValueCallbackIsToldWhatKotlinPassedIt() = withComposer {
         Python3.exec(
             """
-            from pythonx.compose.material3 import Slider
+            from androidx.compose.material3 import Slider
             _px_seen = []
             Slider(on_value_change=lambda v: _px_seen.append(v))
             """.trimIndent(),
@@ -389,8 +389,8 @@ class PythonxCallableTest {
     fun aScopedContentIsHandedItsReceiverAsAProxyOfTheDeclaredType() = withComposer {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import Column
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Column
+            from androidx.compose.material3 import Text
             _px_scope = []
 
             def _px_content(scope):
@@ -434,8 +434,8 @@ class PythonxCallableTest {
     fun aCallableThatDeclaresNoReceiverStillRunsAndOneThatWantsTooManyIsRefused() = withComposer {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import Column
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Column
+            from androidx.compose.material3 import Text
             Column(content=lambda: Text('hi'))
             """.trimIndent(),
         )
@@ -445,7 +445,7 @@ class PythonxCallableTest {
         val refusal = assertFails {
             Python3.exec(
                 """
-                from pythonx.compose.foundation.layout import Column
+                from androidx.compose.foundation.layout import Column
                 Column(content=lambda a, b, c: None)
                 """.trimIndent(),
             )
@@ -480,7 +480,7 @@ class PythonxCallableTest {
             try {
                 Python3.exec(
                     """
-                    from pythonx.compose.foundation.layout import Column
+                    from androidx.compose.foundation.layout import Column
                     _px_kept = []
                     for _ in range(REPS):
                         Column(content=lambda: None)
@@ -547,7 +547,7 @@ class PythonxCallableTest {
                 try {
                     Python3.exec(
                         """
-                        from pythonx.compose.foundation.layout import Column
+                        from androidx.compose.foundation.layout import Column
                         _px_last = []
                         Column(content=lambda s: _px_last.append(type(s).__name__))
                         """.trimIndent(),
@@ -597,7 +597,7 @@ class PythonxCallableTest {
         val refusal = assertFails {
             Python3.exec(
                 """
-                from pythonx.compose.material3 import remember_sheet_state
+                from androidx.compose.material3 import remember_sheet_state
                 remember_sheet_state(confirm_value_change=lambda v: True)
                 """.trimIndent(),
             )
@@ -627,7 +627,7 @@ class PythonxCallableTest {
             try {
                 Python3.exec(
                     """
-                    from pythonx.compose.material3 import Slider
+                    from androidx.compose.material3 import Slider
                     _px_moves = []
                     Slider(on_value_change=lambda v: _px_moves.append(v))
                     """.trimIndent(),
@@ -651,7 +651,7 @@ class PythonxCallableTest {
     private fun pushComposer() = Python3.exec(
         """
         import pythonx
-        from pythonx.compose.runtime import stub_composer
+        from androidx.compose.runtime import stub_composer
         _px_composer = stub_composer()
         pythonx.push_composer(_px_composer)
         """.trimIndent(),
@@ -682,7 +682,7 @@ class PythonxCallableTest {
             "the fixture table is not installed",
         )
         if (!publishesProxyEntryPoints) return@withInterpreter
-        PythonxAdapter.install(COMPOSE_SHAPED_MODULES, COMPOSE_SHAPED_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(COMPOSE_SHAPED_RAW_VALUE_CLASSES)
         block()
     }
 

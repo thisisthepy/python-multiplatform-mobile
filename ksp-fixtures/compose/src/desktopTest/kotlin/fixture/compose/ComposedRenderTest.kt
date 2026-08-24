@@ -46,7 +46,7 @@ class ComposedRenderTest {
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
         ComposedInvocationSlot.reset()
     }
 
@@ -157,7 +157,7 @@ class ComposedRenderTest {
         # pass $pass
         from fixture.compose import emptyModifier, pythonComposed
         from androidx.compose.foundation.layout import size__Dp
-        from pythonx.compose.material3 import Text
+        from androidx.compose.material3 import Text
 
         def _factory(receiver):
             return size__Dp(receiver, $dp)
@@ -172,7 +172,7 @@ class ComposedRenderTest {
 
         val IDENTITY_BODY = """
             from fixture.compose import emptyModifier, pythonComposed
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
 
             def _factory(receiver):
                 return receiver

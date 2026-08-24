@@ -50,7 +50,7 @@ class LayoutIdRenderTest {
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -80,7 +80,7 @@ class LayoutIdRenderTest {
     private fun taggedBody(tag: String) = """
         from fixture.compose import emptyModifier, pythonLayoutIdString
         from androidx.compose.foundation.layout import size__Dp
-        from pythonx.compose.material3 import Text
+        from androidx.compose.material3 import Text
 
         _m = pythonLayoutIdString(size__Dp(emptyModifier(), 20.0), "$tag")
         Text("X", modifier=_m)
@@ -130,7 +130,7 @@ class LayoutIdRenderTest {
     private fun taggedBodyInt(tag: Int) = """
         from fixture.compose import emptyModifier, pythonLayoutIdInt
         from androidx.compose.foundation.layout import size__Dp
-        from pythonx.compose.material3 import Text
+        from androidx.compose.material3 import Text
 
         _m = pythonLayoutIdInt(size__Dp(emptyModifier(), 20.0), $tag)
         Text("X", modifier=_m)

@@ -28,7 +28,7 @@ class ModifierLocalRenderTest {
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -48,8 +48,8 @@ class ModifierLocalRenderTest {
 
         val body = """
             from fixture.compose import emptyModifier, pythonModifierLocalOfString, pythonModifierLocalProviderString, pythonModifierLocalConsumerString
-            from pythonx.compose.material3 import Text
-            from pythonx.compose.foundation.layout import Box
+            from androidx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Box
 
             _local = pythonModifierLocalOfString("default value")
             
@@ -85,7 +85,7 @@ class ModifierLocalRenderTest {
 
         val body = """
             from fixture.compose import emptyModifier, pythonModifierLocalOfString, pythonModifierLocalConsumerString
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
 
             _local = pythonModifierLocalOfString("default value")
             

@@ -63,7 +63,7 @@ class IconRenderTest {
         UpcallTable.clear()
         UpcallTable.install(ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -112,8 +112,8 @@ class IconRenderTest {
     fun pythonLoadsAPainterAndIconDrawsIt() {
         val drawn = inkOf(
             """
-            from pythonx.compose.ui.res import painter_resource
-            from pythonx.compose.material3 import Icon
+            from androidx.compose.ui.res import painter_resource
+            from androidx.compose.material3 import Icon
             Icon(painter_resource('$RESOURCE'), content_description='a square')
             """.trimIndent(),
         )
@@ -151,7 +151,7 @@ class IconRenderTest {
     fun aPythonBuiltColorRoundTripsIntoAnotherWalkedCall() {
         Python3.exec(
             """
-            from pythonx.compose.ui.graphics import Color__Int_Int_Int_Int, to_argb
+            from androidx.compose.ui.graphics import Color__Int_Int_Int_Int, to_argb
 
             _red = Color__Int_Int_Int_Int(255, 0, 0)
             assert type(_red).__name__ != 'int', 'Color came back as a raw number, not an owned value'
@@ -202,9 +202,9 @@ class IconRenderTest {
         )
         val tinted = redOf(
             """
-            from pythonx.compose.ui.graphics import Color__Int_Int_Int_Int
-            from pythonx.compose.ui.res import painter_resource
-            from pythonx.compose.material3 import Icon
+            from androidx.compose.ui.graphics import Color__Int_Int_Int_Int
+            from androidx.compose.ui.res import painter_resource
+            from androidx.compose.material3 import Icon
             Icon(painter_resource('$RESOURCE'), content_description='a square',
                  tint=Color__Int_Int_Int_Int(255, 0, 0))
             """.trimIndent(),
@@ -215,8 +215,8 @@ class IconRenderTest {
         // the callee overwrites, rather than into a NullPointerException.
         val untinted = redOf(
             """
-            from pythonx.compose.ui.res import painter_resource
-            from pythonx.compose.material3 import Icon
+            from androidx.compose.ui.res import painter_resource
+            from androidx.compose.material3 import Icon
             Icon(painter_resource('$RESOURCE'), content_description='a square')
             """.trimIndent(),
         )
@@ -234,7 +234,7 @@ class IconRenderTest {
     fun iconStillCannotBeCalledWithoutAnImage() {
         Python3.exec(
             """
-            from pythonx.compose.material3 import Icon
+            from androidx.compose.material3 import Icon
             try:
                 Icon(content_description='nothing')
                 raise AssertionError('Icon must not be callable without an image')
@@ -277,8 +277,8 @@ class IconRenderTest {
     fun anImageBitmapWithNoPixelsWrittenIntoItDrawsNothingBecauseNoBoundCallCanFillOne() {
         val drawn = inkOf(
             """
-            from pythonx.compose.ui.graphics import ImageBitmap
-            from pythonx.compose.material3 import Icon
+            from androidx.compose.ui.graphics import ImageBitmap
+            from androidx.compose.material3 import Icon
             Icon(ImageBitmap(24, 24), content_description='an empty square')
             """.trimIndent(),
         )
@@ -330,8 +330,8 @@ class IconRenderTest {
         Python3.exec(
             """
             import pythonx
-            from pythonx.compose.ui.graphics import ImageBitmap
-            from pythonx.compose.ui.graphics.painter import BitmapPainter
+            from androidx.compose.ui.graphics import ImageBitmap
+            from androidx.compose.ui.graphics.painter import BitmapPainter
 
             _painter = BitmapPainter(ImageBitmap(24, 24))
             # The proxy still names the type the declaration returns, not its base: the ancestry is a
@@ -366,9 +366,9 @@ class IconRenderTest {
     fun aValueWhoseAncestryDoesNotReachTheSlotIsStillRefused() {
         Python3.exec(
             """
-            from pythonx.compose.ui.graphics import ImageBitmap, Color__Int_Int_Int_Int
-            from pythonx.compose.ui.graphics.painter import BitmapPainter
-            from pythonx.compose.material3 import Icon
+            from androidx.compose.ui.graphics import ImageBitmap, Color__Int_Int_Int_Int
+            from androidx.compose.ui.graphics.painter import BitmapPainter
+            from androidx.compose.material3 import Icon
 
             try:
                 BitmapPainter(Color__Int_Int_Int_Int(255, 0, 0))
@@ -387,10 +387,10 @@ class IconRenderTest {
 
     private fun bitmapPainterInARow(width: Int): String =
         """
-        from pythonx.compose.foundation.layout import Row
-        from pythonx.compose.ui.graphics import ImageBitmap
-        from pythonx.compose.ui.graphics.painter import BitmapPainter
-        from pythonx.compose.material3 import Icon, Text
+        from androidx.compose.foundation.layout import Row
+        from androidx.compose.ui.graphics import ImageBitmap
+        from androidx.compose.ui.graphics.painter import BitmapPainter
+        from androidx.compose.material3 import Icon, Text
         Row(content=lambda row: (
             Icon(BitmapPainter(ImageBitmap($width, 12)), content_description='a square'),
             Text('hi'),
@@ -461,7 +461,7 @@ class IconRenderTest {
         val baseline = settledBaseline()
         Python3.exec(
             """
-            from pythonx.compose.ui.graphics import ImageBitmap
+            from androidx.compose.ui.graphics import ImageBitmap
             _bmp = ImageBitmap(24, 24)
             assert type(_bmp).__name__ != 'int', 'a walked OBJECT result must come back owned, not as a bare handle'
             """.trimIndent(),
@@ -484,7 +484,7 @@ class IconRenderTest {
     fun releasingABitmapTwiceDoesNotFreeTheSlotItsSuccessorTookOver() {
         val baseline = settledBaseline()
 
-        Python3.exec("from pythonx.compose.ui.graphics import ImageBitmap\n_bmp = ImageBitmap(24, 24)")
+        Python3.exec("from androidx.compose.ui.graphics import ImageBitmap\n_bmp = ImageBitmap(24, 24)")
         assertEquals(baseline + 1, HandleTable.liveCount)
 
         Python3.exec("_bmp.__del__()")
@@ -514,8 +514,8 @@ class IconRenderTest {
         val baseline = settledBaseline()
         Python3.exec(
             """
-            from pythonx.compose.ui.graphics import ImageBitmap
-            from pythonx.compose.ui.graphics.painter import BitmapPainter
+            from androidx.compose.ui.graphics import ImageBitmap
+            from androidx.compose.ui.graphics.painter import BitmapPainter
             _bmp = ImageBitmap(24, 24)
             _painter = BitmapPainter(_bmp)
             """.trimIndent(),
@@ -544,8 +544,8 @@ class IconRenderTest {
         val baseline = settledBaseline()
         val drawn = inkOf(
             """
-            from pythonx.compose.ui.res import painter_resource
-            from pythonx.compose.material3 import Icon
+            from androidx.compose.ui.res import painter_resource
+            from androidx.compose.material3 import Icon
             _held = painter_resource('$RESOURCE')
             Icon(_held, content_description='a square')
             """.trimIndent(),
@@ -560,9 +560,9 @@ class IconRenderTest {
 
     private fun iconInARow(width: Int): String =
         """
-        from pythonx.compose.foundation.layout import Row
-        from pythonx.compose.ui.graphics import ImageBitmap
-        from pythonx.compose.material3 import Icon, Text
+        from androidx.compose.foundation.layout import Row
+        from androidx.compose.ui.graphics import ImageBitmap
+        from androidx.compose.material3 import Icon, Text
         Row(content=lambda row: (
             Icon(ImageBitmap($width, 12), content_description='a square'),
             Text('hi'),

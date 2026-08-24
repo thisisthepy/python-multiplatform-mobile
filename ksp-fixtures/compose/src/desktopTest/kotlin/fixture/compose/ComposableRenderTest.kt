@@ -51,7 +51,7 @@ class ComposableRenderTest {
         // are the whole table.
         UpcallTable.install(ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -62,7 +62,7 @@ class ComposableRenderTest {
     /** The claim, in one line of Python. */
     @Test
     fun pythonDrawsARealMaterial3Text() {
-        val drawn = inkOf("from pythonx.compose.material3 import Text\nText('hi')")
+        val drawn = inkOf("from androidx.compose.material3 import Text\nText('hi')")
         val blank = inkOf("pass")
 
         println("compose render: Text('hi') -> $drawn non-background pixels, empty body -> $blank")
@@ -78,8 +78,8 @@ class ComposableRenderTest {
      */
     @Test
     fun theStringPythonWroteIsTheStringComposeDrew() {
-        val short = inkOf("from pythonx.compose.material3 import Text\nText('hi')")
-        val long = inkOf("from pythonx.compose.material3 import Text\nText('hi hi hi hi hi')")
+        val short = inkOf("from androidx.compose.material3 import Text\nText('hi')")
+        val long = inkOf("from androidx.compose.material3 import Text\nText('hi hi hi hi hi')")
 
         println("compose render: 'hi' -> $short px, 'hi hi hi hi hi' -> $long px")
         assertTrue(long > short, "expected more ink for more text: $short vs $long")
@@ -146,14 +146,14 @@ class ComposableRenderTest {
     fun pythonFillsAContainersContentSlotWithALambda() {
         val drawn = inkOf(
             """
-            from pythonx.compose.foundation.layout import Column
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Column
+            from androidx.compose.material3 import Text
             Column(content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val empty = inkOf(
             """
-            from pythonx.compose.foundation.layout import Column
+            from androidx.compose.foundation.layout import Column
             Column(content=lambda: None)
             """.trimIndent(),
         )
@@ -175,15 +175,15 @@ class ComposableRenderTest {
     fun theContentComposesInsideTheContainerAndNotBesideIt() {
         val one = inkOf(
             """
-            from pythonx.compose.foundation.layout import Column
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Column
+            from androidx.compose.material3 import Text
             Column(content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val two = inkOf(
             """
-            from pythonx.compose.foundation.layout import Column
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Column
+            from androidx.compose.material3 import Text
 
             def _body():
                 Text('hi')
@@ -221,8 +221,8 @@ class ComposableRenderTest {
     fun aRealColumnHandsItsContentTheColumnScope() {
         val drawn = inkOf(
             """
-            from pythonx.compose.foundation.layout import Column
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Column
+            from androidx.compose.material3 import Text
             _scopes = []
 
             def _body(scope):
@@ -261,7 +261,7 @@ class ComposableRenderTest {
     fun aRealTextHandsItsLayoutCallbackTheResult() {
         val drawn = inkOf(
             """
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
             _laid_out = []
             Text('hi', on_text_layout=lambda result: _laid_out.append(type(result).__name__))
             """.trimIndent(),
@@ -320,15 +320,15 @@ class ComposableRenderTest {
     fun aScopeForwardedToPythonCanCallTheExtensionComposableDeclaredOnIt() {
         val withIcon = inkOf(
             """
-            from pythonx.compose.foundation.layout import Row
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Row
+            from androidx.compose.material3 import Text
             Row(content=lambda row: row.NavigationBarItem(
                 selected=True, on_click=lambda: None, icon=lambda: Text('hi hi hi')))
             """.trimIndent(),
         )
         val withoutIcon = inkOf(
             """
-            from pythonx.compose.foundation.layout import Row
+            from androidx.compose.foundation.layout import Row
             Row(content=lambda row: row.NavigationBarItem(
                 selected=True, on_click=lambda: None, icon=lambda: None))
             """.trimIndent(),
@@ -361,7 +361,7 @@ class ComposableRenderTest {
         Python3.exec(
             """
             import sys
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
 
             def _content():
                 Text('hi')
@@ -374,7 +374,7 @@ class ComposableRenderTest {
         val scene = ImageComposeScene(width = 200, height = 60, density = Density(1f)) {
             PythonComposition(
                 """
-                from pythonx.compose.foundation.layout import Column
+                from androidx.compose.foundation.layout import Column
                 Column(content=_content)
                 """.trimIndent(),
             )
@@ -432,7 +432,7 @@ class ComposableRenderTest {
         Python3.exec(
             """
             import sys
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
 
             def _first():
                 Text('hi')
@@ -494,13 +494,13 @@ class ComposableRenderTest {
     fun buttonComposesItsClickHandlerAndItsRowScopedContent() {
         val drawn = inkOf(
             """
-            from pythonx.compose.material3 import Button, Text
+            from androidx.compose.material3 import Button, Text
             Button(on_click=lambda: None, content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val empty = inkOf(
             """
-            from pythonx.compose.material3 import Button
+            from androidx.compose.material3 import Button
             Button(on_click=lambda: None, content=lambda: None)
             """.trimIndent(),
         )
@@ -522,13 +522,13 @@ class ComposableRenderTest {
     fun cardResolvesToTheNonClickableOverloadAndDrawsItsContent() {
         val drawn = inkOf(
             """
-            from pythonx.compose.material3 import Card, Text
+            from androidx.compose.material3 import Card, Text
             Card(content=lambda scope: Text('hi'))
             """.trimIndent(),
         )
         val empty = inkOf(
             """
-            from pythonx.compose.material3 import Card
+            from androidx.compose.material3 import Card
             Card(content=lambda scope: None)
             """.trimIndent(),
         )
@@ -548,13 +548,13 @@ class ComposableRenderTest {
     fun materialThemeComposesAZeroArgumentContentLambda() {
         val drawn = inkOf(
             """
-            from pythonx.compose.material3 import MaterialTheme, Text
+            from androidx.compose.material3 import MaterialTheme, Text
             MaterialTheme(content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val empty = inkOf(
             """
-            from pythonx.compose.material3 import MaterialTheme
+            from androidx.compose.material3 import MaterialTheme
             MaterialTheme(content=lambda: None)
             """.trimIndent(),
         )
@@ -580,13 +580,13 @@ class ComposableRenderTest {
     fun listItemComposesItsHeadlineContentUnderItsSnakeCasedName() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import ListItem, Text
+            from androidx.compose.material3 import ListItem, Text
             ListItem(headline_content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import ListItem
+            from androidx.compose.material3 import ListItem
             ListItem(headline_content=lambda: None)
             """.trimIndent(),
         )
@@ -622,13 +622,13 @@ class ComposableRenderTest {
     fun badgeDrawsItsLeafFormWithNoArgumentsAndMoreWithContent() {
         val bare = inkOf(
             """
-            from pythonx.compose.material3 import Badge
+            from androidx.compose.material3 import Badge
             Badge()
             """.trimIndent(),
         )
         val withContent = inkOf(
             """
-            from pythonx.compose.material3 import Badge, Text
+            from androidx.compose.material3 import Badge, Text
             Badge(content=lambda: Text('hi'))
             """.trimIndent(),
         )
@@ -648,13 +648,13 @@ class ComposableRenderTest {
     fun badgedBoxComposesBothItsBadgeAndItsContentScopes() {
         val withBadge = inkOf(
             """
-            from pythonx.compose.material3 import BadgedBox, Badge, Text
+            from androidx.compose.material3 import BadgedBox, Badge, Text
             BadgedBox(badge=lambda scope: Badge(content=lambda: Text('9')), content=lambda scope: Text('hi'))
             """.trimIndent(),
         )
         val withoutBadge = inkOf(
             """
-            from pythonx.compose.material3 import BadgedBox, Text
+            from androidx.compose.material3 import BadgedBox, Text
             BadgedBox(badge=lambda scope: None, content=lambda scope: Text('hi'))
             """.trimIndent(),
         )
@@ -671,13 +671,13 @@ class ComposableRenderTest {
     fun iconButtonComposesItsClickHandlerAndItsContent() {
         val drawn = inkOf(
             """
-            from pythonx.compose.material3 import IconButton, Text
+            from androidx.compose.material3 import IconButton, Text
             IconButton(on_click=lambda: None, content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val empty = inkOf(
             """
-            from pythonx.compose.material3 import IconButton
+            from androidx.compose.material3 import IconButton
             IconButton(on_click=lambda: None, content=lambda: None)
             """.trimIndent(),
         )
@@ -697,14 +697,14 @@ class ComposableRenderTest {
     fun rowFillsItsContentSlotWithALambdaJustAsColumnDoes() {
         val drawn = inkOf(
             """
-            from pythonx.compose.foundation.layout import Row
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Row
+            from androidx.compose.material3 import Text
             Row(content=lambda row: Text('hi'))
             """.trimIndent(),
         )
         val empty = inkOf(
             """
-            from pythonx.compose.foundation.layout import Row
+            from androidx.compose.foundation.layout import Row
             Row(content=lambda row: None)
             """.trimIndent(),
         )
@@ -725,14 +725,14 @@ class ComposableRenderTest {
     fun boxResolvesToTheContentOverloadAndFillsItsBoxScopedSlot() {
         val drawn = inkOf(
             """
-            from pythonx.compose.foundation.layout import Box
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Box
+            from androidx.compose.material3 import Text
             Box(content=lambda scope: Text('hi'))
             """.trimIndent(),
         )
         val empty = inkOf(
             """
-            from pythonx.compose.foundation.layout import Box
+            from androidx.compose.foundation.layout import Box
             Box(content=lambda scope: None)
             """.trimIndent(),
         )
@@ -778,7 +778,7 @@ class ComposableRenderTest {
                 "light_color_scheme became partly omittable -- ArtifactScanner.MAX_OMITTABLE_PARAMETERS "
                 "(6) must have grown past 36, or the omission plan changed: " + repr(_decl.param_has_default)
             )
-            from pythonx.compose.material3 import light_color_scheme
+            from androidx.compose.material3 import light_color_scheme
             try:
                 light_color_scheme()
                 raise AssertionError('light_color_scheme() must not be callable with zero arguments')
@@ -847,8 +847,8 @@ class ComposableRenderTest {
     private fun themedButton(red: Int, green: Int, blue: Int): String =
         """
         import pythonx
-        from pythonx.compose.ui.graphics import Color__Int_Int_Int_Int as _Color
-        from pythonx.compose.material3 import light_color_scheme, MaterialTheme, Button
+        from androidx.compose.ui.graphics import Color__Int_Int_Int_Int as _Color
+        from androidx.compose.material3 import light_color_scheme, MaterialTheme, Button
 
         _decl = pythonx._BY_PACKAGE['androidx.compose.material3']['light_color_scheme'][0]
         _slots = [pythonx.to_python_name(_n) for _n in _decl.param_names]
@@ -867,7 +867,7 @@ class ComposableRenderTest {
         pixelsOf(body).filter { it != BACKGROUND }.toSet()
 
     private fun columnCalling(name: String): String =
-        "from pythonx.compose.foundation.layout import Column\nColumn(content=$name)"
+        "from androidx.compose.foundation.layout import Column\nColumn(content=$name)"
 
     private fun inkOfImage(image: Image): Int {
         val bitmap = Bitmap.makeFromImage(image)

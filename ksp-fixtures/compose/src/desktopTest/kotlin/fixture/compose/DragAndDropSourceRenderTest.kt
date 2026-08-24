@@ -34,7 +34,7 @@ class DragAndDropSourceRenderTest {
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -152,7 +152,7 @@ class DragAndDropSourceRenderTest {
         val BODY = """
             from fixture.compose import emptyModifier, pythonDragAndDropSource
             from androidx.compose.foundation.layout import size__Dp
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
 
             _m = pythonDragAndDropSource(size__Dp(emptyModifier(), 48.0), _on_event)
             Text(str(len(_dnd_events)), modifier=_m)

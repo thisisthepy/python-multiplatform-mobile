@@ -26,7 +26,7 @@ class AnchoredDraggableRenderTest {
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -146,7 +146,7 @@ class AnchoredDraggableRenderTest {
         val BODY = """
             from fixture.compose import emptyModifier, pythonAnchoredDraggableString
             from androidx.compose.foundation.layout import size__Dp
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
 
             _m = pythonAnchoredDraggableString(size__Dp(emptyModifier(), 48.0), "start", "start", 0.0, "end", 40.0, _on_confirm)
             Text(str(len(_confirm_events)), modifier=_m)

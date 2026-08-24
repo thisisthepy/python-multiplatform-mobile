@@ -1,22 +1,17 @@
 package fixture.artifact
 
 /**
- * The `pythonx` -> Kotlin module map these fixtures install.
+ * The value classes these tests may write as a raw primitive.
  *
- * `PythonxAdapter` no longer seeds any mapping of its own -- the binder may not know a library by
- * name -- so an embedder supplies one. This file is what a consumer's `pythonx-map.toml` stands in
- * for, and `pythonx-map.toml` in this same directory is the stub generator's copy of the same
- * facts. Both exist because the runtime and the generator read the map at different times; they
- * name the same packages.
+ * There is no module map beside this any more. The binder does not rename Kotlin namespaces at
+ * all -- a Kotlin package is importable under its own name and nothing else -- so there is nothing
+ * to map. What a `pythonx.*` module is called, and what it restructures, is the business of the
+ * real distribution that ships those modules on disk.
+ *
+ * This set survives because it is a different kind of fact: whether a value class may be written
+ * as the primitive it wraps is a property of the library that declares it, and no bytecode
+ * witnesses it. `Dp`'s public constructor is the identity on its float, so `padding(16)` and
+ * `padding(Dp(16f))` mean the same thing; `Color` and `TextUnit` pack several fields into one
+ * value and a raw number would decode as something else.
  */
-internal val PYTHONX_MODULES: Map<String, String> = mapOf(
-    "pythonx.compose" to "androidx.compose",
-    "pythonx.compose.ui" to "androidx.compose.ui",
-    "pythonx.compose.ui.unit" to "androidx.compose.ui.unit",
-    "pythonx.compose.foundation.layout" to "androidx.compose.foundation.layout",
-    "pythonx.compose.layout" to "androidx.compose.foundation.layout",
-    "pythonx.kotlin" to "kotlin",
-)
-
-/** §4.4's one value class that may be written as its raw primitive. */
 internal val PYTHONX_RAW_VALUE_CLASSES: Set<String> = setOf("androidx.compose.ui.unit.Dp")

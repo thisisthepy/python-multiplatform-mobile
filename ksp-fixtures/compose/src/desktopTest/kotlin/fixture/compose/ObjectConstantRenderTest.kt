@@ -61,7 +61,7 @@ class ObjectConstantRenderTest {
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -89,8 +89,8 @@ class ObjectConstantRenderTest {
     /** The constant is fetched by the name the walker binds it under, through the adaptation layer,
      * exactly as an application would write it. */
     private fun rowWith(constant: String) = """
-        from pythonx.compose.foundation.layout import Row, Arrangement, width__Dp
-        from pythonx.compose.material3 import Text
+        from androidx.compose.foundation.layout import Row, Arrangement, width__Dp
+        from androidx.compose.material3 import Text
         from fixture.compose import emptyModifier
 
         Row(

@@ -119,12 +119,19 @@ class PythonxTableSourceTest {
         // `register_package('pythonx.compose', 'androidx.compose')` and the `Dp` allowlist entry --
         // it pinned the binder knowing a UI library by name. The binder may not know one at all, so
         // the assertion is inverted: the mechanism is here, no library that uses it is.
-        assertTrue(code.contains("def register_package("), "the seam has to exist")
         assertTrue(code.contains("def allow_raw_primitive("), "the seam has to exist")
+        // `pythonx.runtime.*` survives the filter below on purpose: that is the Kotlin package of
+        // this binder's own `PythonCallables.Fragment`, spelled the way every other Kotlin package
+        // is spelled. Naming your own declaration is not renaming someone else's namespace.
+        // Two rules, and the second is the stronger one. This file used to assert the *presence*
+        // of `register_package('pythonx.compose', 'androidx.compose')`, pinning the binder knowing
+        // a UI library by name. `register_package` itself is gone with the rest of the renaming:
+        // a Kotlin package is importable under its own name, and what a `pythonx.*` module is
+        // called is decided by the distribution that ships it, not here.
         assertEquals(
             emptyList(),
-            listOf("androidx", "'pythonx.compose'", "'kotlin'").filter { code.contains(it) },
-            "the binder names a library it should know nothing about",
+            listOf("androidx", "register_package", "'pythonx.compose").filter { code.contains(it) },
+            "the binder either names a library or renames a namespace; it may do neither",
         )
     }
 

@@ -37,7 +37,7 @@ import kotlin.test.assertEquals
  * packages this module walks.
  *
  * `pythonx.runtime.newFunction` is what any walked call site's crossing calls under the hood
- * (`PythonxAdapter._make_function`), and `PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)` -- already needed here for nothing
+ * (`PythonxAdapter._make_function`), and `PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)` -- already needed here for nothing
  * more than its dynamic `pythonx.*` package finder -- registers `PythonCallables.Fragment` as part of
  * installing, which is what makes `from pythonx.runtime import newFunction` resolve at all
  * (`PythonCallables.Fragment` is `internal` to `:python-multiplatform`, so this file cannot register it
@@ -53,7 +53,7 @@ class RetainedSlotSweepPreconditionTest {
         UpcallTable.clear()
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
         // `PythonProxySource.install()` renders its Python source from whatever is registered in
         // `UpcallTable` *at the moment it is called* -- called again here, after `PythonxAdapter
         // .install()` has registered `PythonCallables.Fragment`, is what actually gives

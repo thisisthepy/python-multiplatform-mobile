@@ -41,7 +41,7 @@ import kotlin.test.assertTrue
  * composable half of the surface). They come from the *other* producer,
  * `PythonProxySource` + `FunctionTable`, the route `WalkedArtifactComposeModifierTest` uses for the
  * identical seed in `ksp-fixtures/artifact`. Both producers run in the same test here --
- * `PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)` for `Spacer` itself, `PythonProxySource.install()` for the `Modifier`
+ * `PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)` for `Spacer` itself, `PythonProxySource.install()` for the `Modifier`
  * chain that fills its one argument -- kept out of `ComposableRenderTest`'s shared setup so a
  * regression in this newer combination cannot fail ten unrelated tests that never asked for it.
  *
@@ -65,7 +65,7 @@ class ModifierSeededRenderTest {
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -100,8 +100,8 @@ class ModifierSeededRenderTest {
     @Test
     fun noSpacerLeavesTheSecondTextWhereTheFirstOneEnds() {
         val body = """
-            from pythonx.compose.foundation.layout import Row
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Row
+            from androidx.compose.material3 import Text
             Row(content=lambda row: (Text('hi'), Text('hi')))
         """.trimIndent()
         val rightmost = rightmostInkOf(body)
@@ -113,8 +113,8 @@ class ModifierSeededRenderTest {
         val body = """
             from fixture.compose import emptyModifier
             from androidx.compose.foundation.layout import size__Dp
-            from pythonx.compose.foundation.layout import Spacer, Row
-            from pythonx.compose.material3 import Text
+            from androidx.compose.foundation.layout import Spacer, Row
+            from androidx.compose.material3 import Text
             Row(content=lambda row: (Text('hi'), Spacer(modifier=size__Dp(emptyModifier(), $sizeDp)), Text('hi')))
         """.trimIndent()
         return rightmostInkOf(body)
