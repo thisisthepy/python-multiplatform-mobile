@@ -11,9 +11,9 @@ import androidx.compose.ui.unit.Density
 import org.jetbrains.skia.Bitmap
 import python.multiplatform.ffi.Python3
 import python.multiplatform.ffi.pythonx.PythonxAdapter
+import python.multiplatform.ffi.upcall.UpcallBootstrap
 import python.multiplatform.generated.artifacts.ArtifactTable
 import python.multiplatform.reflection.UpcallTable
-import python.native.ffi.UpcallStub
 import java.awt.Canvas
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -58,17 +58,7 @@ class CallbackDrivenRenderTest {
         Python3.initialize(silent = true)
         UpcallTable.clear()
         UpcallTable.install(ArtifactTable.fragments)
-        Python3.exec(
-            """
-            import ctypes
-
-            _pm_resolve = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_char_p)(${UpcallStub.resolveHandleStubAddr})
-            _pm_invoke = ctypes.CFUNCTYPE(ctypes.py_object, ctypes.c_long, ctypes.py_object)(
-                ${UpcallStub.invokeWithArgsStubAddr}
-            )
-            _pm_release = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_long)(${UpcallStub.releaseObjectStubAddr})
-            """.trimIndent(),
-        )
+        check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonxAdapter.install()
     }
 
