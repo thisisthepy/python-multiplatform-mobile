@@ -48,7 +48,7 @@ class M3ProofRenderTest {
         UpcallTable.clear()
         UpcallTable.install(ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -66,7 +66,7 @@ class M3ProofRenderTest {
     fun horizontalDividerDrawsALineWithNoArguments() {
         val drawn = inkOf(
             """
-            from pythonx.compose.material3 import HorizontalDivider
+            from androidx.compose.material3 import HorizontalDivider
             HorizontalDivider()
             """.trimIndent(),
             width = 200, height = 10,
@@ -87,13 +87,13 @@ class M3ProofRenderTest {
     fun radioButtonRendersItsSelectedAndDeselectedStates() {
         val selected = inkOf(
             """
-            from pythonx.compose.material3 import RadioButton
+            from androidx.compose.material3 import RadioButton
             RadioButton(selected=True, on_click=lambda: None)
             """.trimIndent(),
         )
         val deselected = inkOf(
             """
-            from pythonx.compose.material3 import RadioButton
+            from androidx.compose.material3 import RadioButton
             RadioButton(selected=False, on_click=lambda: None)
             """.trimIndent(),
         )
@@ -133,7 +133,7 @@ class M3ProofRenderTest {
     fun linearProgressIndicatorDrawsAtItsGivenProgress() {
         val drawn = inkOf(
             """
-            from pythonx.compose.material3 import LinearProgressIndicator
+            from androidx.compose.material3 import LinearProgressIndicator
             LinearProgressIndicator(progress=0.75)
             """.trimIndent(),
             width = 200, height = 8,
@@ -155,7 +155,7 @@ class M3ProofRenderTest {
     fun circularProgressIndicatorDrawsAtItsGivenProgress() {
         val drawn = inkOf(
             """
-            from pythonx.compose.material3 import CircularProgressIndicator
+            from androidx.compose.material3 import CircularProgressIndicator
             CircularProgressIndicator(progress=0.75)
             """.trimIndent(),
         )
@@ -177,7 +177,7 @@ class M3ProofRenderTest {
         val error = try {
             inkOf(
                 """
-                from pythonx.compose.material3 import LinearProgressIndicator
+                from androidx.compose.material3 import LinearProgressIndicator
                 LinearProgressIndicator(progress=lambda: 0.75)
                 """.trimIndent(),
                 width = 200, height = 8,
@@ -205,13 +205,13 @@ class M3ProofRenderTest {
     fun surfaceComposesItsContentLambda() {
         val drawn = inkOf(
             """
-            from pythonx.compose.material3 import Surface, Text
+            from androidx.compose.material3 import Surface, Text
             Surface(content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val empty = inkOf(
             """
-            from pythonx.compose.material3 import Surface
+            from androidx.compose.material3 import Surface
             Surface(content=lambda: None)
             """.trimIndent(),
         )
@@ -232,14 +232,14 @@ class M3ProofRenderTest {
     fun scaffoldComposesItsContentWithPaddingValues() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import Scaffold, Text
+            from androidx.compose.material3 import Scaffold, Text
             Scaffold(content=lambda padding: Text('hi'))
             """.trimIndent(),
             width = 200, height = 120,
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import Scaffold
+            from androidx.compose.material3 import Scaffold
             Scaffold(content=lambda padding: None)
             """.trimIndent(),
             width = 200, height = 120,
@@ -269,14 +269,14 @@ class M3ProofRenderTest {
     fun sliderDrawsAtItsGivenValue() {
         val left = pixelsOf(
             """
-            from pythonx.compose.material3 import Slider
+            from androidx.compose.material3 import Slider
             Slider(0.0, on_value_change=lambda v: None)
             """.trimIndent(),
             width = 200, height = 48,
         )
         val right = pixelsOf(
             """
-            from pythonx.compose.material3 import Slider
+            from androidx.compose.material3 import Slider
             Slider(1.0, on_value_change=lambda v: None)
             """.trimIndent(),
             width = 200, height = 48,
@@ -301,14 +301,14 @@ class M3ProofRenderTest {
     fun topAppBarComposesItsTitleLambda() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import TopAppBar, Text
+            from androidx.compose.material3 import TopAppBar, Text
             TopAppBar(title=lambda: Text('hi'))
             """.trimIndent(),
             width = 200, height = 64,
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import TopAppBar
+            from androidx.compose.material3 import TopAppBar
             TopAppBar(title=lambda: None)
             """.trimIndent(),
             width = 200, height = 64,
@@ -337,13 +337,13 @@ class M3ProofRenderTest {
     fun floatingActionButtonComposesItsClickHandlerAndContent() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import FloatingActionButton, Text
+            from androidx.compose.material3 import FloatingActionButton, Text
             FloatingActionButton(on_click=lambda: None, content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import FloatingActionButton
+            from androidx.compose.material3 import FloatingActionButton
             FloatingActionButton(on_click=lambda: None, content=lambda: None)
             """.trimIndent(),
         )
@@ -373,7 +373,7 @@ class M3ProofRenderTest {
     fun tabRowComposesItsTabsAndTabRendersItsTextSlot() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import TabRow, Tab, Text
+            from androidx.compose.material3 import TabRow, Tab, Text
             TabRow(
                 selected_tab_index=0,
                 tabs=lambda: Tab(
@@ -387,7 +387,7 @@ class M3ProofRenderTest {
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import TabRow, Tab
+            from androidx.compose.material3 import TabRow, Tab
             TabRow(
                 selected_tab_index=0,
                 tabs=lambda: Tab(
@@ -418,13 +418,13 @@ class M3ProofRenderTest {
     fun checkboxRendersItsCheckedAndUncheckedStates() {
         val checked = inkOf(
             """
-            from pythonx.compose.material3 import Checkbox
+            from androidx.compose.material3 import Checkbox
             Checkbox(checked=True, on_checked_change=lambda v: None)
             """.trimIndent(),
         )
         val unchecked = inkOf(
             """
-            from pythonx.compose.material3 import Checkbox
+            from androidx.compose.material3 import Checkbox
             Checkbox(checked=False, on_checked_change=lambda v: None)
             """.trimIndent(),
         )
@@ -443,13 +443,13 @@ class M3ProofRenderTest {
     fun switchRendersItsCheckedAndUncheckedStates() {
         val checked = inkOf(
             """
-            from pythonx.compose.material3 import Switch
+            from androidx.compose.material3 import Switch
             Switch(checked=True, on_checked_change=lambda v: None)
             """.trimIndent(),
         )
         val unchecked = inkOf(
             """
-            from pythonx.compose.material3 import Switch
+            from androidx.compose.material3 import Switch
             Switch(checked=False, on_checked_change=lambda v: None)
             """.trimIndent(),
         )
@@ -468,14 +468,14 @@ class M3ProofRenderTest {
     fun bottomAppBarComposesItsContentLambda() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import BottomAppBar, Text
+            from androidx.compose.material3 import BottomAppBar, Text
             BottomAppBar(content=lambda *args: Text('hi'))
             """.trimIndent(),
             width = 200, height = 64,
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import BottomAppBar
+            from androidx.compose.material3 import BottomAppBar
             BottomAppBar(content=lambda *args: None)
             """.trimIndent(),
             width = 200, height = 64,
@@ -499,14 +499,14 @@ class M3ProofRenderTest {
     fun navigationBarComposesItsContentLambda() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import NavigationBar, Text
+            from androidx.compose.material3 import NavigationBar, Text
             NavigationBar(content=lambda *args: Text('hi'))
             """.trimIndent(),
             width = 200, height = 64,
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import NavigationBar
+            from androidx.compose.material3 import NavigationBar
             NavigationBar(content=lambda *args: None)
             """.trimIndent(),
             width = 200, height = 64,
@@ -530,14 +530,14 @@ class M3ProofRenderTest {
     fun navigationRailComposesItsContentLambda() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import NavigationRail, Text
+            from androidx.compose.material3 import NavigationRail, Text
             NavigationRail(content=lambda *args: Text('hi'))
             """.trimIndent(),
             width = 80, height = 200,
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import NavigationRail
+            from androidx.compose.material3 import NavigationRail
             NavigationRail(content=lambda *args: None)
             """.trimIndent(),
             width = 80, height = 200,
@@ -561,13 +561,13 @@ class M3ProofRenderTest {
     fun extendedFloatingActionButtonComposesItsContent() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import ExtendedFloatingActionButton, Text
+            from androidx.compose.material3 import ExtendedFloatingActionButton, Text
             ExtendedFloatingActionButton(on_click=lambda: None, text=lambda: Text('hi'), icon=lambda: None)
             """.trimIndent(),
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import ExtendedFloatingActionButton
+            from androidx.compose.material3 import ExtendedFloatingActionButton
             ExtendedFloatingActionButton(on_click=lambda: None, text=lambda: None, icon=lambda: None)
             """.trimIndent(),
         )
@@ -590,13 +590,13 @@ class M3ProofRenderTest {
     fun snackbarComposesItsContent() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import Snackbar, Text
+            from androidx.compose.material3 import Snackbar, Text
             Snackbar(content=lambda: Text('hi'))
             """.trimIndent(),
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import Snackbar, Text
+            from androidx.compose.material3 import Snackbar, Text
             Snackbar(content=lambda: Text(''))
             """.trimIndent(),
         )
@@ -619,14 +619,14 @@ class M3ProofRenderTest {
     fun alertDialogComposesItsButtonsAndTitle() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import AlertDialog, Text
+            from androidx.compose.material3 import AlertDialog, Text
             AlertDialog(on_dismiss_request=lambda: None, confirm_button=lambda: Text('OK'), title=lambda: Text('hi'))
             """.trimIndent(),
             width = 200, height = 200,
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import AlertDialog
+            from androidx.compose.material3 import AlertDialog
             AlertDialog(on_dismiss_request=lambda: None, confirm_button=lambda: None, title=lambda: None)
             """.trimIndent(),
             width = 200, height = 200,
@@ -650,13 +650,13 @@ class M3ProofRenderTest {
     fun navigationDrawerItemComposesItsLabel() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import NavigationDrawerItem, Text
+            from androidx.compose.material3 import NavigationDrawerItem, Text
             NavigationDrawerItem(label=lambda: Text('hi'), selected=True, on_click=lambda: None)
             """.trimIndent(),
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import NavigationDrawerItem
+            from androidx.compose.material3 import NavigationDrawerItem
             NavigationDrawerItem(label=lambda: None, selected=True, on_click=lambda: None)
             """.trimIndent(),
         )
@@ -679,14 +679,14 @@ class M3ProofRenderTest {
     fun searchBarComposesItsContent() {
         val drawnPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import SearchBar, Text
+            from androidx.compose.material3 import SearchBar, Text
             SearchBar(query="hi", on_query_change=lambda _: None, on_search=lambda _: None, active=False, on_active_change=lambda _: None, content=lambda *args: Text('hi'))
             """.trimIndent(),
             width = 200, height = 200,
         )
         val emptyPixels = pixelsOf(
             """
-            from pythonx.compose.material3 import SearchBar
+            from androidx.compose.material3 import SearchBar
             SearchBar(query="", on_query_change=lambda _: None, on_search=lambda _: None, active=False, on_active_change=lambda _: None, content=lambda *args: None)
             """.trimIndent(),
             width = 200, height = 200,
@@ -711,7 +711,7 @@ class M3ProofRenderTest {
         // 2. DatePicker
         val datePickerInk = inkOf(
             """
-            from pythonx.compose.material3 import DatePicker, remember_date_picker_state
+            from androidx.compose.material3 import DatePicker, remember_date_picker_state
             DatePicker(state=remember_date_picker_state())
             """.trimIndent(),
             width = 400, height = 400,
@@ -721,7 +721,7 @@ class M3ProofRenderTest {
         // 3. TimePicker
         val timePickerInk = inkOf(
             """
-            from pythonx.compose.material3 import TimePicker, remember_time_picker_state
+            from androidx.compose.material3 import TimePicker, remember_time_picker_state
             TimePicker(state=remember_time_picker_state())
             """.trimIndent(),
             width = 400, height = 400,
@@ -730,7 +730,7 @@ class M3ProofRenderTest {
 
         val swipeInk = inkOf(
             """
-            from pythonx.compose.material3 import SwipeToDismissBox, remember_swipe_to_dismiss_box_state, Text
+            from androidx.compose.material3 import SwipeToDismissBox, remember_swipe_to_dismiss_box_state, Text
             SwipeToDismissBox(
                 state=remember_swipe_to_dismiss_box_state(),
                 background_content=lambda: Text("bg"),
@@ -746,15 +746,15 @@ class M3ProofRenderTest {
     fun typographyChangesFontRender() {
         val baseInk = pixelsOf(
             """
-            from pythonx.compose.material3 import MaterialTheme, Text
+            from androidx.compose.material3 import MaterialTheme, Text
             MaterialTheme(content=lambda: Text("A"))
             """.trimIndent(),
             width = 50, height = 50
         )
         val customInk = pixelsOf(
             """
-            from pythonx.compose.material3 import MaterialTheme, Text, Typography
-            from pythonx.compose.ui.text import TextStyle
+            from androidx.compose.material3 import MaterialTheme, Text, Typography
+            from androidx.compose.ui.text import TextStyle
             
             ts = TextStyle.Default
             typo = Typography(ts, ts, ts, ts, ts, ts, ts, ts, ts, ts, ts, ts, ts, ts, ts)
@@ -777,7 +777,7 @@ class M3ProofRenderTest {
         // DropdownMenu creates a Popup which ImageComposeScene does not capture.
         val popupInk = inkOf(
             """
-            from pythonx.compose.material3 import DropdownMenu, Text
+            from androidx.compose.material3 import DropdownMenu, Text
             DropdownMenu(
                 expanded=True,
                 on_dismiss_request=lambda: None,
@@ -807,7 +807,7 @@ class M3ProofRenderTest {
     @Test
     fun colorSchemeResolvesToItsProxyTypeRatherThanAnythingCallable() {
         val error = try {
-            Python3.exec("from pythonx.compose.material3 import ColorScheme; ColorScheme()")
+            Python3.exec("from androidx.compose.material3 import ColorScheme; ColorScheme()")
             null
         } catch (e: Throwable) {
             e.message ?: ""

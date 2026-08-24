@@ -25,7 +25,7 @@ class DraggableLeakTest {
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -61,7 +61,7 @@ class DraggableLeakTest {
         Python3.exec(
             """
             import sys
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
             
             def _acc_on_delta(delta):
                 pass
@@ -82,7 +82,7 @@ class DraggableLeakTest {
                 """
                 from fixture.compose import emptyModifier, pythonDraggable
                 from androidx.compose.foundation.layout import size__Dp
-                from pythonx.compose.material3 import Text
+                from androidx.compose.material3 import Text
                 
                 _m = pythonDraggable(size__Dp(emptyModifier(), 48.0), _acc_on_delta, _acc_on_drag_started, _acc_on_drag_stopped)
                 Text(str(${body.value}), modifier=_m)

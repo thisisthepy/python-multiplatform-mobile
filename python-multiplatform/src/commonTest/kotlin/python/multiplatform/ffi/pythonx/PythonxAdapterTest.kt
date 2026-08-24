@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
  *
  * The four are, in the order the design puts them:
  *
- * 1. **A module exists before any attribute is touched** (§2.3). `import pythonx.compose.foundation
+ * 1. **A module exists before any attribute is touched** (§2.3). `import androidx.compose.foundation
  *    .layout` fails at the import statement, not at an attribute, so a module `__getattr__` can
  *    never be the whole answer. A `sys.meta_path` finder is.
  * 2. **A name is adapted once and then lives in the module dict** (§4.1). The 551--587 ns
@@ -99,8 +99,8 @@ class PythonxAdapterTest {
     fun onlyAPackageSomethingIsBoundUnderIsImportable() = withAdapter {
         Python3.exec(
             """
-            import pythonx.compose.foundation.layout as _layout
-            import pythonx.compose.ui as _ui
+            import androidx.compose.foundation.layout as _layout
+            import androidx.compose.ui as _ui
             _px = {'layout': _layout.__name__, 'ui': _ui.__name__}
             try:
                 import pythonx.compose.nothing.here
@@ -110,8 +110,8 @@ class PythonxAdapterTest {
             """.trimIndent(),
         )
 
-        assertEquals("pythonx.compose.foundation.layout", eval("_px['layout']"))
-        assertEquals("pythonx.compose.ui", eval("_px['ui']"))
+        assertEquals("androidx.compose.foundation.layout", eval("_px['layout']"))
+        assertEquals("androidx.compose.ui", eval("_px['ui']"))
         assertEquals("ModuleNotFoundError", eval("_px['bogus']"))
     }
 
@@ -123,7 +123,7 @@ class PythonxAdapterTest {
      * again for it.
      *
      * The `before` half also pins the other side of that cache, and it found a real defect: this
-     * interpreter is shared by the whole suite, so `sys.modules['pythonx.compose.foundation.layout']`
+     * interpreter is shared by the whole suite, so `sys.modules['androidx.compose.foundation.layout']`
      * outlives a test and so did everything adapted into it. `CallableHandle` packs the table epoch
      * exactly so a handle cached across a reinstall is caught, and it caught this -- six tests
      * failed with *invalid or stale callable handle* before `_register_table` learned to invalidate
@@ -133,7 +133,7 @@ class PythonxAdapterTest {
     fun anAttributeIsAdaptedOnceAndThenLivesInTheModuleDict() = withAdapter {
         Python3.exec(
             """
-            import pythonx.compose.foundation.layout as _layout
+            import androidx.compose.foundation.layout as _layout
             _px = {'before': 'padding' in vars(_layout)}
             _first = _layout.padding
             _px['after'] = 'padding' in vars(_layout)
@@ -227,8 +227,8 @@ class PythonxAdapterTest {
     fun anOverloadSetDispatchesOnArgumentCount() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import padding
-            from pythonx.compose.ui import empty_modifier, describe_modifier
+            from androidx.compose.foundation.layout import padding
+            from androidx.compose.ui import empty_modifier, describe_modifier
             _px = {
                 'one': describe_modifier(padding(empty_modifier(), 16)),
                 'four': describe_modifier(padding(empty_modifier(), 1, 2, 3, 4)),
@@ -258,8 +258,8 @@ class PythonxAdapterTest {
     fun anOverloadSetDispatchesOnKeywordNames() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import padding, padding_values_of
-            from pythonx.compose.ui import empty_modifier, describe_modifier
+            from androidx.compose.foundation.layout import padding, padding_values_of
+            from androidx.compose.ui import empty_modifier, describe_modifier
             _px = {
                 'kw': describe_modifier(padding(empty_modifier(), horizontal=8, vertical=4)),
                 # the same arity, chosen by argument *type* rather than by count
@@ -295,8 +295,8 @@ class PythonxAdapterTest {
     fun anUnmatchedOverloadCallNamesTheCandidatesAndTheExplicitSpellingStillWorks() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import padding, padding__Dp
-            from pythonx.compose.ui import empty_modifier, describe_modifier
+            from androidx.compose.foundation.layout import padding, padding__Dp
+            from androidx.compose.ui import empty_modifier, describe_modifier
             _px = {}
             try:
                 padding(empty_modifier(), 'sixteen')
@@ -329,7 +329,7 @@ class PythonxAdapterTest {
     fun anExtensionIsAMethodOnItsReceiverAndTheChainComposes() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.ui import Modifier, describe_modifier
+            from androidx.compose.ui import Modifier, describe_modifier
             _chained = Modifier.padding(16).size(24)
             _from_instance = Modifier.empty().fill_max_width().z_index(2)
             _px = {
@@ -360,7 +360,7 @@ class PythonxAdapterTest {
     fun theSameChainComparedAgainstADifferentPaddingDoesNotMatch() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.ui import Modifier, describe_modifier
+            from androidx.compose.ui import Modifier, describe_modifier
             _px = {'described': describe_modifier(Modifier.padding(16).size(24))}
             _px['wrong_padding'] = _px['described'] == 'padding(17.0) -> size(24.0)'
             _px['wrong_order'] = _px['described'] == 'size(24.0) -> padding(16.0)'
@@ -387,8 +387,8 @@ class PythonxAdapterTest {
     fun aRawNumberIsAcceptedForDpAndRefusedForAPackedValueClass() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import padding, padding_from_baseline__TextUnit
-            from pythonx.compose.ui import Modifier, describe_modifier
+            from androidx.compose.foundation.layout import padding, padding_from_baseline__TextUnit
+            from androidx.compose.ui import Modifier, describe_modifier
             _px = {'dp': describe_modifier(padding(Modifier.empty(), 16))}
             try:
                 padding_from_baseline__TextUnit(Modifier.empty(), 16)
@@ -419,7 +419,7 @@ class PythonxAdapterTest {
     fun aNameNothingIsBoundUnderFallsThroughToAttributeError() = withAdapter {
         Python3.exec(
             """
-            import pythonx.compose.foundation.layout as _layout
+            import androidx.compose.foundation.layout as _layout
             try:
                 _layout.no_such_modifier
                 _px = 'resolved'
@@ -440,7 +440,7 @@ class PythonxAdapterTest {
      *
      * `Arrangement` itself is a submodule here, not a proxy class -- `_PACKAGES_SEEN` picks up
      * `androidx.compose.foundation.layout.Arrangement` from the getter's own package, and `_Finder`
-     * resolves `from ... import Arrangement` to it before `pythonx.compose.foundation.layout`'s
+     * resolves `from ... import Arrangement` to it before `androidx.compose.foundation.layout`'s
      * `__getattr__` is ever consulted. `.Start` is then that submodule's own attribute read.
      *
      * The no-cache claim is checked the same way `anAttributeIsAdaptedOnceAndThenLivesInTheModuleDict`
@@ -453,7 +453,7 @@ class PythonxAdapterTest {
     fun aStaticGetterIsReadAsAnAttributeAndReadFreshEveryTime() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import Arrangement, describe_horizontal
+            from androidx.compose.foundation.layout import Arrangement, describe_horizontal
             _px = {}
             _first = Arrangement.Start
             _second = Arrangement.Start
@@ -483,7 +483,7 @@ class PythonxAdapterTest {
     fun aStaticGetterIsNotCallable() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import Arrangement
+            from androidx.compose.foundation.layout import Arrangement
             try:
                 Arrangement.Start()
                 _px = 'called'
@@ -517,7 +517,7 @@ class PythonxAdapterTest {
         )
 
         if (!publishesProxyEntryPoints) {
-            val refusal = assertFails { PythonxAdapter.install(COMPOSE_SHAPED_MODULES, COMPOSE_SHAPED_RAW_VALUE_CLASSES) }
+            val refusal = assertFails { PythonxAdapter.install(COMPOSE_SHAPED_RAW_VALUE_CLASSES) }
             assertTrue(
                 refusal.message?.contains("raw upcall entry points are not bound") == true,
                 "a target with no proxy bootstrap must fail the adapter's own guard: $refusal",
@@ -525,7 +525,7 @@ class PythonxAdapterTest {
             return@withInterpreter
         }
 
-        PythonxAdapter.install(COMPOSE_SHAPED_MODULES, COMPOSE_SHAPED_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(COMPOSE_SHAPED_RAW_VALUE_CLASSES)
         Python3.exec(
             "import pythonx\n" +
                 "pythonx.register_empty('androidx.compose.ui.Modifier', " +

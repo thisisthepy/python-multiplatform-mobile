@@ -33,7 +33,7 @@ class SwipeableRenderTest {
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -151,7 +151,7 @@ class SwipeableRenderTest {
         val BODY = """
             from fixture.compose import emptyModifier, pythonSwipeableString
             from androidx.compose.foundation.layout import size__Dp
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
 
             _m = pythonSwipeableString(size__Dp(emptyModifier(), 48.0), "start", "start", 0.0, "end", 40.0, 0.5, _on_value_change)
             Text(str(len(_value_events)), modifier=_m)

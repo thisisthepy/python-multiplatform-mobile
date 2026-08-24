@@ -63,7 +63,7 @@ class RecompositionAccumulationTest {
         UpcallTable.clear()
         UpcallTable.install(ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -84,7 +84,7 @@ class RecompositionAccumulationTest {
         Python3.exec(
             """
             import sys
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
 
             def _acc_named():
                 Text('hi')
@@ -121,13 +121,13 @@ class RecompositionAccumulationTest {
         Python3.exec(
             """
             import sys
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
             """.trimIndent(),
         )
         val measured = measure(null) { pass ->
             "# pass $pass\n" +
-                "from pythonx.compose.foundation.layout import Column\n" +
-                "from pythonx.compose.material3 import Text\n" +
+                "from androidx.compose.foundation.layout import Column\n" +
+                "from androidx.compose.material3 import Text\n" +
                 "Column(content=lambda: Text('hi'))"
         }
         report("inline lambda", measured)
@@ -165,7 +165,7 @@ class RecompositionAccumulationTest {
         )
         val measured = measure("_acc_toggle") { pass ->
             "# pass $pass\n" +
-                "from pythonx.compose.material3 import Checkbox\n" +
+                "from androidx.compose.material3 import Checkbox\n" +
                 "Checkbox(False, on_checked_change=_acc_toggle)"
         }
         report("plain callback", measured)
@@ -198,7 +198,7 @@ class RecompositionAccumulationTest {
         Python3.exec(
             """
             import sys
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
 
             def _acc_make(n):
                 return lambda: Text('hi' * n)
@@ -206,7 +206,7 @@ class RecompositionAccumulationTest {
         )
         val measured = measure(null) { pass ->
             "# pass $pass\n" +
-                "from pythonx.compose.foundation.layout import Column\n" +
+                "from androidx.compose.foundation.layout import Column\n" +
                 "Column(content=_acc_make(${pass % DISTINCT_CAPTURES + 1}))"
         }
         report("capturing lambda over $DISTINCT_CAPTURES distinct values", measured)
@@ -247,7 +247,7 @@ class RecompositionAccumulationTest {
         Python3.exec(
             """
             import sys
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
 
             def _acc_both():
                 Text('hi')
@@ -257,7 +257,7 @@ class RecompositionAccumulationTest {
         )
         val measured = measure("_acc_both") { pass ->
             "# pass $pass\n" +
-                "from pythonx.compose.material3 import Button\n" +
+                "from androidx.compose.material3 import Button\n" +
                 "Button(on_click=_acc_both, content=_acc_both)"
         }
         report("one callable, two slot shapes", measured)
@@ -523,12 +523,12 @@ class RecompositionAccumulationTest {
     /** A `content` that declares a `content`: two wrappers, one nested in the other. */
     private fun nested(pass: Int): String =
         "# pass $pass\n" +
-            "from pythonx.compose.foundation.layout import Column\n" +
+            "from androidx.compose.foundation.layout import Column\n" +
             "Column(content=lambda: Column(content=_acc_inner))"
 
     private fun columnCalling(name: String, pass: Int): String =
         "# pass $pass\n" +
-            "from pythonx.compose.foundation.layout import Column\n" +
+            "from androidx.compose.foundation.layout import Column\n" +
             "Column(content=$name)"
 
     /** Non-background pixels of one frame. `ComposableRenderTest` has the same three lines; the two

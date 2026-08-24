@@ -81,7 +81,7 @@ class WalkedArtifactStubTest {
     /**
      * §4.4's shape, generated from the real `androidx.compose.foundation.layout` jar: the extension
      * is an attribute on `Modifier` whose type is a Protocol with an overloaded `__call__`, and
-     * `Modifier` lives in the module its own Kotlin package maps to (`pythonx.compose.ui`) even
+     * `Modifier` lives in the module its own Kotlin package maps to (`androidx.compose.ui`) even
      * though `padding` is declared in another (`androidx.compose.foundation.layout`).
      *
      * The metaclass of §4.2 is measured not to work in either CPython or mypy, and must not appear.

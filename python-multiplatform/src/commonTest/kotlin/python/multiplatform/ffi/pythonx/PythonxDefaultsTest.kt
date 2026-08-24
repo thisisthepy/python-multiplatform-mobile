@@ -70,7 +70,7 @@ class PythonxDefaultsTest {
     fun aDefaultedParameterMayBeLeftOutEntirely() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.ui import Modifier, describe_modifier
+            from androidx.compose.ui import Modifier, describe_modifier
             _px = {
                 'omitted': describe_modifier(Modifier.fill_max_height()),
                 'given': describe_modifier(Modifier.fill_max_height(0.5)),
@@ -95,8 +95,8 @@ class PythonxDefaultsTest {
     fun anOmittedArgumentNeedNotBeATrailingOne() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import padding__Dp_Dp, padding__Dp_Dp_Dp_Dp
-            from pythonx.compose.ui import Modifier, describe_modifier
+            from androidx.compose.foundation.layout import padding__Dp_Dp, padding__Dp_Dp_Dp_Dp
+            from androidx.compose.ui import Modifier, describe_modifier
             _px = {
                 'last': describe_modifier(Modifier.padding__Dp_Dp_Dp_Dp(bottom=4)),
                 'middle': describe_modifier(Modifier.padding__Dp_Dp(vertical=4)),
@@ -129,7 +129,7 @@ class PythonxDefaultsTest {
     fun omittingEveryArgumentOfAnOverloadedNameIsRefusedByTheBody() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.ui import Modifier, describe_modifier
+            from androidx.compose.ui import Modifier, describe_modifier
             _px = {}
             try:
                 Modifier.padding__Dp_Dp()
@@ -159,8 +159,8 @@ class PythonxDefaultsTest {
     fun theOverloadThatNeedsNoDefaultWins() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import padding
-            from pythonx.compose.ui import Modifier, describe_modifier
+            from androidx.compose.foundation.layout import padding
+            from androidx.compose.ui import Modifier, describe_modifier
             _px = {
                 'one': describe_modifier(Modifier.padding(16)),
                 'two': describe_modifier(Modifier.padding(8, 4)),
@@ -197,8 +197,8 @@ class PythonxDefaultsTest {
     fun aParameterWithNoDefaultIsStillRequired() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import padding__Dp
-            from pythonx.compose.ui import Modifier
+            from androidx.compose.foundation.layout import padding__Dp
+            from androidx.compose.ui import Modifier
             _px = {}
             try:
                 Modifier.padding__Dp()
@@ -246,7 +246,7 @@ class PythonxDefaultsTest {
         )
 
         if (!publishesProxyEntryPoints) {
-            val refusal = assertFails { PythonxAdapter.install(COMPOSE_SHAPED_MODULES, COMPOSE_SHAPED_RAW_VALUE_CLASSES) }
+            val refusal = assertFails { PythonxAdapter.install(COMPOSE_SHAPED_RAW_VALUE_CLASSES) }
             assertTrue(
                 refusal.message?.contains("raw upcall entry points are not bound") == true,
                 "a target with no proxy bootstrap must fail the adapter's own guard: $refusal",
@@ -254,7 +254,7 @@ class PythonxDefaultsTest {
             return@withInterpreter
         }
 
-        PythonxAdapter.install(COMPOSE_SHAPED_MODULES, COMPOSE_SHAPED_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(COMPOSE_SHAPED_RAW_VALUE_CLASSES)
         Python3.exec(
             "import pythonx\n" +
                 "pythonx.register_empty('androidx.compose.ui.Modifier', " +

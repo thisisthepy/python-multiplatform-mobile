@@ -59,7 +59,7 @@ class CallbackDrivenRenderTest {
         UpcallTable.clear()
         UpcallTable.install(ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -444,12 +444,12 @@ class CallbackDrivenRenderTest {
         /** `checked` is read out of Python on every composition, which is what makes a fresh scene
          * show what the callback wrote. */
         val CHECKBOX = """
-            from pythonx.compose.material3 import Checkbox
+            from androidx.compose.material3 import Checkbox
             Checkbox(_cb_state[0], on_checked_change=_cb_toggle)
         """.trimIndent()
 
         val SWITCH = """
-            from pythonx.compose.material3 import Switch
+            from androidx.compose.material3 import Switch
             Switch(_cb_state[0], on_checked_change=_cb_toggle)
         """.trimIndent()
 
@@ -465,7 +465,7 @@ class CallbackDrivenRenderTest {
         /** `value` is read out of Python on every composition, the same as `CHECKBOX`'s `checked` --
          * what makes a fresh scene show what the callback wrote. */
         val TEXT_FIELD = """
-            from pythonx.compose.material3 import TextField
+            from androidx.compose.material3 import TextField
             TextField(_tf_state[0], on_value_change=_tf_on_change)
         """.trimIndent()
 

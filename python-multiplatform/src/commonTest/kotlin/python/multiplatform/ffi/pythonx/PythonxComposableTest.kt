@@ -68,7 +68,7 @@ class PythonxComposableTest {
     fun aComposableIsCalledWithOnlyItsRequiredArgumentAndAComputedMask() = withComposer {
         Python3.exec(
             """
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
             Text('hi')
             """.trimIndent(),
         )
@@ -98,7 +98,7 @@ class PythonxComposableTest {
     fun theMaskBitIsTheParameterIndex() = withComposer {
         Python3.exec(
             """
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
             Text('hi')
             Text('hi', modifier=None)
             Text('hi', color=3)
@@ -147,7 +147,7 @@ class PythonxComposableTest {
             PythonCallables.withScope(scope) {
                 Python3.exec(
                     """
-                    from pythonx.compose.foundation.layout import stub_row_scope
+                    from androidx.compose.foundation.layout import stub_row_scope
                     _row = stub_row_scope()
                     _row.NavigationBarItem(selected=True, on_click=lambda: None)
                     _row.NavigationBarItem(selected=True, on_click=lambda: None, enabled=False)
@@ -185,7 +185,7 @@ class PythonxComposableTest {
     fun aParameterWithNoDefaultCannotBeOmittedFromAComposable() = withComposer {
         Python3.exec(
             """
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
             _px = {}
             try:
                 Text()
@@ -211,7 +211,7 @@ class PythonxComposableTest {
     fun callingAComposableOutsideACompositionRefusesAndSaysWhy() = withAdapter {
         Python3.exec(
             """
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
             _px = {}
             try:
                 Text('hi')
@@ -232,7 +232,7 @@ class PythonxComposableTest {
     fun theSyntheticSlotsAreNotAddressableFromPython() = withComposer {
         Python3.exec(
             """
-            from pythonx.compose.material3 import Text
+            from androidx.compose.material3 import Text
             _px = {}
             for _name in ('composer', 'changed', 'default'):
                 try:
@@ -270,7 +270,7 @@ class PythonxComposableTest {
         Python3.exec(
             """
             import pythonx
-            from pythonx.compose.runtime import stub_composer
+            from androidx.compose.runtime import stub_composer
             # Held in a global on purpose. An OBJECT result reaches Python as a proxy that owns its
             # handle and releases it in `__del__`, so `push_composer(stub_composer())` alone would
             # push a handle and then drop the last reference to it -- the next call through the
@@ -296,14 +296,14 @@ class PythonxComposableTest {
             "the fixture table is not installed",
         )
         if (!publishesProxyEntryPoints) {
-            val refusal = assertFails { PythonxAdapter.install(COMPOSE_SHAPED_MODULES, COMPOSE_SHAPED_RAW_VALUE_CLASSES) }
+            val refusal = assertFails { PythonxAdapter.install(COMPOSE_SHAPED_RAW_VALUE_CLASSES) }
             assertTrue(
                 refusal.message?.contains("raw upcall entry points are not bound") == true,
                 "a target with no proxy bootstrap must fail the adapter's own guard: $refusal",
             )
             return@withInterpreter
         }
-        PythonxAdapter.install(COMPOSE_SHAPED_MODULES, COMPOSE_SHAPED_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(COMPOSE_SHAPED_RAW_VALUE_CLASSES)
         block()
     }
 

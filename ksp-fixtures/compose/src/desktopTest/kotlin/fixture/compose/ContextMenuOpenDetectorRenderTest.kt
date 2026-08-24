@@ -25,7 +25,7 @@ class ContextMenuOpenDetectorRenderTest {
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -48,7 +48,7 @@ class ContextMenuOpenDetectorRenderTest {
                 """
                 from fixture.compose import emptyModifier, pythonContextMenuOpenDetector
                 from androidx.compose.foundation.layout import size__Dp
-                from pythonx.compose.material3 import Text
+                from androidx.compose.material3 import Text
                 
                 _m = pythonContextMenuOpenDetector(size__Dp(emptyModifier(), 48.0), True, _on_pointer_down)
                 Text("Box", modifier=_m)
@@ -98,7 +98,7 @@ class ContextMenuOpenDetectorRenderTest {
                 """
                 from fixture.compose import emptyModifier, pythonContextMenuOpenDetector
                 from androidx.compose.foundation.layout import size__Dp
-                from pythonx.compose.material3 import Text
+                from androidx.compose.material3 import Text
                 
                 _m = pythonContextMenuOpenDetector(size__Dp(emptyModifier(), 48.0), True, _on_pointer_down)
                 Text("Box", modifier=_m)

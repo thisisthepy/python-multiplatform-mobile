@@ -66,7 +66,7 @@ class WalkedArtifactCallbackTest {
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -87,7 +87,7 @@ class WalkedArtifactCallbackTest {
         PythonCallables.withScope(PythonCallables.newScope()) {
             Python3.exec(
                 """
-                from pythonx.kotlin.system import measure_time_millis
+                from kotlin.system import measure_time_millis
 
                 _ran = []
                 _never = []
@@ -120,7 +120,7 @@ class WalkedArtifactCallbackTest {
         PythonCallables.withScope(PythonCallables.newScope()) {
             Python3.exec(
                 """
-                from pythonx.kotlin.system import measure_time_millis
+                from kotlin.system import measure_time_millis
                 try:
                     measure_time_millis(lambda wanted: None)
                     raise AssertionError('a one-argument callable filled a zero-argument slot')
@@ -153,7 +153,7 @@ class WalkedArtifactCallbackTest {
         PythonCallables.withScope(PythonCallables.newScope()) {
             Python3.exec(
                 """
-                from pythonx.compose.foundation import clickable__Boolean_String_Role_Unit as clickable
+                from androidx.compose.foundation import clickable__Boolean_String_Role_Unit as clickable
                 from fixture.artifact import emptyModifier, modifierElementCount, isTheEmptyModifier
                 from fixture.artifact import describeModifier
 
@@ -187,7 +187,7 @@ class WalkedArtifactCallbackTest {
         PythonCallables.withScope(PythonCallables.newScope()) {
             Python3.exec(
                 """
-                from pythonx.compose.foundation import clickable__Boolean_String_Role_Unit as clickable
+                from androidx.compose.foundation import clickable__Boolean_String_Role_Unit as clickable
                 from fixture.artifact import emptyModifier
 
                 try:
@@ -224,7 +224,7 @@ class WalkedArtifactCallbackTest {
         PythonCallables.withScope(first) {
             Python3.exec(
                 """
-                from pythonx.kotlin.system import measure_time_millis
+                from kotlin.system import measure_time_millis
                 measure_time_millis(lambda: None)
                 """.trimIndent(),
             )
@@ -272,7 +272,7 @@ class WalkedArtifactCallbackTest {
 
         Python3.exec(
             """
-            from pythonx.kotlin.system import measure_time_millis
+            from kotlin.system import measure_time_millis
             try:
                 measure_time_millis(lambda: None)
                 raise AssertionError('a callable crossed with nowhere to live')

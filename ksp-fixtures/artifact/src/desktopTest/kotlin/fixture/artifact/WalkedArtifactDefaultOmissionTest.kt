@@ -62,7 +62,7 @@ class WalkedArtifactDefaultOmissionTest {
         // under their Kotlin packages (`fixture.artifact`), which is where the comparison functions
         // live; `pythonx` is the adaptation layer and the only one of the two that fills defaults.
         PythonProxySource.install()
-        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
+        PythonxAdapter.install(PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
@@ -81,7 +81,7 @@ class WalkedArtifactDefaultOmissionTest {
     fun composeFunctionsAreCalledWithTheirRequiredArgumentsAlone() {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import fill_max_width, wrap_content_size
+            from androidx.compose.foundation.layout import fill_max_width, wrap_content_size
             from fixture.artifact import emptyModifier
             from fixture.artifact import equalsFillMaxWidth, equalsFillMaxWidthFraction
             from fixture.artifact import equalsWrapContentSize, equalsWrapContentSizeTopStart
@@ -118,7 +118,7 @@ class WalkedArtifactDefaultOmissionTest {
     fun oneKeywordArgumentSelectsItsParameterAndLeavesTheRestToKotlin() {
         Python3.exec(
             """
-            from pythonx.compose.foundation.layout import padding__Dp_Dp
+            from androidx.compose.foundation.layout import padding__Dp_Dp
             from fixture.artifact import emptyModifier, equalsVerticalPadding, equalsHorizontalPadding
 
             _padded = padding__Dp_Dp(emptyModifier(), vertical=8.0)
