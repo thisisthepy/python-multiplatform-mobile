@@ -461,31 +461,58 @@ object PythonxAdapter {
         _PACKAGES = {}
 
 
-        def register_package(python_prefix, kotlin_prefix):
-            '''`pythonx.compose` means `androidx.compose`. The only per-library knowledge in this file.'''
-            _PACKAGES[python_prefix] = kotlin_prefix
+        def register_package(python_name, kotlin_package):
+            '''Declare that the Python module `python_name` stands for `kotlin_package`.
 
+            **Nothing is registered by default, and that is the point.** Which Kotlin package a
+            `pythonx.*` module wraps is the Python package's design decision, not the binder's --
+            `pythonx.compose.layout` wraps `androidx.compose.foundation.layout`, dropping
+            `foundation.`, and no artefact says so. This file used to hardcode two prefixes, which
+            made the binder know a UI library by name and put every other library one core edit
+            away. It also could not express that drop: a prefix substitution has no way to remove a
+            middle segment, so the runtime and the generated stubs disagreed about the module name.
 
-        register_package('pythonx.compose', 'androidx.compose')
-        register_package('pythonx.kotlin', 'kotlin')
+            A full name maps to a full name. `pythonx-compose` ships the map (`pythonx-map.toml`)
+            and the embedder installs it; with nothing installed, `pythonx.*` resolves nothing,
+            which is the honest answer rather than a guess.
+            '''
+            _PACKAGES[python_name] = kotlin_package
 
 
         def kotlin_package_for(module_name):
-            '''The Kotlin package a `pythonx.*` module name stands for, or `None`.'''
+            '''The Kotlin package a `pythonx.*` module name stands for, or `None`.
+
+            An exact match wins; failing that, the **longest mapped ancestor** with the remaining
+            tail appended. Both halves are needed and neither alone is enough.
+
+            The old form was prefix-only, which cannot express a rename in the middle of a name --
+            and the map is full of exactly that (`pythonx.compose.layout` ->
+            `androidx.compose.foundation.layout`, dropping `foundation.`). Exact-only cannot express
+            the tail: `Arrangement` is a submodule under a mapped package rather than a mapped name
+            of its own, and no map would list every nested object.
+
+            A name with no mapped ancestor is `None`. Nothing is registered by default, so the
+            package that owns the map decides what exists at all.
+            '''
+            exact = _PACKAGES.get(module_name)
+            if exact is not None:
+                return exact
             best = None
-            for python_prefix, kotlin_prefix in _PACKAGES.items():
-                if module_name == python_prefix or module_name.startswith(python_prefix + '.'):
-                    if best is None or len(python_prefix) > len(best[0]):
-                        best = (python_prefix, kotlin_prefix)
+            for python_name, kotlin_package in _PACKAGES.items():
+                if module_name.startswith(python_name + '.'):
+                    if best is None or len(python_name) > len(best[0]):
+                        best = (python_name, kotlin_package)
             if best is None:
                 return None
-            python_prefix, kotlin_prefix = best
-            return kotlin_prefix + module_name[len(python_prefix):]
+            return best[1] + module_name[len(best[0]):]
 
 
         # --------------------------------------------------------------------------- value classes (§4.4)
 
-        _VALUE_CLASS_ALLOWLIST = set(('androidx.compose.ui.unit.Dp',))
+        # Empty, and injected only. A value class that may be written as its raw primitive is a
+        # fact about the library that declares it -- `pythonx-compose` says `Dp` may, and this file
+        # has no business knowing that Dp exists. `allow_raw_primitive` below is the whole seam.
+        _VALUE_CLASS_ALLOWLIST = set()
 
 
         def allow_raw_primitive(kotlin_type_name):
@@ -855,9 +882,15 @@ object PythonxAdapter {
                 return _simple_name(self.kotlin_type_name) + '(' + repr(self.raw) + ')'
 
 
-        def dp(value):
-            '''The `Dp` spelling `docs/kotlin-extensions-in-python.md` §4.4 requires to always work.'''
-            return _ValueProxy('androidx.compose.ui.unit.Dp', float(value))
+        def value_of(kotlin_type_name, raw):
+            '''Wrap `raw` as the value class `kotlin_type_name`.
+
+            The generic form of what used to be a `dp()` function sitting here. Naming a Compose
+            type in this file made `pythonx.dp` a name the *binder* owned, which put every other
+            library one core edit away from the same convenience. A package defines its own
+            spellings on top of this -- `pythonx-compose` is where `dp` belongs.
+            '''
+            return _ValueProxy(kotlin_type_name, raw)
 
 
         _PROXY_TYPES = {}
@@ -1519,11 +1552,17 @@ object PythonxAdapter {
 
             def exec_module(self, module):
                 module.__path__ = []
+                module._pythonx_kotlin_package = self._kotlin_package
+                if self._kotlin_package is None:
+                    # An intermediate step on the way to a mapped name. It carries no declarations
+                    # of its own, so it gets no `__getattr__` -- an attribute on it is an
+                    # AttributeError, which is what it is.
+                    module._pythonx_adapted = []
+                    return
                 module._pythonx_adapted = []
                 _MODULES.append(module)
                 module.__getattr__ = _module_getattr(module, self._kotlin_package)
                 module.__dir__ = _module_dir(self._kotlin_package)
-                module._pythonx_kotlin_package = self._kotlin_package
 
 
         class _Finder:
@@ -1539,7 +1578,16 @@ object PythonxAdapter {
                 if fullname != _ROOT and not fullname.startswith(_ROOT + '.'):
                     return None
                 kotlin_package = kotlin_package_for(fullname)
-                if kotlin_package is None or kotlin_package not in _PACKAGES_SEEN:
+                if kotlin_package is None:
+                    # A name the map does not carry may still be a step on the way to one it does:
+                    # `pythonx.compose.foundation` is nobody's Kotlin package, but
+                    # `pythonx.compose.foundation.layout` is. The lookup is exact -- it has to be,
+                    # because the map renames middle segments -- so intermediate steps are
+                    # recognised here instead, as containers with nothing of their own.
+                    if any(name.startswith(fullname + '.') for name in _PACKAGES):
+                        return _machinery.ModuleSpec(fullname, _Loader(None), is_package=True)
+                    return None
+                if kotlin_package not in _PACKAGES_SEEN:
                     # Not "every pythonx.* name exists": a package nothing is bound under is not
                     # importable, so a typo is a ModuleNotFoundError at the import rather than an
                     # AttributeError several lines later.
@@ -1664,15 +1712,29 @@ object PythonxAdapter {
      *
      * @return the source that was executed, so a caller can log or inspect exactly what ran.
      */
-    fun install(): String {
+    fun install(
+        modules: Map<String, String> = emptyMap(),
+        rawPrimitiveValueClasses: Set<String> = emptySet(),
+    ): String {
         // The adapter's own Kotlin service, registered by the layer that needs it rather than by
         // every consumer's table. Idempotent by `moduleName`, so a second install after a `clear()`
         // puts it back and one after a `register` does nothing. See [PythonCallables.Fragment].
         UpcallTable.register(PythonCallables.Fragment)
         val source = render(UpcallTable.entries())
         Python3.exec(source)
+        // Applied after the adapter exists, because `register_package` is one of the names it
+        // defines. Empty by default and empty is a real answer: with no map installed, `pythonx.*`
+        // resolves nothing rather than guessing a Kotlin package from a Python one. The map is the
+        // Python package's (`pythonx-compose` ships `pythonx-map.toml`); this file only applies it.
+        val lines = modules.entries.map { (python, kotlin) ->
+            "pythonx.register_package(${python.pyStr()}, ${kotlin.pyStr()})"
+        } + rawPrimitiveValueClasses.map { "pythonx.allow_raw_primitive(${it.pyStr()})" }
+        if (lines.isNotEmpty()) Python3.exec((listOf("import pythonx") + lines).joinToString("\n"))
         return source
     }
+
+    /** A Python string literal for [this], quoted the way the rendered source quotes its own. */
+    private fun String.pyStr(): String = "'" + replace("\\", "\\\\").replace("'", "\\'") + "'"
 
     private fun Boolean.py(): String = if (this) "True" else "False"
 

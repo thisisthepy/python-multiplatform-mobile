@@ -682,7 +682,7 @@ class PythonxCallableTest {
             "the fixture table is not installed",
         )
         if (!publishesProxyEntryPoints) return@withInterpreter
-        PythonxAdapter.install()
+        PythonxAdapter.install(COMPOSE_SHAPED_MODULES, COMPOSE_SHAPED_RAW_VALUE_CLASSES)
         block()
     }
 

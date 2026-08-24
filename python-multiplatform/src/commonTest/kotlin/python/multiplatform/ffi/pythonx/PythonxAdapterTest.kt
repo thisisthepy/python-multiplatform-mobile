@@ -517,7 +517,7 @@ class PythonxAdapterTest {
         )
 
         if (!publishesProxyEntryPoints) {
-            val refusal = assertFails { PythonxAdapter.install() }
+            val refusal = assertFails { PythonxAdapter.install(COMPOSE_SHAPED_MODULES, COMPOSE_SHAPED_RAW_VALUE_CLASSES) }
             assertTrue(
                 refusal.message?.contains("raw upcall entry points are not bound") == true,
                 "a target with no proxy bootstrap must fail the adapter's own guard: $refusal",
@@ -525,7 +525,7 @@ class PythonxAdapterTest {
             return@withInterpreter
         }
 
-        PythonxAdapter.install()
+        PythonxAdapter.install(COMPOSE_SHAPED_MODULES, COMPOSE_SHAPED_RAW_VALUE_CLASSES)
         Python3.exec(
             "import pythonx\n" +
                 "pythonx.register_empty('androidx.compose.ui.Modifier', " +

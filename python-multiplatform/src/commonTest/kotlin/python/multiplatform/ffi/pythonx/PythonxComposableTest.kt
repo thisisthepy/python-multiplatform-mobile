@@ -296,14 +296,14 @@ class PythonxComposableTest {
             "the fixture table is not installed",
         )
         if (!publishesProxyEntryPoints) {
-            val refusal = assertFails { PythonxAdapter.install() }
+            val refusal = assertFails { PythonxAdapter.install(COMPOSE_SHAPED_MODULES, COMPOSE_SHAPED_RAW_VALUE_CLASSES) }
             assertTrue(
                 refusal.message?.contains("raw upcall entry points are not bound") == true,
                 "a target with no proxy bootstrap must fail the adapter's own guard: $refusal",
             )
             return@withInterpreter
         }
-        PythonxAdapter.install()
+        PythonxAdapter.install(COMPOSE_SHAPED_MODULES, COMPOSE_SHAPED_RAW_VALUE_CLASSES)
         block()
     }
 

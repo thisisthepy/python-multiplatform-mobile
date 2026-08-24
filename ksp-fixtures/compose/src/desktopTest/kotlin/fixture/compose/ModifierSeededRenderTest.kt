@@ -41,7 +41,7 @@ import kotlin.test.assertTrue
  * composable half of the surface). They come from the *other* producer,
  * `PythonProxySource` + `FunctionTable`, the route `WalkedArtifactComposeModifierTest` uses for the
  * identical seed in `ksp-fixtures/artifact`. Both producers run in the same test here --
- * `PythonxAdapter.install()` for `Spacer` itself, `PythonProxySource.install()` for the `Modifier`
+ * `PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)` for `Spacer` itself, `PythonProxySource.install()` for the `Modifier`
  * chain that fills its one argument -- kept out of `ComposableRenderTest`'s shared setup so a
  * regression in this newer combination cannot fail ten unrelated tests that never asked for it.
  *
@@ -65,7 +65,7 @@ class ModifierSeededRenderTest {
         UpcallTable.install(FunctionTable.fragments + ArtifactTable.fragments)
         check(UpcallBootstrap.publishToGlobals()) { "UpcallBootstrap.publishToGlobals() failed" }
         PythonProxySource.install()
-        PythonxAdapter.install()
+        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest

@@ -115,9 +115,17 @@ class PythonxTableSourceTest {
         val offenders = listOf("padding", "Modifier", "fillMaxWidth", "Button", "Text(", "material3")
             .filter { code.contains(it) }
         assertEquals(emptyList(), offenders, "a per-declaration name in a per-rule file")
-        // The package map is data, and `Dp` is the seeded allowlist entry §4.4 asks for by name.
-        assertTrue(code.contains("register_package('pythonx.compose', 'androidx.compose')"))
-        assertTrue(code.contains("androidx.compose.ui.unit.Dp"))
+        // Stronger than it used to be. This file used to assert that the source *did* seed
+        // `register_package('pythonx.compose', 'androidx.compose')` and the `Dp` allowlist entry --
+        // it pinned the binder knowing a UI library by name. The binder may not know one at all, so
+        // the assertion is inverted: the mechanism is here, no library that uses it is.
+        assertTrue(code.contains("def register_package("), "the seam has to exist")
+        assertTrue(code.contains("def allow_raw_primitive("), "the seam has to exist")
+        assertEquals(
+            emptyList(),
+            listOf("androidx", "'pythonx.compose'", "'kotlin'").filter { code.contains(it) },
+            "the binder names a library it should know nothing about",
+        )
     }
 
     /**

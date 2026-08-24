@@ -62,7 +62,7 @@ class WalkedArtifactDefaultOmissionTest {
         // under their Kotlin packages (`fixture.artifact`), which is where the comparison functions
         // live; `pythonx` is the adaptation layer and the only one of the two that fills defaults.
         PythonProxySource.install()
-        PythonxAdapter.install()
+        PythonxAdapter.install(PYTHONX_MODULES, PYTHONX_RAW_VALUE_CLASSES)
     }
 
     @AfterTest
