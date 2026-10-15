@@ -243,8 +243,8 @@ val generateCoordinates = tasks.register("generateCoordinates") {
         val file = rootDir.resolve("../gradle.properties")
         if (file.isFile) file.inputStream().use { load(it) }
     }
-    val pythonVersionValue = rootProperties.getProperty("pythonVersion") ?: "3.14.7"
-    val pbsReleaseValue = rootProperties.getProperty("pythonBuildStandaloneRelease") ?: "20260807"
+    val pythonVersionValue = rootProperties.getProperty("pythonVersion") ?: "3.15.0"
+    val pbsReleaseValue = rootProperties.getProperty("pythonBuildStandaloneRelease") ?: "20261013"
     val freeThreadedValue = rootProperties.getProperty("pythonFreeThreaded")?.toBoolean() ?: false
 
     // `python-multiplatform` itself is versioned "$pythonVersion-alpha01" -- see that build's own
