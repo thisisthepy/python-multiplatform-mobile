@@ -38,7 +38,7 @@ plugins {
 
 val configuredPythonVersion = project.findProperty("pythonVersion")?.toString() ?: project.rootProject.version.toString()
 val pythonFreeThreaded = project.findProperty("pythonFreeThreaded")?.toString()?.toBoolean() ?: false
-val pbsRelease = project.findProperty("pythonBuildStandaloneRelease")?.toString() ?: "20260807"
+val pbsRelease = project.findProperty("pythonBuildStandaloneRelease")?.toString() ?: "20261013"
 val pythonAppleSupportBuild = project.findProperty("pythonAppleSupportBuild")?.toString() ?: "b11"
 
 val pythonVersion = configuredPythonVersion
