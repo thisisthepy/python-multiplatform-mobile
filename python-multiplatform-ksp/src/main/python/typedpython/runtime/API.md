@@ -177,3 +177,9 @@ per-interpreter counter that only grows and, once it wraps to 0, assigns nothing
 gets at most MAX_VERSIONS_PER_CLASS (1000) tags. So a tag never repeats within an interpreter and a
 class whose tags are exhausted keeps 0 (never current). Py_TPFLAGS_VALID_VERSION_TAG is "Unused.
 Legacy flag" in 3.14 (never set) and is not consulted.
+
+## Development-mode import gate (Python API, not C; SPEC N-7b)
+    typedpython.importgate.install(source_roots)   # meta path finder; checks project modules before they run
+    typedpython.importgate.uninstall()
+    typedpython.importgate.install_from_env()      # installs when TYPEDPYTHON_IMPORT_GATE=<roots, os.pathsep-separated>
+A type error raises `ImportGateError` (an `ImportError`, `.diagnostics` holds the gate's errors) and the module's code does not run. Only files under the roots are checked; results are cached by content hash. Do not call it in release builds.
