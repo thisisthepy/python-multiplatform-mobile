@@ -533,6 +533,7 @@ def _mutant(built, tmp: Path, drop: str) -> Path:
     return cbuild.build("\n".join(kept), "ftmod", tmp / drop, ext_suffix=None)
 
 
+@pytest.mark.race_mutant
 def test_mutant_without_the_array_critical_section_is_caught(built, tmp_path):
     so = _mutant(built, tmp_path, "tp_cs_begin")
     detected = False
@@ -588,6 +589,7 @@ def _racy_runtime(tmp: Path, *, drop_dict_lock: bool, plain_epoch: bool) -> Path
     return d
 
 
+@pytest.mark.race_mutant
 def test_mutant_without_the_dict_critical_section_is_caught(built, tmp_path):
     """Without the critical section around the epoch read and the global lookup, a thread can
     remember a binding the rebinding thread has already replaced (the watcher fires before the store)."""
@@ -670,7 +672,12 @@ def _tsan_reports(built, tmp: Path, launcher: Path, rt: Path | None) -> tuple[in
     run = subprocess.run([str(launcher), "-c", LOADER + textwrap.dedent(TSAN_SCRIPT), str(so), "1"],
                          capture_output=True, text=True, env=env, timeout=600)
     out = run.stdout + run.stderr
-    return out.count("WARNING: ThreadSanitizer"), "TSAN-RUN-DONE" in out
+    # The interpreter is not instrumented, so TSan also reports races between two accesses inside
+    # CPython itself (seen on Linux CI). Count only reports with a frame of the extension or the
+    # header: those are the accesses this test is about.
+    blocks = out.split("WARNING: ThreadSanitizer")[1:]
+    ours = [b for b in blocks if "ftmod" in b or " tp_" in b]
+    return len(ours), "TSAN-RUN-DONE" in out
 
 
 @pytest.fixture(scope="module")

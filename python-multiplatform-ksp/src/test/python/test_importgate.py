@@ -89,8 +89,10 @@ def test_clean_module_imports_and_is_cached_by_content(project, calls):
     assert len(calls) == 1, "an unchanged module must not be checked again"
 
     del sys.modules["good_mod"]
-    path.write_text("VALUE: int = 2\n")
-    assert importlib.import_module("good_mod").VALUE == 2
+    # a different length: CPython's .pyc check compares mtime in whole seconds and the size, so a
+    # same-size rewrite within one second would run the stale bytecode (CPython's own behaviour)
+    path.write_text("VALUE: int = 22\n")
+    assert importlib.import_module("good_mod").VALUE == 22
     assert len(calls) == 2, "changed content must be re-checked"
 
 
