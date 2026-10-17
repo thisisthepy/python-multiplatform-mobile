@@ -6,6 +6,8 @@ import org.jetbrains.kotlin.library.abi.AbiClassifierReference
 import org.jetbrains.kotlin.library.abi.AbiDeclarationContainer
 import org.jetbrains.kotlin.library.abi.AbiCompoundName
 import org.jetbrains.kotlin.library.abi.AbiFunction
+import org.jetbrains.kotlin.library.abi.AbiModality
+import org.jetbrains.kotlin.library.abi.AbiProperty
 import org.jetbrains.kotlin.library.abi.AbiQualifiedName
 import org.jetbrains.kotlin.library.abi.AbiType
 import org.jetbrains.kotlin.library.abi.AbiTypeArgument
@@ -187,6 +189,7 @@ internal object KlibScanner {
             return emptyList()
         }
 
+        val classes = classesOf(abi.topLevelDeclarations)
         val candidates = abi.topLevelDeclarations.declarations
             .filterIsInstance<AbiFunction>()
             .filter { matchesInclude(it.qualifiedName, includePrefixes) }
@@ -196,10 +199,132 @@ internal object KlibScanner {
             // receiver handle to be worth anything. Filtered rather than declined for the same reason
             // `ArtifactScanner` never builds a model for `<init>`.
             .filter { !it.isConstructor }
-            .mapNotNull { candidateOrNull(it, classesOf(abi.topLevelDeclarations)) }
+            .mapNotNull { candidateOrNull(it, classes) }
 
-        // Same rule, same implementation as the JVM producer -- see this object's KDoc.
-        return ArtifactScanner.disambiguateOverloads(candidates)
+        // Issue #237: the member functions of the klib's classes, as #215 binds them from a jar.
+        val members = classes.values
+            .filter { matchesInclude(it.qualifiedName, includePrefixes) }
+            .filter { !ArtifactScanner.isExcludedPackage(it.qualifiedName.packageName.toString(), excludePackages) }
+            .flatMap { memberCandidatesOf(it, classes) }
+
+        // Same rule, same implementation as the JVM producer -- see this object's KDoc. A member's key
+        // is `Owner.name`, so its overload set is its class's alone.
+        return ArtifactScanner.disambiguateOverloads(candidates + members)
+    }
+
+    /**
+     * The member functions of [cls] (issue #237), as `METHOD` entries `Owner.name` -- the shape #215
+     * gives a jar's members and KSP gives its own: `args[0]` is the receiver, not counted in `arity`,
+     * and the generated call is `(args[0] as Owner).name(...)`. The binding layer serves them as
+     * methods of the receiver's proxy, and never as a module attribute.
+     *
+     * The class must be able to cross as a handle ([handleClassOrNull]); a generic one's members are
+     * declined, as on the jar side. A member is declined, with its reason, when it is `suspend`,
+     * `@Deprecated`, `@PublishedApi`, `@Composable`, a member extension or one with context receivers,
+     * named like a property of its class (the property's name is the attribute), or typed by something
+     * without a klib boundary type. Constructors are not read here (stage 3).
+     */
+    private fun memberCandidatesOf(cls: AbiClass, classes: Map<String, AbiClass>): List<Candidate> {
+        val owner = cls.qualifiedName.dotted()
+        val ownerType = KotlinTypeModel(owner)
+        val generic = cls.typeParameters.isNotEmpty()
+        if (!generic && cls.kind != AbiClassKind.OBJECT && handleClassOrNull(ownerType, classes) == null) return emptyList()
+        val propertyNames = cls.declarations.filterIsInstance<AbiProperty>()
+            .mapTo(HashSet()) { it.qualifiedName.relativeName.toString().substringAfterLast('.') }
+        // The pinned compiler's klib ABI records modality but no visibility, and lists the `protected`
+        // members of an open, abstract or sealed class beside its public ones; source outside a subclass
+        // cannot call a `protected` one. An interface has none, and a final class's are effectively
+        // private, so only those members bind. An `object`'s functions are statics on the jar side (#53),
+        // called without a receiver, which this `METHOD` shape is not.
+        val unbindable = when {
+            cls.kind == AbiClassKind.OBJECT -> "a function of an object: bound as a static on the jar side (#53), not yet from a klib"
+            cls.kind == AbiClassKind.CLASS && cls.modality != AbiModality.FINAL ->
+                "a member of a non-final class: this klib ABI does not say whether it is protected"
+            else -> null
+        }
+        val enum = cls.kind == AbiClassKind.ENUM_CLASS
+        return cls.declarations.filterIsInstance<AbiFunction>()
+            .filter { !it.isConstructor }
+            // `Any`'s members are not the class's API, as on the jar side; an enum class's
+            // `valueOf`/`values`/`entries` are statics the ABI lists among its members, and no
+            // instance call reaches them.
+            .filter { function -> !isAnyMember(function) && !(enum && function.leafName() in ENUM_STATICS) }
+            .mapNotNull { function -> memberCandidateOrNull(function, owner, ownerType, generic, unbindable, propertyNames, classes) }
+    }
+
+    private fun memberCandidateOrNull(
+        function: AbiFunction,
+        owner: String,
+        ownerType: KotlinTypeModel,
+        generic: Boolean,
+        unbindable: String?,
+        propertyNames: Set<String>,
+        classes: Map<String, AbiClass>,
+    ): Candidate? {
+        val name = function.leafName()
+        val model = declarationModelOf(function)?.copy(
+            simpleName = name,
+            owner = owner,
+            ownerIsClass = true,
+            receiver = ownerType,
+            receiverBoundaryTag = OBJECT_TAG,
+            kind = METHOD_KIND,
+        ) ?: return null
+        val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
+        when {
+            function.isSuspend -> return declined("suspend")
+            generic -> return declined("a member of a generic class: not bound yet")
+            unbindable != null -> return declined(unbindable)
+            function.hasAnnotation(DEPRECATED) ->
+                return declined("@Deprecated: its level is not in this klib ABI, and a HIDDEN one cannot be called from source")
+            function.hasAnnotation(PUBLISHED_API) ->
+                return declined("@PublishedApi internal -- binary-visible for inlining, not part of the module's public Kotlin API")
+            function.hasAnnotation(COMPOSABLE) -> return declined("a @Composable member function: not bound on a proxy")
+            function.hasExtensionReceiverParameter -> return declined("a member extension: it needs two receivers")
+            function.contextReceiverParametersCount > 0 ->
+                return declined("${function.contextReceiverParametersCount} context receiver(s), whose types this klib ABI does not expose")
+            name in propertyNames -> return declined("shares its name with a property of the class, which keeps the attribute")
+            // A data class's `copy`/`componentN` are synthetics the jar side never binds (U-4), and this
+            // ABI cannot tell them from a hand-written member of the same name.
+            name == "copy" || DATA_COMPONENT.matches(name) ->
+                return declined("a data-class synthetic (copy/componentN), or a member this klib ABI cannot tell from one")
+        }
+        val returnType = klibBoundaryTypeOf(model.returnType, classes)
+            ?: return declined("no boundary type for return ${model.returnType.render()}")
+        val boundaryTypes = model.parameters.map { parameter ->
+            klibBoundaryTypeOf(parameter.type, classes)
+                ?: return declined("no boundary type for parameter ${parameter.type.render()}")
+        }
+        if (boundaryTypes.any { it.isReturnOnly }) return declined("a parameter of a return-only boundary type")
+
+        val key = "$owner.$name"
+        val argumentExpressions = boundaryTypes.mapIndexed { index, type -> type.read("args[${index + 1}]") }
+        val body = returnType.wrapReturn("(args[0] as $owner).$name(${argumentExpressions.joinToString(", ")})")
+        val callable = ArtifactCallable(
+            name = key,
+            arity = boundaryTypes.size,
+            paramTags = boundaryTypes.map { it.tag },
+            returnTag = returnType.tag,
+            // The receiver is read even with no declared parameter, so the body always takes `args`.
+            lambdaBody = "{ args -> $body }",
+            receiverTypeName = owner,
+            paramTypeNames = model.parameters.map { it.type.qualifiedName },
+            returnTypeName = model.returnType.qualifiedName,
+            returnSupertypes = if (returnType.tag == OBJECT_TAG) supertypesOf(model.returnType.qualifiedName, classes) else emptyList(),
+            // Every argument is passed, as for a top-level klib entry (see [candidateOrNull]).
+            paramHasDefault = List(boundaryTypes.size) { false },
+            kind = METHOD_KIND,
+        )
+        return Candidate(
+            callable = callable,
+            declaration = model.copy(
+                bindingName = key,
+                returnBoundaryTag = returnType.tag,
+                parameters = model.parameters.mapIndexed { index, parameter ->
+                    parameter.copy(boundaryTag = boundaryTypes[index].tag, declaresDefault = false)
+                },
+            ),
+        )
     }
 
     /**
@@ -470,6 +595,21 @@ internal object KlibScanner {
     }
 
     private const val OBJECT_TAG = "OBJECT"
+
+    private const val METHOD_KIND = "METHOD"
+
+    private val ENUM_STATICS = setOf("valueOf", "values", "entries")
+
+    private val DATA_COMPONENT = Regex("component[1-9][0-9]*")
+
+    private fun AbiFunction.leafName(): String = qualifiedName.relativeName.toString().substringAfterLast('.')
+
+    /** `toString()`, `hashCode()` and `equals(other)`: what every class has from `Any`. */
+    private fun isAnyMember(function: AbiFunction): Boolean = when (function.leafName()) {
+        "toString", "hashCode" -> function.valueParameters.isEmpty()
+        "equals" -> function.valueParameters.size == 1
+        else -> false
+    }
 
     /**
      * The walked klib's class [type] names, when a handle of it can cross (issue #234): a public

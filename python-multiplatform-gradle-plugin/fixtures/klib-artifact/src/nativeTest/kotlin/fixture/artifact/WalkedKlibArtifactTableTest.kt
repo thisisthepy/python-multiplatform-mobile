@@ -57,23 +57,33 @@ class WalkedKlibArtifactTableTest {
     /**
      * The fixed text: everything `KlibScanner` bound out of the whole `kotlinx-coroutines-core` klib
      * under the `kotlinx.coroutines` namespace. Zero before issue #234, when no Kotlin object could
-     * cross the klib boundary; since then the factories whose types are the klib's own classes.
-     * `KlibScannerTest.aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactories` pins the
+     * cross the klib boundary; since then the factories whose types are the klib's own classes, and
+     * since #237 the members of its interfaces and final classes.
+     * `KlibScannerTest.aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactoriesAndMembers` pins the
      * same list walking the klib directly; if the two disagree, the wiring between `KlibScanner` and
      * this generated table is what broke.
      */
     @Test
-    fun theWalkerBindsExactlyTheKlibsHandleFactories() {
+    fun theWalkerBindsExactlyTheKlibsHandleFactoriesAndMembers() {
         ArtifactTable.registerInto()
         assertEquals(
             listOf(
+                "kotlinx.coroutines.ChildJob.parentCancelled",
+                "kotlinx.coroutines.CompletableJob.complete",
+                "kotlinx.coroutines.DisposableHandle.dispose",
                 "kotlinx.coroutines.Job",
+                "kotlinx.coroutines.Job.attachChild",
+                "kotlinx.coroutines.Job.start",
                 "kotlinx.coroutines.MainScope",
+                "kotlinx.coroutines.Runnable.run",
                 "kotlinx.coroutines.SupervisorJob",
+                "kotlinx.coroutines.TimeoutCancellationException.createCopy",
                 "kotlinx.coroutines.newFixedThreadPoolContext",
                 "kotlinx.coroutines.newSingleThreadContext",
                 "kotlinx.coroutines.sync.Mutex",
                 "kotlinx.coroutines.sync.Semaphore",
+                "kotlinx.coroutines.sync.Semaphore.release",
+                "kotlinx.coroutines.sync.Semaphore.tryAcquire",
             ),
             UpcallTable.entries().map { it.name }.filter { it.startsWith("kotlinx.") }.sorted(),
         )
