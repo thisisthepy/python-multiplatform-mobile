@@ -135,6 +135,20 @@ fail, then implement.
   source directories, file selection, a staged fake tree); `PM/iosSimulatorArm64Test/.../env/IosPythonHomeTest.kt`
   (resolution order; the simulator test task's `PYTHONHOME` still wins). The installed-app run on the
   simulator is a manual check, `docs/platforms/ios-app-bundle.md`.
+- **L-12** The dev agent (#233; toolchain `docs/design/live-connection.md`, option B): when the launcher sets
+  `PYTHON_MULTIPLATFORM_DEV_AGENT` to `port=<n>;token=<t>[;overlay=<dir>]` (a debug launch; a release build
+  never does), `Python3.initialize()` loads the embedded agent (`src/commonMain/python/
+  python_multiplatform_devagent.py`, generated into Kotlin by `generateDevAgentSource`) as the module
+  `python_multiplatform_devagent` and it listens on 127.0.0.1 only. A connection's first message must be
+  `hello` with the token. Then, one JSON object per line: `execute` runs code in `__main__`'s persistent
+  namespace, streams stdout and stderr, returns the last expression's value and reports errors with their
+  traceback; `complete` completes from that namespace; `push` writes `.py` files into a writable overlay first
+  on `sys.path` and re-imports the loaded ones, children first, through `typedpython.importgate` when the app
+  has it (N-7b), keeping the old module when a re-import is refused or fails. A malformed request is printed
+  and does not stop the app. `Status: partial`: desktop
+  (`PM/desktopTest/.../env/PythonDevAgentTest.kt`: the embedded agent answers over loopback, and a child JVM started with the variable has an agent on that port while one started without it has none; the protocol, `python-multiplatform/src/test/python/
+  test_devagent.py`, CI `Dev agent protocol tests`); nothing sets the variable on Android or iOS yet
+  (toolchain's M2, M3); no interrupt; `execute` runs on the agent's thread (no main-thread dispatch yet).
 
 ## 2. Low-level C API (downcall surface)
 
