@@ -387,10 +387,24 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `toString()` of it; `null` stays `None` for `CharSequence?`); a `CharSequence` parameter is still
   declined (#73). `Status: implemented`, `GP/artifact/TextStateBindingTest.kt`,
   `python-multiplatform-compose/fixtures/compose/.../TextFieldStateRenderTest.kt`.
-- **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial`,
-  `GP/artifact/KlibScannerTest.kt` and `python-multiplatform-gradle-plugin/fixtures/klib-artifact` assert that the scanned klib's
-  declarations are declined with reasons; no klib declaration is bound at run time yet. It reads
-  top-level functions only: no class constructor, property or member function (B-1, #215).
+- **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial`. It reads
+  top-level functions only: no class constructor, property or member function yet (B-1, #215).
+  Since #234 a **Kotlin object crosses as a handle**: a type whose class is a public, non-generic,
+  non-value `class`, `interface`, `enum class` or `object` of the walked klib is an `OBJECT` slot
+  or result, non-null or nullable, cast in generated source as the jar producer casts one, and a
+  handle result carries its ancestry from the klib's supertypes. Handles are the common
+  trampoline's and `HandleTable`'s, under the jar side's rules: passing one back into Kotlin takes
+  no second slot, and dropping it releases it exactly once. Still declined, each with its reason:
+  a type of another klib (`kotlin.coroutines.CoroutineContext`), a class of package `kotlin` other
+  than the boundary's primitives, an extension (the pinned compiler's klib ABI has no receiver type),
+  and any `@Deprecated` declaration (the ABI has no level, and a `HIDDEN` one, such as
+  `kotlinx.coroutines.Job0`, cannot be called from source). From `kotlinx-coroutines-core` this binds
+  `Job`, `SupervisorJob`, `MainScope`, `Mutex`, `Semaphore`, `newSingleThreadContext` and
+  `newFixedThreadPoolContext`. `GP/artifact/KlibScannerTest.kt`, `GP/artifact/KlibObjectHandleTest.kt`;
+  `python-multiplatform-gradle-plugin/fixtures/klib-artifact` builds `androidNativeArm64` and
+  `iosSimulatorArm64` from one table in `nativeMain`, and its suite (`WalkedKlibArtifactHandleTest`,
+  `WalkedKlibArtifactTableTest`, `WalkedKlibArtifactPythonImportTest`) runs through Gradle on the iOS
+  simulator (`iosSimulatorArm64Test`); on androidNative it is linked by the build and run by hand.
 - **B-3** Default arguments can be omitted from Python (a call per subset of defaulted parameters,
   ambiguous omissions refused). `Status: implemented`, `GP/artifact/DefaultOmissionTest.kt`,
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactDefaultOmissionTest.kt`, `PM/commonTest/.../PythonxDefaultsTest.kt`.

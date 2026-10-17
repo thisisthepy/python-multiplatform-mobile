@@ -141,12 +141,26 @@ class KlibScannerTest {
      * "does it survive a real, messy artefact, and decline what it must decline" case.
      */
     @Test
-    fun aRealThirdPartyKlibIsScannedWithoutCrashingAndDeclinesEveryDeclaration() {
+    fun aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactories() {
+        // Zero before issue #234, when no Kotlin object could cross the klib boundary. Since then the
+        // non-extension factories whose types are this klib's own classes bind; the extensions, the
+        // suspend functions and anything typed by another klib (`CoroutineContext`) are still declined.
         val entries = KlibScanner.scanKlib(coroutinesKlib, includePrefixes = emptyList())
-        assertEquals(emptyList(), entries.map { it.name })
+        assertEquals(
+            listOf(
+                "kotlinx.coroutines.Job",
+                "kotlinx.coroutines.MainScope",
+                "kotlinx.coroutines.SupervisorJob",
+                "kotlinx.coroutines.newFixedThreadPoolContext",
+                "kotlinx.coroutines.newSingleThreadContext",
+                "kotlinx.coroutines.sync.Mutex",
+                "kotlinx.coroutines.sync.Semaphore",
+            ),
+            entries.map { it.name },
+        )
     }
 
-    /** The specific bug [aRealThirdPartyKlibIsScannedWithoutCrashingAndDeclinesEveryDeclaration] pins
+    /** The specific bug [aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactories] pins
      * the fix for, isolated to one declaration and its reason. */
     @Test
     fun aPublishedApiInternalDeclarationIsDeclinedWithItsOwnReason() {
