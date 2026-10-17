@@ -114,7 +114,15 @@ internal const val PROPERTY_MARKER = "Kotlin property: "
  */
 internal const val CONSTRUCTOR_MARKER = "Kotlin constructor: "
 
+/**
+ * What every member-function stub (issue #215) carries after its table key, in the docstring of the
+ * method or in the comment that says why there is none -- the one place a test can match a key to its
+ * stub, as [PROPERTY_MARKER] is for a property.
+ */
+internal const val METHOD_MARKER = "Kotlin member: "
+
 private val PROPERTY_KINDS = setOf("GETTER", "SETTER")
+private const val METHOD_KIND = "METHOD"
 
 /** Python's hard keywords (`keyword.kwlist`): none of these can be a parameter name. */
 private val PYTHON_KEYWORDS = setOf(
@@ -192,8 +200,13 @@ private enum class Role { PARAM, RESULT }
 
 private class StubRenderer(declarations: List<DeclarationModel>) {
 
-    /** Everything that is a module attribute; properties are attributes of a proxy instead. */
-    private val bound: List<DeclarationModel> = declarations.filter { it.kind !in PROPERTY_KINDS }
+    /** Everything that is a module attribute; properties and member functions are attributes of a proxy instead. */
+    private val bound: List<DeclarationModel> = declarations.filter { it.kind !in PROPERTY_KINDS && it.kind != METHOD_KIND }
+
+    /** receiver type -> its bound member functions (issue #215), each a method of the receiver's stub class. */
+    private val methods: Map<String, List<DeclarationModel>> = declarations
+        .filter { it.kind == METHOD_KIND && it.bindingName != null && it.receiver != null }
+        .groupBy { it.receiver!!.qualifiedName }
 
     /** receiver type -> property name -> (getter, setter). A setter never stands without its getter. */
     private val properties: Map<String, Map<String, Pair<DeclarationModel, DeclarationModel?>>> = run {
@@ -670,11 +683,20 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             }
         }
 
+        // Issue #215: member functions, by explicit name and, for an overload set, by base name -- the two
+        // keys `_index` serves them under. A member wins over an extension of the same name, as at run time.
+        val memberFunctions = sortedMapOf<String, MutableList<DeclarationModel>>()
+        methods[qualifiedName].orEmpty().sortedBy { it.bindingName }.forEach { d ->
+            val leaf = leafOf(d)
+            memberFunctions.getOrPut(leaf) { mutableListOf() } += d
+            if (isSuffixed(leaf)) memberFunctions.getOrPut(baseOf(leaf)) { mutableListOf() } += d
+        }
         val attributes = sortedMapOf<String, MutableList<DeclarationModel>>()
         extensionsByReceiver[qualifiedName].orEmpty().sortedBy { it.bindingName }.forEach { d ->
             val leaf = leafOf(d)
+            if (leaf in memberFunctions) return@forEach
             attributes.getOrPut(leaf) { mutableListOf() } += d
-            if (isSuffixed(leaf)) attributes.getOrPut(baseOf(leaf)) { mutableListOf() } += d
+            if (isSuffixed(leaf) && baseOf(leaf) !in memberFunctions) attributes.getOrPut(baseOf(leaf)) { mutableListOf() } += d
         }
         // Issue #131: the proxy also serves each member's Pythonic alias, decided over every member
         // name the runtime looks up for this type -- its own and every supertype's (`_member_aliases`).
@@ -694,6 +716,16 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             node.members += "$attribute: $TYPING.ClassVar[$protocol]"
             protocols[attribute] = protocol
         }
+        val stubbedMethods = mutableMapOf<String, String>()
+        memberFunctions.forEach { (name, group) ->
+            if (!isIdentifier(name) || name in node.children) {
+                group.filter { leafOf(it) == name }.forEach { node.members += methodNotStubbed(it, "'$name' cannot be written as an attribute here") }
+                return@forEach
+            }
+            val rendered = renderMethods(name, group, ctx)
+            node.members += rendered
+            stubbedMethods[name] = name
+        }
         val stubbedProperties = mutableMapOf<String, Pair<DeclarationModel, DeclarationModel?>>()
         properties[qualifiedName].orEmpty().forEach { (name, accessors) ->
             val (getter, setter) = accessors
@@ -708,13 +740,34 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
             if (!isIdentifier(alias) || alias in node.children) return@forEach
             protocols[kotlin]?.let { node.members += "$alias: $TYPING.ClassVar[$it]" }
             stubbedProperties[kotlin]?.let { (getter, setter) -> node.members += renderProperty(alias, getter, setter, ctx) }
+            if (kotlin in stubbedMethods && alias !in memberFunctions) node.members += renderMethods(alias, memberFunctions.getValue(kotlin), ctx)
         }
     }
+
+    /**
+     * One member function, or an overload set under its base name, as methods named [name]. A single
+     * declaration's method carries its table key after [METHOD_MARKER]; an overload set's `@overload`s
+     * do not, because each member is also stubbed under its own explicit name, which does.
+     */
+    private fun renderMethods(name: String, group: List<DeclarationModel>, ctx: ModuleOut): String =
+        if (group.size == 1) {
+            val d = group.single()
+            "def $name(${parameters(d, ctx, method = true)}) -> ${result(d, ctx)}:\n" +
+                "    \"\"\"$METHOD_MARKER${d.bindingName}\"\"\"\n" +
+                "    ..."
+        } else {
+            group.mapIndexed { index, d ->
+                "@$TYPING.overload\ndef $name(${parameters(d, ctx, method = true)}) -> ${result(d, ctx)}: ..." + shadowed(index)
+            }.joinToString("\n")
+        }
+
+    private fun methodNotStubbed(d: DeclarationModel, why: String): String = "# $METHOD_MARKER${d.bindingName} is not stubbed: $why"
 
     /** Every member name the binding layer serves on a proxy of [qualifiedName]: `_member_names`. */
     private fun memberNamesOf(qualifiedName: String): Set<String> =
         (listOf(qualifiedName) + supertypes[qualifiedName].orEmpty()).flatMap { type ->
             extensionsByReceiver[type].orEmpty().flatMap { listOf(leafOf(it), baseOf(leafOf(it))) } +
+                methods[type].orEmpty().flatMap { listOf(leafOf(it), baseOf(leafOf(it))) } +
                 properties[type].orEmpty().keys
         }.toSet()
 
@@ -746,6 +799,21 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
      * a value of it can still reach Python (a `kotlin.Any?` result, a supertype's slot). One whose
      * class cannot be stubbed gets the marker comment instead; see this file's KDoc.
      */
+    /**
+     * Every receiver that has member functions gets its stub class, as one with properties does; one
+     * whose class cannot be stubbed gets a marker comment per member in its package's module instead.
+     */
+    private fun registerMethodOwners() {
+        methods.forEach { (receiver, declarations) ->
+            val ref = classRefOf(receiver)
+            val ctx = out(ref?.pkg ?: receiver.substringBeforeLast('.', ""))
+            if (ref != null && classReference(receiver, null, ctx) != ANY) return@forEach
+            declarations.forEach { d ->
+                ctx.defs += methodNotStubbed(d, "${receiver.substringAfterLast('.')} has no stub class (its name is taken in its module)")
+            }
+        }
+    }
+
     private fun registerPropertyOwners() {
         properties.forEach { (receiver, byName) ->
             val ref = classRefOf(receiver)
@@ -783,6 +851,7 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
     fun render(): Map<String, String> {
         renderModuleDefs()
         registerPropertyOwners()
+        registerMethodOwners()
         renderClasses()
         return modules.filterValues { it.defs.isNotEmpty() || it.classes.isNotEmpty() }
             .mapValues { (_, ctx) ->
