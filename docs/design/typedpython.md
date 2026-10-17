@@ -309,6 +309,11 @@ PyPy·GraalVM 과 같은 방식이다. N-11 클래스의 객체를 PyObject 대�
    **1단계 구현 (#141):** 루프와 함수 진입에서 폴링하고, 일정 횟수마다 모듈의 `lambda: None` 을 불러 CPython 자기
    eval breaker 처리를 그대로 돌린다. 배열 copy-in·전역 스냅샷을 쥔 함수가 실행 중이면 미룬다. 그 함수 안에서의
    GIL 넘기기는 2단계(#154)이고, 방식은 결정 대기(#152).
+   **비용 (2026-10-17, 조용한 창, develop 대비 교대 11쌍):** fannkuch +8.2% (중앙값 1.082, 범위 1.043~1.191),
+   nbody 0.995 (배열 스냅샷 함수는 폴링하지 않음). 루프 폴링을 뺀 실험판은 fannkuch 1.000 이므로 남은 비용은
+   전부 짧은 안쪽 루프의 매 반복 카운트다운이다. CPython 도 모든 back-edge 에서 eval breaker 를 검사하므로 같은
+   종류의 비용이고, 시그널·스레드 굶김과 3.15t 의 GC stop-the-world 차단을 고치는 대가로 받아들였다(리더 결정).
+   range 루프의 묶음 폴링은 후속 이슈다. 원자료: `benchmarks/typedpython/results/2026-10-17-eval-breaker-*.json`.
 3. **이미 있는 차이: 추적·모니터링.** 컴파일된 함수는 `sys.settrace`·`sys.setprofile`·`sys.monitoring`
    이벤트를 내지 않는다. 진입에서 추적이 켜져 있으면 인터프리터로 실행하는 방법(deopt 경로 재사용)을 제안한다.
    이것도 별도 이슈다.
