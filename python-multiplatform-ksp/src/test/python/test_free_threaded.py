@@ -666,6 +666,20 @@ def _tsan_launcher(tmp: Path) -> Path | None:
     return launcher if link.returncode == 0 else None
 
 
+def _access_is_ours(block: str) -> bool:
+    """A report counts when one of its two racing accesses was made by the extension itself: the
+    first stack frame of that access outside the sanitizer runtime is in `ftmod` (generated C or the
+    header). A race whose accesses are inside libpython (seen on Linux CI: two `PyUnicode_FromString`
+    memcpys into memory the uninstrumented allocator had handed from one thread to another) is not
+    about this extension, even when an extension frame calls it further up."""
+    for part in block.split("\n\n")[:2]:
+        frames = [ln for ln in part.splitlines() if ln.strip().startswith("#")]
+        first = next((f for f in frames if "libtsan" not in f and "sanitizer_common" not in f), "")
+        if "ftmod" in first:
+            return True
+    return False
+
+
 def _tsan_reports(built, tmp: Path, launcher: Path, rt: Path | None) -> tuple[int, bool]:
     result, path, _ = built
     flags = list(cbuild.DEFAULT_FLAGS) + ["-O1", "-g", "-fno-omit-frame-pointer", "-fsanitize=thread"]
@@ -682,7 +696,7 @@ def _tsan_reports(built, tmp: Path, launcher: Path, rt: Path | None) -> tuple[in
     # CPython itself (seen on Linux CI). Count only reports with a frame of the extension or the
     # header: those are the accesses this test is about.
     blocks = out.split("WARNING: ThreadSanitizer")[1:]
-    ours = [b for b in blocks if "ftmod" in b or " tp_" in b]
+    ours = [b for b in blocks if _access_is_ours(b)]
     _tsan_reports.first = ("WARNING: ThreadSanitizer" + ours[0])[:4000] if ours else ""
     return len(ours), "TSAN-RUN-DONE" in out
 
