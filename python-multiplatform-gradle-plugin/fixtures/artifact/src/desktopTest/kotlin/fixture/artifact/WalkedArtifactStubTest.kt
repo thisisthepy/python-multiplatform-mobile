@@ -229,11 +229,25 @@ class WalkedArtifactStubTest {
             .toSet()
         assertEquals(emptySet(), constructors - installed, "a constructor stub names no table key")
 
+        // A fifth shape (issue #215): a member function is a method of its receiver's stub class -- or,
+        // where the class has no stub, a comment saying so -- and either way it carries its table key
+        // after `Kotlin member: `. Matched by key, like a property.
+        val members = generatedPaths()
+            .filter { it.endsWith(".pyi") }
+            .flatMap { path ->
+                Regex("""Kotlin member: ([^\s"]+)""").findAll(stub(path)).map { it.groupValues[1] }.toList()
+            }
+            .toSet()
+        val memberKeys = UpcallTable.entries().filter { it.kind.name == "METHOD" }.map { it.name }.toSet()
+        assertTrue("fixture.valueclass.member.Tally.reset" in memberKeys, "no member function was bound: $memberKeys")
+        assertEquals(emptySet(), members - memberKeys, "a member stub names no member key")
+        assertEquals(emptySet(), memberKeys - members, "a member key has no stub")
+
         // The base name of an overload set (`padding` for `padding__Dp`, ...) is served by the binding
         // layer's dispatcher and is stubbed as `@overload`s; it is not itself a table key.
         val overloadBases = installed.map { it.substringBeforeLast('.') + "." + it.substringAfterLast('.').substringBefore("__") }
             .filter { it !in installed }.toSet()
         assertEquals(emptySet(), stubbed - installed - overloadBases, "stubbed but not callable")
-        assertEquals(emptySet(), installed - propertyKeys - stubbed - constructors, "callable but not stubbed")
+        assertEquals(emptySet(), installed - propertyKeys - memberKeys - stubbed - constructors, "callable but not stubbed")
     }
 }

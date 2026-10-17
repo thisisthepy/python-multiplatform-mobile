@@ -59,6 +59,18 @@ class WalkedArtifactTableTest {
                 // nothing noticed because `python-multiplatform-gradle-plugin-fixtures:artifact` is not in the usual verification
                 // set. `ArtifactScannerTest` pins the same constructor from the plugin side.
                 "fixture.valueclass.Meters",
+                // `fixture.valueclass.member` (issue #215): member functions as `METHOD` entries, beside
+                // the class's constructor and its properties. `WalkedArtifactMemberFunctionTest` calls them.
+                "fixture.valueclass.member.Switch.on",
+                "fixture.valueclass.member.Switch.turnOff",
+                "fixture.valueclass.member.Tally",
+                "fixture.valueclass.member.Tally.add__Int",
+                "fixture.valueclass.member.Tally.add__Int_String",
+                "fixture.valueclass.member.Tally.reset",
+                "fixture.valueclass.member.Tally.total",
+                "fixture.valueclass.member.Tally.total=",
+                "fixture.valueclass.member.Tally.twin",
+                "fixture.valueclass.member.newSwitch",
                 "fixture.valueclass.sumMeters",
                 "junit.runner.BaseTestRunner.getFilteredTrace",
                 "junit.runner.BaseTestRunner.getPreference__String",
