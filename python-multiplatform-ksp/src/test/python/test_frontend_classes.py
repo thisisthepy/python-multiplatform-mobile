@@ -587,10 +587,11 @@ def test_binary_trees_with_slots_lowers_make_and_check(tmp_path):
         FieldGet(OBJ, Local(OBJ, "node"), "Node", "right")]
     assert nodes(check, Is)
     assert nodes(check, CallObject) == [] and nodes(check, GetAttr) == []
-    # report: make() and check() both may deopt (i64 arithmetic, and `check(left)` passes an
-    # `Node | None` local to a parameter guarded `type(x) is Node`)
+    # report: check() may deopt (i64 arithmetic, and `check(left)` passes an `Node | None` local to
+    # a parameter guarded `type(x) is Node`); make() no longer does (#148: `depth - 1` sits under
+    # `if depth > 0`, so it cannot overflow)
     print(f"make.may_deopt={make.may_deopt} check.may_deopt={check.may_deopt}")
-    assert make.may_deopt and check.may_deopt
+    assert check.may_deopt and not make.may_deopt
 
 
 def test_binary_trees_without_slots_stays_object_code(tmp_path):

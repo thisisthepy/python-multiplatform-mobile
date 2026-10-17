@@ -169,6 +169,18 @@ _MATH = {ir.MathFunc.SQRT: 1, ir.MathFunc.EXP: 1, ir.MathFunc.LOG: 1, ir.MathFun
 _I64_DEOPT = {ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL, ir.BinOpKind.FLOORDIV,
               ir.BinOpKind.TRUEDIV}
 _INT64_MIN, _INT64_MAX = -(2 ** 63), 2 ** 63 - 1
+# `proven` on an I64 op (ir.BinOp.proven): ADD/SUB/MUL cannot overflow; FLOORDIV/MOD by a Const
+# power of two of a value >= 0 become a shift / mask.
+_SHIFT_OPS = {ir.BinOpKind.FLOORDIV, ir.BinOpKind.MOD}
+_PROVEN_OPS = {ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL} | _SHIFT_OPS
+
+
+def _pow2_shift(divisor: ir.Expr) -> int | None:
+    """k when `divisor` is the Const 2**k (k >= 0), else None."""
+    v = divisor.value if isinstance(divisor, ir.Const) and divisor.type is Type.I64 else None
+    if type(v) is int and v >= 1 and v & (v - 1) == 0:
+        return v.bit_length() - 1
+    return None
 
 
 # --- C literals and identifiers ------------------------------------------------------------------
@@ -287,7 +299,7 @@ def _all_exprs(f: ir.Function):
 
 def _can_deopt(e: ir.Expr, functions: dict[str, ir.Function]) -> bool:
     if isinstance(e, ir.BinOp) and e.left.type is Type.I64 and e.op in _I64_DEOPT:
-        return not e.proven              # a proven op cannot deopt (overflow = SystemError)
+        return not e.proven              # a proven op cannot deopt (no overflow, or a shift / mask)
     if isinstance(e, ir.UnaryOp) and e.op is ir.UnaryOpKind.NEG and e.operand.type is Type.I64:
         return not e.proven
     if isinstance(e, (ir.Unbox, ir.CheckExact)):
@@ -632,12 +644,16 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
         raise CGenError(f"{f.name}: marked pure but contains an effect ({what})")
     for e in _all_exprs(f):
         if isinstance(e, (ir.BinOp, ir.UnaryOp)) and e.proven:
-            checked = (e.op in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL)
-                       if isinstance(e, ir.BinOp) else e.op is ir.UnaryOpKind.NEG)
+            checked = (e.op in _PROVEN_OPS if isinstance(e, ir.BinOp)
+                       else e.op is ir.UnaryOpKind.NEG)
             operand = e.left if isinstance(e, ir.BinOp) else e.operand
             if not checked or operand.type is not Type.I64:
                 raise CGenError(f"{f.name}: proven is set on {e.op.name} of {operand.type} "
-                                "(ir.py: I64 ADD/SUB/MUL and NEG only)")
+                                "(ir.py: I64 ADD/SUB/MUL, FLOORDIV/MOD by a power of two, and NEG "
+                                "only)")
+            if isinstance(e, ir.BinOp) and e.op in _SHIFT_OPS and _pow2_shift(e.right) is None:
+                raise CGenError(f"{f.name}: proven {e.op.name} needs a Const power-of-two divisor "
+                                f"(ir.py), got {e.right!r}")
         if isinstance(e, ir.Call):
             callee = functions.get(e.function)
             if callee is None:
@@ -788,14 +804,6 @@ class _FnGen:
         self.emit(f"tp_s = {call};")
         self.emit("if (tp_s != 0) { tp_rc = tp_s; goto tp_exit; }")
 
-    def check_proven(self, call: str) -> None:
-        """A checked I64 helper on a `proven` op (ir.BinOp.proven): it can only return 0 or 1, and
-        1 means the front end's and the verifier's proof was wrong, an internal error, never a
-        deopt (a proven op may sit after an effect)."""
-        self.emit(f"tp_s = {call};")
-        self.emit("if (tp_s != 0) { PyErr_SetString(PyExc_SystemError, "
-                  "\"typedpython: proven operation overflowed\"); tp_rc = -1; goto tp_exit; }")
-
     def fail(self) -> None:
         self.emit("{ tp_rc = -1; goto tp_exit; }")
 
@@ -877,8 +885,15 @@ class _FnGen:
         a, b = self.ev(e.left), self.ev(e.right)
         if lt is Type.I64:
             t = self.tmp("double" if e.op is ir.BinOpKind.TRUEDIV else "int64_t")
-            if e.proven:
-                self.check_proven(f"{_I64_OP[e.op]}({a}, {b}, &{t})")
+            if e.proven and e.op in _SHIFT_OPS:
+                # a >= 0 and the divisor is 2**k (verifier): Python's // and % equal >> and &
+                k = _pow2_shift(e.right)
+                if e.op is ir.BinOpKind.FLOORDIV:
+                    self.emit(f"{t} = {a} >> {k};")
+                else:
+                    self.emit(f"{t} = {a} & {_i64_lit((1 << k) - 1)};")
+            elif e.proven:
+                self.emit(f"tp_proven({e.op.name.lower()}, {a}, {b}, {t});")
             else:
                 self.check(f"{_I64_OP[e.op]}({a}, {b}, &{t})")
             return t
@@ -909,7 +924,7 @@ class _FnGen:
         if ot is Type.I64 and e.op is ir.UnaryOpKind.NEG:
             t = self.tmp("int64_t")
             if e.proven:
-                self.check_proven(f"tp_neg_i64({v}, &{t})")
+                self.emit(f"tp_proven_neg({v}, {t});")
             else:
                 self.check(f"tp_neg_i64({v}, &{t})")
             return t

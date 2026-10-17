@@ -743,10 +743,11 @@ def test_duplicate_function_names_are_rejected():
 # The verifier never trusts `proven`: it computes an interval for every I64 expression and accepts
 # a proven op only when the exact result interval fits in i64. Intervals (verify.py documents them):
 # Const [v, v]; a ForRange var inside its own loop [lo(start), hi(stop)-1] (step > 0) or
-# [lo(stop)+1, hi(start)] (step < 0); Len [0, 2**60-1]; ADD/SUB/MUL/NEG/POS by interval arithmetic;
+# [lo(stop)+1, hi(start)] (step < 0); Len [0, 2**62]; ADD/SUB/MUL/NEG/POS by interval arithmetic;
 # MOD by a divisor whose interval is positive [0, hi(divisor)-1]; FLOORDIV by a positive divisor
-# interval by its endpoints; everything else (params, entry globals, other locals, Index, Unbox,
-# Call) the full i64 range.
+# interval by its endpoints; a local assigned only i64 values (not a loop var) the join of their
+# intervals, narrowed by the guards around the read (#148, test_interval_proofs.py); everything else
+# (params, entry globals, Index, Unbox, Call) the full i64 range.
 
 def _ranged(op, start=0, stop=5, step=1, impure=True, pure=False, may_deopt=False, params=()):
     """for k in range(start, stop, step): t = <op(k)>   in an (impure) function"""
@@ -855,17 +856,23 @@ def test_len_bound_is_zero_to_two_to_the_62():
     assert_rejected(PROVEN, fn(params=a, returns=I64, body=[W, Return(pmul(L, i(-3)))]))
 
 
-def test_mod_and_floordiv_are_full_range_so_nothing_is_provable_from_them():
+def test_mod_and_floordiv_by_a_constant_have_bounded_results():
+    # #148: n % 7 is in [0, 6] (it was full range before)
     ps = [Param("n", I64)]
     m = BinOp(I64, BinOpKind.MOD, li("n"), i(7))
-    assert_rejected(PROVEN, fn(params=ps, returns=I64, pure=True, may_deopt=True,
-                               body=[Return(padd(m, i(1)))]))
+    assert_accepted(fn(params=ps, returns=I64, pure=True, may_deopt=True,
+                       body=[Return(padd(m, i(1)))]))
+    # ... and by an unknown divisor it is still full range
+    ps2 = [Param("n", I64), Param("d", I64)]
+    full = BinOp(I64, BinOpKind.MOD, li("n"), li("d"))
+    assert_rejected(PROVEN, fn(params=ps2, returns=I64, pure=True, may_deopt=True,
+                               body=[Return(padd(full, i(1)))]))
 
 
 def test_what_the_intervals_cannot_prove():
-    # a local assigned a constant is still full range (locals other than loop vars are not tracked)
-    assert_rejected(PROVEN, fn(locals_={"x": I64}, returns=I64,
-                               body=[IMPURE, Assign("x", i(1)), Return(padd(li("x"), i(1)))]))
+    # a local assigned an unknown value is full range (#148: a local assigned a constant is not)
+    assert_rejected(PROVEN, fn(params=[Param("n", I64)], locals_={"x": I64}, returns=I64,
+                               body=[IMPURE, Assign("x", li("n")), Return(padd(li("x"), i(1)))]))
     # the loop var after its loop is full range
     assert_rejected(PROVEN, fn(locals_={"k": I64}, returns=I64, body=[
         IMPURE, Assign("k", i(0)), ForRange("k", i(0), i(5), i(1), ()), Return(padd(li("k"), i(1)))]))
@@ -1304,7 +1311,7 @@ def _proof_mutations(rng, base):
         return "proven on param add", b, "q", {PROVEN}
     if kind == 2:       # proven set on a node that has no i64 overflow
         node = rng.choice([BinOp(F64, BinOpKind.ADD, f(1.0), f(2.0), proven=True),
-                           BinOp(I64, BinOpKind.FLOORDIV, i(4), i(2), proven=True),
+                           BinOp(I64, BinOpKind.FLOORDIV, i(-4), i(2), proven=True),   # negative dividend
                            UnaryOp(I64, UnaryOpKind.POS, i(1), proven=True),
                            BinOp(I64, BinOpKind.ADD, i(1), i(2), proven=1)])
         t = Type.F64 if node.type is F64 else Type.I64

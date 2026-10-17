@@ -185,10 +185,11 @@ def test_float_arithmetic_is_never_marked_proven(tmp_path):
     assert not any(n.proven for n in nodes(f, BinOp) + nodes(f, UnaryOp))
 
 
-@pytest.mark.parametrize("expr", ["i // 2", "i / 2"])
+@pytest.mark.parametrize("expr", ["i // 3", "i / 2"])
 def test_int_division_cannot_be_recorded_as_proven_so_it_deopts(tmp_path, expr):
-    # ir.BinOp.proven exists for ADD/SUB/MUL only; the verifier cannot re-prove // and / on i64,
-    # so they count as deopting: in a pure function may_deopt, in an impure one a CPython int.
+    # ir.BinOp.proven exists for ADD/SUB/MUL and for // and % by a power of two of a value >= 0
+    # (#148, test_interval_proofs.py); the verifier cannot re-prove // by 3 or / on i64, so they
+    # count as deopting: in a pure function may_deopt, in an impure one a CPython int.
     m = lower(tmp_path, f"""
 @compiled
 def f(n: int) -> float:

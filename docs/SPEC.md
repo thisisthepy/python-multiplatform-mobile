@@ -577,6 +577,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   | No deopting node in an impure function | not compiled; diagnostic |
   | Array access in bounds, or a runtime bounds check kept | the check stays (never an unchecked access) |
   | Array parameters only indexed, stored, `len`-ed; no aliasing (entry guard) | not compiled; diagnostic |
+  | Integer ops proven safe by the verifier's intervals (constants, `len`, `range` variables, guards such as `if x < e` / `while lo < hi`, joined local assignments, `//` and `%` by constants) | emitted unchecked (a shift/mask for `//`/`%` by a power of two of a non-negative value); the sanitizer CI run builds with `TP_CHECK_PROVEN` and turns a wrong proof into a SystemError (#148) |
   | A function holding an array parameter runs no user code: closed, and no slot read or `C(args)` whose slow path runs user code, in its whole call tree (#203) | not compiled; diagnostic |
   | OBJ references follow one ownership rule; no IR form for free, borrowed alias or NULL read | not compiled; diagnostic |
   | Integer overflow checked and promoted (deopt); an op marked `proven` must re-prove its interval fits i64 | not compiled; diagnostic `verify/proven-overflow` |

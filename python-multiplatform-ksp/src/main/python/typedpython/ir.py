@@ -130,10 +130,15 @@ class BinOp(Expr):
     op: BinOpKind
     left: Expr
     right: Expr
-    # I64 ADD/SUB/MUL only: set by the front end when an interval proof shows the result cannot
-    # leave the i64 range; the verifier re-proves it (never trusts it) and a proven op cannot
-    # deopt, so it is allowed in an impure function. The back end still uses the checked helper
-    # and treats an overflow there as an internal error (SystemError), never as a deopt.
+    # I64 only, set by the front end when an interval proof shows the op cannot deopt; the
+    # verifier re-proves it (never trusts it) and a proven op cannot deopt, so it is allowed in an
+    # impure function.
+    #   ADD/SUB/MUL: the result cannot leave the i64 range. The back end does plain arithmetic, with
+    #     no check (#148); built with -DTP_CHECK_PROVEN it uses the checked helper and treats an
+    #     overflow as an internal error (SystemError), never as a deopt.
+    #   FLOORDIV/MOD: the divisor is a Const power of two >= 1 and the dividend lies in
+    #     [0, 2**63-1] (Python's floor semantics and C's agree there); the back end emits `>>` / `&`.
+    # Any other op, or an op the verifier cannot prove, is rejected (verify/proven-overflow).
     proven: bool = False
 
 
