@@ -32,7 +32,8 @@ reported as a diagnostic. What it proves:
 - arrays: every `Index`/`StoreIndex` is either proved in bounds (and marked `proven`) or keeps its
   runtime check; array params are used only by `Index`/`StoreIndex`/`Len`;
 - ownership: OBJ values are created only by nodes that return a new reference (Box, Global,
-  GetAttr, CallObject, OBJ BinOp) and the back end releases them by one rule (every OBJ local owns its reference; assigning
+  GetAttr, CallObject, OBJ BinOp, GetItem, Format, BuildString, NewList, NewDict, a str Const) and
+  the back end releases them by one rule (every OBJ local owns its reference; assigning
   releases the old one; every exit releases all); the IR has no node that frees, aliases a
   borrowed reference, or reads a possibly-NULL object, so use-after-free and NULL dereference have
   no IR form.
@@ -81,9 +82,11 @@ class Expr:
 
 @dataclass(frozen=True)
 class Const(Expr):
-    """A literal. `value` is a Python int/float/bool/None matching `type`."""
+    """A literal. `value` is a Python int/float/bool/None matching `type`. An OBJ constant is None
+    or a `str` (a new reference to the module-lifetime str the back end holds for it; the text has
+    no NUL and no lone surrogate, so it is exactly the UTF-8 the C source carries)."""
 
-    value: int | float | bool | None
+    value: int | float | bool | str | None
 
 
 @dataclass(frozen=True)
@@ -124,7 +127,9 @@ class BinOp(Expr):
       FLOORDIV/MOD, CPython's float floor division and modulo (sign of divisor, `-0.0` cases),
         divisor 0.0 → ZeroDivisionError("float floor division by zero") / ("float modulo by
         zero").
-    OBJ: CPython's generic operation on objects (PyNumber_*), never deopts.
+    OBJ: CPython's generic operation on objects (PyNumber_*), never deopts. `inplace` (OBJ only) is
+      the augmented form `a op= b` (PyNumber_InPlace*, which a list's `+=` and a user `__iadd__`
+      need); an exact `str + str` is PyUnicode_Concat, the function PyNumber_Add ends in for it.
     """
 
     op: BinOpKind
@@ -140,6 +145,7 @@ class BinOp(Expr):
     #     [0, 2**63-1] (Python's floor semantics and C's agree there); the back end emits `>>` / `&`.
     # Any other op, or an op the verifier cannot prove, is rejected (verify/proven-overflow).
     proven: bool = False
+    inplace: bool = False
 
 
 class UnaryOpKind(Enum):
@@ -359,6 +365,64 @@ class Tuple(Expr):
 
 
 @dataclass(frozen=True)
+class GetItem(Expr):
+    """`obj[index]` on OBJ operands (obj first, then index): PyObject_GetItem, the call the
+    interpreter's BINARY_OP [] makes, so `__getitem__`, `__missing__`, `__hash__`/`__eq__` of the
+    key, `__index__` and every error (KeyError(key), IndexError, TypeError) are CPython's. For an
+    object that is exactly a `dict` it is PyDict_GetItemRef and, when absent, KeyError(key) built as
+    dict's own subscript does (runtime `tp_getitem`; the guard is the exact type). Type OBJ. Makes the
+    function impure and not closed."""
+
+    obj: Expr
+    index: Expr
+
+
+@dataclass(frozen=True)
+class Contains(Expr):
+    """`left in right` / `left not in right` (negate) on OBJ operands (left first, then right):
+    PySequence_Contains(right, left), the call CONTAINS_OP makes, so `__contains__`, iteration and
+    `__eq__` (with RichCompareBool's identity shortcut) run as in CPython. Type BOOL, always a bool
+    (so unlike CompareObj it is allowed anywhere). Makes the function impure and not closed."""
+
+    left: Expr
+    right: Expr
+    negate: bool = False
+
+
+@dataclass(frozen=True)
+class NewList(Expr):
+    """`[]`: PyList_New(0). Type OBJ. A fresh object is not an effect."""
+
+
+@dataclass(frozen=True)
+class NewDict(Expr):
+    """`{}`: PyDict_New(). Type OBJ. A fresh object is not an effect."""
+
+
+@dataclass(frozen=True)
+class Format(Expr):
+    """One `{value!c:spec}` field of an f-string, exactly as FORMAT_VALUE / CONVERT_VALUE +
+    FORMAT_SIMPLE / FORMAT_WITH_SPEC do: apply the conversion (`conversion`: -1 none, 115 `!s`
+    PyObject_Str, 114 `!r` PyObject_Repr, 97 `!a` PyObject_ASCII), then with `spec` (a constant str)
+    PyObject_Format(value, spec), without it the value itself when it is exactly a str, else
+    PyObject_Format(value, NULL). Type OBJ (a str unless a user `__format__` returned something
+    else, which PyObject_Format rejects with CPython's TypeError). Impure and not closed."""
+
+    operand: Expr
+    spec: str | None
+    conversion: int
+
+
+@dataclass(frozen=True)
+class BuildString(Expr):
+    """The f-string itself (BUILD_STRING): the str that joins `elements` (OBJ strs: Const strs and
+    Format results), evaluated in order, each Format running before the next element is evaluated.
+    Type OBJ. Runs no user code."""
+
+    elements: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
 class Is(Expr):
     """`a is b` / `a is not b` (negate) on OBJ operands: identity, no user code. Type BOOL. With
     `Const(None, OBJ)` this is how `x is None` is written."""
@@ -475,6 +539,38 @@ class FieldSet(Stmt):
 
 
 @dataclass(frozen=True)
+class StoreItem(Stmt):
+    """`obj[index] = value` on OBJ operands. CPython evaluates the value first, then the container,
+    then the index: the back end evaluates them in that order (the three operands are expressions
+    that may be effects). PyObject_SetItem, the call STORE_SUBSCR makes (for an object that is exactly
+    a `dict`, PyDict_SetItem, which is what dict's `mp_ass_subscript` calls). An effect, and not
+    closed: `__setitem__`, `__hash__`/`__eq__` of the key and dropping the old value run user code."""
+
+    obj: Expr
+    index: Expr
+    value: Expr
+
+
+@dataclass(frozen=True)
+class ForObj(Stmt):
+    """`for t in iter:` or `for t0, t1, ... in iter:` over any object: `iter` (OBJ) is evaluated once,
+    GET_ITER is PyObject_GetIter, each step is PyIter_Next (the call FOR_ITER ends in: StopIteration
+    is the end, any other exception propagates); the item is stored into the OBJ locals `targets`
+    left to right. With `unpack` the item is unpacked into the targets as UNPACK_SEQUENCE does (an
+    exact tuple of the right length directly, anything else through its iterator, with CPython's
+    `cannot unpack non-iterable T object`, `not enough values to unpack (expected n, got k)` and
+    `too many values to unpack (expected n[, got k])` errors); without it there is exactly one target
+    and it receives the item. The targets keep their last value after the loop; a loop that ran zero
+    times leaves them as they were. `break`/`continue` and every exit release the iterator once.
+    The effect of GetIter/Next is user code, so the function is impure and not closed."""
+
+    targets: tuple[str, ...]
+    iter: Expr
+    body: tuple[Stmt, ...]
+    unpack: bool = False
+
+
+@dataclass(frozen=True)
 class ExprStmt(Stmt):
     value: Expr
 
@@ -582,8 +678,8 @@ class Function:
     Its length never changes after creation, so a bounds proof against Len(local) holds.
 
     `pure`: no effect outside its own locals, no stores into anything but locals, no CallObject,
-    no GetAttr (a property can have effects), no Truth/CompareObj/ObjToFloat/OBJ BinOp (they run
-    user methods), only `Call`s to pure functions.
+    no GetAttr (a property can have effects), no Truth/CompareObj/ObjToFloat/OBJ BinOp/GetItem/
+    Contains/Format/StoreItem/ForObj (they run user methods), only `Call`s to pure functions.
 
     Kotlin interop (maintainer: compiled code must still talk to Kotlin freely): a function that
     calls into the binder is impure, so its int arithmetic cannot use the deopting I64 path,
@@ -609,7 +705,8 @@ class Function:
     # Module globals of a scalar type read ONCE at entry, as part of the guards: each must be
     # exactly that type (else deopt, before any effect), and the body reads it as `Local(name)`.
     # Legal only for a *closed* function, one that runs no user code (no GetAttr, CallObject,
-    # Truth, CompareObj, ObjToFloat, OBJ BinOp; Calls only to closed functions), so nothing can
+    # Truth, CompareObj, ObjToFloat, OBJ BinOp, GetItem, Contains, Format, StoreItem, ForObj; Calls
+    # only to closed functions), so nothing can
     # rebind the global between entry and use, and reading it once equals reading it at each use.
     entry_globals: tuple[Param, ...] = ()
 

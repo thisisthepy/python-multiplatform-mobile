@@ -136,12 +136,39 @@ All return new references or NULL with CPython's exception set; none deopts.
     PyObject *tp_global(PyObject *module_dict, PyObject *name);   /* globals, then builtins; NameError("name 'x' is not defined") */
     PyObject *tp_getattr(PyObject *obj, PyObject *name);          /* PyObject_GetAttr */
     PyObject *tp_call(PyObject *callee, PyObject *const *args, size_t nargs, PyObject *kwnames); /* PyObject_Vectorcall: nargs = positional count; keyword values follow at args[nargs..] */
-    /* tp_binop_obj op codes: TP_BINOP_ADD..TP_BINOP_MOD = 0..5 in ir.BinOpKind declaration order */
+    /* tp_binop_obj op codes: TP_BINOP_ADD..TP_BINOP_MOD = 0..5 in ir.BinOpKind declaration order;
+       TP_BINOP_IADD..TP_BINOP_IMOD = 6..11 are the augmented forms (PyNumber_InPlace*, ir.BinOp.inplace) */
     int       tp_truth(PyObject *obj);                            /* 0/1, -1 error (PyObject_IsTrue) */
     int       tp_compare_bool(PyObject *a, PyObject *b, int op);  /* 0/1, -1 error: PyObject_RichCompare then PyObject_IsTrue (no identity shortcut, as `if a == b`) */
     int       tp_obj_to_f64(PyObject *obj, double *out);          /* 0 / -1 (PyNumber_Float, then exact double) */
     PyObject *tp_binop_obj(PyObject *a, PyObject *b, int op);     /* PyNumber_Add/... for ir.BinOpKind on OBJ */
     void      tp_release(PyObject **slot);                        /* Py_CLEAR: the only way generated code drops a reference */
+
+## Objects: subscript, in, f-strings, iteration (issue #150; ir.GetItem / StoreItem / Contains / NewList / NewDict / Format / BuildString / ForObj / a str Const)
+Every helper makes the C API call the interpreter's bytecode makes, so results, exceptions (type,
+message, args) and the user `__hash__` / `__eq__` / `__index__` / `__getitem__` / `__format__` /
+`__iter__` calls, and their order, are CPython's. New references or NULL / -1 with the exception set;
+none deopts. A fast path replaces a generic call only under an exact-type guard, and only with the C
+function the generic call ends in for that exact type: the two guards are the macros
+`TP_FASTPATH_GUARD_DICT(o)` (`PyDict_CheckExact`) and `TP_FASTPATH_GUARD_STR(o)`
+(`PyUnicode_CheckExact`), the single mutation points the tests widen to `PyDict_Check` /
+`PyUnicode_Check` and must see fail. A `dict` or `str` subclass (which can override
+`__getitem__`, `__setitem__`, `__add__`, ...) always takes the generic call.
+    PyObject *tp_getitem(PyObject *obj, PyObject *key);           /* BINARY_OP []: PyObject_GetItem; exact dict: PyDict_GetItemRef + KeyError(key) as dict_subscript raises it */
+    int       tp_setitem(PyObject *obj, PyObject *key, PyObject *value); /* STORE_SUBSCR: PyObject_SetItem; exact dict: PyDict_SetItem. 0 / -1 */
+    int       tp_contains(PyObject *container, PyObject *needle); /* CONTAINS_OP: PySequence_Contains; 1 / 0 / -1 */
+    PyObject *tp_new_list(void);                                  /* PyList_New(0) */
+    PyObject *tp_new_dict(void);                                  /* PyDict_New() */
+    PyObject *tp_format(PyObject *value, PyObject *spec, int conversion); /* one f-string field: conversion -1 / 's' / 'r' / 'a' (PyObject_Str / Repr / ASCII), then spec != NULL: PyObject_Format(v, spec); else an exact str as it is, else PyObject_Format(v, NULL) */
+    PyObject *tp_build_string(PyObject *const *parts, Py_ssize_t n); /* BUILD_STRING: PyUnicode_Join("", parts); parts are borrowed */
+    PyObject *tp_get_iter(PyObject *obj);                         /* GET_ITER: PyObject_GetIter */
+    PyObject *tp_iter_next(PyObject *iter);                       /* FOR_ITER: PyIter_Next; NULL without an error at the end */
+    int       tp_unpack(PyObject *v, Py_ssize_t n, PyObject **out); /* UNPACK_SEQUENCE: an exact tuple of length n directly, else through its iterator with the interpreter's "cannot unpack non-iterable T object" / "not enough values to unpack (expected n, got k)" / "too many values to unpack (expected n[, got k])"; 0 with n new references in out, or -1 with none */
+`str + str` (both exactly str) in `tp_binop_obj` is `PyUnicode_Concat`, which `PyNumber_Add` ends in for two strs.
+Free-threaded: containers are read with the strong-reference API (`PyDict_GetItemRef`); an exact
+tuple's items may be borrowed because a tuple is immutable; a list or any other object is read
+through its iterator, so no borrowed reference into a container outlives the call that returned it.
+A str constant is an interned object held in the module state (`names`, immutable after init).
 
 ## Local arrays (ir.NewArray / CopyArray; owned by the function, no list object)
 Same structs as above with `list == NULL` and `dirty == NULL`. 0 ok, -1 MemoryError.

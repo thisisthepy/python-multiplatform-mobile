@@ -143,6 +143,13 @@ static inline void tp_cs_end(tp_cs *c)
 #define TP_BINOP_TRUEDIV 3
 #define TP_BINOP_FLOORDIV 4
 #define TP_BINOP_MOD 5
+/* the augmented forms `a op= b` (PyNumber_InPlace*): ir.BinOp.inplace */
+#define TP_BINOP_IADD 6
+#define TP_BINOP_ISUB 7
+#define TP_BINOP_IMUL 8
+#define TP_BINOP_ITRUEDIV 9
+#define TP_BINOP_IFLOORDIV 10
+#define TP_BINOP_IMOD 11
 
 /* ------------------------------------------------------------------------------------------
  * Integers (int64_t)
@@ -1270,19 +1277,209 @@ static inline int tp_obj_to_f64(PyObject *obj, double *out)
     return 0;
 }
 
-/* op is an ir.BinOpKind: TP_BINOP_ADD .. TP_BINOP_MOD (declaration order) */
+/* Fast-path guards (issue #150). A fast path may replace a generic C API call only when the
+ * operand is exactly the type for which the fast path is what the generic call ends up in:
+ * subclasses (which can override __getitem__, __setitem__, __add__, ...) always take the generic
+ * call. These two macros are the only places where "exactly" is decided; the mutation tests in
+ * test_str_dict.py widen each to PyDict_Check / PyUnicode_Check and must fail. */
+#define TP_FASTPATH_GUARD_DICT(o) PyDict_CheckExact(o)
+#define TP_FASTPATH_GUARD_STR(o) PyUnicode_CheckExact(o)
+
+/* op is an ir.BinOpKind: TP_BINOP_ADD .. TP_BINOP_MOD (declaration order), or its in-place form
+ * TP_BINOP_IADD .. TP_BINOP_IMOD. `str + str` (both exactly str) is PyUnicode_Concat, which is what
+ * PyNumber_Add ends in for two strs (str has no nb_add, its sq_concat is PyUnicode_Concat), and
+ * what the interpreter's BINARY_OP_ADD_UNICODE calls. */
 static inline PyObject *tp_binop_obj(PyObject *a, PyObject *b, int op)
 {
     switch (op) {
-    case TP_BINOP_ADD: return PyNumber_Add(a, b);
+    case TP_BINOP_ADD:
+        if (TP_FASTPATH_GUARD_STR(a) && TP_FASTPATH_GUARD_STR(b)) {
+            return PyUnicode_Concat(a, b);
+        }
+        return PyNumber_Add(a, b);
     case TP_BINOP_SUB: return PyNumber_Subtract(a, b);
     case TP_BINOP_MUL: return PyNumber_Multiply(a, b);
     case TP_BINOP_TRUEDIV: return PyNumber_TrueDivide(a, b);
     case TP_BINOP_FLOORDIV: return PyNumber_FloorDivide(a, b);
     case TP_BINOP_MOD: return PyNumber_Remainder(a, b);
+    case TP_BINOP_IADD: return PyNumber_InPlaceAdd(a, b);
+    case TP_BINOP_ISUB: return PyNumber_InPlaceSubtract(a, b);
+    case TP_BINOP_IMUL: return PyNumber_InPlaceMultiply(a, b);
+    case TP_BINOP_ITRUEDIV: return PyNumber_InPlaceTrueDivide(a, b);
+    case TP_BINOP_IFLOORDIV: return PyNumber_InPlaceFloorDivide(a, b);
+    case TP_BINOP_IMOD: return PyNumber_InPlaceRemainder(a, b);
     }
     PyErr_SetString(PyExc_SystemError, "tp_binop_obj: unknown operator");
     return NULL;
+}
+
+/* ------------------------------------------------------------------------------------------
+ * str and dict code (issue #150; API.md "Objects: subscript, in, f-strings, iteration"). Each
+ * helper makes the C API call the interpreter's bytecode makes; the fast paths are guarded by the
+ * exact type (TP_FASTPATH_GUARD_*). All return new references or NULL / -1 with CPython's exception.
+ * ------------------------------------------------------------------------------------------ */
+
+/* BINARY_OP []: PyObject_GetItem. For an object that is exactly a dict: PyDict_GetItemRef (a strong
+ * reference, free-threaded safe) and KeyError(key) when absent, which is what dict_subscript does
+ * for an exact dict (BINARY_OP_SUBSCR_DICT in the interpreter). */
+static inline PyObject *tp_getitem(PyObject *obj, PyObject *key)
+{
+    if (TP_FASTPATH_GUARD_DICT(obj)) {
+        PyObject *v = NULL;
+        int rc = PyDict_GetItemRef(obj, key, &v);
+        if (rc > 0) {
+            return v;
+        }
+        if (rc == 0) {
+            PyObject *exc = PyObject_CallOneArg(PyExc_KeyError, key);   /* _PyErr_SetKeyError */
+            if (exc != NULL) {
+                PyErr_SetObject((PyObject *)Py_TYPE(exc), exc);
+                Py_DECREF(exc);
+            }
+        }
+        return NULL;
+    }
+    return PyObject_GetItem(obj, key);
+}
+
+/* STORE_SUBSCR: PyObject_SetItem; an exact dict's mp_ass_subscript is PyDict_SetItem. 0 / -1. */
+static inline int tp_setitem(PyObject *obj, PyObject *key, PyObject *value)
+{
+    if (TP_FASTPATH_GUARD_DICT(obj)) {
+        return PyDict_SetItem(obj, key, value);
+    }
+    return PyObject_SetItem(obj, key, value);
+}
+
+/* CONTAINS_OP: PySequence_Contains(container, needle). 1 / 0 / -1. */
+static inline int tp_contains(PyObject *container, PyObject *needle)
+{
+    return PySequence_Contains(container, needle);
+}
+
+static inline PyObject *tp_new_list(void)
+{
+    return PyList_New(0);
+}
+
+static inline PyObject *tp_new_dict(void)
+{
+    return PyDict_New();
+}
+
+/* One f-string field (CONVERT_VALUE, then FORMAT_SIMPLE or FORMAT_WITH_SPEC): `conversion` is -1,
+ * 's', 'r' or 'a'; `spec` is NULL or the format spec str. */
+static inline PyObject *tp_format(PyObject *value, PyObject *spec, int conversion)
+{
+    PyObject *converted, *result;
+    switch (conversion) {
+    case -1: converted = Py_NewRef(value); break;
+    case 's': converted = PyObject_Str(value); break;
+    case 'r': converted = PyObject_Repr(value); break;
+    case 'a': converted = PyObject_ASCII(value); break;
+    default:
+        PyErr_SetString(PyExc_SystemError, "tp_format: unknown conversion");
+        return NULL;
+    }
+    if (converted == NULL) {
+        return NULL;
+    }
+    if (spec == NULL && PyUnicode_CheckExact(converted)) {
+        return converted;                      /* FORMAT_SIMPLE: an exact str is its own format */
+    }
+    result = PyObject_Format(converted, spec);
+    Py_DECREF(converted);
+    return result;
+}
+
+/* BUILD_STRING: the join of n strs with the empty separator. */
+static inline PyObject *tp_build_string(PyObject *const *parts, Py_ssize_t n)
+{
+    PyObject *seq = tp_tuple(parts, n);
+    PyObject *empty, *result;
+    if (seq == NULL) {
+        return NULL;
+    }
+    empty = PyUnicode_New(0, 0);               /* the empty-string singleton */
+    if (empty == NULL) {
+        Py_DECREF(seq);
+        return NULL;
+    }
+    result = PyUnicode_Join(empty, seq);
+    Py_DECREF(empty);
+    Py_DECREF(seq);
+    return result;
+}
+
+/* GET_ITER: PyObject_GetIter. */
+static inline PyObject *tp_get_iter(PyObject *obj)
+{
+    return PyObject_GetIter(obj);
+}
+
+/* FOR_ITER: the next item (a new reference), or NULL with no error set at the end (a StopIteration
+ * is the end and is cleared), or NULL with the exception set. */
+static inline PyObject *tp_iter_next(PyObject *iter)
+{
+    return PyIter_Next(iter);
+}
+
+/* UNPACK_SEQUENCE (no star) of `v` into the n slots `out`, each a new reference. An exact tuple of
+ * length n is taken directly (immutable, so the items cannot change under us); anything else goes
+ * through its iterator, with the interpreter's unpack_iterable errors. 0 ok; -1 error, with no
+ * reference left in `out`. */
+static inline int tp_unpack(PyObject *v, Py_ssize_t n, PyObject **out)
+{
+    PyObject *it, *w;
+    Py_ssize_t i;
+    if (PyTuple_CheckExact(v) && PyTuple_GET_SIZE(v) == n) {
+        for (i = 0; i < n; i++) {
+            out[i] = Py_NewRef(PyTuple_GET_ITEM(v, i));
+        }
+        return 0;
+    }
+    it = PyObject_GetIter(v);
+    if (it == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_TypeError) && Py_TYPE(v)->tp_iter == NULL
+                && !PySequence_Check(v)) {
+            PyErr_Format(PyExc_TypeError, "cannot unpack non-iterable %.200s object",
+                         Py_TYPE(v)->tp_name);
+        }
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        w = PyIter_Next(it);
+        if (w == NULL) {
+            if (!PyErr_Occurred()) {
+                PyErr_Format(PyExc_ValueError,
+                             "not enough values to unpack (expected %zd, got %zd)", n, i);
+            }
+            goto fail;
+        }
+        out[i] = w;
+    }
+    w = PyIter_Next(it);
+    if (w == NULL) {
+        if (PyErr_Occurred()) {
+            goto fail;
+        }
+        Py_DECREF(it);
+        return 0;
+    }
+    Py_DECREF(w);
+    if (PyList_CheckExact(v) || PyTuple_CheckExact(v) || PyDict_CheckExact(v)) {
+        Py_ssize_t ll = PyDict_CheckExact(v) ? PyDict_Size(v) : Py_SIZE(v);
+        PyErr_Format(PyExc_ValueError, "too many values to unpack (expected %zd, got %zd)", n, ll);
+    }
+    else {
+        PyErr_Format(PyExc_ValueError, "too many values to unpack (expected %zd)", n);
+    }
+fail:
+    while (i > 0) {
+        Py_CLEAR(out[--i]);
+    }
+    Py_DECREF(it);
+    return -1;
 }
 
 /* Py_CLEAR: the only way generated code drops a reference */

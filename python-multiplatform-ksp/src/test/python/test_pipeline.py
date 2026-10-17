@@ -54,11 +54,11 @@ def test_unsupported_functions_stay_interpreted_with_a_reason(write, tmp_path):
     path = write("mixed.py", SCALAR + """
 
 def greet(name: str) -> str:
-    return "hi " + name
+    return name[1:]
 """)
     result = pipeline.compile_module(path, tmp_path / "out")
     assert "greet" in result.skipped and result.skipped["greet"]
-    assert pipeline.load(result).greet("x") == "hi x"
+    assert pipeline.load(result).greet("xy") == "y"
 
 
 def test_a_module_with_nothing_to_compile_produces_no_extension(write, tmp_path):

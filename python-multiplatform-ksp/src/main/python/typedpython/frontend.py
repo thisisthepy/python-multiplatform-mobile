@@ -42,6 +42,17 @@ object), and `C(args)` is `New` when `ClassDecl.trivial_init` (arguments in `__s
 `CallObject(Global(C))`. `trivial_init` requires the i-th `__init__` parameter to be stored into
 the i-th slot (ir.ClassDecl: "`__init__(self, *fields-in-order)`"); other orders stay an object call.
 
+Objects, str and dict code (#150). A function may also use, as object operations (each is the C API
+call the interpreter's bytecode makes, ir.py says which): `str` constants, `{}` and `[]`, `o[i]`
+(`GetItem`) and `o[i] = v` (`StoreItem`) on anything that is not a native array, `x in c` /
+`x not in c` (`Contains`), f-strings (`Format` / `BuildString`, a constant format spec only),
+`for t in obj` and `for a, b in obj` (`ForObj`), and augmented assignment on objects in its in-place
+form. `for v in range(n)` whose bound is a CPython int object (an impure function's ints are) is a
+`ForObj` over `range(n)` called as an object, and then `v` is an object too (`_ObjRange`). All of
+them make the function impure and not closed, so it can hold no array and no entry global. What stays
+interpreted: non-empty list/dict displays, slices, `del`, tuple-assignment, comprehensions,
+`x[i] += v` on an object, a format spec with a nested field.
+
 Entry globals (ir.Function.entry_globals). A module-level name assigned once at top level, of type
 float/int/bool (annotated, or literals and arithmetic of such names), never rebound or deleted in
 the module, and read in a *closed* function (one that runs no user code, decided after lowering)
@@ -653,7 +664,12 @@ def _lower_function(
     try:
         return _lower_in_mode(sig, env, info, inferred, impure=True)
     except Skip as e:
-        return (pure_error or e).reason
+        # The pure attempt's reason is the natural one, unless it stopped after an impure construct:
+        # then the function was never going to be pure and the pure mode's types (a native int where
+        # the impure mode has an object) make its complaint beside the point.
+        if pure_error is not None and not getattr(pure_error, "impure_seen", False):
+            return pure_error.reason
+        return e.reason
 
 
 def _lower_in_mode(sig, env, info, inferred, impure: bool) -> ir.Function:
@@ -665,15 +681,39 @@ def _lower_in_mode(sig, env, info, inferred, impure: bool) -> ir.Function:
     return fn
 
 
+class _ObjRange(Exception):
+    """A `for v in range(...)` whose bound is a CPython int object: `v` cannot be an I64 range
+    index. Raised once per variable; the function is lowered again with `v` an object (a `ForObj`)."""
+
+    def __init__(self, var: str) -> None:
+        super().__init__(var)
+        self.var = var
+
+
 def _lower_with_bounds(sig, env, info, inferred, impure: bool,
                        candidates: dict[str, Type]) -> ir.Function:
+    obj_ranges: frozenset[str] = frozenset()
+    while True:
+        try:
+            return _lower_rounds(sig, env, info, inferred, impure, candidates, obj_ranges)
+        except _ObjRange as r:
+            assert r.var not in obj_ranges, "an object range variable was asked for twice"
+            obj_ranges |= {r.var}
+
+
+def _lower_rounds(sig, env, info, inferred, impure: bool, candidates: dict[str, Type],
+                  obj_ranges: frozenset[str]) -> ir.Function:
     # Range-target intervals: least fixpoint by iteration, widened to TOP if it does not settle.
     # A local that keeps growing (a counter) is widened to the i64 limit from round 3 on, as the
     # verifier's own fixpoint does (verify._prove).
     bounds: dict[str, Interval] = {}
     for rnd in range(16):
-        lowerer = _Lowerer(sig, env, info, inferred, impure, bounds, candidates)
-        fn = lowerer.run()
+        lowerer = _Lowerer(sig, env, info, inferred, impure, bounds, candidates, obj_ranges)
+        try:
+            fn = lowerer.run()
+        except Skip as e:
+            e.impure_seen = lowerer.impure      # type: ignore[attr-defined]
+            raise
         joined = {**bounds}
         for var, iv in lowerer.found_bounds.items():
             new = _join(joined.get(var), iv)
@@ -686,7 +726,7 @@ def _lower_with_bounds(sig, env, info, inferred, impure: bool,
             return fn
         bounds = joined
     widened = {var: TOP for var in bounds}
-    return _Lowerer(sig, env, info, inferred, impure, widened, candidates).run()
+    return _Lowerer(sig, env, info, inferred, impure, widened, candidates, obj_ranges).run()
 
 
 def _join(a: Interval, b: Interval) -> Interval:
@@ -706,8 +746,10 @@ class _Binding:
 class _Lowerer:
     def __init__(self, sig: _Signature, env: dict[str, ir.Function], info: _ModuleInfo,
                  inferred: dict[str, list[tuple[int, str]]], impure: bool,
-                 bounds: dict[str, Interval], candidates: dict[str, Type]) -> None:
+                 bounds: dict[str, Interval], candidates: dict[str, Type],
+                 obj_ranges: frozenset[str] = frozenset()) -> None:
         self.sig = sig
+        self.obj_ranges = obj_ranges
         self.candidates = candidates
         self.entry_used: dict[str, Type] = {}
         self.fn = sig.node
@@ -729,8 +771,11 @@ class _Lowerer:
         self.range_vars = {
             n for n, bs in self.bindings.items()
             if n not in self.params and any(b.how == "range" for b in bs)
-            and all(b.how in ("range", "annotation") for b in bs)
+            and all(b.how in ("range", "annotation") for b in bs) and n not in self.obj_ranges
         }
+        # Locals bound by a loop over an object (`for t in obj`, an object range): always objects.
+        self.iter_vars = {n for n, bs in self.bindings.items() if any(b.how == "for" for b in bs)}
+        self.iter_vars |= self.obj_ranges
         # Locals only ever assigned by plain `=` / `+=` statements (never a loop target): their
         # interval is the join of what is assigned to them (found_bounds, widened across rounds).
         self.acc_vars = {
@@ -892,6 +937,9 @@ class _Lowerer:
         if name not in self.annotations:
             kinds += self.inferred.get(name, [])
         distinct = sorted({k for _, k in kinds})
+        if not distinct and name in self.iter_vars:
+            self.types[name] = Type.OBJ   # what a loop over an object binds: an object
+            return Type.OBJ
         if not distinct:
             raise Skip(self.bindings[name][0].line, f"no type is known for local `{name}`")
         if len(distinct) > 1:
@@ -906,6 +954,9 @@ class _Lowerer:
             t = Type.OBJ if self.impure_mode and name not in self.range_vars else Type.I64
         else:
             t = SCALAR_KIND.get(kind, Type.OBJ)
+        if name in self.iter_vars and t != Type.OBJ:
+            raise Skip(self.bindings[name][0].line, f"loop variable `{name}` is bound by a loop over "
+                                                    f"an object but is a native {TYPE_NAME[t]}")
         self.types[name] = t
         return t
 
@@ -1023,6 +1074,16 @@ class _Lowerer:
             value = self.coerce(value, t, value_node, f"local `{name}`")
             self.note_assign(name, value)
             return self.take() + [ir.Assign(name, value)]
+        if isinstance(target, ast.Subscript) and not (
+                isinstance(target.value, ast.Name) and target.value.id in self.arrays):
+            if isinstance(target.slice, ast.Slice):
+                raise Skip(line, f"slice assignment `{_src(target)} = ...` is not supported")
+            # STORE_SUBSCR: the value, then the container, then the index.
+            value = self.boxed(self.value(value_node), value_node)
+            obj = self.boxed(self.sub(target.value), target.value)
+            key = self.boxed(self.sub(target.slice), target.slice)
+            self.impure = True
+            return self.take() + [ir.StoreItem(obj, key, value)]
         if isinstance(target, ast.Subscript):
             array, elem = self.array_of(target)
             # CPython evaluates the value first, then the index.
@@ -1210,7 +1271,7 @@ class _Lowerer:
                 raise _unsupported(node)
             t = self.local_type(name, line)
             current = ir.Local(t, name)
-            result = self.arith(op, current, self.sub(node.value), node)
+            result = self.arith(op, current, self.sub(node.value), node, inplace=True)
             result = self.coerce(result, t, node, f"local `{name}`")
             self.note_assign(name, result)
             return self.take() + [ir.Assign(name, result)]
@@ -1229,19 +1290,56 @@ class _Lowerer:
             raise Skip(line, f"assignment to attribute `{_src(target)}` is not supported")
         raise _unsupported(target)
 
+    def for_object(self, node: ast.For, call: ast.Call | None = None) -> list[ir.Stmt]:
+        """`for t in obj` / `for a, b in obj` (ir.ForObj); `call` is an object-bounded `range(...)`."""
+        line = node.lineno
+        target = node.target
+        if isinstance(target, ast.Name):
+            names, unpack = [target.id], False
+        elif isinstance(target, (ast.Tuple, ast.List)) and target.elts \
+                and all(isinstance(e, ast.Name) for e in target.elts):
+            names, unpack = [e.id for e in target.elts], True  # type: ignore[attr-defined]
+        else:
+            raise Skip(line, f"loop target `{_src(target)}` is not supported (names only)")
+        if len(set(names)) != len(names):
+            raise Skip(line, f"loop target `{_src(target)}` binds a name twice")
+        for n in names:
+            if n in self.arrays:
+                raise Skip(line, f"loop variable `{n}` is an array")
+            if self.local_type(n, line) != Type.OBJ:
+                raise Skip(line, f"loop variable `{n}` is a native {TYPE_NAME[self.local_type(n, line)]}"
+                                 ", but a loop over an object binds objects")
+        if call is not None:      # range(...) with an object bound: called as the object it is
+            callee = ir.Global(Type.OBJ, "range")
+            self.hoist_ok = False
+            it: ir.Expr = ir.CallObject(Type.OBJ, callee, tuple(
+                self.boxed(self.value(a), a) for a in call.args))
+        else:
+            it = self.boxed(self.value(node.iter), node.iter)
+        self.impure = True
+        pre = self.take()
+        killed = _stored_names(node.body) | set(names)
+        head = {k: v for k, v in self.refined.items() if k not in killed}
+        self.refined = head
+        body = self.block(node.body)
+        self.refined = dict(head)
+        return pre + [ir.ForObj(tuple(names), it, body, unpack)]
+
     def for_range(self, node: ast.For) -> list[ir.Stmt]:
         line = node.lineno
         if node.orelse:
             raise Skip(line, "`for ... else` is not supported")
-        if not isinstance(node.target, ast.Name):
-            raise Skip(line, f"loop target `{_src(node.target)}` is not supported (only a name)")
         if isinstance(node.iter, ast.Name) and node.iter.id in self.arrays:
             raise self.array_misuse(node.iter.id, node.iter)
         if not (_is_range_call(node.iter) and self.builtin("range")):
-            raise Skip(line, f"`for` over `{_src(node.iter)}` is not supported (only range())")
+            return self.for_object(node)
         call = node.iter
         assert isinstance(call, ast.Call)
+        if not isinstance(node.target, ast.Name):
+            raise Skip(line, f"loop target `{_src(node.target)}` is not supported (only a name)")
         var = node.target.id
+        if var in self.obj_ranges:
+            return self.for_object(node, call)
         if var in self.params:
             raise Skip(line, f"loop variable `{var}` is a parameter")
         for inner in ast.walk(ast.Module(body=node.body, type_ignores=[])):
@@ -1262,10 +1360,10 @@ class _Lowerer:
             step = 1
         if len(args) == 1:
             start: ir.Expr = ir.Const(Type.I64, 0)
-            stop = self.range_bound(args[0])
+            stop = self.range_bound(args[0], var)
         else:
-            start = self.range_bound(args[0])
-            stop = self.range_bound(args[1])
+            start = self.range_bound(args[0], var)
+            stop = self.range_bound(args[1], var)
         pre = self.take()
 
         s, e = self.interval(start), self.interval(stop)
@@ -1283,8 +1381,10 @@ class _Lowerer:
         self.refined = dict(head)
         return pre + [ir.ForRange(var, start, stop, ir.Const(Type.I64, step), body)]
 
-    def range_bound(self, node: ast.expr) -> ir.Expr:
+    def range_bound(self, node: ast.expr, var: str | None = None) -> ir.Expr:
         e = self.value(node)
+        if e.type == Type.OBJ and self.impure_mode and var is not None:
+            raise _ObjRange(var)    # a CPython int object: the loop is a ForObj over range(...)
         if e.type != Type.I64:
             why = (" (it is a CPython int here: its arithmetic is not proved free of i64 overflow "
                    "in an impure function)" if e.type == Type.OBJ and self.impure_mode else "")
@@ -1378,6 +1478,8 @@ class _Lowerer:
                 return ir.Const(Type.F64, v)
             if v is None:
                 return ir.Const(Type.OBJ, None)
+            if isinstance(v, str):
+                return self.str_const(v, node)
             raise Skip(line, f"{type(v).__name__} constant `{_src(node)}` is not supported")
         if isinstance(node, ast.Name):
             return self.name(node)
@@ -1411,8 +1513,54 @@ class _Lowerer:
                                      "right-hand side of an assignment is a native copy")
                 array, elem = self.array_of(node)
                 return ir.Index(elem, array, self.index(node.slice))
-            raise Skip(line, f"subscript `{_src(node)}` of an object is not supported")
+            if isinstance(node.slice, ast.Slice):
+                raise Skip(line, f"slice `{_src(node)}` is not supported")
+            obj = self.boxed(self.sub(node.value), node.value)      # the container, then the index
+            key = self.boxed(self.sub(node.slice), node.slice)
+            self.impure = True
+            return ir.GetItem(Type.OBJ, obj, key)
+        if isinstance(node, ast.Dict) and not node.keys:
+            return ir.NewDict(Type.OBJ)
+        if isinstance(node, ast.List) and not node.elts and isinstance(node.ctx, ast.Load):
+            return ir.NewList(Type.OBJ)
+        if isinstance(node, ast.JoinedStr):
+            return self.fstring(node)
         raise _unsupported(node)
+
+    def str_const(self, v: str, node: ast.AST) -> ir.Expr:
+        """A `str` constant: the text must be exactly the UTF-8 C string the back end embeds."""
+        try:
+            v.encode("utf-8")
+        except UnicodeEncodeError:
+            raise Skip(node.lineno, "a str constant with a lone surrogate is not supported") from None
+        if "\0" in v:
+            raise Skip(node.lineno, "a str constant containing NUL is not supported")
+        return ir.Const(Type.OBJ, v)
+
+    def fstring(self, node: ast.JoinedStr) -> ir.Expr:
+        """BUILD_STRING of the constant pieces and the `Format` of each field, in source order."""
+        parts: list[ir.Expr] = []
+        for piece in node.values:
+            if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                parts.append(self.str_const(piece.value, piece))
+                continue
+            assert isinstance(piece, ast.FormattedValue)
+            spec = None
+            if piece.format_spec is not None:
+                texts = piece.format_spec.values  # type: ignore[attr-defined]
+                if not all(isinstance(t, ast.Constant) and isinstance(t.value, str) for t in texts):
+                    raise Skip(piece.lineno, f"format spec of `{_src(piece)}` has a nested field "
+                                             "(only a constant spec is supported)")
+                spec = "".join(t.value for t in texts)  # type: ignore[attr-defined]
+                self.str_const(spec, piece)
+            operand = self.boxed(self.value(piece.value), piece.value)
+            self.impure = True
+            parts.append(ir.Format(Type.OBJ, operand, spec, piece.conversion))
+        if not parts:
+            return ir.Const(Type.OBJ, "")
+        if len(parts) == 1:
+            return parts[0]            # the compiler emits no BUILD_STRING for one piece
+        return ir.BuildString(Type.OBJ, tuple(parts))
 
     def name(self, node: ast.Name) -> ir.Expr:
         name = node.id
@@ -1460,20 +1608,21 @@ class _Lowerer:
             raise Skip(node.lineno, f"operator `{_src(node)}` is not supported")
         return kind
 
-    def arith(self, op: ir.BinOpKind, left: ir.Expr, right: ir.Expr, node: ast.AST) -> ir.Expr:
+    def arith(self, op: ir.BinOpKind, left: ir.Expr, right: ir.Expr, node: ast.AST,
+              inplace: bool = False) -> ir.Expr:
         lt, rt = left.type, right.type
         if Type.BOOL in (lt, rt) or Type.NONE in (lt, rt):
             raise Skip(node.lineno, f"arithmetic on {TYPE_NAME[Type.BOOL if Type.BOOL in (lt, rt) else Type.NONE]} "
                                     f"in `{_src(node)}` is not supported")
         if Type.OBJ in (lt, rt):
-            return self.obj_binop(op, left, right)
+            return self.obj_binop(op, left, right, inplace)
         if lt == Type.I64 and rt == Type.I64:
             result = Type.F64 if op == ir.BinOpKind.TRUEDIV else Type.I64
             e = ir.BinOp(result, op, left, right)
             if self.recordable(e) and self.proved(e):
                 return dataclasses.replace(e, proven=True)
             if self.impure_mode:
-                return self.obj_binop(op, left, right)
+                return self.obj_binop(op, left, right, inplace)
             self.deopts = True
             return e
         if lt == Type.I64:
@@ -1482,9 +1631,10 @@ class _Lowerer:
             right = ir.ToFloat(Type.F64, right)
         return ir.BinOp(Type.F64, op, left, right)
 
-    def obj_binop(self, op: ir.BinOpKind, left: ir.Expr, right: ir.Expr) -> ir.Expr:
+    def obj_binop(self, op: ir.BinOpKind, left: ir.Expr, right: ir.Expr,
+                  inplace: bool = False) -> ir.Expr:
         self.impure = True
-        return ir.BinOp(Type.OBJ, op, _box(left), _box(right))
+        return ir.BinOp(Type.OBJ, op, _box(left), _box(right), inplace=inplace)
 
     def unary(self, node: ast.UnaryOp) -> ir.Expr:
         if isinstance(node.op, ast.Not):
@@ -1548,10 +1698,13 @@ class _Lowerer:
                                         f"{TYPE_NAME[left.type if left.type != Type.OBJ else right.type]}"
                                         " is not supported (only of objects)")
             return ir.Is(Type.BOOL, left, right, isinstance(op, ast.IsNot))
+        if isinstance(op, (ast.In, ast.NotIn)):
+            self.impure = True
+            return ir.Contains(Type.BOOL, _box(left), _box(right), isinstance(op, ast.NotIn))
         kind = COMPARE.get(type(op))
         if kind is None:
             raise Skip(node.lineno, f"comparison `{_src(node)}` is not supported "
-                                    "(only == != < <= > >=)")
+                                    "(only == != < <= > >=, in, not in, is, is not)")
         lt, rt = left.type, right.type
         if Type.OBJ in (lt, rt):
             if not obj_ok:
@@ -1570,8 +1723,8 @@ class _Lowerer:
         for i, v in enumerate(node.values):
             if i > 0:
                 self.hoist_ok = False  # evaluated only if the earlier operands did not decide
-            e = self.sub(v, 1 if cond == 2 else 0)
-            if cond == 2:
+            e = self.sub(v, 1 if cond else 0)
+            if cond:
                 e = self.truth(e, v)
             elif e.type != Type.BOOL:
                 raise Skip(node.lineno, f"`{word}` on a non-bool operand `{_src(v)}` outside a "
@@ -1903,10 +2056,11 @@ def _walk(x):
 
 
 def _closed(fn: ir.Function, env: dict[str, ir.Function], seen: frozenset[str] = frozenset()) -> bool:
-    """`fn` runs no user code: no GetAttr, CallObject, Truth, CompareObj, ObjToFloat or OBJ
-    BinOp, and calls only closed functions."""
+    """`fn` runs no user code: no GetAttr, CallObject, Truth, CompareObj, ObjToFloat, GetItem,
+    Contains, Format, StoreItem, ForObj or OBJ BinOp, and calls only closed functions."""
     for n in _walk(fn.body):
-        if isinstance(n, (ir.GetAttr, ir.CallObject, ir.Truth, ir.CompareObj, ir.ObjToFloat)):
+        if isinstance(n, (ir.GetAttr, ir.CallObject, ir.Truth, ir.CompareObj, ir.ObjToFloat,
+                          ir.GetItem, ir.Contains, ir.Format, ir.StoreItem, ir.ForObj)):
             return False
         if isinstance(n, ir.BinOp) and n.type == Type.OBJ:
             return False

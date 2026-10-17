@@ -272,6 +272,12 @@ def _exprs_of_stmt(s: ir.Stmt):
     elif isinstance(s, ir.FieldSet):
         yield s.value
         yield s.obj
+    elif isinstance(s, ir.StoreItem):
+        yield s.value
+        yield s.obj
+        yield s.index
+    elif isinstance(s, ir.ForObj):
+        yield s.iter
     elif isinstance(s, ir.ExprStmt):
         yield s.value
     elif isinstance(s, ir.If):
@@ -288,7 +294,7 @@ def _exprs_of_stmt(s: ir.Stmt):
 def _children(s: ir.Stmt):
     if isinstance(s, ir.If):
         return s.then + s.orelse
-    if isinstance(s, (ir.While, ir.ForRange)):
+    if isinstance(s, (ir.While, ir.ForRange, ir.ForObj)):
         return s.body
     return ()
 
@@ -376,7 +382,8 @@ def _watch_event_stmt() -> str:
 
 
 def _is_effect(e: ir.Expr) -> bool:
-    if isinstance(e, (ir.GetAttr, ir.CallObject, ir.Truth, ir.CompareObj, ir.ObjToFloat)):
+    if isinstance(e, (ir.GetAttr, ir.CallObject, ir.Truth, ir.CompareObj, ir.ObjToFloat,
+                      ir.GetItem, ir.Contains, ir.Format)):
         return True
     return isinstance(e, ir.BinOp) and e.type is Type.OBJ
 
@@ -387,7 +394,7 @@ def _is_effect(e: ir.Expr) -> bool:
 # Nodes that can run Python code (and so create Python frames the compiled frame count must see):
 # their slow paths call getattr, the class, __bool__, __float__, a Python callable, a descriptor.
 _RUNS_PYTHON = (ir.CallObject, ir.GetAttr, ir.Truth, ir.CompareObj, ir.ObjToFloat, ir.FieldGet,
-                ir.FieldSet, ir.New)
+                ir.FieldSet, ir.New, ir.GetItem, ir.Contains, ir.Format, ir.StoreItem, ir.ForObj)
 
 
 def _runs_no_python(f: ir.Function) -> bool:
@@ -403,7 +410,7 @@ def _runs_no_python(f: ir.Function) -> bool:
     if any(t is Type.OBJ for t in f.locals.values()):
         return False
     for s in _walk_stmts(f.body):
-        if isinstance(s, ir.FieldSet):
+        if isinstance(s, (ir.FieldSet, ir.StoreItem, ir.ForObj)):
             return False
     for e in _all_exprs(f):
         if isinstance(e, _RUNS_PYTHON):
@@ -664,7 +671,7 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
     # a store into a local array is not an effect (ir.py "Local arrays"); into a parameter it is
     stores = [s for s in _walk_stmts(f.body)
               if (isinstance(s, ir.StoreIndex) and f.locals.get(s.array) not in ir.ARRAYS)
-              or isinstance(s, ir.FieldSet)]
+              or isinstance(s, (ir.FieldSet, ir.StoreItem, ir.ForObj))]
     if f.pure and (effects or stores):
         what = type(effects[0]).__name__ if effects else type(stores[0]).__name__
         raise CGenError(f"{f.name}: marked pure but contains an effect ({what})")
@@ -725,6 +732,8 @@ def _is_closed(f: ir.Function, functions: dict[str, ir.Function], seen=None) -> 
     if f.name in seen:
         return True
     seen.add(f.name)
+    if any(isinstance(s, (ir.StoreItem, ir.ForObj)) for s in _walk_stmts(f.body)):
+        return False
     for e in _all_exprs(f):
         if _is_effect(e):
             return False
@@ -893,6 +902,9 @@ class _FnGen:
                 return self._own_copy("Py_None")
             if isinstance(e.value, bool):
                 return self._own_copy("Py_True" if e.value else "Py_False")
+            if type(e.value) is str and "\0" not in e.value:
+                # a str constant: the interned object the module state holds (names table)
+                return self._own_copy(f"tp_st->names[{self.mg.name_index(e.value)}]")
             raise CGenError(f"{self.f.name}: OBJ constant {e.value!r} (use Box of a scalar Const)")
         raise CGenError(f"{self.f.name}: constant of type {e.type}")
 
@@ -934,7 +946,8 @@ class _FnGen:
             return t
         if lt is Type.OBJ:
             t = self.tmp("PyObject *")
-            self.emit(f"{t} = tp_binop_obj({a}, {b}, {_OBJ_OP[e.op]});")
+            op = _OBJ_OP[e.op] if not e.inplace else f"TP_BINOP_I{e.op.name}"
+            self.emit(f"{t} = tp_binop_obj({a}, {b}, {op});")
             self._own_release(a, b)
             self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
             return t
@@ -1411,6 +1424,54 @@ class _FnGen:
         self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
         return t
 
+    def ev_GetItem(self, e: ir.GetItem) -> str:
+        o = self._obj_operand(e.obj, "GetItem")                    # the container, then the index
+        k = self._obj_operand(e.index, "GetItem index")
+        t = self.tmp("PyObject *")
+        self.emit(f"{t} = tp_getitem({o}, {k});")
+        self._own_release(o, k)
+        self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
+        return t
+
+    def ev_Contains(self, e: ir.Contains) -> str:
+        a = self._obj_operand(e.left, "Contains")                  # CONTAINS_OP: left, then right
+        b = self._obj_operand(e.right, "Contains")
+        t = self.tmp("int")
+        self.emit(f"{t} = tp_contains({b}, {a});")
+        self._own_release(a, b)
+        self.emit(f"if ({t} < 0) {{ tp_rc = -1; goto tp_exit; }}")
+        if e.negate:
+            self.emit(f"{t} = !{t};")
+        return t
+
+    def ev_NewList(self, e: ir.NewList) -> str:
+        return self._own_new("tp_new_list()")
+
+    def ev_NewDict(self, e: ir.NewDict) -> str:
+        return self._own_new("tp_new_dict()")
+
+    def ev_Format(self, e: ir.Format) -> str:
+        if e.conversion not in (-1, 97, 114, 115) or (e.spec is not None and "\0" in e.spec):
+            raise CGenError(f"{self.f.name}: Format conversion {e.conversion!r} / spec {e.spec!r}")
+        o = self._obj_operand(e.operand, "Format")
+        spec = "NULL" if e.spec is None else f"tp_st->names[{self.mg.name_index(e.spec)}]"
+        t = self.tmp("PyObject *")
+        self.emit(f"{t} = tp_format({o}, {spec}, {e.conversion});")
+        self._own_release(o)
+        self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
+        return t
+
+    def ev_BuildString(self, e: ir.BuildString) -> str:
+        if len(e.elements) < 2:
+            raise CGenError(f"{self.f.name}: BuildString of {len(e.elements)} elements")
+        items = [self._obj_operand(x, "BuildString element") for x in e.elements]
+        t = self.tmp("PyObject *")
+        self.emit(f"{{ PyObject *tp_av[{len(items)}] = {{{', '.join(items)}}};")
+        self.emit(f"  {t} = tp_build_string(tp_av, {len(items)}); }}")
+        self._own_release(*items)
+        self.emit(f"if ({t} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
+        return t
+
     def _assign_array(self, s: ir.Assign, at: Type) -> None:
         """`local = NewArray | CopyArray`: build into a zeroed temporary, then (only on success)
         free the old array and move the temporary in."""
@@ -1488,6 +1549,48 @@ class _FnGen:
         self.emit(f"{ptr}->data[{slot}] = {v};")
         if not local:                           # a local array has no list to write back to
             self.emit(f"{ptr}->dirty[{slot}] = 1;")
+
+    def st_StoreItem(self, s: ir.StoreItem) -> None:
+        v = self._obj_operand(s.value, "StoreItem value")          # STORE_SUBSCR: value, container, index
+        o = self._obj_operand(s.obj, "StoreItem")
+        k = self._obj_operand(s.index, "StoreItem index")
+        self.emit(f"tp_s = tp_setitem({o}, {k}, {v});")
+        self._own_release(o, k, v)
+        self.emit("if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
+
+    def st_ForObj(self, s: ir.ForObj) -> None:
+        if not s.targets or len(set(s.targets)) != len(s.targets) or (not s.unpack and len(s.targets) != 1):
+            raise CGenError(f"{self.f.name}: ForObj targets {s.targets!r} (unpack={s.unpack})")
+        for name in s.targets:
+            if self.types.get(name) is not Type.OBJ:
+                raise CGenError(f"{self.f.name}: ForObj target {name} must be an OBJ local")
+        o = self._obj_operand(s.iter, "ForObj iterable")
+        it = self.tmp("PyObject *")          # the iterator: owned by this statement across iterations
+        self.emit(f"{it} = tp_get_iter({o});")                # GET_ITER
+        self._own_release(o)
+        self.emit(f"if ({it} == NULL) {{ tp_rc = -1; goto tp_exit; }}")
+        item = self.tmp("PyObject *")
+        self.emit("for (;;) {")
+        self.depth += 1
+        self.poll()
+        self.emit(f"{item} = tp_iter_next({it});")            # FOR_ITER (StopIteration ends the loop)
+        self.emit(f"if ({item} == NULL) {{ if (PyErr_Occurred()) {{ tp_rc = -1; goto tp_exit; }} break; }}")
+        if not s.unpack:
+            self._own_move(_ident("l", s.targets[0]), item)
+        else:
+            n = len(s.targets)
+            self.emit(f"{{ PyObject *tp_u[{n}] = {{0}};")
+            self.emit(f"  tp_s = tp_unpack({item}, {n}, tp_u);")  # UNPACK_SEQUENCE; nothing owned on error
+            self._own_release(item)
+            self.emit("  if (tp_s < 0) { tp_rc = -1; goto tp_exit; }")
+            for i, name in enumerate(s.targets):
+                local = _ident("l", name)
+                self.emit(f"  {{ PyObject *tp_old = {local}; {local} = tp_u[{i}]; tp_release(&tp_old); }}")
+            self.emit("}")
+        self.stmts(s.body)
+        self.depth -= 1
+        self.emit("}")
+        self._own_release(it)               # after the loop and after a `break`; a return/error exits via tp_exit
 
     def st_FieldSet(self, s: ir.FieldSet) -> None:
         slot = self.mg.slot(self.f.name, s.cls, s.field)

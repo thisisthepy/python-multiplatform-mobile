@@ -116,7 +116,9 @@ def test_impure_function_keeps_an_unbounded_int_local_as_a_python_int(tmp_path):
     assert f.locals == {"m": OBJ}
     assert f.body[:2] == (
         Assign("m", Box(OBJ, Local(I64, "n"))),
-        Assign("m", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "m"), Box(OBJ, Const(I64, 1)))),
+        # `m += 1` on an object is the in-place operation (PyNumber_InPlaceAdd, #150)
+        Assign("m", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "m"), Box(OBJ, Const(I64, 1)),
+                          inplace=True)),
     )
     assert not f.pure and not f.may_deopt
 
@@ -709,7 +711,8 @@ def test_compiled_code_calls_imported_callables_around_native_float_math(tmp_pat
         ExprStmt(CallObject(OBJ, Global(OBJ, "draw"), (
             Local(OBJ, "canvas"), Box(OBJ, Local(F64, "x")), Box(OBJ, Const(F64, 0.5)),
         ), ("alpha",))),
-        Assign("hits", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "hits"), Box(OBJ, Const(I64, 1)))),
+        Assign("hits", BinOp(OBJ, BinOpKind.ADD, Local(OBJ, "hits"), Box(OBJ, Const(I64, 1)),
+                             inplace=True)),    # `hits += 1` on an object: in place (#150)
         If(CompareObj(BOOL, CompareKind.GT, Local(OBJ, "hits"), Box(OBJ, Local(I64, "n"))),
            (Break(),)),
     )

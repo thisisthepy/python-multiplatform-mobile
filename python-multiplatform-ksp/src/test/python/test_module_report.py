@@ -101,7 +101,7 @@ MIXED = "# typedpython: compiled\n" + textwrap.dedent("""\
 
 
     def greet(name: str) -> str:
-        return "hi " + name
+        return name[1:]
     """)
 
 
@@ -125,7 +125,7 @@ def test_kind_compiled(tmp_path):
 
 def test_kind_nothing_compiled_with_structured_items(tmp_path):
     _, _, m = build_one(tmp_path, "pkg/plain.py",
-                        "# typedpython: compiled\n\ndef f(s: str) -> str:\n    return s + 'x'\n")
+                        "# typedpython: compiled\n\ndef f(s: str) -> str:\n    return s[1:]\n")
     assert m.kind == "nothing_compiled" and m.extension is None
     [item] = m.skipped_items
     assert (item.name, item.file, item.line) == ("f", "pkg/plain.py", 4)
@@ -138,7 +138,7 @@ def test_kind_not_marked_when_there_is_neither_marker_nor_decorator(tmp_path):
 
 
 def test_a_compiled_decorator_alone_opts_in(tmp_path):
-    src = "@compiled\ndef f(s: str) -> str:\n    return s + 'x'\n"
+    src = "@compiled\ndef f(s: str) -> str:\n    return s[1:]\n"
     _, _, m = build_one(tmp_path, "pkg/deco.py", src)
     assert m.kind == "nothing_compiled"
     assert [(i.name, i.line) for i in m.skipped_items] == [("f", 3)]
@@ -170,7 +170,7 @@ def test_structure_round_trips_through_the_cache_for_reused_modules(tmp_path):
 
 def test_not_marked_and_nothing_compiled_survive_reuse(tmp_path):
     root, path, _ = build_one(tmp_path, "pkg/plain.py",
-                              "# typedpython: compiled\n\ndef f(s: str) -> str:\n    return s + 'x'\n")
+                              "# typedpython: compiled\n\ndef f(s: str) -> str:\n    return s[1:]\n")
     again = pipeline.compile_project([path], root, tmp_path / "cache").modules[0]
     assert again.status == "reused" and again.kind == "nothing_compiled" and again.skipped_items
     root2, path2, _ = build_one(tmp_path, "pkg/un.py", "def f(x: int) -> int:\n    return x\n")
