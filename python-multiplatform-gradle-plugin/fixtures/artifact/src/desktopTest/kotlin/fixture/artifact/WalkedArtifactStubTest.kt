@@ -7,6 +7,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -117,10 +118,15 @@ class WalkedArtifactStubTest {
         paths.filter { it.endsWith(".pyi") }.forEach { path ->
             val text = stub(path)
             assertTrue("pythonx" !in text, "$path mentions pythonx")
-            assertTrue(
-                Regex("""class _(?!\w+_\w+\(_t\.Protocol\))""").find(text) == null,
-                "$path carries a private class that is not a receiver-method protocol",
-            )
+            // A private class is a receiver-method protocol, or (issue #217) the stub-private class of a type
+            // whose name a function of its module takes, which says so in its docstring.
+            Regex("""class (_\w+)[^\n]*:\n([^\n]*)""").findAll(text).forEach { match ->
+                if (Regex("""^class _\w+_\w+\(_t\.Protocol\)""").containsMatchIn(match.value.trimStart())) return@forEach
+                assertTrue(
+                    "(stubbed as ${match.groupValues[1]}:" in match.groupValues[2],
+                    "$path carries a private class that is neither a receiver-method protocol nor a taken name's class: ${match.value}",
+                )
+            }
         }
     }
 
@@ -249,5 +255,19 @@ class WalkedArtifactStubTest {
             .filter { it !in installed }.toSet()
         assertEquals(emptySet(), stubbed - installed - overloadBases, "stubbed but not callable")
         assertEquals(emptySet(), installed - propertyKeys - memberKeys - stubbed - constructors, "callable but not stubbed")
+    }
+
+    /**
+     * Issue #217: `fixture.valueclass.member.Gauge` is an interface and a function. The stub's `Gauge` is
+     * the function, as at run time, and the type is `_Gauge`, with its property and its member.
+     */
+    @Test
+    fun aTypeWhoseNameAFactoryTakesIsStubbedUnderAPrivateName() {
+        val stub = stub("fixture/valueclass/member/__init__.pyi")
+        assertTrue("def Gauge() -> _Gauge:" in stub, stub)
+        assertTrue("class _Gauge:" in stub, stub)
+        assertTrue("    def level(self) -> int:" in stub, stub)
+        assertTrue("    def bump(self) -> None:" in stub, stub)
+        assertFalse("is not stubbed" in stub, stub)
     }
 }

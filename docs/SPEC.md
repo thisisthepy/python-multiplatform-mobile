@@ -405,6 +405,17 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Status: partial`, `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCallbackTest.kt`; a value-returning slot
   (`() -> Float`) does not yet accept a Python callable (`M3ProofRenderTest.kt`
   `aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable`).
+  A parameter typed as a **functional interface** (a Java interface with one abstract method, such as
+  `java.lang.Runnable`, or a Kotlin `fun interface`) whose method returns `Unit`/`void` and which is
+  not generic takes a Python callable as well as a Kotlin handle (#216). Its slot type name is the
+  interface, `|`, and the equivalent `kotlin.FunctionN` (`java.lang.Runnable|kotlin.Function0()->kotlin.Unit`):
+  the binding layer makes a callable into that function type and checks a handle against the
+  interface, and generated source converts a wrapper with a SAM lambda (`java.lang.Runnable { f() }`)
+  and casts anything else, with no reflection. A JDK interface is read from the JDK the build runs
+  on, any other from the consumer's jars. The stub shows the slot as a `Callable`. A functional
+  interface whose method returns a value, or a generic one, is left as it was: a handle parameter
+  (Compose's `Alignment` is one). `Status: implemented` on desktop, `GP/artifact/SamParameterBindingTest.kt`,
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactSamParameterTest.kt`.
 - **B-6** `@Composable` functions are callable from Python inside a composition; a Python click reaches
   a Kotlin callback and the redraw shows it. `Status: implemented` on desktop,
   `python-multiplatform-compose/fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
@@ -447,7 +458,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   its `@overload`s) and the module's constants and functions as members, never as a bare `def`, which
   would hide `TextRange.Zero` from a checker),
   `.github/scripts/stubs/check-stubs.sh` (mypy over the Compose stubs). A class whose name is also a function in
-  its module is `Any`, except that a class's own bound constructor is that class's `__init__`
+  its module (Kotlin's factory idiom, `kotlinx.coroutines.Job` and `fun Job()`) is stubbed under the
+  stub-private name `_<Name>` (#217): the function keeps `Job`, as at run time, and every use of the
+  type, the factory's result included, is `_Job`, a class with the type's properties and member
+  functions; nothing at run time is named `_Job`. Except that a class's own bound constructor is that class's `__init__`
   (`@overload`ed for several), so the class keeps its stub, members and properties; a single one's
   docstring carries its table key after `Kotlin constructor: `; its `__`-suffixed table-key spellings
   stay module functions; a value class bound as its primitive keeps its constructor as a module function

@@ -589,6 +589,8 @@ object PythonxAdapter {
         def _simple_name(qualified):
             if not qualified:
                 return '?'
+            # A functional-interface slot (issue #216) is named by its interface in every message.
+            qualified = qualified.partition(_SAM_SEPARATOR)[0]
             # A function-typed slot's name is a signature rather than a classifier, so its last
             # dotted component is the *return* type: `kotlin.Function3@Composable(…)->kotlin.Unit`
             # would print as `Unit`, which names the one part of it a reader does not need. Rendered
@@ -661,6 +663,10 @@ object PythonxAdapter {
         # ------------------------------------------------------------------- callables (§6)
 
         _FUNCTION_PREFIX = 'kotlin.Function'
+        # `Interface|kotlin.FunctionN(...)->kotlin.Unit`: a functional-interface slot (issue #216), filled
+        # from a Python callable as that function type or from a handle checked against the interface.
+        # Must match `ArtifactScanner.SAM_SEPARATOR`.
+        _SAM_SEPARATOR = '|'
 
         # What `ArtifactScanner.functionSlotTypeName` appends to a slot whose declared
         # `kotlin.FunctionN` was lowered by the Compose plugin into a JVM `FunctionN+2`. Not a legal
@@ -1603,6 +1609,11 @@ object PythonxAdapter {
 
         def _coerce(value, tag, type_name, decl, slot, strict):
             '''One argument on its way in. Returns the marshalled value, or raises when `strict`.'''
+            # A functional-interface slot (issue #216): the interface is what a handle is checked against,
+            # the function type what a callable is made into.
+            callable_as = None
+            if type_name and _SAM_SEPARATOR in type_name:
+                type_name, _, callable_as = type_name.partition(_SAM_SEPARATOR)
             if value is None:
                 # `None` written for a slot that has no default to fall back on: Kotlin's `null`, which
                 # a nullable declaration takes (`Icon(..., contentDescription=None)`) and a non-null
@@ -1644,7 +1655,7 @@ object PythonxAdapter {
                 # made itself. Everything else in this branch requires a handle, because a Kotlin
                 # object is the only thing a Kotlin parameter can hold; a function is the exception
                 # because Kotlin can be given one that calls back.
-                slot = _function_slot(type_name)
+                slot = _function_slot(callable_as or type_name)
                 if slot is not None and _is_python_callable(value):
                     # A Python callable cannot stand in for a lambda that has to give something back.
                     # `kotlin.Function1` is the spelling of both `(Float) -> Unit` and
@@ -1663,7 +1674,8 @@ object PythonxAdapter {
                         return _CALLABLE_PENDING
                     return _make_function(value, slot)
                 if slot is not None and getattr(value, '_pm_handle', None) is None:
-                    # A function slot and something that is not callable. Refused with the signature
+                    # A function slot and something that is not callable (or, for a functional
+                    # interface, not a handle either). Refused with the signature
                     # rather than falling through to "expected a handle": Kotlin will never hand a
                     # `FunctionN` back out for Python to pass in again, so a handle is not the answer
                     # here and saying so would send the caller looking for one.
