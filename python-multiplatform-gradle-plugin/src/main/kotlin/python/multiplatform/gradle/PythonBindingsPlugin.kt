@@ -145,6 +145,14 @@ interface PythonBindingsExtension {
      */
     val packagePythonHome: Property<Boolean>
 
+    /**
+     * SPEC L-9 (issue #246): the directory a GraalVM native image of this app is written to. When it
+     * is set, `stageNativeImagePythonHome` copies the same pruned prefix Compose packaging gets into
+     * `<this>/python-multiplatform-home`, where the library finds it at run time beside the
+     * executable. Unset, the task copies nothing.
+     */
+    val nativeImageDirectory: org.gradle.api.file.DirectoryProperty
+
     /** CPython version to stage. Defaults to the one this library was built against. */
     val pythonVersion: Property<String>
 
@@ -684,6 +692,21 @@ class PythonBindingsPlugin : Plugin<Project> {
                     requireNoEmptyLibraries(destinationDir.resolve(PACKAGED_HOME_DIRECTORY))
                 }
             }
+
+        // SPEC L-9 (issue #246): the same prefix beside a native image, wherever the app writes one.
+        val besideImage = project.provider { extension.nativeImageDirectory.isPresent }
+        project.tasks.register("stageNativeImagePythonHome", org.gradle.api.tasks.Sync::class.java) {
+            group = "python"
+            description = "Copies the CPython prefix beside a GraalVM native image (pythonBindings.nativeImageDirectory)."
+            dependsOn(java.util.concurrent.Callable { if (besideImage.get()) listOf(stage) else emptyList() })
+            from(java.util.concurrent.Callable { if (besideImage.get()) stagedPrefix else emptyList<Any>() }) {
+                include(includes)
+                exclude(PACKAGED_PREFIX_EXCLUDES)
+            }
+            into(extension.nativeImageDirectory.dir(PACKAGED_HOME_DIRECTORY).orElse(project.layout.buildDirectory.dir("tmp/stageNativeImagePythonHome-unset")))
+            onlyIf("pythonBindings.nativeImageDirectory is set") { besideImage.get() }
+            doLast { requireNoEmptyLibraries(destinationDir) }
+        }
     }
 
     /**

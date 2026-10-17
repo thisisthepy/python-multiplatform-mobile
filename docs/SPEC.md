@@ -81,7 +81,11 @@ fail, then implement.
   this off. At run time, before `Py_Initialize`, desktop takes the first of: `PYTHONHOME` from the
   environment (CPython reads it itself and nothing else happens); the system property
   `python.multiplatform.home`; `<compose.application.resources.dir>/python-multiplatform-home` when
-  that directory exists. A prefix taken from a property goes through L-3's check (a catchable
+  that directory exists; and, inside a GraalVM native image only (`org.graalvm.nativeimage.imagecode`
+  is `runtime`; on a JVM the executable is `java`), `<directory of the executable>/python-multiplatform-home`
+  when that directory exists (#246). The plugin stages that one with `stageNativeImagePythonHome`, a
+  copy of the same pruned prefix into `<pythonBindings.nativeImageDirectory>/python-multiplatform-home`,
+  which does nothing unless `nativeImageDirectory` is set. A prefix taken from a property or a directory goes through L-3's check (a catchable
   `IllegalStateException` naming the path and where it came from), is handed to CPython with
   `Py_SetPythonHome`, and is where `libpython` is loaded from when it contains one.
   `Status: partial`, `GP/PackagedPythonHomeTest.kt` (what is copied, which tasks, the switch);
