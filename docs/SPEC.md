@@ -614,7 +614,13 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     without being passed it. At such a call every live virtual object is materialised, in allocation order.
   `is`, `type()` and `isinstance` on virtual objects are decided statically. An increment/decrement pair is
   elided only when another owned reference keeps the object alive throughout and no unknown code runs in
-  between, so every refcount that can be observed is exact. Virtual objects whose count is unbounded live in
+  between, so every refcount that can be observed is exact. **On free-threaded 3.15t (no GIL) both
+  borrowed field reads and pair elision apply only to objects proven thread-local** (never escaped to a
+  global, a container, another thread or unknown code; #193, decision D5): another thread could otherwise
+  write the slot and free the child between the read and its use. Every other field read takes a real
+  reference, or reads inside CPython's per-object critical section (`Py_BEGIN_CRITICAL_SECTION`) when a
+  sequence of reads must be consistent. A free-threaded stress test (one thread reading a field, another
+  replacing it) under ASan/TSan is part of N-12's tests. Virtual objects whose count is unbounded live in
   a region tied to one activation (the innermost scope that bounds their lifetime) and are freed together;
   real objects are never placed in a region. A failed region allocation raises `MemoryError` where CPython
   would. The verifier proves non-escape, materialisation before every observation point, a keeping
