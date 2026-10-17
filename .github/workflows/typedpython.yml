@@ -10,9 +10,10 @@ on:
     paths: [ "python-multiplatform-ksp/**", "python-multiplatform-ksp/fixtures/app/**", ".github/workflows/typedpython.yml" ]
   workflow_dispatch:
 concurrency:
-  # A newer push to the same ref supersedes this run; frees the shared macOS runners.
+  # A run in progress finishes; a newer push replaces only the queued run (frequent merges
+  # to develop otherwise cancelled every run before it reported).
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   test:
