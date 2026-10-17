@@ -9,17 +9,11 @@ name: Kotlin-name stubs
 #   - every `v*` tag: the same stubs are also attached to the tag's GitHub release as `kotlin-stubs.zip`.
 
 on:
+  # Checked on develop after merging, not on every pull request (user decision,
+  # 2026-10-17). A red develop is fixed forward by its own pull request.
   push:
     branches: [ "develop" ]
     tags: [ "v*" ]
-  pull_request:
-    branches: [ "develop" ]
-    paths:
-      - "python-multiplatform-gradle-plugin/**"
-      - "python-multiplatform-compose/fixtures/compose/**"
-      - ".github/scripts/stubs/**"
-      - "gradle/libs.versions.toml"
-      - ".github/workflows/stubs.yml"
   workflow_dispatch:
 
 permissions:
