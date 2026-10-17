@@ -640,9 +640,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   display whose inferred element type is a union) as warnings in `checked` mode and errors in
   `compiled` mode. Nothing
   inside dependencies is reported. `python -m typedpython check` exits 0 / 1 / 2 for clean / errors /
-  tool failure. `Status: partial`, the gate is asserted by
-  `python-multiplatform-ksp/src/test/python/` (run with that module's `.venv`); it is **not yet run by the
-  build** (design §6 step 1b). Rebinding and mixed containers are found by a second Pyrefly pass over a
+  tool failure. `Status: implemented`, asserted by `python-multiplatform-ksp/src/test/python/`. It runs in
+  every consumer build: `python-multiplatform-ksp` publishes the gate as `typedpython-gate@zip` (#212) and
+  toolchain's `typedpythonCheck` installs it with pinned hashes before each `buildPython` (toolchain #91;
+  #20). Rebinding and mixed containers are found by a second Pyrefly pass over a
   probed copy (design §6.1), which runs only when a file has a name assigned twice or a container
   display; `for` targets and comprehension variables are not probed.
 - **N-7b** The type gate also runs when a module is imported in development mode (maintainer decision
@@ -665,7 +666,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   (direct and mutual recursion) are compiled: every compiled function counts its frame (`tp_enter_call` /
   `tp_leave_call`, added to the Python frame depth and compared with `sys.getrecursionlimit()`), so recursion
   past the limit raises `RecursionError('maximum recursion depth exceeded')` where CPython does, and a C-stack
-  guard keeps the process alive at any limit (#57). `Status: planned`.
+  guard keeps the process alive at any limit (#57). `Status: implemented` for desktop host builds
+  (`test_pipeline.py`, `test_cgen*.py`, `test_recursion.py`, `test_eval_breaker.py`, `test_fast_entry.py`,
+  `test_free_threaded.py`; free-threaded 3.15t, #159). Not yet: shipping compiled modules in an app through
+  pypackpack (#25), methods of fixed-layout classes (#155), native ints in impure functions (#232).
 - **N-9** TypedPython memory safety is proved on the IR before C is generated (#41; maintainer decision
   2026-10-03). Each property, and what happens when it cannot be proved:
 
@@ -685,14 +689,19 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   | `entry_globals` only in a closed function (no user code runs); a call of a function with entry globals is a deopt point in its caller unless it is a legal redo or the caller snapshots the same globals | not compiled; diagnostic `verify/entry-global-open` / `verify/deopt-impure` |
 
   Generated C reaches memory and `PyObject`s only through the runtime helpers. ASan/UBSan CI,
-  differential tests against the interpreter and fuzzing back the proof. `Status: planned`.
+  differential tests against the interpreter and fuzzing back the proof. `Status: implemented`
+  (`verify.py`; `test_verify*.py`, including the mutation fuzzing; the ASan/UBSan CI job, which also
+  re-checks every proven op with `TP_CHECK_PROVEN`).
 - **N-10** TypedPython incremental compilation (#41; maintainer decision 2026-10-03). The unit is a module.
   Its cache key is the source hash, the interface hashes (typed signatures) of the modules it depends
   on, the compiler version, the target platform and the build flags; a body-only change leaves the
   interface hash unchanged, so dependent modules are not recompiled. C objects are cached per module.
   The Gradle task declares exact inputs and outputs so up-to-date checks and the build cache apply.
   Tests: changing one function body recompiles that module only; an unchanged rebuild spends ~0 s in
-  the compile step. `Status: planned`.
+  the compile step. `Status: partial`: the per-module cache and its key are implemented in Python
+  (`incremental.py`, `pipeline.compile_project`; `test_incremental.py`, `test_pipeline_incremental.py`);
+  the Gradle task with declared inputs and outputs does not exist yet, because compiled modules are built
+  through pypackpack's compile slot (#25, #113).
 - **N-11** TypedPython fixed-layout classes (M2b, 2026-11-21; design §4.3.3). A class compiles to fixed
   field access only when its layout is fixed **in CPython too**: it declares `__slots__` listing exactly
   its annotated instance fields, has no base but `object`, no metaclass, no decorator but `@compiled`,
@@ -720,7 +729,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
     A class that defines `__getattr__`, `__getattribute__`, `__setattr__` or `__delattr__` is not
     compiled.
   A class outside these rules stays interpreted with a reason. Methods are not compiled yet.
-  `Status: implemented (module-level functions; methods planned)`.
+  `Status: implemented (module-level functions; methods planned, #155)`.
 - **N-12** TypedPython object cost: virtual objects, refcount elision, region allocation (design §4.3.4).
   Every execution of compiled code must be indistinguishable from some valid CPython execution. An object
   of an N-11 class without `__del__` and without a `__weakref__` slot may live as a C struct (a virtual
