@@ -94,6 +94,16 @@ Fixed-layout classes (SPEC N-11). The verifier never trusts the front end for th
     "`obj` itself ... after checking": the result is a new reference to the operand (the back end
     increfs it); the operand's own reference is untouched.
 
+Objects, str and dict code (#150). GetItem, Contains, Format, StoreItem and ForObj run user code
+(`__getitem__`, `__hash__`, `__eq__`, `__format__`, `__iter__`, `__next__`, `__setitem__`): each is an
+effect and makes the function not closed (so it can hold no array, no buffer and no entry global),
+like CallObject. NewList, NewDict and BuildString run none. They are OBJ producers (new references)
+with the OBJ operand slots below; an OBJ Const is None or a plain str (UTF-8, no NUL); a ForObj's
+targets are distinct declared OBJ locals, assigned by the loop (so definitely assigned inside the
+body, and not after it unless assigned before: a loop of zero iterations binds nothing), killing
+any exact-type fact about them; `unpack` false means exactly one target; `BinOp.inplace` only on an
+OBJ operation; `Format.conversion` is -1, 97, 114 or 115 and `spec` None or a plain str.
+
 Proven i64 operations. The verifier never trusts `BinOp.proven` / `UnaryOp.proven`: for every I64
 expression it computes an interval [lo, hi] (exact Python ints) and accepts `proven=True` only on an
 I64 ADD/SUB/MUL (BinOp) or NEG (UnaryOp) whose exact result interval lies inside [-2**63, 2**63-1],
@@ -212,6 +222,7 @@ from .ir import (
     Truth, Tuple, Type, Unbox, UnaryOp, UnaryOpKind, While,
 )
 from .ir import CheckExact, ClassDecl, FieldGet, FieldSet, Is, IsExact, New
+from .ir import BuildString, Contains, ForObj, Format, GetItem, NewDict, NewList, StoreItem
 
 DA = "verify/definite-assignment"
 MISSING_RETURN = "verify/missing-return"
@@ -249,15 +260,18 @@ class Diagnostic:
 # the one the back end implements).
 _EXPRS = frozenset({Const, Local, BinOp, UnaryOp, Compare, And, Or, ToFloat, Box, Unbox, MathCall,
                     Call, Global, GetAttr, CallObject, Truth, CompareObj, ObjToFloat, Len, Index,
-                    NewArray, CopyArray, Tuple, Is, IsExact, CheckExact, FieldGet, New})
+                    NewArray, CopyArray, Tuple, Is, IsExact, CheckExact, FieldGet, New,
+                    GetItem, Contains, NewList, NewDict, Format, BuildString})
 _STMTS = frozenset({Assign, StoreIndex, ExprStmt, If, While, ForRange, Return, Break, Continue,
-                    FieldSet})
+                    FieldSet, StoreItem, ForObj})
 # Nodes whose OBJ result is a new reference (ir.py "ownership": Box, Global, GetAttr, CallObject,
 # OBJ BinOp, Tuple), plus reads of an OBJ local (the local owns its reference; the back end increfs or
 # borrows under that rule) and Calls of a compiled function returning OBJ (which returns a new
 # reference by the same rule).
 _OBJ_PRODUCERS = frozenset({Box, Global, GetAttr, CallObject, BinOp, Local, Call, Tuple, New,
-                            FieldGet, CheckExact, Const})     # an OBJ Const is None (e_Const)
+                            FieldGet, CheckExact, Const,      # an OBJ Const is None or a str (e_Const)
+                            GetItem, NewList, NewDict, Format, BuildString})
+_CONVERSIONS = (-1, 97, 114, 115)          # Format.conversion: none, !a, !r, !s
 _VALUE_TYPES = (Type.I64, Type.F64, Type.BOOL, Type.OBJ)        # what a local may hold
 _RETURN_TYPES = _VALUE_TYPES + (Type.NONE,)
 _ELEMENT = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64}
@@ -574,7 +588,7 @@ class _Checker:
               or (t is Type.BOOL and type(v) is bool)
               or (t is Type.NONE and v is None))
         if t is Type.OBJ:
-            ok = v is None          # the only OBJ constant: a new reference to the None singleton
+            ok = v is None or _plain_str(v)   # None, or a str the C source can carry exactly
         if not ok:
             self.error(TYPE, f"constant {v!r} does not match type {t.value}")
         return e
@@ -705,6 +719,10 @@ class _Checker:
             return e
         left, right = self.expr(e.left, state), self.expr(e.right, state)
         lt, rt = getattr(left, "type", None), getattr(right, "type", None)
+        if type(e.inplace) is not bool:
+            self.error(TYPE, f"BinOp `inplace` {e.inplace!r} is not a bool")
+        elif e.inplace and lt is not Type.OBJ:
+            self.error(TYPE, "BinOp `inplace` is set on a non-OBJ operation (it is PyNumber_InPlace*)")
         proven = False
         if type(e.proven) is not bool:
             self.error(TYPE, f"BinOp `proven` {e.proven!r} is not a bool")
@@ -1029,6 +1047,55 @@ class _Checker:
 
     # --- fixed-layout classes -----------------------------------------------------------------
 
+    def e_GetItem(self, e: GetItem, state: _State) -> ir.Expr:
+        obj = self.obj_operand(e.obj, state, "container of GetItem")
+        index = self.obj_operand(e.index, state, "index of GetItem")
+        self.result(e, Type.OBJ)
+        self.effects.append("GetItem (runs __getitem__, __hash__, __eq__, __index__)")
+        self.opens.append("GetItem")
+        return dataclasses.replace(e, obj=obj, index=index)
+
+    def e_Contains(self, e: Contains, state: _State) -> ir.Expr:
+        left = self.obj_operand(e.left, state, "left operand of in")
+        right = self.obj_operand(e.right, state, "right operand of in")
+        if type(e.negate) is not bool:
+            self.error(TYPE, f"Contains `negate` {e.negate!r} is not a bool")
+        self.result(e, Type.BOOL)
+        self.effects.append("Contains (runs __contains__, __iter__, __eq__)")
+        self.opens.append("Contains")
+        return dataclasses.replace(e, left=left, right=right)
+
+    def e_NewList(self, e: NewList, state: _State) -> ir.Expr:
+        self.result(e, Type.OBJ)
+        return e
+
+    def e_NewDict(self, e: NewDict, state: _State) -> ir.Expr:
+        self.result(e, Type.OBJ)
+        return e
+
+    def e_Format(self, e: Format, state: _State) -> ir.Expr:
+        operand = self.obj_operand(e.operand, state, "operand of Format")
+        if e.spec is not None and not _plain_str(e.spec):
+            self.error(TYPE, f"Format spec {e.spec!r} is not None or a plain str")
+        if e.conversion not in _CONVERSIONS or type(e.conversion) is not int:
+            self.error(TYPE, f"Format conversion {e.conversion!r} is not one of {_CONVERSIONS}")
+        self.result(e, Type.OBJ)
+        self.effects.append("Format (runs __format__, __str__, __repr__)")
+        self.opens.append("Format")
+        return dataclasses.replace(e, operand=operand)
+
+    def e_BuildString(self, e: BuildString, state: _State) -> ir.Expr:
+        if not isinstance(e.elements, tuple) or len(e.elements) < 2:
+            self.error(STRUCTURE, "BuildString elements are not a tuple of at least two")
+            return e
+        elements = tuple(self.obj_operand(x, state, f"element {k + 1} of BuildString")
+                         for k, x in enumerate(e.elements))
+        for k, x in enumerate(elements):
+            if not (type(x) is Format or (type(x) is Const and type(x.value) is str)):
+                self.error(TYPE, f"element {k + 1} of BuildString is not a Format or a str Const")
+        self.result(e, Type.OBJ)
+        return dataclasses.replace(e, elements=elements)
+
     def e_Is(self, e: Is, state: _State) -> ir.Expr:
         left = self.obj_operand(e.left, state, "left operand of is")
         right = self.obj_operand(e.right, state, "right operand of is")
@@ -1243,6 +1310,57 @@ class _Checker:
         self.opens.append(f"FieldSet .{s.field}")      # dropping the old value may run its __del__
         return dataclasses.replace(s, obj=obj, value=value), state
 
+    def s_StoreItem(self, s: StoreItem, state: _State):
+        obj = self.obj_operand(s.obj, state, "container of StoreItem")
+        index = self.obj_operand(s.index, state, "index of StoreItem")
+        value = self.obj_operand(s.value, state, "value of StoreItem")
+        self.effects.append("StoreItem (runs __setitem__, __hash__, __eq__)")
+        self.opens.append("StoreItem")
+        return dataclasses.replace(s, obj=obj, index=index, value=value), state
+
+    def s_ForObj(self, s: ForObj, state: _State):
+        it = self.obj_operand(s.iter, state, "iterable of ForObj")
+        targets = s.targets
+        ok = (isinstance(targets, tuple) and targets and all(isinstance(t, str) for t in targets)
+              and len(set(targets)) == len(targets))
+        if not ok:
+            self.error(STRUCTURE, f"ForObj targets {targets!r} are not distinct names")
+            targets = ()
+        if type(s.unpack) is not bool:
+            self.error(TYPE, f"ForObj `unpack` {s.unpack!r} is not a bool")
+        elif not s.unpack and len(targets) != 1 and ok:
+            self.error(STRUCTURE, "ForObj without unpack has exactly one target")
+        for t in targets:
+            if t in self.arrays or t in self.larrays:
+                self.error(ARRAY_USE, f"ForObj target '{t}' is an array")
+            elif self.scalars.get(t) is not Type.OBJ:
+                self.error(TYPE, f"ForObj target '{t}' must be a declared obj local")
+            if t in self.entry:
+                self.error(STRUCTURE, f"entry global '{t}' is assigned by the loop")
+            for outer in self.loops:
+                if outer.var == t:
+                    self.error(STRUCTURE, f"loop variable '{t}' is assigned in its loop body "
+                                          f"(by an inner loop)")
+        self.effects.append("ForObj (runs __iter__ and __next__)")
+        self.opens.append("ForObj")
+        loop = _Loop(None, None)
+        self.loops.append(loop)
+        head = self.loop_facts(s.body, tuple(targets))
+        self.facts = dict(head)
+        killed = _assigned_names(s.body) | set(targets)
+        head_refine = {k: v for k, v in self.refine.items() if k not in killed}
+        self.refine = head_refine
+        body, _ = self.block(s.body, None if state is None else state | set(targets))
+        self.loops.pop()
+        self.refine = dict(head_refine)
+        self.facts = dict(head)
+        # Zero iterations leave the targets as they were: the state after the loop is the entry
+        # state, met with every break state (each a superset of it).
+        after: _State = state
+        for br in loop.breaks:
+            after = _meet(after, br)
+        return dataclasses.replace(s, iter=it, body=body), after
+
     def s_If(self, s: If, state: _State):
         cond = self.cond(s.cond, state, "if")
         base = self.facts
@@ -1444,7 +1562,7 @@ def _assigned(body: object, counts: dict[str, int] | None = None) -> dict[str, i
             elif cls is If:
                 _assigned(st.then, counts)
                 _assigned(st.orelse, counts)
-            elif cls in (While, ForRange):
+            elif cls in (While, ForRange, ForObj):
                 _assigned(st.body, counts)
     return counts
 
@@ -1461,6 +1579,10 @@ def _assigned_values(body: object, out: dict[str, list[object]]) -> None:
                 _assigned_values(st.orelse, out)
             elif cls in (While, ForRange):
                 _assigned_values(st.body, out)
+            elif cls is ForObj:
+                for t in st.targets if isinstance(st.targets, tuple) else ():
+                    out.setdefault(t, []).append(st)   # not a New: ends form (e) for the target
+                _assigned_values(st.body, out)
 
 
 def _loop_vars(body: object) -> set[str]:
@@ -1470,7 +1592,7 @@ def _loop_vars(body: object) -> set[str]:
             cls = type(st)
             if cls is If:
                 out |= _loop_vars(st.then) | _loop_vars(st.orelse)
-            elif cls is While:
+            elif cls in (While, ForObj):
                 out |= _loop_vars(st.body)
             elif cls is ForRange:
                 out.add(st.var)
@@ -1490,10 +1612,24 @@ def _assigned_names(body: object) -> set[str]:
                 out |= _assigned_names(st.then) | _assigned_names(st.orelse)
             elif cls is While:
                 out |= _assigned_names(st.body)
+            elif cls is ForObj:
+                out |= set(st.targets) if isinstance(st.targets, tuple) else set()
+                out |= _assigned_names(st.body)
             elif cls is ForRange:
                 out.add(st.var)
                 out |= _assigned_names(st.body)
     return out
+
+
+def _plain_str(v: object) -> bool:
+    """A str the generated C source carries exactly: it encodes to UTF-8 and has no NUL."""
+    if type(v) is not str or "\0" in v:
+        return False
+    try:
+        v.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _meet_interval(a: tuple[int, int], b: tuple[int, int] | None) -> tuple[int, int]:

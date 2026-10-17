@@ -513,8 +513,12 @@ def test_the_operand_of_a_field_node_must_be_an_object():
 def test_none_is_an_obj_constant_and_nothing_else_is():
     rejected(TYPE, getter([If(Is(BOOL, lo("q"), Const(OBJ, 0)), (Return(g_("a")),)),
                            Return(g_("b"))], params=(obj(),)))
-    rejected(TYPE, getter([If(Is(BOOL, lo("q"), Const(OBJ, "x")), (Return(g_("a")),)),
+    rejected(TYPE, getter([If(Is(BOOL, lo("q"), Const(OBJ, b"x")), (Return(g_("a")),)),
                            Return(g_("b"))], params=(obj(),)))
+    # a str is the other OBJ constant (#150); its text must be exactly what the C source carries
+    accepted(getter([Return(Const(OBJ, "x"))], params=()))
+    rejected(TYPE, getter([Return(Const(OBJ, "a\0b"))], params=()))
+    rejected(TYPE, getter([Return(Const(OBJ, "\ud800"))], params=()))
     # a None constant is a new reference to the singleton wherever an object may flow
     accepted(getter([Return(none())], params=()))
     accepted(getter([Assign("t", none()), Return(lo("t"))], params=(), locals_={"t": OBJ}))
