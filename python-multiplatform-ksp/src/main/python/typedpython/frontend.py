@@ -18,10 +18,15 @@ lowered again in impure mode, where nothing may deopt: an int whose i64 arithmet
 free of overflow is a CPython int object (OBJ, `PyNumber_*`), a call to a compiled function that
 may deopt goes through the module global (`CallObject(Global)`), and only `for ... in range()`
 targets whose every binding is such a loop stay I64. The proof is a small interval analysis:
-constants, range targets (between their bounds), `len()` and the i64 range of a guarded parameter.
-It is recorded in the IR: an I64 ADD/SUB/MUL/NEG it proves cannot overflow is `proven=True` (the
-verifier re-proves it; a proven op does not deopt). Division and modulo of ints cannot be recorded,
-so they count as deopting. An impure caller of a pure callee that may deopt and returns F64, BOOL
+constants, range targets (between their bounds), `len()` (at most 2**62), the i64 range of a guarded
+parameter, the join of what a plain local is assigned (a fixpoint over lowering rounds, widened
+when it keeps growing), and the comparisons around a use (`if n > 0:` narrows `n` inside, `while
+lo < hi:` narrows both at the top of each iteration, a returning guard narrows the code after it;
+a narrowing ends at the next assignment; verify.py "Local variables and guards" is the contract and
+the verifier recomputes all of it). It is recorded in the IR: an I64 ADD/SUB/MUL/NEG it proves cannot
+overflow is `proven=True` (the verifier re-proves it; a proven op does not deopt), and so is an I64
+`//` or `%` by a Const power of two of a value it proves >= 0 (the back end emits a shift / mask).
+Any other division or modulo of ints cannot be recorded, so it counts as deopting. An impure caller of a pure callee that may deopt and returns F64, BOOL
 or NONE emits `Call(redo=True)`: only the callee is redone on a deopt.
 
 Fixed-layout classes (SPEC N-11, `ir.ClassDecl`). A module-level class (in a marked module, or
@@ -60,6 +65,8 @@ MARKER = "# typedpython: compiled"
 I64_MIN, I64_MAX = -2**63, 2**63 - 1
 TOP = (I64_MIN, I64_MAX)
 EXACT_INT_FLOAT = 2**53  # |n| <= this: int/int true division is exact-rounded in C (ir.BinOp)
+
+LEN_MAX = 2**62  # a native array is never longer (the verifier's Len interval is [0, 2**62])
 
 Interval = tuple[int, int] | None  # None: no value at all (not yet known to be reached)
 
@@ -608,13 +615,20 @@ def _lower_in_mode(sig, env, info, inferred, impure: bool) -> ir.Function:
 def _lower_with_bounds(sig, env, info, inferred, impure: bool,
                        candidates: dict[str, Type]) -> ir.Function:
     # Range-target intervals: least fixpoint by iteration, widened to TOP if it does not settle.
+    # A local that keeps growing (a counter) is widened to the i64 limit from round 3 on, as the
+    # verifier's own fixpoint does (verify._prove).
     bounds: dict[str, Interval] = {}
-    for _ in range(8):
+    for rnd in range(16):
         lowerer = _Lowerer(sig, env, info, inferred, impure, bounds, candidates)
         fn = lowerer.run()
         joined = {**bounds}
         for var, iv in lowerer.found_bounds.items():
-            joined[var] = _join(joined.get(var), iv)
+            new = _join(joined.get(var), iv)
+            old = joined.get(var)
+            if rnd >= 3 and var in lowerer.acc_vars and old is not None and new != old:
+                new = (old[0] if new[0] >= old[0] else I64_MIN,
+                       old[1] if new[1] <= old[1] else I64_MAX)
+            joined[var] = new
         if joined == bounds:
             return fn
         bounds = joined
@@ -664,6 +678,17 @@ class _Lowerer:
             if n not in self.params and any(b.how == "range" for b in bs)
             and all(b.how in ("range", "annotation") for b in bs)
         }
+        # Locals only ever assigned by plain `=` / `+=` statements (never a loop target): their
+        # interval is the join of what is assigned to them (found_bounds, widened across rounds).
+        self.acc_vars = {
+            n for n, bs in self.bindings.items()
+            if n not in self.params and n not in self.local_arrays
+            and any(b.how == "assign" for b in bs)
+            and all(b.how in ("assign", "annotation") for b in bs)
+        }
+        # Guard facts at this point (verify.py "Local variables and guards"): local -> interval.
+        self.refined: dict[str, tuple[int, int]] = {}
+        self.dead = 0   # >0: in code whose guard read a local with no interval yet in this round
         self.all_names = {n.id for n in ast.walk(self.fn) if isinstance(n, ast.Name)} \
             | set(self.params)
 
@@ -878,13 +903,41 @@ class _Lowerer:
         if isinstance(node, ast.If):
             cond = self.condition(node.test)
             pre = self.take()
-            return pre + [ir.If(cond, self.block(node.body), self.block(node.orelse))]
+            entry = self.refined
+            self.refined, dead = self.narrowed(cond, True, entry)
+            self.dead += dead
+            then = self.block(node.body)
+            self.dead -= dead
+            then_refined = self.refined
+            self.refined, dead = self.narrowed(cond, False, entry)
+            self.dead += dead
+            orelse = self.block(node.orelse)
+            self.dead -= dead
+            else_refined = self.refined
+            then_ends, else_ends = _diverges(then), _diverges(orelse)
+            if then_ends and else_ends:
+                self.refined = entry
+            elif then_ends:
+                self.refined = else_refined
+            elif else_ends:
+                self.refined = then_refined
+            else:
+                self.refined = {k: (min(v[0], else_refined[k][0]), max(v[1], else_refined[k][1]))
+                                for k, v in then_refined.items() if k in else_refined}
+            return pre + [ir.If(cond, then, orelse)]
         if isinstance(node, ast.While):
             if node.orelse:
                 raise Skip(line, "`while ... else` is not supported")
+            killed = _stored_names(node.body)
+            head = {k: v for k, v in self.refined.items() if k not in killed}
+            self.refined = head
             cond = self.condition(node.test)
             pre = self.take()
+            self.refined, dead = self.narrowed(cond, True, head)
+            self.dead += dead
             body = self.block(node.body)
+            self.dead -= dead
+            self.refined = dict(head)
             if not pre:
                 return [ir.While(cond, body)]
             # The condition needs statements (a chain's temporary): run them on every iteration.
@@ -906,8 +959,9 @@ class _Lowerer:
                 raise Skip(line, f"array parameter `{name}` is rebound")
             value = self.value(value_node)
             t = self.local_type(name, line)
-            return self.take() + [ir.Assign(name, self.coerce(value, t, value_node,
-                                                               f"local `{name}`"))]
+            value = self.coerce(value, t, value_node, f"local `{name}`")
+            self.note_assign(name, value)
+            return self.take() + [ir.Assign(name, value)]
         if isinstance(target, ast.Subscript):
             array, elem = self.array_of(target)
             # CPython evaluates the value first, then the index.
@@ -1096,7 +1150,9 @@ class _Lowerer:
             t = self.local_type(name, line)
             current = ir.Local(t, name)
             result = self.arith(op, current, self.sub(node.value), node)
-            return self.take() + [ir.Assign(name, self.coerce(result, t, node, f"local `{name}`"))]
+            result = self.coerce(result, t, node, f"local `{name}`")
+            self.note_assign(name, result)
+            return self.take() + [ir.Assign(name, result)]
         if isinstance(target, ast.Subscript):
             array, elem = self.array_of(target)
             index = self.index(target.slice)
@@ -1152,14 +1208,18 @@ class _Lowerer:
         pre = self.take()
 
         s, e = self.interval(start), self.interval(stop)
-        if s is not None and e is not None:
+        if s is not None and e is not None and not self.dead:
             if step > 0:
                 iv = (s[0], max(s[0], e[1] - 1))
             else:
                 iv = (min(s[1], e[0] + 1), s[1])
             self.found_bounds[var] = _join(self.found_bounds.get(var), iv)
 
+        killed = _stored_names(node.body) | {var}
+        head = {k: v for k, v in self.refined.items() if k not in killed}
+        self.refined = head
         body = self.block(node.body)
+        self.refined = dict(head)
         return pre + [ir.ForRange(var, start, stop, ir.Const(Type.I64, step), body)]
 
     def range_bound(self, node: ast.expr) -> ir.Expr:
@@ -1591,18 +1651,75 @@ class _Lowerer:
     def interval(self, e: ir.Expr) -> Interval:
         if isinstance(e, ir.Const) and e.type == Type.I64:
             return (e.value, e.value)  # type: ignore[return-value]
-        if isinstance(e, ir.Local) and e.type == Type.I64 and e.name in self.range_vars:
-            return self.bounds.get(e.name)
+        if isinstance(e, ir.Local) and e.type == Type.I64:
+            base = (self.bounds.get(e.name) if e.name in self.range_vars or e.name in self.acc_vars
+                    else TOP)
+            if base is None:
+                return None
+            return _meet(base, self.refined.get(e.name))
         if isinstance(e, ir.Len):
-            return (0, I64_MAX)
-        if isinstance(e, (ir.BinOp, ir.UnaryOp)) and e.type == Type.I64 and self.proved(e):
-            return self._result_interval(e)
+            return (0, LEN_MAX)
+        if isinstance(e, (ir.BinOp, ir.UnaryOp)) and e.type == Type.I64:
+            if isinstance(e, ir.BinOp) and e.op in (ir.BinOpKind.FLOORDIV, ir.BinOpKind.MOD):
+                a, b = self.interval(e.left), self.interval(e.right)
+                if a is None or b is None:
+                    return None
+                return _clamp(_div_interval(e.op, a, b))
+            if isinstance(e, ir.BinOp) and e.op == ir.BinOpKind.TRUEDIV:
+                return TOP
+            # ADD/SUB/MUL/NEG/POS: an op that overflows deopts, so only in-range results flow on
+            r = self._result_interval(e)
+            return None if r is None else _clamp(r)
         return TOP
 
-    @staticmethod
-    def recordable(e: ir.BinOp) -> bool:
-        """`proven` exists for ADD/SUB/MUL only; the verifier cannot re-prove the others."""
-        return e.op in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL)
+    def note_assign(self, name: str, value: ir.Expr) -> None:
+        """`name = value` was lowered: record the value's interval for the local (acc_vars) and end
+        any guard on it."""
+        if name in self.acc_vars and not self.dead and value.type == Type.I64:
+            iv = self.interval(value)
+            if iv is not None:
+                self.found_bounds[name] = _join(self.found_bounds.get(name), iv)
+        self.refined.pop(name, None)
+
+    def narrowed(self, cond: ir.Expr, truth: bool, base: dict[str, tuple[int, int]]
+                 ) -> tuple[dict[str, tuple[int, int]], bool]:
+        """(`base` narrowed by `cond` being `truth`, whether a bound read a local with no interval
+        yet). Same rules as verify._Checker.refinements."""
+        self.refined = base
+        found, bottom = {}, False
+        stack = [(cond, truth)]
+        while stack:
+            c, t = stack.pop()
+            if isinstance(c, ir.UnaryOp) and c.op == ir.UnaryOpKind.NOT:
+                stack.append((c.operand, not t))
+            elif isinstance(c, (ir.And, ir.Or)) and (isinstance(c, ir.And) == t):
+                stack += [(c.left, t), (c.right, t)]
+            elif isinstance(c, ir.Compare) and c.left.type == Type.I64 and c.right.type == Type.I64:
+                kind = c.op if t else _NEGATE[c.op]
+                for local, other, k in ((c.left, c.right, kind), (c.right, c.left, _SWAP[kind])):
+                    if isinstance(local, ir.Local):
+                        iv = self.interval(other)
+                        if iv is None:
+                            bottom = True
+                        else:
+                            _narrow(found, local.name, _bound(k, iv))
+        out = dict(base)
+        for name, iv in found.items():
+            _narrow(out, name, iv)
+        return out, bottom
+
+    def recordable(self, e: ir.BinOp) -> bool:
+        """`proven` exists for ADD/SUB/MUL, and for FLOORDIV/MOD by a Const power of two >= 1 of a
+        value known to be >= 0 (the back end then emits a shift / mask); the verifier re-proves
+        both and cannot re-prove anything else."""
+        if e.op in (ir.BinOpKind.ADD, ir.BinOpKind.SUB, ir.BinOpKind.MUL):
+            return True
+        if e.op in (ir.BinOpKind.FLOORDIV, ir.BinOpKind.MOD):
+            d = e.right.value if isinstance(e.right, ir.Const) else None
+            a = self.interval(e.left)
+            return (type(d) is int and d >= 1 and d & (d - 1) == 0
+                    and a is not None and a[0] >= 0)
+        return False
 
     def proved(self, e: ir.BinOp | ir.UnaryOp) -> bool:
         """The i64 operation provably does not deopt (no overflow, exact division)."""
@@ -1639,16 +1756,80 @@ class _Lowerer:
         if e.op == ir.BinOpKind.MUL:
             products = [x * y for x in a for y in b]
             return (min(products), max(products))
-        if e.op == ir.BinOpKind.FLOORDIV:
-            m = max(abs(a[0]), abs(a[1]))
-            return (max(-m, I64_MIN), min(m, I64_MAX))
-        if e.op == ir.BinOpKind.MOD:
-            d = max(abs(b[0]), abs(b[1]), 1)
-            return (-(d - 1), d - 1)
         return TOP
 
 
 # --- helpers -------------------------------------------------------------------------------------
+
+_NEGATE = {ir.CompareKind.EQ: ir.CompareKind.NE, ir.CompareKind.NE: ir.CompareKind.EQ,
+           ir.CompareKind.LT: ir.CompareKind.GE, ir.CompareKind.GE: ir.CompareKind.LT,
+           ir.CompareKind.LE: ir.CompareKind.GT, ir.CompareKind.GT: ir.CompareKind.LE}
+_SWAP = {ir.CompareKind.EQ: ir.CompareKind.EQ, ir.CompareKind.NE: ir.CompareKind.NE,
+         ir.CompareKind.LT: ir.CompareKind.GT, ir.CompareKind.GT: ir.CompareKind.LT,
+         ir.CompareKind.LE: ir.CompareKind.GE, ir.CompareKind.GE: ir.CompareKind.LE}
+
+
+def _clamp(iv: tuple[int, int]) -> tuple[int, int]:
+    return (max(iv[0], I64_MIN), min(iv[1], I64_MAX))
+
+
+def _meet(a: tuple[int, int], b: tuple[int, int] | None) -> tuple[int, int]:
+    """`a` narrowed by `b`; an empty meet (unreachable code) leaves `a`, which is still sound."""
+    if b is None:
+        return a
+    lo, hi = max(a[0], b[0]), min(a[1], b[1])
+    return (lo, hi) if lo <= hi else a
+
+
+def _narrow(facts: dict[str, tuple[int, int]], name: str, iv: tuple[int, int] | None) -> None:
+    if iv is not None:
+        cur = facts.get(name)
+        facts[name] = iv if cur is None else _meet(cur, iv)
+
+
+def _bound(kind: ir.CompareKind, other: tuple[int, int]) -> tuple[int, int] | None:
+    """The interval of `x` when `x <kind> e` is true and `e` lies in `other` (verify._bound)."""
+    lo, hi = other
+    K = ir.CompareKind
+    out = {K.LT: (I64_MIN, hi - 1), K.LE: (I64_MIN, hi), K.GT: (lo + 1, I64_MAX),
+           K.GE: (lo, I64_MAX), K.EQ: (lo, hi)}.get(kind)
+    return out if out is not None and out[0] <= out[1] else None
+
+
+def _div_interval(op: ir.BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
+    """Result interval of I64 FLOORDIV / MOD (verify._div_interval)."""
+    if op == ir.BinOpKind.MOD:
+        if b[0] > 0:
+            return (0, b[1] - 1)
+        if b[1] < 0:
+            return (b[0] + 1, 0)
+        d = max(abs(b[0]), abs(b[1]), 1)
+        return (-(d - 1), d - 1)
+    if b[0] > 0 or b[1] < 0:
+        corners = [x // y for x in a for y in b]
+        return (min(corners), max(corners))
+    m = max(abs(a[0]), abs(a[1]))
+    return (-m, m)
+
+
+def _stored_names(stmts: Iterable[ast.stmt]) -> set[str]:
+    """Every name stored (assigned, augmented, loop target) anywhere in `stmts`."""
+    return {n.id for st in stmts for n in ast.walk(st)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+
+
+def _diverges(body: tuple[ir.Stmt, ...]) -> bool:
+    """Control never reaches the end of `body`: it ends in a return, break or continue, or in an
+    `if` whose branches both do (verify.py reads these as unreachable states too)."""
+    if not body:
+        return False
+    last = body[-1]
+    if isinstance(last, (ir.Return, ir.Break, ir.Continue)):
+        return True
+    if isinstance(last, ir.If):
+        return _diverges(last.then) and _diverges(last.orelse)
+    return False
+
 
 def _walk(x):
     if isinstance(x, (tuple, list)):

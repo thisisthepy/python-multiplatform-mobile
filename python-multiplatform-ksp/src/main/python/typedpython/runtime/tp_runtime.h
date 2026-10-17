@@ -218,6 +218,38 @@ static inline int tp_neg_i64(int64_t a, int64_t *out)
     return 0;
 }
 
+/* Proven i64 operations (ir.BinOp.proven / UnaryOp.proven): the verifier showed the result fits in
+ * i64, so the generated code does the arithmetic with no check (unsigned wrap-around, which is plain
+ * machine arithmetic and has no undefined behaviour). Built with -DTP_CHECK_PROVEN, each of them is
+ * the checked helper again and a wrong proof is a SystemError, never a deopt: that is for the tests
+ * and for debugging a verifier change. The macros use the generated function's `tp_s`, `tp_rc` and
+ * `tp_exit`. */
+static inline int64_t tp_padd_i64(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }
+static inline int64_t tp_psub_i64(int64_t a, int64_t b) { return (int64_t)((uint64_t)a - (uint64_t)b); }
+static inline int64_t tp_pmul_i64(int64_t a, int64_t b) { return (int64_t)((uint64_t)a * (uint64_t)b); }
+static inline int64_t tp_pneg_i64(int64_t a) { return (int64_t)(0 - (uint64_t)a); }
+#ifdef TP_CHECK_PROVEN
+#define tp_proven_fail()                                                                          \
+    do {                                                                                          \
+        PyErr_SetString(PyExc_SystemError, "typedpython: proven operation overflowed");           \
+        tp_rc = -1;                                                                               \
+        goto tp_exit;                                                                             \
+    } while (0)
+#define tp_proven(op, a, b, t)                                                                    \
+    do {                                                                                          \
+        tp_s = tp_##op##_i64((a), (b), &(t));                                                     \
+        if (tp_s != 0) tp_proven_fail();                                                          \
+    } while (0)
+#define tp_proven_neg(a, t)                                                                       \
+    do {                                                                                          \
+        tp_s = tp_neg_i64((a), &(t));                                                             \
+        if (tp_s != 0) tp_proven_fail();                                                          \
+    } while (0)
+#else
+#define tp_proven(op, a, b, t) ((t) = tp_p##op##_i64((a), (b)))
+#define tp_proven_neg(a, t) ((t) = tp_pneg_i64(a))
+#endif
+
 /* Python floor division: the quotient rounds toward negative infinity. */
 static inline int tp_floordiv_i64(int64_t a, int64_t b, int64_t *out)
 {

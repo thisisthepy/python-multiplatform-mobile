@@ -94,9 +94,11 @@ Fixed-layout classes (SPEC N-11). The verifier never trusts the front end for th
 
 Proven i64 operations. The verifier never trusts `BinOp.proven` / `UnaryOp.proven`: for every I64
 expression it computes an interval [lo, hi] (exact Python ints) and accepts `proven=True` only on an
-I64 ADD/SUB/MUL (BinOp) or NEG (UnaryOp) whose exact result interval lies inside [-2**63, 2**63-1];
-anything else (a different op, a non-I64 node, a result that may leave i64, a non-bool flag) is
-rejected, and so is the whole function. A proven op is not a deopting node (an impure function may
+I64 ADD/SUB/MUL (BinOp) or NEG (UnaryOp) whose exact result interval lies inside [-2**63, 2**63-1],
+or on an I64 FLOORDIV/MOD whose divisor is a Const power of two >= 1 and whose dividend interval lies
+inside [0, 2**63-1] (the back end then emits a shift / mask, #148);
+anything else (a different op, a non-I64 node, a result that may leave i64, a dividend that may be
+negative, another divisor, a non-bool flag) is rejected, and so is the whole function. A proven op is not a deopting node (an impure function may
 contain it; a pure one does not count it toward `may_deopt`); every unproven I64 ADD/SUB/MUL/NEG
 still deopts. The interval rules, exactly:
 
@@ -106,17 +108,45 @@ still deopts. The interval rules, exactly:
       step < 0                 [min(hi(start), lo(stop) + 1), hi(start)]
                                (the bounds are the intervals of the start/stop expressions, both
                                evaluated before the loop; then intersected with the i64 range)
+  Local, any other I64 local   see "Local variables and guards" below
   Len(array)                   [0, 2**62]
   ADD / SUB / MUL              interval arithmetic on the operand intervals (for MUL the min/max of
                                the four endpoint products); a proven op must fit i64 exactly, an
                                unproven one is clamped to i64 (a result outside it deopts, so only
                                in-range values flow on)
   NEG / POS                    [-hi, -lo] / [lo, hi]
-  everything else              the full i64 range: I64 params and entry globals, every local that is
-                               not the ForRange var of an enclosing loop (the verifier does no flow
-                               analysis, so a local assigned a constant is still "any i64"), a loop
-                               var after its loop, Index elements, Unbox, Call results, FLOORDIV,
-                               MOD, TRUEDIV
+  MOD                          divisor interval > 0: [0, hi(b) - 1]; < 0: [lo(b) + 1, 0]; else
+                               [-(d - 1), d - 1] with d = max |b|
+  FLOORDIV                     divisor interval that keeps its sign: the min/max of the four
+                               corner quotients; else [-m, m] with m = max |a| (all clamped to i64:
+                               -2**63 // -1 deopts, so it yields no value)
+  everything else              the full i64 range: I64 params and entry globals, a loop var after
+                               its loop, Index elements, Unbox, Call results, TRUEDIV
+
+Local variables and guards (#148). Two flow facts narrow what a read of an I64 local can be; both
+are computed here, never taken from the front end.
+
+  * Assigned values. A local that is not a parameter, entry global, array or ForRange var of the
+    function, and is assigned by Assign statements, has the join of the intervals of every value
+    assigned to it (an unproven op counts clamped to i64, as above). The intervals are a fixed point:
+    `_prove` walks the body again and again, each walk reading the intervals the previous one found,
+    until no interval grows; from the fourth walk a bound that still grows jumps to the i64 limit,
+    and after 16 walks every such local is full range. The fixed point means each assigned value
+    lies inside its local's interval, whichever path ran. An assignment that reads a local with no
+    interval yet (the first walks) adds nothing that walk. So `x = 1; x + 1` is proven, and a counter
+    that starts at 0 and only grows (`k = 0 ... k = k + 1`) is in [0, 2**63-1], not "any i64".
+  * Guards. Inside the then-branch of `If(c)` (the else-branch for `c` false), the body of
+    `While(c)`, and after an `If` one branch of which cannot complete (return, break, continue), a
+    Local that is a side of an I64 comparison with the other side's interval [lo, hi] is narrowed:
+    `x < e` gives x <= hi - 1, `x <= e` x <= hi, `x > e` x >= lo + 1, `x >= e` x >= lo, `x == e`
+    [lo, hi]; the Local may be either side; And (true) and Or (false) apply both links, Not flips,
+    the negation of a comparison is the opposite comparison, `!=` and anything else give nothing.
+    A guard on `x` ends at the next Assign to `x`; entering a loop drops the guards on every local
+    the loop body assigns (the back edge brings other values); a While's condition is re-read at
+    each iteration, so it narrows the top of every iteration. A read is the assigned-values interval
+    narrowed by the guard (and a ForRange var's interval is narrowed by it too).
+  So `if n > 0: return n - 1` and `while lo < hi: lo += 1; hi -= 1` need no check, `n <= 0` early
+  return then `n - 1` likewise.
 
 Local arrays (NewArray / CopyArray, ir.Function "Local arrays"). A local of an array type holds a
 native array the function owns. The verifier proves, never trusting the front end:
@@ -146,12 +176,12 @@ native array the function owns. The verifier proves, never trusting the front en
 Tuple. `Tuple(OBJ, elements)`: a tuple of OBJ expressions (a scalar needs Box), result OBJ, a
 reference creator in the ownership rule. Building one is not an effect.
 
-What this cannot prove: anything that needs knowing a value through assignments (accumulators,
-`x = 1; x + 1`), relations between variables (`i < n` does not bound `i + n`), bounds that come from
-guards or conditions (`if n < 100`), values through array elements, calls or Unbox, the result of
-`//` and `%` (even by a constant), a loop var after the loop, or `range` bounds that are themselves
-full-range (`range(n)` bounds the var only by i64). A function needing such a proof keeps its
-checked, deopting ops (and is then legal only if pure).
+What this cannot prove: relations between variables (`i < n` bounds `i`, not `i + n`, and says
+nothing about `j` when `j` is not compared), the range of a counter that is bounded only by how
+often a loop runs (`k += 1` in `while c`), values through array elements, calls or Unbox, a loop var
+after the loop, a guard on a local the guarded code assigns before the use, or `range` bounds that
+are themselves full-range (`range(n)` bounds the var only by i64). A function needing such a proof
+keeps its checked, deopting ops (and is then legal only if pure).
 
 Call.redo. Legal only if the caller is impure, the callee is pure and may_deopt, and the callee
 returns F64, BOOL or NONE (`verify/redo` otherwise). A redo call is not a deopting node in the
@@ -235,6 +265,15 @@ _I64_MIN, _I64_MAX = -2 ** 63, 2 ** 63 - 1
 _FULL = (_I64_MIN, _I64_MAX)
 _LEN_MAX = 2 ** 62
 _PROVABLE_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL})
+_POW2_OPS = frozenset({BinOpKind.FLOORDIV, BinOpKind.MOD})   # `proven` means shift / mask
+_NEGATE = {CompareKind.EQ: CompareKind.NE, CompareKind.NE: CompareKind.EQ,
+           CompareKind.LT: CompareKind.GE, CompareKind.GE: CompareKind.LT,
+           CompareKind.LE: CompareKind.GT, CompareKind.GT: CompareKind.LE}
+_SWAP = {CompareKind.EQ: CompareKind.EQ, CompareKind.NE: CompareKind.NE,
+         CompareKind.LT: CompareKind.GT, CompareKind.GT: CompareKind.LT,
+         CompareKind.LE: CompareKind.GE, CompareKind.GE: CompareKind.LE}
+_ROUNDS = 16          # rounds of the local-interval fixpoint before every local is full range
+_WIDEN_FROM = 3       # from this round on a bound that still grows jumps to the i64 limit
 
 # Definite assignment uses `None` for "unreachable" (bottom: every name counts as assigned).
 _State = frozenset[str] | None
@@ -253,6 +292,7 @@ class _Loop:
         self.var = var                      # ForRange var (None for While)
         self.bounds_array = bounds_array    # array whose indices by `var` are in bounds
         self.interval = _FULL               # the values `var` takes inside the body
+        self.bottom = False                 # fixpoint round: start/stop not known yet
         self.breaks: list[_State] = []
 
 
@@ -261,8 +301,19 @@ class _Checker:
     body with proven bounds."""
 
     def __init__(self, function: Function, signatures: dict[str, Function],
-                 classes: dict[str, ClassDecl] | None = None):
+                 classes: dict[str, ClassDecl] | None = None,
+                 var_ivs: dict[str, tuple[int, int]] | None = None, fixing: bool = False):
         self.fn = function
+        # Local intervals (module docstring "Local variables and guards"): `var_ivs` is the interval
+        # of every eligible local; `fixing` says this walk is a round of the fixpoint that computes
+        # them (a local without an interval yet is then "bottom": `bottom` is set when one is read).
+        self.var_ivs = dict(var_ivs or {})
+        self.fixing = fixing
+        self.eligible: frozenset[str] = frozenset()
+        self.contrib: dict[str, tuple[int, int]] = {}
+        self.bottom = False
+        self.dead = 0                        # >0: inside code that is bottom in this round
+        self.refine: dict[str, tuple[int, int]] = {}   # guard facts at this point
         self.sigs = signatures
         self.classes = classes or {}
         self.facts: dict[str, str] = {}      # local -> class it is proved exactly (see docstring)
@@ -551,18 +602,67 @@ class _Checker:
         if cls is Local:
             for loop in reversed(self.loops):
                 if loop.var == e.name:
-                    return loop.interval
-            return _FULL
+                    if loop.bottom:
+                        self.bottom = True
+                    return _meet_interval(loop.interval, self.refine.get(e.name))
+            base = _FULL
+            if e.name in self.eligible:
+                known = self.var_ivs.get(e.name)
+                if known is not None:
+                    base = known
+                elif self.fixing:
+                    self.bottom = True
+            return _meet_interval(base, self.refine.get(e.name))
         if cls is Len:
             return self.lens.get(e.array, (0, _LEN_MAX))
         if cls is BinOp and e.op in _PROVABLE_OPS:
             lo, hi = _exact(e.op, self.interval(e.left), self.interval(e.right))
+            return (max(lo, _I64_MIN), min(hi, _I64_MAX))
+        if cls is BinOp and e.op in _POW2_OPS:
+            lo, hi = _div_interval(e.op, self.interval(e.left), self.interval(e.right))
             return (max(lo, _I64_MIN), min(hi, _I64_MAX))
         if cls is UnaryOp and e.op in (UnaryOpKind.NEG, UnaryOpKind.POS):
             lo, hi = self.interval(e.operand)
             lo, hi = (-hi, -lo) if e.op is UnaryOpKind.NEG else (lo, hi)
             return (max(lo, _I64_MIN), min(hi, _I64_MAX))
         return _FULL
+
+    def refinements(self, c: ir.Expr, truth: bool) -> dict[str, tuple[int, int]]:
+        """The intervals that hold of locals when condition `c` evaluated to `truth` (module
+        docstring "Local variables and guards"). A comparison of two I64 operands one of which is a
+        `Local` bounds that local by the interval of the other; And (true) / Or (false) combine
+        both links; Not flips; anything else gives nothing."""
+        cls = type(c)
+        if cls is Compare and type(c.op) is CompareKind:
+            l, r = c.left, c.right
+            if getattr(l, "type", None) is not Type.I64 or getattr(r, "type", None) is not Type.I64:
+                return {}
+            kind = c.op if truth else _NEGATE[c.op]
+            out: dict[str, tuple[int, int]] = {}
+            if type(l) is Local:
+                _narrow(out, l.name, _bound(kind, self.interval(r)))
+            if type(r) is Local:
+                _narrow(out, r.name, _bound(_SWAP[kind], self.interval(l)))
+            return out
+        if cls is UnaryOp and c.op is UnaryOpKind.NOT:
+            return self.refinements(c.operand, not truth)
+        if (cls is And and truth) or (cls is Or and not truth):
+            out = self.refinements(c.left, truth)
+            for name, iv in self.refinements(c.right, truth).items():
+                _narrow(out, name, iv)
+            return out
+        return {}
+
+    def narrowed(self, c: ir.Expr, truth: bool) -> tuple[dict[str, tuple[int, int]], bool]:
+        """(the current guard facts narrowed by `c` being `truth`, whether the narrowing read a local
+        whose interval is not known yet in this fixpoint round)."""
+        self.bottom = False
+        found = self.refinements(c, truth)
+        bottom, self.bottom = self.bottom, False
+        out = dict(self.refine)
+        for name, iv in found.items():
+            _narrow(out, name, iv)
+        return out, bottom
 
     def check_proven(self, shape_ok: bool, interval: tuple[int, int], what: str) -> bool:
         """`proven=True` (already known to be a bool) is accepted only if re-proved. Returns
@@ -572,6 +672,21 @@ class _Checker:
         elif not (_I64_MIN <= interval[0] and interval[1] <= _I64_MAX):
             self.error(PROVEN, f"`proven` is set on {what} but its result interval "
                                f"[{interval[0]}, {interval[1]}] is not inside i64")
+        else:
+            return True
+        return False
+
+    def check_shift(self, op: BinOpKind, left: ir.Expr, right: ir.Expr) -> bool:
+        """`proven` on an I64 FLOORDIV / MOD: the divisor is a Const power of two >= 1 and the
+        dividend lies in [0, 2**63-1], so the back end may emit a shift / mask (Python's floor
+        semantics and C's agree there). Returns whether the node counts as non-deopting."""
+        d = right.value if type(right) is Const and type(right.value) is int else None
+        if d is None or d < 1 or d & (d - 1) != 0:
+            self.error(PROVEN, f"`proven` is set on i64 {op.value} but the divisor is not a "
+                               f"Const power of two >= 1")
+        elif self.interval(left)[0] < 0:
+            self.error(PROVEN, f"`proven` is set on i64 {op.value} by {d} but the dividend may be "
+                               f"negative (its interval starts at {self.interval(left)[0]})")
         else:
             return True
         return False
@@ -586,10 +701,14 @@ class _Checker:
         if type(e.proven) is not bool:
             self.error(TYPE, f"BinOp `proven` {e.proven!r} is not a bool")
         elif e.proven:
-            shape = (e.type is Type.I64 and lt is Type.I64 and rt is Type.I64
-                     and e.op in _PROVABLE_OPS)
-            exact = _exact(e.op, self.interval(left), self.interval(right)) if shape else _FULL
-            proven = self.check_proven(shape, exact, f"{e.type.value} {e.op.value}")
+            both = e.type is Type.I64 and lt is Type.I64 and rt is Type.I64
+            if both and e.op in _POW2_OPS:
+                proven = self.check_shift(e.op, left, right)
+            else:
+                shape = both and e.op in _PROVABLE_OPS
+                exact = (_exact(e.op, self.interval(left), self.interval(right))
+                         if shape else _FULL)
+                proven = self.check_proven(shape, exact, f"{e.type.value} {e.op.value}")
         if lt not in (Type.I64, Type.F64, Type.OBJ):
             self.error(TYPE if lt is not Type.OBJ else OWNERSHIP,
                        f"BinOp {e.op.value} on {getattr(lt, 'value', lt)} operands")
@@ -1067,6 +1186,14 @@ class _Checker:
                 self.error(TYPE, f"None assigned to '{target}'")
         if target in self.entry:
             self.error(STRUCTURE, f"entry global '{target}' is assigned in the body")
+        if (target in self.eligible and not alloc and not self.dead
+                and getattr(value, "type", None) is Type.I64):
+            self.bottom = False
+            iv = self.interval(value)
+            if not self.bottom:
+                self.contrib[target] = _join_interval(self.contrib.get(target), iv)
+            self.bottom = False
+        self.refine.pop(target, None)         # a guard on `target` ends at its assignment
         proved = None if alloc else self.exact_of(value)
         if proved is not None:
             self.facts[target] = proved
@@ -1108,12 +1235,29 @@ class _Checker:
     def s_If(self, s: If, state: _State):
         cond = self.cond(s.cond, state, "if")
         base = self.facts
+        entry = self.refine
         self.facts = {**base, **self.facts_if(cond, True)}
+        self.refine, dead = self.narrowed(cond, True)
+        self.dead += dead
         then, st = self.block(s.then, state)
-        then_facts = self.facts
+        self.dead -= dead
+        then_facts, then_refine = self.facts, self.refine
         self.facts = {**base, **self.facts_if(cond, False)}
+        self.refine = entry
+        self.refine, dead = self.narrowed(cond, False)
+        self.dead += dead
         orelse, se = self.block(s.orelse, state)
-        else_facts = self.facts
+        self.dead -= dead
+        else_facts, else_refine = self.facts, self.refine
+        if st is None and se is None:
+            self.refine = entry
+        elif st is None:
+            self.refine = else_refine
+        elif se is None:
+            self.refine = then_refine
+        else:
+            self.refine = {k: (min(v[0], else_refine[k][0]), max(v[1], else_refine[k][1]))
+                           for k, v in then_refine.items() if k in else_refine}
         if st is None and se is None:
             self.facts = base
         elif st is None:
@@ -1133,14 +1277,21 @@ class _Checker:
     def s_While(self, s: While, state: _State):
         head = self.loop_facts(s.body)
         self.facts = head
+        killed = _assigned_names(s.body)
+        head_refine = {k: v for k, v in self.refine.items() if k not in killed}
+        self.refine = head_refine
         cond = self.cond(s.cond, state, "while")
         loop = _Loop(None, None)
         self.facts = {**head, **self.facts_if(cond, True)}
+        self.refine, dead = self.narrowed(cond, True)
+        self.dead += dead
         self.loops.append(loop)
         # Assignments only add names, so the loop-head state is the entry state (the meet of the
         # entry, end-of-body and continue states equals the entry state).
         body, _ = self.block(s.body, state)
         self.loops.pop()
+        self.dead -= dead
+        self.refine = dict(head_refine)
         self.facts = dict(head)       # leaving by the condition or a break: no more than the head's facts
         forever = type(s.cond) is Const and s.cond.type is Type.BOOL and s.cond.value is True
         after: _State = None if forever else state
@@ -1179,7 +1330,9 @@ class _Checker:
         loop = _Loop(var, bounds)
         if (step_ok and getattr(start, "type", None) is Type.I64
                 and getattr(stop, "type", None) is Type.I64):
+            self.bottom = False
             (slo, shi), (elo, ehi) = self.interval(start), self.interval(stop)
+            loop.bottom, self.bottom = self.bottom, False
             if step.value > 0:
                 lo = slo
                 hi = max(lo, ehi - 1)
@@ -1190,8 +1343,12 @@ class _Checker:
         self.loops.append(loop)
         head = self.loop_facts(s.body, (var,))
         self.facts = dict(head)
+        killed = _assigned_names(s.body) | {var}
+        head_refine = {k: v for k, v in self.refine.items() if k not in killed}
+        self.refine = head_refine
         body, _ = self.block(s.body, None if state is None else state | {var})
         self.loops.pop()
+        self.refine = dict(head_refine)
         self.facts = dict(head)
         # Zero iterations leave `var` (and everything the body assigns) as it was: the state after
         # the loop is the entry state, met with every break state (each a superset of it).
@@ -1228,6 +1385,13 @@ class _Checker:
         fn = self.fn
         params = self.declarations()
         self.reassigned = frozenset(_assigned_names(fn.body))
+        assigned: dict[str, list[object]] = {}
+        _assigned_values(fn.body, assigned)
+        loop_vars = _loop_vars(fn.body)
+        self.eligible = frozenset(
+            n for n in assigned
+            if self.scalars.get(n) is Type.I64 and n not in params and n not in loop_vars
+            and n not in self.arrays and n not in self.larrays)
         self.new_only = self.new_only_locals(params)
         if self.larrays:
             counts: dict[str, int] = {}
@@ -1321,6 +1485,62 @@ def _assigned_names(body: object) -> set[str]:
     return out
 
 
+def _meet_interval(a: tuple[int, int], b: tuple[int, int] | None) -> tuple[int, int]:
+    """`a` narrowed by `b`; an empty meet (unreachable code) leaves `a`, which is still sound."""
+    if b is None:
+        return a
+    lo, hi = max(a[0], b[0]), min(a[1], b[1])
+    return (lo, hi) if lo <= hi else a
+
+
+def _narrow(facts: dict[str, tuple[int, int]], name: str, iv: tuple[int, int] | None) -> None:
+    if iv is None:
+        return
+    cur = facts.get(name)
+    facts[name] = iv if cur is None else _meet_interval(cur, iv)
+
+
+def _bound(kind: CompareKind, other: tuple[int, int]) -> tuple[int, int] | None:
+    """The interval of `x` when `x <kind> e` is true and `e` lies in `other`."""
+    lo, hi = other
+    if kind is CompareKind.LT:
+        out = (_I64_MIN, hi - 1)
+    elif kind is CompareKind.LE:
+        out = (_I64_MIN, hi)
+    elif kind is CompareKind.GT:
+        out = (lo + 1, _I64_MAX)
+    elif kind is CompareKind.GE:
+        out = (lo, _I64_MAX)
+    elif kind is CompareKind.EQ:
+        out = (lo, hi)
+    else:
+        return None
+    return out if out[0] <= out[1] else None
+
+
+def _div_interval(op: BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
+    """The result interval of I64 FLOORDIV / MOD (an operation that completes: a zero divisor
+    raises and -2**63 // -1 deopts, so neither yields a value). MOD: [0, hi(b) - 1] for a positive
+    divisor, [lo(b) + 1, 0] for a negative one, else |result| < max |b|. FLOORDIV: for a divisor
+    that keeps its sign the extremes are at the corners; else |result| <= max |a|."""
+    if op is BinOpKind.MOD:
+        if b[0] > 0:
+            return (0, b[1] - 1)
+        if b[1] < 0:
+            return (b[0] + 1, 0)
+        d = max(abs(b[0]), abs(b[1]), 1)
+        return (-(d - 1), d - 1)
+    if b[0] > 0 or b[1] < 0:
+        corners = [x // y for x in a for y in b]
+        return (min(corners), max(corners))
+    m = max(abs(a[0]), abs(a[1]))
+    return (-m, m)
+
+
+def _join_interval(a: tuple[int, int] | None, b: tuple[int, int]) -> tuple[int, int]:
+    return b if a is None else (min(a[0], b[0]), max(a[1], b[1]))
+
+
 def _exact(op: BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
     """The exact (unbounded) result interval of ADD/SUB/MUL on operand intervals."""
     if op is BinOpKind.ADD:
@@ -1329,6 +1549,42 @@ def _exact(op: BinOpKind, a: tuple[int, int], b: tuple[int, int]) -> tuple[int, 
         return a[0] - b[1], a[1] - b[0]
     products = (a[0] * b[0], a[0] * b[1], a[1] * b[0], a[1] * b[1])
     return min(products), max(products)
+
+
+def _prove(g: Function, sigs: dict[str, Function], classes: dict[str, ClassDecl]
+           ) -> tuple[_Checker, Function]:
+    """Check `g`, first computing the interval of every eligible local (Local variables and
+    guards): walks of the body repeat, each reading the intervals found by the one before, until
+    they stop growing (a bound still growing from round `_WIDEN_FROM` jumps to the i64 limit). The
+    result is a fixed point, so every assigned value lies inside its local's interval. If it does
+    not settle in `_ROUNDS` walks, every eligible local is full range."""
+    known: dict[str, tuple[int, int]] = {}
+    for rnd in range(_ROUNDS):
+        c = _Checker(g, sigs, classes, known, True)
+        rebuilt = c.run()
+        if not c.eligible:
+            return c, rebuilt
+        grown = dict(known)
+        for name in c.eligible:
+            iv = c.contrib.get(name)
+            if iv is None:
+                continue
+            old = known.get(name)
+            if old is None:
+                grown[name] = iv
+                continue
+            lo = old[0] if iv[0] >= old[0] else (_I64_MIN if rnd >= _WIDEN_FROM else iv[0])
+            hi = old[1] if iv[1] <= old[1] else (_I64_MAX if rnd >= _WIDEN_FROM else iv[1])
+            grown[name] = (lo, hi)
+        if grown == known:
+            absent = c.eligible - set(known)
+            if not absent:
+                return c, rebuilt
+            for name in absent:         # never given an interval: nothing is known about it
+                grown[name] = _FULL
+        known = grown
+    c = _Checker(g, sigs, classes, {}, False)
+    return c, c.run()
 
 
 def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
@@ -1364,8 +1620,7 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     open_why: dict[str, str] = {}          # a function that runs user code -> why
     slow_why: dict[str, str] = {}          # a function whose slow paths can run user code -> why
     for name, g in sigs.items():
-        c = _Checker(g, sigs, classes)
-        rebuilt = c.run()
+        c, rebuilt = _prove(g, sigs, classes)
         for d in c.diags:
             reject(d.function, d.source_line, d.rule, d.message)
         checked[name] = rebuilt

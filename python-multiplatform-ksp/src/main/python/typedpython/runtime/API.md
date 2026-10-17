@@ -10,6 +10,16 @@ Python error set, nothing to undo), `-1` Python error set (CPython's exception t
     int tp_sub_i64(int64_t a, int64_t b, int64_t *out);
     int tp_mul_i64(int64_t a, int64_t b, int64_t *out);
     int tp_neg_i64(int64_t a, int64_t *out);                 /* 1 for INT64_MIN */
+    /* Proven operations (ir.BinOp.proven, #148): the verifier showed the result fits in i64, so the
+       generated code calls these (function-like macros; no check, no status). With
+       -DTP_CHECK_PROVEN they are the checked helpers above and a wrong proof is a SystemError. A
+       proven // or % by a power of two is emitted inline as `>>` / `&`, not through a helper. */
+    tp_proven(add|sub|mul, a, b, t);                         /* t = a op b, no overflow check */
+    tp_proven_neg(a, t);                                     /* t = -a */
+    int64_t tp_padd_i64(int64_t a, int64_t b);               /* the unchecked forms behind them */
+    int64_t tp_psub_i64(int64_t a, int64_t b);
+    int64_t tp_pmul_i64(int64_t a, int64_t b);
+    int64_t tp_pneg_i64(int64_t a);
     int tp_floordiv_i64(int64_t a, int64_t b, int64_t *out); /* -1 ZeroDivisionError; 1 for MIN // -1 */
     int tp_mod_i64(int64_t a, int64_t b, int64_t *out);      /* -1 ZeroDivisionError; sign of b */
     int tp_truediv_i64(int64_t a, int64_t b, double *out);   /* -1 ZeroDivisionError; 1 if |a| or |b| > 2**53 */
