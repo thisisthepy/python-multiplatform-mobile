@@ -37,11 +37,14 @@ Rules (the `rule` of a Diagnostic):
   verify/structure            break/continue outside a loop, the ForRange var assigned in its body,
                               a zero or non-constant step, duplicate names, bad declarations, an
                               entry global that collides with a parameter/local/other entry global or
-                              is assigned in the body
+                              is assigned in the body, or more than two array parameters (the lists
+                              are locked from copy-in to write-back: one- and two-object critical
+                              sections only, #159)
   verify/proven-overflow      `proven` is set on an op the verifier cannot prove stays inside i64 (or
                               on a node `proven` does not apply to, or it is not a bool)
   verify/redo                 `Call.redo` where it is not legal (see below)
   verify/entry-global-open    a function with entry_globals is not closed
+  verify/array-open           a function with an ArrayParam runs user code (#203)
   verify/class                a class named by FieldGet/FieldSet/New/IsExact/CheckExact/Param.cls is not
                               a (valid) ClassDecl of the module, a field is not one of its fields, a
                               New names a class without trivial_init or has the wrong arity, or a
@@ -196,6 +199,7 @@ CONDITION_ONLY = "verify/condition-only"
 PROVEN = "verify/proven-overflow"
 REDO = "verify/redo"
 ENTRY_OPEN = "verify/entry-global-open"
+ARRAY_OPEN = "verify/array-open"
 CLASS = "verify/class"
 FIELD = "verify/field-unproved"
 
@@ -278,6 +282,7 @@ class _Checker:
         self.lens: dict[str, tuple[int, int]] = {}   # single-assignment local array -> length
         self.entry: dict[str, Type] = {}     # name -> type of every entry global
         self.opens: list[str] = []           # reasons the function is not closed
+        self.slow_user: list[str] = []       # slow paths that can run user code (FieldGet, New)
 
     def error(self, rule: str, message: str) -> None:
         d = Diagnostic(self.fn.name, rule, message, self.fn.source_line)
@@ -310,6 +315,10 @@ class _Checker:
             if p.name in params:
                 self.error(STRUCTURE, f"parameter '{p.name}' appears twice")
             params.add(p.name)
+        if sum(type(p) is ArrayParam for p in fn.params) > 2:
+            self.error(STRUCTURE, "more than two array parameters: compiled code holds each list's "
+                                  "critical section from copy-in to write-back, and free-threaded "
+                                  "CPython has no section for more than two objects (#159)")
         eg = fn.entry_globals
         if not isinstance(eg, tuple):
             self.error(STRUCTURE, "entry_globals is not a tuple")
@@ -919,9 +928,13 @@ class _Checker:
         self.result(e, Type.OBJ)
         if self.known_field(e.cls, e.field, f"FieldGet .{e.field}"):
             self.proved(obj, e.cls, f"FieldGet {e.cls}.{e.field}")
-        return dataclasses.replace(e, obj=obj)        # a slot read runs no user code: not an effect
+        # a slot read runs no user code: not an effect. Its slow path after a class change (getattr)
+        # can, which matters to array functions (#203).
+        self.slow_user.append(f"FieldGet .{e.field} (generic getattr after a class change)")
+        return dataclasses.replace(e, obj=obj)
 
     def e_New(self, e: New, state: _State) -> ir.Expr:
+        self.slow_user.append(f"New {e.cls} (calls the class after a class change)")
         args = self.args(e.args, state, f"New {e.cls}")
         for k, a in enumerate(args):
             self.slot(a, Type.OBJ, f"argument {k + 1} of New {e.cls}")
@@ -1349,6 +1362,7 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
     checked: dict[str, Function] = {}
     callees: dict[str, set[str]] = {}
     open_why: dict[str, str] = {}          # a function that runs user code -> why
+    slow_why: dict[str, str] = {}          # a function whose slow paths can run user code -> why
     for name, g in sigs.items():
         c = _Checker(g, sigs, classes)
         rebuilt = c.run()
@@ -1358,6 +1372,8 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
         callees[name] = c.callees
         if c.opens:
             open_why[name] = c.opens[0]
+        if c.slow_user:
+            slow_why[name] = c.slow_user[0]
 
     # Closedness (entry_globals): a fixpoint over the call graph.
     changed = True
@@ -1373,6 +1389,26 @@ def verify(module: Module) -> tuple[Module, list[Diagnostic]]:
         if name in open_why and isinstance(g.entry_globals, tuple) and g.entry_globals:
             reject(name, g.source_line, ENTRY_OPEN,
                    f"has entry globals but is not closed: {open_why[name]}")
+
+    # ArrayParam (#203): the list is copied in and written back, so nothing may run user code while
+    # the copy is live: user code could read or change the list. Closed as above, and also no
+    # FieldGet/New, whose slow paths run user code after a class change, anywhere in the call tree.
+    array_why = dict(open_why)
+    for name, why in slow_why.items():
+        array_why.setdefault(name, why)
+    changed = True
+    while changed:
+        changed = False
+        for name, cs in callees.items():
+            if name not in array_why:
+                bad = sorted(c for c in cs if c in array_why)
+                if bad:
+                    array_why[name] = f"calls '{bad[0]}', which can run user code ({array_why[bad[0]]})"
+                    changed = True
+    for name, g in sigs.items():
+        if name in array_why and any(isinstance(p, ArrayParam) for p in g.params):
+            reject(name, g.source_line, ARRAY_OPEN,
+                   f"holds a list copy-in but can run user code: {array_why[name]}")
 
     # A call cycle (direct or mutual recursion) is legal: every compiled impl function counts its
     # frame at entry (tp_enter_call), so recursion ends in RecursionError where CPython raises it
