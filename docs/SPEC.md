@@ -473,6 +473,16 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   with the notebook's own state spelling (`main.App.messages.getValue()` / `setValue(...)`, #174)
   against pythonx-compose f6dd3e2. No CI
   workflow runs the module yet.
+- **B-11** (#192) The artifact walker skips every declaration whose package has an `internal` segment
+  (`*.internal` and `*.internal.*`, as in `androidx.compose.ui.internal`), on jars and on klibs. That is the
+  Kotlin `.api` dump convention: a library that puts a declaration in such a package has declared it
+  non-public API even though it is public in bytecode. The walker also honours
+  `pythonBindings.excludePackages`, with the namespace matching the KSP side uses (a package equal to an
+  entry, or below it). A skipped declaration gets no binding and no `.pyi` stub, and no declined
+  `DeclarationModel` either: it is not part of the library's surface. The rule is a blacklist (decision 12.7
+  in `AGENTS.md`): everything else that is public stays bound; it is not a list of what to expose. A segment
+  must equal `internal` exactly (`internals` and `internal_api` are ordinary packages).
+  `Status: implemented`, `GP/artifact/InternalPackageExclusionTest.kt`.
 
 ## 7. Threading and builds
 

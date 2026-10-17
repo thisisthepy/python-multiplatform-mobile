@@ -362,6 +362,7 @@ class PythonBindingsPlugin : Plugin<Project> {
                     },
                 )
                 includePrefixes.set(includes)
+                excludePackages.set(extension.excludePackages.getOrElse(emptyList()))
                 this.klibReaderClasspath.from(klibReader)
                 outputDirectory.set(
                     project.layout.buildDirectory.dir("generated/pythonArtifactBindings/$sourceSetName"),
@@ -508,6 +509,7 @@ class PythonBindingsPlugin : Plugin<Project> {
             description = "Emits .pyi stubs for the declarations the artefact walker bound."
             artifacts.from(resolved.artifactFiles)
             includePrefixes.set(includes)
+            excludePackages.set(extension.excludePackages.getOrElse(emptyList()))
             klibReaderClasspath.from(klibReader)
             outputDirectory.set(project.layout.buildDirectory.dir("generated/pythonStubs/$sourceSetName"))
         }

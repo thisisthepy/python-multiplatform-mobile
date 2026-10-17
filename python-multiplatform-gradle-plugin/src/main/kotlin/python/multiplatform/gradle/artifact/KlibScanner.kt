@@ -164,18 +164,18 @@ internal object KlibScanner {
     private val PUBLISHED_API = AbiQualifiedName(AbiCompoundName("kotlin"), AbiCompoundName("PublishedApi"))
 
     /** Every binding this klib offers, sorted by name -- the counterpart of [ArtifactScanner.scanJar]. */
-    fun scanKlib(klib: File, includePrefixes: List<String>): List<ArtifactCallable> =
-        scan(klib, includePrefixes).mapNotNull { it.callable }.sortedBy { it.name }
+    fun scanKlib(klib: File, includePrefixes: List<String>, excludePackages: List<String> = emptyList()): List<ArtifactCallable> =
+        scan(klib, includePrefixes, excludePackages).mapNotNull { it.callable }.sortedBy { it.name }
 
     /** The same walk with the other half of its result kept -- the counterpart of
      * [ArtifactScanner.scanDeclarations], sorted the same way so the two producers' models can be
      * concatenated without either one's order depending on which walked first. */
-    fun scanKlibDeclarations(klib: File, includePrefixes: List<String>): List<DeclarationModel> =
-        scan(klib, includePrefixes)
+    fun scanKlibDeclarations(klib: File, includePrefixes: List<String>, excludePackages: List<String> = emptyList()): List<DeclarationModel> =
+        scan(klib, includePrefixes, excludePackages)
             .map { it.declaration }
             .sortedWith(compareBy({ it.owner }, { it.simpleName }, { it.bindingName ?: "" }))
 
-    private fun scan(klib: File, includePrefixes: List<String>): List<Candidate> {
+    private fun scan(klib: File, includePrefixes: List<String>, excludePackages: List<String>): List<Candidate> {
         val abi = try {
             LibraryAbiReader.readAbiInfo(klib)
         } catch (e: Exception) {
@@ -185,6 +185,8 @@ internal object KlibScanner {
         val candidates = abi.topLevelDeclarations.declarations
             .filterIsInstance<AbiFunction>()
             .filter { matchesInclude(it.qualifiedName, includePrefixes) }
+            // SPEC B-11: `internal` packages and `excludePackages`, as on the JVM producer.
+            .filter { !ArtifactScanner.isExcludedPackage(it.qualifiedName.packageName.toString(), excludePackages) }
             // Not a *top-level* shape at all: a constructor belongs to an `AbiClass` and needs a
             // receiver handle to be worth anything. Filtered rather than declined for the same reason
             // `ArtifactScanner` never builds a model for `<init>`.

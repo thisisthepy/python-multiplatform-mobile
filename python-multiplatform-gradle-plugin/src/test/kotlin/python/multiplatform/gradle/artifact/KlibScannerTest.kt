@@ -151,12 +151,12 @@ class KlibScannerTest {
     @Test
     fun aPublishedApiInternalDeclarationIsDeclinedWithItsOwnReason() {
         val declarations = KlibScanner.scanKlibDeclarations(coroutinesKlib, includePrefixes = emptyList())
-        val checkIndexOverflow = declarations.single { it.simpleName == "checkIndexOverflow" }
-        assertEquals(null, checkIndexOverflow.bindingName)
-        assertTrue(
-            checkIndexOverflow.declineReason?.contains("PublishedApi") == true,
-            "expected a @PublishedApi decline reason, got ${checkIndexOverflow.declineReason}",
-        )
+        // checkIndexOverflow lives in kotlinx.coroutines.internal, which B-11 (#192) skips outright:
+        // it gets no model at all, so the @PublishedApi reason is checked on declarations elsewhere.
+        assertTrue(declarations.none { it.simpleName == "checkIndexOverflow" })
+        val publishedApi = declarations.filter { it.declineReason?.contains("PublishedApi") == true }
+        assertTrue(publishedApi.isNotEmpty(), "expected a @PublishedApi decline outside internal packages")
+        assertTrue(publishedApi.all { it.bindingName == null })
     }
 
     /**

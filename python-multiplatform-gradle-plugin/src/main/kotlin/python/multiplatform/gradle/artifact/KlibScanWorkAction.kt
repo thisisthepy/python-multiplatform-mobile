@@ -51,15 +51,17 @@ internal abstract class KlibScanWorkAction : WorkAction<KlibScanWorkAction.Param
     internal interface Params : WorkParameters {
         val klibFile: RegularFileProperty
         val includePrefixes: ListProperty<String>
+        val excludePackages: ListProperty<String>
         val resultFile: RegularFileProperty
     }
 
     override fun execute() {
         val klib = parameters.klibFile.get().asFile
         val includes = parameters.includePrefixes.get()
+        val excludes = parameters.excludePackages.get()
         val result = KlibScanResult(
-            callables = KlibScanner.scanKlib(klib, includes),
-            declarations = KlibScanner.scanKlibDeclarations(klib, includes),
+            callables = KlibScanner.scanKlib(klib, includes, excludes),
+            declarations = KlibScanner.scanKlibDeclarations(klib, includes, excludes),
         )
         ObjectOutputStream(parameters.resultFile.get().asFile.outputStream()).use { it.writeObject(result) }
     }
@@ -138,6 +140,7 @@ private fun pluginCodeSource(): File {
 internal fun WorkerExecutor.scanKlibIsolated(
     klib: File,
     includes: List<String>,
+    excludes: List<String>,
     scratchDirectory: File,
     readerClasspath: Collection<File>,
 ): KlibScanResult {
@@ -153,6 +156,7 @@ internal fun WorkerExecutor.scanKlibIsolated(
     queue.submit(KlibScanWorkAction::class.java) {
         klibFile.set(klib)
         includePrefixes.set(includes)
+        excludePackages.set(excludes)
         this.resultFile.set(resultFile)
     }
     queue.await()
