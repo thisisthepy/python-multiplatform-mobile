@@ -66,6 +66,10 @@ abstract class PythonStubsTask : DefaultTask() {
     @get:Input
     abstract val includePrefixes: ListProperty<String>
 
+    /** Packages to leave out, the same set the binder gets; SPEC B-11. */
+    @get:Input
+    abstract val excludePackages: ListProperty<String>
+
     /**
      * The klib reader for the isolated worker, exactly as
      * [python.multiplatform.gradle.artifact.PythonArtifactBindingsTask.klibReaderClasspath] -- including
@@ -86,9 +90,10 @@ abstract class PythonStubsTask : DefaultTask() {
         destination.mkdirs()
 
         val includes = includePrefixes.get()
+        val excludes = excludePackages.get()
         val jars = artifacts.files.filter { it.isFile && it.name.endsWith(".jar") }
         val declarations = jars.sortedBy { it.name }.flatMap { jar ->
-            ArtifactScanner.scanDeclarations(jar, includes, classpath = jars)
+            ArtifactScanner.scanDeclarations(jar, includes, classpath = jars, excludePackages = excludes)
         } + artifacts.files.filter { it.isFile && it.name.endsWith(".klib") }.sortedBy { it.name }.flatMap { klib ->
             // A Kotlin/Native target resolves klibs where a JVM target resolves jars, and both
             // producers now build the same `DeclarationModel` -- so a stub is not a JVM-only product.
@@ -97,7 +102,7 @@ abstract class PythonStubsTask : DefaultTask() {
             //
             // Not a direct `KlibScanner.scanKlibDeclarations` call: same classloader-scope collision
             // `PythonArtifactBindingsTask`'s KDoc documents, worked around the same way.
-            workerExecutor.scanKlibIsolated(klib, includes, temporaryDir, klibReaderClasspath.files).declarations
+            workerExecutor.scanKlibIsolated(klib, includes, excludes, temporaryDir, klibReaderClasspath.files).declarations
         }
 
         val files = renderKotlinFqnStubs(declarations)

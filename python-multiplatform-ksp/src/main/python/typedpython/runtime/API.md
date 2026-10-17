@@ -119,6 +119,7 @@ frames never are.
 ## Eval breaker (top of every loop iteration and impl entry; issue #141)
     int  tp_poll(PyObject *breaker);        /* 0 continue; -1 exception set (a signal handler raised) */
     int  tp_poll_slow(PyObject *breaker);   /* every TP_POLL_INTERVAL polls: call the breaker */
+    int  tp_pc_tick(int *pc);               /* loop countdown: 1 (and reset) when the slow path is due */
     Py_ssize_t tp_snapshot_depth;           /* THREAD-LOCAL; ++ at entry, -- at tp_exit of a snapshot-holding impl */
     int        tp_poll_countdown;           /* THREAD-LOCAL */
 `breaker` is the module state's `lambda: None`. Calling it runs CPython's own eval-breaker handling
@@ -254,3 +255,9 @@ kwnames tuple, `PyTuple` items.
 Memory orders: relaxed loads and stores for the tags and the epoch (the synchronisation that
 publishes a class or global change to another thread, a lock or an event, orders them), acquire-release
 for the epoch's increment. `tp_runtime.h` needs the GCC/Clang `__atomic` builtins.
+
+## Development-mode import gate (Python API, not C; SPEC N-7b)
+    typedpython.importgate.install(source_roots)   # meta path finder; checks project modules before they run
+    typedpython.importgate.uninstall()
+    typedpython.importgate.install_from_env()      # installs when TYPEDPYTHON_IMPORT_GATE=<roots, os.pathsep-separated>
+A type error raises `ImportGateError` (an `ImportError`, `.diagnostics` holds the gate's errors) and the module's code does not run. Only files under the roots are checked; results are cached by content hash. Do not call it in release builds.
