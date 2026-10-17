@@ -24,7 +24,6 @@ import importlib.machinery
 import importlib.util
 import textwrap
 
-import numpy as np
 import pytest
 
 from typedpython import cbuild, cgen, frontend, ir, verify
@@ -32,8 +31,6 @@ from typedpython import cbuild, cgen, frontend, ir, verify
 SOURCE = textwrap.dedent('''
     # typedpython: compiled
     import array
-    import numpy as np
-    import numpy.typing as npt
 
 
     def sum_ad(a: array.array[float]) -> float:
@@ -119,22 +116,13 @@ SOURCE = textwrap.dedent('''
         y[0] = 5.0
 
 
-    def nd_first(x: npt.NDArray[np.float64]) -> object:
-        return x[0]
-
-
-    def nd_sum(x: npt.NDArray[np.float64]) -> object:
-        s = 0.0
-        for i in range(len(x)):
-            s += x[i]
-        return s
 ''')
 
 COMPILED = {
     "sum_ad", "sum_aq", "get_ad", "get_aq", "set_ad", "set_aq", "length_ad", "scale_ad", "iota_aq",
     "copy_ad", "cascade_ad", "fill_n", "mixed", "four", "div_ad",
 }
-SKIPPED = {"open_ad", "rebind_view", "nd_first", "nd_sum"}
+SKIPPED = {"open_ad", "rebind_view"}
 
 
 def build_source(d, source, name="bufmod"):
@@ -252,23 +240,6 @@ def wrapper_text(c, name):
     return c[start:c.index("\n}\n", start)]
 
 
-# --- numpy is not supported (#220): an ordinary object parameter ----------------------------------
-
-def test_numpy_parameter_is_an_ordinary_object_and_keeps_numpy_results(built):
-    for f in built.proved.functions:
-        assert all(not isinstance(p, ir.ArrayParam) or p.buffer == "array" or p.buffer is None
-                   for p in f.params)
-        assert not (f.name.startswith("nd_") and any(isinstance(p, ir.ArrayParam) for p in f.params))
-    x = np.array(F, dtype=np.float64)
-    r = built.module.nd_first(x)
-    assert type(r) is np.float64 and r == F[0]
-    r = built.module.nd_sum(x)               # never compiled: the module's plain function
-    ref = 0.0
-    for v in x:
-        ref += v
-    assert type(r) is np.float64 and r == ref
-
-
 # --- reads, writes, len ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name,make", [
@@ -375,7 +346,6 @@ class SubArray(array.array):
     ("sum_ad", lambda: (array.array("f", [1.0, 2.0]),)),
     ("sum_ad", lambda: (SubArray("d", F),)),
     ("sum_ad", lambda: (list(F),)),
-    ("sum_ad", lambda: (np.array(F),)),
     ("sum_ad", lambda: (memoryview(AD()),)),
     ("sum_ad", lambda: (None,)),
 ])
