@@ -1478,7 +1478,17 @@ static inline void tp_leave_call(void)
 static int tp_poll_countdown = TP_POLL_INTERVAL;
 static Py_ssize_t tp_snapshot_depth = 0;
 
-static inline int tp_poll_slow(PyObject *breaker)
+/* Kept out of line and marked cold: inlined into every loop body it bloated short inner loops
+ * (fannkuch paid ~11% with it inline). */
+#if defined(__GNUC__) || defined(__clang__)
+#define TP_COLD __attribute__((noinline, cold, unused))
+#define TP_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define TP_COLD
+#define TP_UNLIKELY(x) (x)
+#endif
+
+static TP_COLD int tp_poll_slow(PyObject *breaker)
 {
     PyObject *r;
     tp_poll_countdown = TP_POLL_INTERVAL;
@@ -1493,10 +1503,21 @@ static inline int tp_poll_slow(PyObject *breaker)
     return 0;
 }
 
+/* A loop's poll countdown (a local of the impl, kept in a register): 1 when the slow path is due,
+ * which also resets the countdown. Inline, with the rare case marked unlikely. */
+static inline int tp_pc_tick(int *pc)
+{
+    if (TP_UNLIKELY(--*pc == 0)) {
+        *pc = TP_POLL_INTERVAL;
+        return 1;
+    }
+    return 0;
+}
+
 /* 0 = continue, -1 = exception set (e.g. KeyboardInterrupt from a signal handler). */
 static inline int tp_poll(PyObject *breaker)
 {
-    if (--tp_poll_countdown > 0) {
+    if (!TP_UNLIKELY(--tp_poll_countdown <= 0)) {
         return 0;
     }
     return tp_poll_slow(breaker);

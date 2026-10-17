@@ -1348,8 +1348,8 @@ class _FnGen:
         if not self.snapshot:
             # A function-local countdown (kept in a register), not the module counter: a load and
             # store of a global on every iteration of a short inner loop cost fannkuch ~38%.
-            self.emit("if (--tp_pc == 0) { tp_pc = TP_POLL_INTERVAL; "
-                      "if (tp_poll_slow(tp_st->breaker) != 0) { tp_rc = -1; goto tp_exit; } }")
+            self.emit("if (tp_pc_tick(&tp_pc) && tp_poll_slow(tp_st->breaker) != 0) "
+                      "{ tp_rc = -1; goto tp_exit; }")
 
     def st_While(self, s: ir.While) -> None:
         self.emit("for (;;) {")
