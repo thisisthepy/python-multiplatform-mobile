@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.join(HERE, "..", "..", "commonMain", "python"))
 
 import python_multiplatform_devagent as devagent  # noqa: E402
 
-TOKEN = "t0ken-for-tests"
+# secrets.token_urlsafe(32): the shortest token the agent accepts is this long.
+TOKEN = "dGVzdC10b2tlbi1mb3ItdGhlLWRldi1hZ2VudC10ZXN0cw"
 
 
 class Client:
@@ -121,13 +122,48 @@ class Authentication(unittest.TestCase):
 
     def test_the_request_comes_from_the_environment(self):
         self.assertEqual(
-            {"port": 4719, "token": "abc", "overlay": "/tmp/o"},
-            devagent.parse_request("port=4719;token=abc;overlay=/tmp/o"),
+            {"port": 4719, "token": TOKEN, "overlay": "/tmp/o"},
+            devagent.parse_request(f"port=4719;token={TOKEN};overlay=/tmp/o"),
         )
-        self.assertEqual({"port": 4719, "token": "abc", "overlay": None}, devagent.parse_request("port=4719;token=abc"))
-        for bad in ["", "port=x;token=abc", "port=1", "token=abc"]:
+        self.assertEqual({"port": 4719, "token": TOKEN, "overlay": None}, devagent.parse_request(f"port=4719;token={TOKEN}"))
+        for bad in ["", f"port=x;token={TOKEN}", "port=1", f"token={TOKEN}"]:
             with self.assertRaises(ValueError, msg=bad):
                 devagent.parse_request(bad)
+
+    def test_a_short_token_is_refused_before_anything_listens(self):
+        short = TOKEN[: devagent.MIN_TOKEN_LENGTH - 1]
+        with self.assertRaises(ValueError):
+            devagent.parse_request(f"port=4719;token={short}")
+        with self.assertRaises(ValueError):
+            devagent.start(port=0, token=short, overlay=tempfile.mkdtemp())
+        self.assertGreaterEqual(devagent.MIN_TOKEN_LENGTH, len(__import__("secrets").token_urlsafe(32)))
+
+    def test_another_socket_cannot_take_the_port_over(self):
+        agent = devagent.start(port=0, token=TOKEN, overlay=tempfile.mkdtemp())
+        try:
+            options = [socket.SO_REUSEADDR] + [getattr(socket, "SO_REUSEPORT")] * hasattr(socket, "SO_REUSEPORT")
+            for option in options:
+                hijacker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    hijacker.setsockopt(socket.SOL_SOCKET, option, 1)
+                    with self.assertRaises(OSError, msg=f"option {option}"):
+                        hijacker.bind(("127.0.0.1", agent.port))
+                finally:
+                    hijacker.close()
+        finally:
+            agent.stop()
+
+    def test_a_restarted_agent_gets_its_port_back(self):
+        # A launcher reuses the port across app restarts, so the closed agent's connections in TIME_WAIT
+        # must not keep the next one from binding.
+        agent = devagent.start(port=0, token=TOKEN, overlay=tempfile.mkdtemp())
+        port = agent.port
+        client = Client(port)
+        client.request("hello", token=TOKEN)
+        agent.stop()
+        client.close()
+        again = devagent.start(port=port, token=TOKEN, overlay=tempfile.mkdtemp())
+        again.stop()
 
 
 class Execute(AgentTestCase):

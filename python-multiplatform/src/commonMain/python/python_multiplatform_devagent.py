@@ -4,8 +4,10 @@ python-multiplatform SPEC L-12, issue #233; the design is toolchain's docs/desig
 
 The runtime starts it from `Python3.initialize()` only when the launcher sets the environment variable
 `PYTHON_MULTIPLATFORM_DEV_AGENT` to `port=<n>;token=<t>[;overlay=<dir>]` (a debug launch does; a release
-build never does). It listens on 127.0.0.1 only. A connection's first message must be `hello` with the
-token; anything else closes the connection.
+build never does), and only in a build that staged the enabling marker (the runtime checks that; see
+`PythonDevAgent.kt`). It listens on 127.0.0.1 only. The token must be at least `MIN_TOKEN_LENGTH` characters
+(`secrets.token_urlsafe(32)`), or the agent refuses to start. A connection's first message must be `hello`
+with the token; anything else closes the connection.
 
 Messages are JSON objects, one per line, each carrying the request's `id`:
 
@@ -39,6 +41,9 @@ import traceback
 PROTOCOL = 1
 ENVIRONMENT_VARIABLE = "PYTHON_MULTIPLATFORM_DEV_AGENT"
 LOOPBACK = "127.0.0.1"
+# len(secrets.token_urlsafe(32)): 32 random bytes. The token is all that stands between any local process
+# and code execution in the app, so a short one is refused rather than used.
+MIN_TOKEN_LENGTH = 43
 
 
 def parse_request(value):
@@ -53,8 +58,9 @@ def parse_request(value):
         token = fields["token"]
     except (KeyError, ValueError):
         raise ValueError(f"{ENVIRONMENT_VARIABLE} must be port=<n>;token=<t>[;overlay=<dir>], not {value!r}")
-    if not token or not 0 <= port <= 65535:
+    if not 0 <= port <= 65535:
         raise ValueError(f"{ENVIRONMENT_VARIABLE} must be port=<n>;token=<t>[;overlay=<dir>], not {value!r}")
+    _check_token(token)
     return {"port": port, "token": token, "overlay": fields.get("overlay") or None}
 
 
@@ -69,8 +75,17 @@ def start_from_env():
     return agent
 
 
+def _check_token(token):
+    if not isinstance(token, str) or len(token) < MIN_TOKEN_LENGTH:
+        raise ValueError(
+            f"the dev agent's token must be at least {MIN_TOKEN_LENGTH} characters "
+            "(secrets.token_urlsafe(32)); refusing to start"
+        )
+
+
 def start(port, token, overlay=None):
     """Start an agent on loopback; `port=0` picks a free one (the agent's `port` says which)."""
+    _check_token(token)
     agent = Agent(token, overlay or tempfile.mkdtemp(prefix="python-multiplatform-overlay-"))
     agent.listen(port)
     return agent
@@ -123,7 +138,16 @@ class Agent:
 
     def listen(self, port):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            # Windows: SO_REUSEADDR there lets another socket bind the port while this one listens, and
+            # without SO_EXCLUSIVEADDRUSE a same-user process can do so even when this one did not set it.
+            self.server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            # POSIX: only so that a restarted app can bind the launcher's port while the last run's
+            # connections sit in TIME_WAIT. It does not let another socket bind 127.0.0.1:<port> while this
+            # one listens (Linux refuses a second listener; BSD and macOS need SO_REUSEPORT on both).
+            # test_another_socket_cannot_take_the_port_over checks that on each platform the tests run on.
+            self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server.bind((LOOPBACK, port))
         self.server.listen()
         self.port = self.server.getsockname()[1]
@@ -135,7 +159,7 @@ class Agent:
         except OSError:
             pass
         for connection in list(self.connections):
-            connection.close()
+            connection.shutdown()
 
     def _accept(self):
         while True:
@@ -160,6 +184,17 @@ class _Connection:
         data = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
         with self.send_lock:
             self.sock.sendall(data)
+
+    def shutdown(self):
+        """Wake the serving thread, which then closes the connection itself.
+
+        Closing the reader from another thread would wait on the buffered reader's lock, which the serving
+        thread holds while it blocks in a read: stop() hung there.
+        """
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def close(self):
         for closable in (self.reader, self.sock):

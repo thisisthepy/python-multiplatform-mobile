@@ -136,18 +136,26 @@ fail, then implement.
   (resolution order; the simulator test task's `PYTHONHOME` still wins). The installed-app run on the
   simulator is a manual check, `docs/platforms/ios-app-bundle.md`.
 - **L-12** The dev agent (#233; toolchain `docs/design/live-connection.md`, option B): when the launcher sets
-  `PYTHON_MULTIPLATFORM_DEV_AGENT` to `port=<n>;token=<t>[;overlay=<dir>]` (a debug launch; a release build
-  never does), `Python3.initialize()` loads the embedded agent (`src/commonMain/python/
-  python_multiplatform_devagent.py`, generated into Kotlin by `generateDevAgentSource`) as the module
-  `python_multiplatform_devagent` and it listens on 127.0.0.1 only. A connection's first message must be
-  `hello` with the token. Then, one JSON object per line: `execute` runs code in `__main__`'s persistent
-  namespace, streams stdout and stderr, returns the last expression's value and reports errors with their
-  traceback; `complete` completes from that namespace; `push` writes `.py` files into a writable overlay first
-  on `sys.path` and re-imports the loaded ones, children first, through `typedpython.importgate` when the app
-  has it (N-7b), keeping the old module when a re-import is refused or fails. A malformed request is printed
+  `PYTHON_MULTIPLATFORM_DEV_AGENT` to `port=<n>;token=<t>[;overlay=<dir>]` **and** an installed payload root
+  holds the marker `python_multiplatform_devagent.enable`, `Python3.initialize()` loads the embedded agent
+  (`src/commonMain/python/python_multiplatform_devagent.py`, generated into Kotlin by `generateDevAgentSource`)
+  as the module `python_multiplatform_devagent` and it listens on 127.0.0.1 only. The marker is the build-time
+  switch: this library is one artifact for debug and release, so the app's build decides, and toolchain stages
+  the marker into debug variants only. Without it the variable is ignored with a warning and no port opens. The
+  token must be at least 43 characters (`secrets.token_urlsafe(32)`), or the agent refuses to start. The listening
+  socket cannot be bound by another socket while it listens: `SO_EXCLUSIVEADDRUSE` on Windows; on POSIX,
+  `SO_REUSEADDR` only so that a restarted app can rebind the launcher's port past TIME_WAIT. A connection's first
+  message must be `hello` with the token. Then, one JSON object per line: `execute` runs code in `__main__`'s
+  persistent namespace, streams stdout and stderr, returns the last expression's value and reports errors with
+  their traceback; `complete` completes from that namespace; `push` writes `.py` files into a writable overlay
+  first on `sys.path` and re-imports the loaded ones, children first, through `typedpython.importgate` when the
+  app has it (N-7b), keeping the old module when a re-import is refused or fails. A malformed request is printed
   and does not stop the app. `Status: partial`: desktop
-  (`PM/desktopTest/.../env/PythonDevAgentTest.kt`: the embedded agent answers over loopback, and a child JVM started with the variable has an agent on that port while one started without it has none; the protocol, `python-multiplatform/src/test/python/
-  test_devagent.py`, CI `Dev agent protocol tests`); nothing sets the variable on Android or iOS yet
+  (`PM/desktopTest/.../env/PythonDevAgentTest.kt`: the embedded agent answers over loopback; a child JVM with the
+  marker and the variable has an agent on that port, one without the variable has none, one without the marker
+  (a release build) opens no port with the variable set, and a short token opens no port; the protocol, token
+  length, port takeover and restart: `python-multiplatform/src/test/python/test_devagent.py`, CI `Dev agent
+  protocol tests`, macOS only so far); nothing sets the variable or stages the marker on Android or iOS yet
   (toolchain's M2, M3); no interrupt; `execute` runs on the agent's thread (no main-thread dispatch yet).
 
 ## 2. Low-level C API (downcall surface)
