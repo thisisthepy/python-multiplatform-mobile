@@ -1,5 +1,6 @@
 package python.multiplatform.gradle.artifact
 
+import python.multiplatform.gradle.deleteWithoutFollowingLinks
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
@@ -101,10 +102,10 @@ abstract class PythonArtifactBindingsTask : DefaultTask() {
         val destination = outputDirectory.get().asFile.resolve(ARTIFACTS_PACKAGE.replace('.', '/'))
         // Rebuilt from scratch: a dependency that was removed, or an include prefix that stopped
         // matching, must take its fragment file with it or the next compilation still sees it.
-        outputDirectory.get().asFile.deleteRecursively()
+        deleteWithoutFollowingLinks(outputDirectory.get().asFile)
         destination.mkdirs()
         val thunkRoot = thunkDirectory.get().asFile
-        thunkRoot.deleteRecursively()
+        deleteWithoutFollowingLinks(thunkRoot)
         val thunkDestination = thunkRoot.resolve(THUNK_PACKAGE.replace('.', '/'))
         thunkDestination.mkdirs()
 
