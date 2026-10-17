@@ -6,6 +6,7 @@ import kotlin.metadata.KmType
 import kotlin.metadata.KmVariance
 import kotlin.metadata.MemberKind
 import kotlin.metadata.Visibility
+import kotlin.metadata.isFunInterface
 import kotlin.metadata.isNullable
 import kotlin.metadata.isSuspend
 import kotlin.metadata.isValue
@@ -587,7 +588,9 @@ internal object ArtifactScanner {
         // A zero-parameter member of a group -- there can be at most one, so this only ever has to
         // be distinct from the others, not descriptive.
         if (parts.isEmpty()) return "0"
-        return parts.joinToString("_") { name ->
+        return parts.joinToString("_") { slotName ->
+            // A functional-interface slot (issue #216) is named by its interface, not by the callable form.
+            val name = slotName.substringBefore(SAM_SEPARATOR)
             val chosen = if (qualified) name else name.substringAfterLast('.')
             chosen.map { if (it.isLetterOrDigit()) it else '_' }.joinToString("")
         }
@@ -1759,6 +1762,9 @@ internal object ArtifactScanner {
         val typeName: String? = null,
         val boundary: BoundaryType? = null,
         val declineReason: String? = null,
+        /** The type a stub shows for the slot when it is not the declared one: a functional
+         * interface's `kotlin.FunctionN` (issue #216). */
+        val modelType: KotlinTypeModel? = null,
     )
 
     /**
@@ -1849,6 +1855,142 @@ internal object ArtifactScanner {
         // unchecked (the wrapper is a `Function1<Any?, Unit>` whatever the slot said), which the
         // fragment's file-level `@Suppress("UNCHECKED_CAST")` already covers.
         return FunctionSlot(typeName = name, boundary = BoundaryType("OBJECT", "(%s as $rendered)", "(%s)"))
+    }
+
+    /**
+     * A parameter typed as a **functional interface** (issue #216): a Java interface with one abstract
+     * method (`java.lang.Runnable`) or a Kotlin `fun interface`, whose method returns `Unit` and which is
+     * not generic. `null` for anything else, which leaves the parameter exactly as it was -- an
+     * interface on the classpath still crosses as a handle (`Alignment` is a `fun interface` whose
+     * method returns an `IntOffset`, and its slots must keep taking `Alignment.Center`).
+     *
+     * The slot takes **both** a Python callable and a Kotlin handle. Its type name is the interface's,
+     * then [SAM_SEPARATOR], then the `kotlin.FunctionN` it is equivalent to
+     * (`java.lang.Runnable|kotlin.Function0()->kotlin.Unit`): the binding layer fills it from a callable
+     * through the wrapper path a function type has (B-5, `pythonx._make_function`) and checks a handle
+     * against the interface. The generated read converts a wrapper with a SAM lambda and casts anything
+     * else -- `((%s).let { v -> if (v is kotlin.Function0<*>) java.lang.Runnable { ... } else v as
+     * java.lang.Runnable })` -- which `kotlinc` compiles; nothing is looked up at run time (AGENTS.md §12).
+     *
+     * The interface is read off the consumer's classpath, or, for a `java.`/`javax.` one, off the JDK
+     * this build runs on ([jdkClassNode]): the walk's classpath is the consumer's jars and never held
+     * `java.lang.Runnable`, which is why `runRunnable(block: Runnable)` was declined.
+     */
+    private fun functionalInterfaceSlotOrNull(type: KmType, classpath: ArtifactClasspath): FunctionSlot? {
+        val classifier = type.classifier as? KmClassifier.Class ?: return null
+        val internal = classifier.name
+        if (internal.startsWith(KOTLIN_FUNCTION_INTERNAL_PREFIX)) return null
+        if (type.arguments.isNotEmpty()) return null
+        val binary = internal.replace('.', '$')
+        val node = classpath.classNode(binary) ?: jdkClassNode(binary) ?: return null
+        if (!node.access.hasFlag(Opcodes.ACC_INTERFACE) || !node.access.hasFlag(Opcodes.ACC_PUBLIC)) return null
+        if (node.signature?.startsWith("<") == true) return null
+        val kmClass = when (val metadata = kotlinClassMetadataOf(node)) {
+            null -> null
+            is KotlinClassMetadata.Class -> metadata.kmClass.takeIf { it.isFunInterface } ?: return null
+            else -> return null
+        }
+        val method = abstractMethodsOf(node, classpath)?.singleOrNull() ?: return null
+        val (descriptors, returns) = splitMethodDescriptor(method.desc)
+        if (returns != "V") return null
+        // A Kotlin `fun interface` says each parameter's nullability; a Java one does not, so an object
+        // parameter is taken as nullable there -- Java may pass `null`, and a non-null type would throw.
+        val parameterTypes: List<Pair<String, String>> = if (kmClass != null) {
+            val declared = kmClass.functions.singleOrNull { it.name == method.name } ?: return null
+            if (declared.valueParameters.size != descriptors.size) return null
+            declared.valueParameters.map { parameter ->
+                val name = kotlinClassifierNameOf(parameter.type) ?: return null
+                name to (renderKotlinSourceType(parameter.type, classpath, depth = 0) ?: return null)
+            }
+        } else {
+            descriptors.map { descriptor -> javaParameterTypeOf(descriptor, classpath) ?: return null }
+        }
+        val qualified = internal.replace('/', '.')
+        val arity = parameterTypes.size
+        val functionType = "kotlin.Function$arity<" + (parameterTypes.map { it.second } + UNIT_TYPE_NAME).joinToString(", ") + ">"
+        val star = "kotlin.Function$arity<" + List(arity + 1) { "*" }.joinToString(", ") + ">"
+        val names = (0 until arity).map { "p$it" }
+        val arrow = if (arity == 0) "" else names.joinToString(", ", postfix = " -> ")
+        val convert = "v -> if (v is $star) $qualified { $arrow(v as $functionType)(${names.joinToString(", ")}) } else v as $qualified"
+        val read = if (type.isNullable) "((%s)?.let { $convert })" else "((%s).let { $convert })"
+        return FunctionSlot(
+            typeName = qualified + SAM_SEPARATOR + KOTLIN_FUNCTION_PREFIX + arity +
+                "(" + parameterTypes.joinToString(",") { it.first } + ")" + FUNCTION_RETURNS + UNIT_TYPE_NAME,
+            boundary = BoundaryType("OBJECT", read, "(%s)"),
+            modelType = KotlinTypeModel(
+                "kotlin.Function$arity",
+                isNullable = type.isNullable,
+                arguments = parameterTypes.map { KotlinTypeModel(it.first) } + KotlinTypeModel(UNIT_TYPE_NAME),
+            ),
+        )
+    }
+
+    /** Separates a functional-interface slot's interface from the function type a callable fills it as
+     * (issue #216). Must match `pythonx`'s `_SAM_SEPARATOR`; not a character a classifier can contain. */
+    internal const val SAM_SEPARATOR: String = "|"
+
+    /** `Object`'s public methods, which an interface may redeclare without becoming non-functional. */
+    private val OBJECT_METHOD_SIGNATURES = setOf(
+        "equals" to "(Ljava/lang/Object;)Z",
+        "hashCode" to "()I",
+        "toString" to "()Ljava/lang/String;",
+    )
+
+    /**
+     * The abstract methods an interface leaves to an implementation, its superinterfaces' included and
+     * minus any a subinterface gives a default body; `null` when a superinterface cannot be read.
+     */
+    private fun abstractMethodsOf(node: ClassNode, classpath: ArtifactClasspath): List<org.objectweb.asm.tree.MethodNode>? {
+        val abstract = LinkedHashMap<Pair<String, String>, org.objectweb.asm.tree.MethodNode>()
+        val concrete = HashSet<Pair<String, String>>()
+        fun visit(current: ClassNode, depth: Int): Boolean {
+            if (depth > 8) return false
+            current.methods.filter { !it.access.hasFlag(Opcodes.ACC_STATIC) && !it.access.hasFlag(Opcodes.ACC_SYNTHETIC) }.forEach { method ->
+                val key = method.name to method.desc
+                if (key in OBJECT_METHOD_SIGNATURES || method.name.startsWith("<")) return@forEach
+                if (method.access.hasFlag(Opcodes.ACC_ABSTRACT)) abstract.putIfAbsent(key, method) else concrete += key
+            }
+            return current.interfaces.all { parent ->
+                val parentNode = classpath.classNode(parent) ?: jdkClassNode(parent) ?: return false
+                visit(parentNode, depth + 1)
+            }
+        }
+        if (!visit(node, 0)) return null
+        return abstract.filterKeys { it !in concrete }.values.toList()
+    }
+
+    /**
+     * A Java method parameter as `(slot type name, Kotlin source type)`: primitives and `String` by
+     * their Kotlin names, any other class by its name when it is nameable, an object type nullable.
+     */
+    private fun javaParameterTypeOf(descriptor: String, classpath: ArtifactClasspath): Pair<String, String>? {
+        val primitive = when (descriptor) {
+            "I" -> "kotlin.Int"; "J" -> "kotlin.Long"; "Z" -> "kotlin.Boolean"; "D" -> "kotlin.Double"
+            "F" -> "kotlin.Float"; "S" -> "kotlin.Short"; "B" -> "kotlin.Byte"; "C" -> "kotlin.Char"
+            else -> null
+        }
+        if (primitive != null) return primitive to primitive
+        if (!descriptor.startsWith("L") || !descriptor.endsWith(";")) return null
+        val binary = descriptor.substring(1, descriptor.length - 1)
+        val name = when (binary) {
+            "java/lang/String" -> "kotlin.String"
+            "java/lang/Object" -> "kotlin.Any"
+            else -> if (classpath.isNameablePublicClass(binary)) binary.replace('/', '.').replace('$', '.') else return null
+        }
+        return name to "$name?"
+    }
+
+    /**
+     * A `java.`/`javax.` class file, read from the JDK this build runs on -- the walk's classpath is the
+     * consumer's jars, which never contain the platform. Build time only, and only to recognise a
+     * functional interface ([functionalInterfaceSlotOrNull]); it does not make a JDK type nameable as a
+     * handle anywhere else.
+     */
+    private fun jdkClassNode(binaryName: String): ClassNode? {
+        if (!binaryName.startsWith("java/") && !binaryName.startsWith("javax/")) return null
+        val bytes = ClassLoader.getPlatformClassLoader().getResourceAsStream("$binaryName.class")?.use { it.readBytes() }
+            ?: return null
+        return readClassNodeOrNull(bytes)
     }
 
     /** The Kotlin-source spelling of a function type: `kotlin.Function1<kotlin.Float, kotlin.Unit>`.
@@ -2126,7 +2268,7 @@ internal object ArtifactScanner {
         // Read before `resolveKotlinType` is asked anything, because for a function-typed parameter
         // it is the one that would answer -- and would answer "no". See [functionSlotOrNull].
         val functionSlots = function.allParameterTypes.mapIndexed { index, type ->
-            functionSlotOrNull(type, paramDescriptors[index], classpath)
+            functionSlotOrNull(type, paramDescriptors[index], classpath) ?: functionalInterfaceSlotOrNull(type, classpath)
         }
         functionSlots.firstNotNullOfOrNull { it?.declineReason }?.let { return declined(it) }
 
@@ -2207,13 +2349,16 @@ internal object ArtifactScanner {
         // A member's defaults are not omittable yet (issue #215): no plan, so Python passes every
         // argument and the stub says so.
         val omittable = if (member != null) emptySet() else omittableParameterIndices(function, receiverIndex)
+        val modelParameters = model.parameters.mapIndexed { index, parameter ->
+            functionSlots[index + receiverIndex]?.modelType?.let { parameter.copy(type = it) } ?: parameter
+        }
         return Candidate(
             callable = callable,
             declaration = model.copy(
                 bindingName = qualifiedName,
                 returnBoundaryTag = returnType.tag,
                 receiverBoundaryTag = if (function.isExtension) resolvedParams.first().tag else model.receiverBoundaryTag,
-                parameters = model.parameters.mapIndexed { index, parameter ->
+                parameters = modelParameters.mapIndexed { index, parameter ->
                     parameter.copy(boundaryTag = resolvedParams[index + receiverIndex].tag)
                 },
             ),
