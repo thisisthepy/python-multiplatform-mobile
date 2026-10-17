@@ -170,6 +170,27 @@ object PythonxAdapter {
 
         # --------------------------------------------------------------------------- the table
 
+        def _as_receiver_slot(row):
+            '''A `METHOD` row (issue #215) restated the way an extension row reads: the receiver as slot 0.
+
+            The boundary sends both the same tuple, `(receiver, *arguments)`: a `METHOD` keeps its receiver
+            out of `arity` and the slot lists (`CallableKind.METHOD.hasReceiver`) and an extension counts
+            it, but `pm_invoke` is handed the receiver first either way. Restating it once, here, lets a
+            member be bound, dispatched among its overloads, called with keywords and described exactly as
+            an extension on its receiver is, by the code that already does that.
+            '''
+            (kotlin_name, arity, kind, is_suspend, names, tags, type_names, return_tag, return_type_name,
+             _is_extension, receiver, has_default) = row
+            return (
+                kotlin_name, arity + 1, kind, is_suspend,
+                ('<receiver>',) + tuple(names or ()),
+                ('OBJECT',) + tuple(tags or ()),
+                (receiver,) + tuple(type_names or ()),
+                return_tag, return_type_name, True, receiver,
+                (False,) + tuple(has_default or ()),
+            )
+
+
         class _Decl:
             '''One row of what `PythonxAdapter.renderTable` sent, plus its resolved handle.'''
 
@@ -195,6 +216,9 @@ object PythonxAdapter {
                 # `{keyword: slot}`, Kotlin names and Pythonic aliases (`keyword_slots`), built on the
                 # first call that passes a keyword rather than for every row at install.
                 self.keywords = None
+                if row[2] == 'METHOD' and row[10]:
+                    row = _as_receiver_slot(row)
+                    self.row = row
                 (self.kotlin_name, self.arity, self.kind, self.is_suspend, self.param_names,
                  self.param_tags, self.param_type_names, self.return_tag, self.return_type_name,
                  self.is_extension, self.receiver_type_name, self.param_has_default) = row
@@ -275,6 +299,7 @@ object PythonxAdapter {
         _CHILDREN = {}       # kotlin package -> the Kotlin names of its direct child packages/objects
         _SUPERTYPES = {}     # kotlin type name -> the types it is a, nearest first
         _PROPERTIES = {}     # kotlin type a property is read on -> {kotlin name -> _Property}
+        _METHODS = {}        # kotlin type a member function is declared on -> {kotlin name -> [_Decl]}
 
 
         # The two row kinds that are attributes of a *value* rather than names in a package (issue #38):
@@ -346,6 +371,7 @@ object PythonxAdapter {
             _CHILDREN.clear()
             _SUPERTYPES.clear()
             _PROPERTIES.clear()
+            _METHODS.clear()
             present = set()
             for row in rows:
                 kotlin_name = row[0]
@@ -375,6 +401,13 @@ object PythonxAdapter {
                             prop.getter = decl
                         else:
                             prop.setter = decl
+                    continue
+                if decl.kind == 'METHOD':
+                    # A member function (issue #215) is a method of its owner's proxy and nothing else:
+                    # `Owner.name` is not a package, so neither the package index nor the packages seen
+                    # may learn `Owner` from it. A row with no receiver has nowhere to be served.
+                    if decl.receiver_type_name:
+                        _index(_METHODS.setdefault(decl.receiver_type_name, {}), decl)
                     continue
                 _index(_BY_PACKAGE.setdefault(decl.package, {}), decl)
                 if decl.is_extension and decl.receiver_type_name:
@@ -1218,7 +1251,9 @@ object PythonxAdapter {
                 prop = _PROPERTIES.get(candidate, {}).get(name)
                 if prop is not None:
                     return prop
-                decls = _BY_RECEIVER.get(candidate, {}).get(name)
+                # A member function before an extension of the same name on the same type: Kotlin
+                # resolves the member (issue #215).
+                decls = _METHODS.get(candidate, {}).get(name) or _BY_RECEIVER.get(candidate, {}).get(name)
                 if decls:
                     return decls
             return None
@@ -1229,7 +1264,7 @@ object PythonxAdapter {
             names = []
             seen = set()
             for candidate in _served_types(type_name):
-                for table in (_PROPERTIES, _BY_RECEIVER):
+                for table in (_PROPERTIES, _METHODS, _BY_RECEIVER):
                     for name in table.get(candidate, {}):
                         if name not in seen:
                             seen.add(name)
@@ -2187,10 +2222,11 @@ object PythonxAdapter {
             def __dir__():
                 names = set(_BY_PACKAGE.get(kotlin_package, {}))
                 names.update(_CHILDREN.get(kotlin_package, ()))
-                for type_name in _BY_RECEIVER:
-                    package, _, leaf = type_name.rpartition('.')
-                    if package == kotlin_package:
-                        names.add(leaf)
+                for served in (_BY_RECEIVER, _METHODS):
+                    for type_name in served:
+                        package, _, leaf = type_name.rpartition('.')
+                        if package == kotlin_package:
+                            names.add(leaf)
                 return sorted(names)
 
             return __dir__

@@ -4,6 +4,7 @@ import kotlin.metadata.ClassKind
 import kotlin.metadata.KmClassifier
 import kotlin.metadata.KmType
 import kotlin.metadata.KmVariance
+import kotlin.metadata.MemberKind
 import kotlin.metadata.Visibility
 import kotlin.metadata.isNullable
 import kotlin.metadata.isSuspend
@@ -260,9 +261,18 @@ internal object ArtifactScanner {
         // neither claims a constructor's namespace (`TextStyle.color` must not cost `TextStyle(...)`
         // its binding) nor joins an overload set. [settlePropertyNames] gives them the one check
         // they do need, against the finished names of everything else.
-        val (properties, functions) = entries.partition { it.declaration.kind in PROPERTY_KINDS }
+        //
+        // Member functions (issue #215) take no part in them either, for the property's reason: a
+        // `METHOD` is served on its receiver's proxy, so `Counter.add` must not cost `Counter(...)` its
+        // constructor (the prefix rule of [dropCollidingConstructors]), and a member is never an
+        // overload of a top-level function of the same name. Inside one class they are an overload set
+        // like any other, so [disambiguateOverloads] still names them; [settleMethodNames] is their one
+        // check against everything else.
+        val (properties, rest) = entries.partition { it.declaration.kind in PROPERTY_KINDS }
+        val (methods, functions) = rest.partition { it.declaration.kind == METHOD_KIND }
         val settledFunctions = assignThunkIndices(disambiguateOverloads(applyDefaultOmission(dropCollidingConstructors(functions))))
-        return (settledFunctions + settlePropertyNames(properties, settledFunctions))
+        val settledMethods = settleMethodNames(disambiguateOverloads(methods), settledFunctions)
+        return (settledFunctions + settledMethods + settlePropertyNames(properties, settledFunctions + settledMethods))
             // The ancestry the binding carries is the model's too (issue #31): copied at the end, from the
             // callable that was actually bound, so the two cannot be read differently.
             .map { candidate ->
@@ -273,8 +283,9 @@ internal object ArtifactScanner {
                 // unwritable name, an ambiguous sibling): the binding then requires every argument
                 // while the stub would still offer `= ...`. One view, taken from the binding.
                 val omittable = omittableSlotsOf(callable)
-                // A property's receiver is not one of its slots (`CallableKind.GETTER.hasReceiver`).
-                val receiverIndex = if (callable.receiverTypeName != null && callable.kind !in PROPERTY_KINDS) 1 else 0
+                // A property's or a member's receiver is not one of its slots (`CallableKind.hasReceiver`);
+                // only an extension's is.
+                val receiverIndex = if (callable.receiverTypeName != null && callable.kind == "FUNCTION") 1 else 0
                 candidate.copy(
                     declaration = candidate.declaration.copy(
                         returnSupertypes = callable.returnSupertypes,
@@ -433,7 +444,8 @@ internal object ArtifactScanner {
                 bindObjectMembers = metadata.kmClass.visibility == Visibility.PUBLIC,
             ) + constructorCandidates(metadata.kmClass, node, classpath) +
                 objectConstantCandidates(metadata.kmClass, node, classpath) +
-                memberPropertyCandidates(metadata.kmClass, node, classpath)
+                memberPropertyCandidates(metadata.kmClass, node, classpath) +
+                memberFunctionCandidates(metadata.kmClass, node, classpath)
             is KotlinClassMetadata.FileFacade -> {
                 val owner = kotlinPackageNameOverrideOf(node) ?: packageNameOf(node.name)
                 kotlinCandidates(
@@ -564,7 +576,8 @@ internal object ArtifactScanner {
      * group.
      */
     private fun ArtifactCallable.overloadSuffix(includeReceiver: Boolean, qualified: Boolean): String {
-        val skipReceiver = if (receiverTypeName != null && !includeReceiver) 1 else 0
+        // A member's receiver (issue #215) is not in [paramTypeNames] at all, so there is nothing to skip.
+        val skipReceiver = if (receiverTypeName != null && kind == "FUNCTION" && !includeReceiver) 1 else 0
         // A composable's synthetic slots are the same for every member of its overload set --
         // `Composer_Int_Int_Int` on all of them -- so they separate nothing and would only make the
         // Python name unreadable. Dropped, which leaves exactly the declared parameters the two
@@ -843,6 +856,121 @@ internal object ArtifactScanner {
     }
 
     // -------------------------------------------------------------------------- properties (#38)
+
+    /** What a member function's candidate needs of the class it is read on (issue #215). */
+    private class MemberReceiver(
+        /** The class's qualified Kotlin name: the entry's `receiverTypeName` and the key's owner. */
+        val owner: String,
+        /** The receiver as generated source reads it out of `args[0]`. */
+        val read: String,
+        private val model: KotlinTypeModel,
+    ) {
+        /** [declaration] as a `METHOD`: read off a receiver of [owner], every argument passed. */
+        fun restate(declaration: DeclarationModel): DeclarationModel = declaration.copy(
+            kind = METHOD_KIND,
+            receiver = model,
+            receiverBoundaryTag = OBJECT_TAG,
+            parameters = declaration.parameters.map { it.copy(declaresDefault = false) },
+        )
+    }
+
+    /**
+     * A public class's or interface's own **member functions**, as `METHOD` entries under
+     * `Owner.name` (issue #215).
+     *
+     * `kotlinx.coroutines.Job.cancel()` and `CoroutineDispatcher.dispatch(...)` are members: until this
+     * producer, a handle Python held to one could have its properties read and nothing called on it.
+     * `CallableKind.METHOD` already says the shape -- `args[0]` is the receiver, resolved from the
+     * proxy's handle and not counted in `arity` -- and KSP already emits it for its own classes, so
+     * nothing about the boundary is new. The call is source, `(args[0] as Owner).name(...)`; `kotlinc`
+     * resolves and mangles it.
+     *
+     * ### What is bound
+     *
+     * The class rules are [memberPropertyCandidates]': Kotlin-public, a `class`, `interface` or `enum
+     * class` (an `object`'s functions are #53's statics), crossing as an object handle, every supertype
+     * on the walk's classpath. A function is bound when it is public, declared rather than synthesized
+     * (a data class's `copy`/`componentN`, U-4), not an extension (a member extension needs two
+     * receivers), not one of `Any`'s members, and backed by a public, non-static, non-synthetic JVM
+     * method whose parameter count is the declared one. Declined, each with its reason: `suspend`, a
+     * reified or bounded type parameter, `@Composable`, a member of a generic class (its receiver would
+     * be cast with arguments a type parameter of the function may need -- not yet), and a member that
+     * shares its name with a property of the class, because Python has one attribute for both and the
+     * property (#38) keeps it.
+     */
+    private fun memberFunctionCandidates(
+        kmClass: kotlin.metadata.KmClass,
+        ownerNode: ClassNode,
+        classpath: ArtifactClasspath,
+    ): List<Candidate> {
+        if (kmClass.visibility != Visibility.PUBLIC) return emptyList()
+        if (kmClass.kind !in PROPERTY_OWNER_KINDS) return emptyList()
+        val synthesized = kmClass.functions.filter { it.kind == MemberKind.SYNTHESIZED }.mapTo(HashSet()) { it.name }
+        val functions = functionsOf(kmClass).filter { !it.isExtension && it.kotlinName !in synthesized }
+        if (functions.isEmpty()) return emptyList()
+        val owner = binaryNameToQualified(ownerNode.name)
+        val ownerType = KmType().apply { classifier = KmClassifier.Class(ownerNode.name) }
+        val receiverBoundary = resolveKotlinBoundary(ownerType, classpath, BoundaryDirection.PARAMETER) ?: return emptyList()
+        if (receiverBoundary.boundary.tag != OBJECT_TAG) return emptyList()
+        val receiverModel = kotlinTypeModelOf(ownerType, classpath) ?: return emptyList()
+        val member = MemberReceiver(owner, receiverBoundary.boundary.read("args[0]"), receiverModel)
+        val receiverDecline = classpath.unreachableSupertypeOf(ownerNode.name)
+            ?.let { missing -> unreachableReceiverReason(missing, owner) }
+        val propertyNames = kmClass.properties.mapTo(HashSet()) { it.name }
+        val methods = ownerNode.methods.associateBy { it.name to it.desc }
+
+        return functions.mapNotNull { function ->
+            val signature = function.jvmSignature.name to function.jvmSignature.descriptor
+            if (signature in ANY_MEMBER_SIGNATURES) return@mapNotNull null
+            val method = methods[signature]
+            val composable = method != null && isComposable(method)
+            fun declined(reason: String) =
+                declinedCandidate(owner, true, function, classpath, reason, composable)
+                    ?.let { it.copy(declaration = member.restate(it.declaration)) }
+            when {
+                function.isSuspend -> return@mapNotNull declined("suspend")
+                function.hasReifiedTypeParameter ->
+                    return@mapNotNull declined("a reified type parameter: its type argument is read at run time, so kotlin.Any? cannot stand for it")
+                method == null || !method.access.hasFlag(Opcodes.ACC_PUBLIC) -> return@mapNotNull null
+                method.access.hasFlag(Opcodes.ACC_STATIC) || method.access.hasFlag(Opcodes.ACC_SYNTHETIC) ||
+                    method.access.hasFlag(Opcodes.ACC_BRIDGE) -> return@mapNotNull null
+                composable -> return@mapNotNull declined("a @Composable member function: not bound on a proxy")
+                kmClass.typeParameters.isNotEmpty() -> return@mapNotNull declined("a member of a generic class: not bound yet")
+                function.kotlinName in propertyNames ->
+                    return@mapNotNull declined("shares its name with a property of the class, which keeps the attribute")
+                receiverDecline != null -> return@mapNotNull declined(receiverDecline)
+            }
+            val (paramDescriptors, _) = splitMethodDescriptor(method!!.desc)
+            if (function.allParameterTypes.size != paramDescriptors.size) {
+                return@mapNotNull declined(
+                    "the JVM signature carries ${paramDescriptors.size - function.allParameterTypes.size} " +
+                        "parameter(s) metadata does not declare",
+                )
+            }
+            candidateFromFunction(owner, true, function, classpath, paramDescriptors, isComposable = false, member = member)
+        }
+    }
+
+    /**
+     * Gives a member function (issue #215) a key no other binding holds. Keys are `Owner.name`, the
+     * namespace of a property's (`Owner.prop`) and of an object's constants and functions; a property
+     * of the same name is already excluded where the member is built, so what is left here is a nested
+     * object's or a companion's binding under the same dotted name. The other binding keeps it.
+     */
+    private fun settleMethodNames(methods: List<Candidate>, settled: List<Candidate>): List<Candidate> {
+        val taken = settled.mapNotNullTo(HashSet()) { it.callable?.name }
+        return methods.map { candidate ->
+            val name = candidate.callable?.name ?: return@map candidate
+            if (name !in taken) return@map candidate
+            candidate.copy(
+                callable = null,
+                declaration = candidate.declaration.copy(
+                    bindingName = null,
+                    declineReason = "member key $name collides with another binding",
+                ),
+            )
+        }
+    }
 
     /**
      * A public class's or interface's own **member** properties, as `GETTER` entries -- and, for a
@@ -1203,6 +1331,7 @@ internal object ArtifactScanner {
             "so generated Kotlin cannot read a member of it"
 
     internal const val GETTER_KIND = "GETTER"
+    internal const val METHOD_KIND = "METHOD"
     internal const val SETTER_KIND = "SETTER"
 
     /** The two kinds [scan] keeps out of the function passes; see [settlePropertyNames]. */
@@ -1972,8 +2101,11 @@ internal object ArtifactScanner {
         classpath: ArtifactClasspath,
         paramDescriptors: List<String>,
         isComposable: Boolean,
+        member: MemberReceiver? = null,
     ): Candidate? {
-        val model = declarationModelOf(owner, ownerIsClass, function, classpath, isComposable) ?: return null
+        val model = declarationModelOf(owner, ownerIsClass, function, classpath, isComposable)
+            ?.let { if (member != null) member.restate(it) else it }
+            ?: return null
         val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
         val receiverIndex = if (function.isExtension) 1 else 0
         if (function.hasUnsubstitutableTypeParameters) {
@@ -2018,7 +2150,10 @@ internal object ArtifactScanner {
         val returnTypeName = kotlinClassifierNameOf(function.returnType)
 
         val qualifiedName = "$owner.${function.kotlinName}"
-        val argumentExpressions = resolvedParams.mapIndexed { index, type -> type.read("args[$index]") }
+        // A member's receiver is `args[0]` and is not one of [resolvedParams] (issue #215), so its
+        // declared parameters start at `args[1]`, as in KSP's `METHOD` entries.
+        val firstArgument = if (member != null) 1 else 0
+        val argumentExpressions = resolvedParams.mapIndexed { index, type -> type.read("args[${index + firstArgument}]") }
 
         // Kotlin has no syntax to call an extension function by fully qualifying it the way an
         // ordinary top-level function or a Java static can be (`pkg.fn(args)`) -- the receiver can
@@ -2036,7 +2171,9 @@ internal object ArtifactScanner {
 
         /** The call that passes everything, positionally -- byte for byte what this generator
          * emitted before defaults existed, and still the `else`-less first branch below. */
-        val call = if (function.isExtension) {
+        val call = if (member != null) {
+            "${member.read}.${function.kotlinName}$typeArguments(${argumentExpressions.joinToString(", ")})"
+        } else if (function.isExtension) {
             "${argumentExpressions.first()}.$alias$typeArguments(${argumentExpressions.drop(1).joinToString(", ")})"
         } else {
             "$owner.${function.kotlinName}$typeArguments(${argumentExpressions.joinToString(", ")})"
@@ -2053,10 +2190,11 @@ internal object ArtifactScanner {
             arity = arity,
             paramTags = resolvedParams.map { it.tag },
             returnTag = returnType.tag,
-            lambdaBody = if (arity == 0) "{ ${returnType.wrapReturn(call)} }"
+            // A member reads its receiver out of `args[0]` even with no declared parameter.
+            lambdaBody = if (arity == 0 && member == null) "{ ${returnType.wrapReturn(call)} }"
             else "{ args -> ${returnType.wrapReturn(call)} }",
             imports = imports,
-            receiverTypeName = function.receiverType?.let { kotlinClassifierNameOf(it) },
+            receiverTypeName = member?.owner ?: function.receiverType?.let { kotlinClassifierNameOf(it) },
             paramNames = function.allParameterNames,
             paramTypeNames = paramTypeNames,
             returnTypeName = returnTypeName,
@@ -2064,14 +2202,17 @@ internal object ArtifactScanner {
             // Deliberately all `false` until [applyDefaultOmission] says otherwise: this column is a
             // statement about **this body**, and this body passes everything.
             paramHasDefault = List(resolvedParams.size) { false },
+            kind = if (member != null) METHOD_KIND else "FUNCTION",
         )
-        val omittable = omittableParameterIndices(function, receiverIndex)
+        // A member's defaults are not omittable yet (issue #215): no plan, so Python passes every
+        // argument and the stub says so.
+        val omittable = if (member != null) emptySet() else omittableParameterIndices(function, receiverIndex)
         return Candidate(
             callable = callable,
             declaration = model.copy(
                 bindingName = qualifiedName,
                 returnBoundaryTag = returnType.tag,
-                receiverBoundaryTag = if (function.isExtension) resolvedParams.first().tag else null,
+                receiverBoundaryTag = if (function.isExtension) resolvedParams.first().tag else model.receiverBoundaryTag,
                 parameters = model.parameters.mapIndexed { index, parameter ->
                     parameter.copy(boundaryTag = resolvedParams[index + receiverIndex].tag)
                 },
