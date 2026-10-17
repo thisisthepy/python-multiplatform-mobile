@@ -458,7 +458,10 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   its `@overload`s) and the module's constants and functions as members, never as a bare `def`, which
   would hide `TextRange.Zero` from a checker),
   `.github/scripts/stubs/check-stubs.sh` (mypy over the Compose stubs). A class whose name is also a function in
-  its module is `Any`, except that a class's own bound constructor is that class's `__init__`
+  its module (Kotlin's factory idiom, `kotlinx.coroutines.Job` and `fun Job()`) is stubbed under the
+  stub-private name `_<Name>` (#217): the function keeps `Job`, as at run time, and every use of the
+  type, the factory's result included, is `_Job`, a class with the type's properties and member
+  functions; nothing at run time is named `_Job`. Except that a class's own bound constructor is that class's `__init__`
   (`@overload`ed for several), so the class keeps its stub, members and properties; a single one's
   docstring carries its table key after `Kotlin constructor: `; its `__`-suffixed table-key spellings
   stay module functions; a value class bound as its primitive keeps its constructor as a module function
