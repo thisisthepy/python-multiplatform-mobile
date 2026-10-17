@@ -50,6 +50,30 @@ the wheel from pythonx-compose `develop` with uv and runs this module on every p
 interpreter has no installer of its own. The tests then require `pythonx.compose.__file__` to be
 inside that directory, so a stray source checkout on `sys.path` cannot stand in for the wheel.
 
+## In a GraalVM native image (macOS, #249)
+
+The same 20 scenarios, built into one executable and run on their own:
+
+```bash
+JAVA_HOME=<JDK 21> ./gradlew :python-multiplatform-compose:fixtures:notebook-e2e:notebookE2eNativeRun \
+    -PpythonxComposeWheel=.tmp/pythonx-compose-dist --console=plain
+```
+
+- `NotebookE2eMain` calls each scenario after its class's `@BeforeTest`, with no JUnit, and prints
+  `NOTEBOOK_E2E: n passed, m failed of 20`. `notebookE2eJvm` runs it on the JVM first.
+- `notebookE2eNativeCompile` calls `native-image` from the JDK 25 toolchain (Liberica NIK Full). The
+  configuration Compose and skiko need is `src/desktopTest/native-image`, recorded by
+  `notebookE2eNativeAgent`; rerun that task after a dependency changes.
+- Beside the executable: `python-multiplatform-home/` (the plugin's `stageNativeImagePythonHome`),
+  `site-packages/` (the wheel) and `app/`. The image finds them there with no environment.
+- `notebookE2eNativeRun` removes `JAVA_HOME` and `PYTHONHOME`, requires 20 passed, and fails if
+  `otool -L` shows `libjvm`.
+- The image takes `ui`, `ui-text` and `foundation` from compose-multiplatform-core-extended's mavenLocal
+  build (`composeExtended.*` in the root `gradle.properties`): upstream Compose sends its main-thread
+  work to skiko's Swing queue, which needs AWT, and AWT needs `libjvm`. The fork sends it to
+  `Dispatchers.Main` under `compose.main.dispatcher=coroutines`, which `NotebookE2eMainDispatcherFactory`
+  supplies (registered by `src/desktopTest/native-image-main/` on the image's classpath only).
+
 ## Scenarios
 
 | Notebook cells | Test | What must hold |

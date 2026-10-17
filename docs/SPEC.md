@@ -561,6 +561,17 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   with the notebook's own state spelling (`main.App.messages.getValue()` / `setValue(...)`, #174)
   against pythonx-compose f6dd3e2. CI runs it on every push to `develop`
   (`desktop.yml`, job `notebook-e2e`, #213), against a wheel built from pythonx-compose `develop`.
+  **In a GraalVM native image on macOS** (#249, #191's first milestone): `NotebookE2eMain` runs the
+  same 20 scenarios by direct calls, and `notebookE2eNativeRun` requires 20 passed with `JAVA_HOME`
+  and `PYTHONHOME` removed and no `libjvm` linked (only system frameworks); the prefix
+  (`stageNativeImagePythonHome`, L-9), the wheel and the app are staged beside the executable. 20
+  passed, 0 failed on 2026-10-17 (Liberica NIK 25.0.4.1, a 129 MB image), also from a relocated copy
+  under `env -i`. The image takes `ui`, `ui-text` and `foundation` from compose-multiplatform-core-extended
+  (`composeExtended.*` in `gradle.properties`, one place), because upstream Compose dispatches its
+  main-thread work to skiko's Swing queue, which starts AWT, and AWT in an image needs the JDK's
+  `libawt`, which links `libjvm`; the fork sends it to `Dispatchers.Main` when
+  `compose.main.dispatcher=coroutines`, and the fixture supplies a single-thread one with no AWT.
+  `desktopTest` keeps upstream Compose. Not on CI yet: the fork's artefacts are in mavenLocal only.
 - **B-11** (#192) The artifact walker skips every declaration whose package has an `internal` segment
   (`*.internal` and `*.internal.*`, as in `androidx.compose.ui.internal`), on jars and on klibs. That is the
   Kotlin `.api` dump convention: a library that puts a declaration in such a package has declared it
