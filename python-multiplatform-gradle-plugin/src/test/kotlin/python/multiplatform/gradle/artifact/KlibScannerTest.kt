@@ -141,26 +141,36 @@ class KlibScannerTest {
      * "does it survive a real, messy artefact, and decline what it must decline" case.
      */
     @Test
-    fun aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactories() {
+    fun aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactoriesAndMembers() {
         // Zero before issue #234, when no Kotlin object could cross the klib boundary. Since then the
-        // non-extension factories whose types are this klib's own classes bind; the extensions, the
-        // suspend functions and anything typed by another klib (`CoroutineContext`) are still declined.
+        // non-extension factories whose types are this klib's own classes bind, and since #237 the
+        // members of its interfaces and final classes; the extensions, the suspend functions, the
+        // members of open classes and anything typed by another klib (`CoroutineContext`) are declined.
         val entries = KlibScanner.scanKlib(coroutinesKlib, includePrefixes = emptyList())
         assertEquals(
             listOf(
+                "kotlinx.coroutines.ChildJob.parentCancelled",
+                "kotlinx.coroutines.CompletableJob.complete",
+                "kotlinx.coroutines.DisposableHandle.dispose",
                 "kotlinx.coroutines.Job",
+                "kotlinx.coroutines.Job.attachChild",
+                "kotlinx.coroutines.Job.start",
                 "kotlinx.coroutines.MainScope",
+                "kotlinx.coroutines.Runnable.run",
                 "kotlinx.coroutines.SupervisorJob",
+                "kotlinx.coroutines.TimeoutCancellationException.createCopy",
                 "kotlinx.coroutines.newFixedThreadPoolContext",
                 "kotlinx.coroutines.newSingleThreadContext",
                 "kotlinx.coroutines.sync.Mutex",
                 "kotlinx.coroutines.sync.Semaphore",
+                "kotlinx.coroutines.sync.Semaphore.release",
+                "kotlinx.coroutines.sync.Semaphore.tryAcquire",
             ),
             entries.map { it.name },
         )
     }
 
-    /** The specific bug [aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactories] pins
+    /** The specific bug [aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactoriesAndMembers] pins
      * the fix for, isolated to one declaration and its reason. */
     @Test
     fun aPublishedApiInternalDeclarationIsDeclinedWithItsOwnReason() {
