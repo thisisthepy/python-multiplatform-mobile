@@ -677,6 +677,7 @@ def _tsan_reports(built, tmp: Path, launcher: Path, rt: Path | None) -> tuple[in
     # header: those are the accesses this test is about.
     blocks = out.split("WARNING: ThreadSanitizer")[1:]
     ours = [b for b in blocks if "ftmod" in b or " tp_" in b]
+    _tsan_reports.first = ("WARNING: ThreadSanitizer" + ours[0])[:4000] if ours else ""
     return len(ours), "TSAN-RUN-DONE" in out
 
 
@@ -692,9 +693,11 @@ def tsan_launcher(tmp_path_factory):
 def test_threadsanitizer_reports_nothing_on_the_extension(built, tsan_launcher):
     d, launcher = tsan_launcher
     reports, done = _tsan_reports(built, d, launcher, None)
-    assert done and reports == 0, f"{reports} ThreadSanitizer report(s) (done={done})"
+    assert done and reports == 0, \
+        f"{reports} ThreadSanitizer report(s) (done={done}); first:\n{_tsan_reports.first}"
 
 
+@pytest.mark.race_mutant
 def test_threadsanitizer_sees_a_plain_epoch(built, tsan_launcher):
     """The check can fail: with the epoch back to plain loads and increments TSan reports the race
     between the watcher callback and the readers."""
