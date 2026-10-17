@@ -6,6 +6,12 @@ import java.net.URL
 import java.net.URLClassLoader
 import java.nio.charset.Charset
 import java.nio.file.Path
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.FileVisitResult
+import java.nio.file.attribute.BasicFileAttributes
+import java.io.IOException
 import java.lang.reflect.InvocationTargetException
 import java.io.FileOutputStream
 import java.security.MessageDigest
@@ -23,6 +29,26 @@ import python.multiplatform.gradle.CPythonIncludeDirectories
 import python.multiplatform.gradle.CPythonIncludeLayout
 import python.multiplatform.gradle.EmbeddedPythonVersion
 import python.multiplatform.gradle.GenerateWasmProxyExportsTask
+
+// Issue #227: Kotlin's File.deleteRecursively follows symbolic links and deletes what they point
+// at. This walk reports a link as an entry and removes the link only. A missing path is fine.
+fun deleteWithoutFollowingLinks(path: File) {
+    val start = path.toPath()
+    if (!Files.exists(start, LinkOption.NOFOLLOW_LINKS)) return
+    Files.walkFileTree(start, object : SimpleFileVisitor<Path>() {
+        override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+            Files.delete(file)
+            return FileVisitResult.CONTINUE
+        }
+
+        override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult {
+            if (exc != null) throw exc
+            Files.delete(dir)
+            return FileVisitResult.CONTINUE
+        }
+    })
+}
+
 
 
 plugins {
@@ -630,7 +656,7 @@ val downloadPython_ios = tasks.register("downloadPython_ios") {
         val iosWanted = "$iosLockKey ${iosArchive.name}"
         if (iosExtractDir.exists() && (!iosStamp.exists() || iosStamp.readText().trim() != iosWanted)) {
             println("Discarding stale iOS extraction in $iosExtractDir")
-            iosExtractDir.deleteRecursively()
+            deleteWithoutFollowingLinks(iosExtractDir)
         }
         val isEmpty = iosExtractDir.list()?.isEmpty() ?: true
         if (isEmpty) {
@@ -1684,7 +1710,7 @@ fun writeNativeTestResults(
         }
     }
 
-    resultsDir.deleteRecursively()
+    deleteWithoutFollowingLinks(resultsDir)
     resultsDir.mkdirs()
 
     var total = 0
@@ -1822,7 +1848,7 @@ listOf("Arm64" to "arm64-v8a", "X64" to "x86_64").forEach { (targetSuffix, abi) 
 
             // AGENTS.md: results are counted out of this directory, and a crashed run that leaves
             // the previous run's XML behind gets counted as the previous run.
-            resultsRoot.get().asFile.deleteRecursively()
+            deleteWithoutFollowingLinks(resultsRoot.get().asFile)
 
             var totalFailures = 0
             val summaries = mutableListOf<String>()

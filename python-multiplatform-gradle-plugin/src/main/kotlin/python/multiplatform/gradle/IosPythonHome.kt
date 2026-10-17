@@ -219,7 +219,7 @@ abstract class StageIosPythonHomeTask : DefaultTask() {
         val home = File(root, PREFIX_DIRECTORY)
         // Whole directory replaced: a file dropped from the plan (an exclusion added, an upstream
         // module removed) must not survive from the previous run into the next app.
-        home.deleteRecursively()
+        deleteWithoutFollowingLinks(home)
         for ((relative, source) in plan) {
             val target = File(home, relative)
             target.parentFile.mkdirs()
