@@ -1,5 +1,6 @@
 package python.multiplatform.gradle.stubs
 
+import python.multiplatform.gradle.deleteWithoutFollowingLinks
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
@@ -86,7 +87,7 @@ abstract class PythonStubsTask : DefaultTask() {
         val destination = outputDirectory.get().asFile
         // Rebuilt from scratch, exactly as `PythonArtifactBindingsTask` is: a dependency that was
         // removed, or an include prefix that stopped matching, must take its stub with it.
-        destination.deleteRecursively()
+        deleteWithoutFollowingLinks(destination)
         destination.mkdirs()
 
         val includes = includePrefixes.get()
