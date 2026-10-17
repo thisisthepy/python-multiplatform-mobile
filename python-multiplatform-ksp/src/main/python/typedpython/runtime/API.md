@@ -88,6 +88,54 @@ loop does not poll (below), so it delays other threads' stop-the-world requests 
 GC) until it returns: a liveness delay, results unaffected. Polls inside array-holding functions
 need the re-validation decided in issue #152 and are not added.
 
+## Buffer arrays (issue #149; `ArrayParam.buffer` = "array" | "numpy")
+An exact `array.array` (`array.array[float]` / `array.array[int]`) or `numpy.ndarray`
+(`numpy.typing.NDArray[numpy.float64]` / `[numpy.int64]`; the names must resolve through the module's
+own top-level imports) argument is not copied.
+    typedef struct { Py_buffer view; Py_ssize_t len; void *data; int held; } tp_buf;
+    int  tp_buf_enter(PyObject *obj, PyObject *exact, const char *fmt1, const char *fmt2, int writable, tp_buf *b);
+    void tp_buf_exit(tp_buf *b);          /* PyBuffer_Release if held; zeroes b; idempotent */
+    int  tp_buf_slot_array(const tp_buf *b, int64_t i, int store, Py_ssize_t *slot);   /* 0 / -1, array.array's IndexError text */
+    int  tp_buf_slot_numpy(const tp_buf *b, int64_t i, int store, Py_ssize_t *slot);   /* 0 / -1, numpy's IndexError text */
+    double  tp_buf_ld_f64(const tp_buf *b, Py_ssize_t i);   void tp_buf_st_f64(const tp_buf *b, Py_ssize_t i, double v);
+    int64_t tp_buf_ld_i64(const tp_buf *b, Py_ssize_t i);   void tp_buf_st_i64(const tp_buf *b, Py_ssize_t i, int64_t v);
+    int  tp_import_attr(const char *mod, const char *attr, PyObject **out);   /* exec slot: new ref or NULL (cleared); -1 MemoryError */
+`enter` returns 0 (held), 1 (deopt: b zeroed, nothing held, no exception) or -1 (MemoryError). It
+deopts unless: `exact` is non-NULL and `Py_IS_TYPE(obj, exact)` (a subclass may override
+`__getitem__`); `PyObject_GetBuffer(C_CONTIGUOUS | FORMAT [| WRITABLE when the function stores])`
+succeeds; ndim 1, itemsize 8, no suboffsets, `shape[0] * 8 == len`; the format string is exactly
+`d` (floats) or `q` / `l` (ints; a byte-order prefix, `Q`, `i` ... fail); the data is 8-byte aligned.
+The wrapper calls `exit` on every path (ok, error, deopt), so the export lives exactly as long as the
+compiled call. Element access is one relaxed atomic 8-byte load or store (`__atomic_load_n` /
+`__atomic_store_n` on `uint64_t`, bit-cast with `memcpy`); `-DTP_BUFFER_PLAIN` replaces them with
+plain loads and stores, for measuring what the atomics cost only. `len` is `shape[0]`, fixed for the
+call by the export.
+
+Rules that go with it (verifier / front end):
+* Closed (#203) like a list: a function with a buffer runs no user code (`verify/array-open`).
+* No limit on the number of buffer parameters (no critical section); lists keep the limit of two.
+  A buffer and a list cannot alias (different types). Two buffers may share memory (the same array
+  twice, two numpy views): per-element access makes reads see earlier writes in program order, as in
+  the interpreter, which a copy-in could not.
+* `y = x[:]` of a buffer is not a native copy (a numpy slice is a view): the function stays interpreted.
+* numpy only: a `/`, `//` or `%` whose divisor is not a nonzero Const (and any float `//` or `%`)
+  is rejected (`verify/buffer`): an `np.float64` / `np.int64` element divides by zero without
+  raising, the compiled Python-float code would raise `ZeroDivisionError`. `array.array` elements
+  are Python floats and ints, so no such rule applies.
+* The accumulator of a numpy loop needs an annotation (`s: float = 0.0`): Pyrefly types `s += x[i]`
+  with the numpy scalar type, which the front end does not know.
+* Known, documented difference: a scalar read from a numpy buffer and returned is a Python `float` /
+  `int`, where the interpreter returns `np.float64` / `np.int64`. Integer arithmetic that overflows
+  i64 deopts to the interpreter in a pure function, which then wraps as numpy does.
+* OPEN POINT (decision pending in #149), deliberately not decided here and not tested: holding the
+  export makes another thread's `append` / `resize` / `extend` on the same `array.array` raise
+  `BufferError` for the duration of the call; what a concurrent resize should observe instead is not
+  settled. for an ndarray the export keeps the array object (and so its memory) alive; whether numpy's
+  own resize is refused during an export was not examined.
+* Free-threaded: no critical section; every element access is an atomic, so a concurrent writer of the
+  same element yields one whole value, never a torn one. A function holding a buffer does not poll the
+  eval breaker (same liveness note as lists, #152).
+
 ## Opaque objects (Kotlin interop and any Python object; ir.Global/GetAttr/CallObject/Truth/CompareObj/ObjToFloat)
 All return new references or NULL with CPython's exception set; none deopts.
     PyObject *tp_global(PyObject *module_dict, PyObject *name);   /* globals, then builtins; NameError("name 'x' is not defined") */
@@ -269,6 +317,8 @@ static or module-state field must be added here):
 | `tp_name_strings`, `tp_fields_*`, `tp_class_names`, `tp_source*`, `tp_methods`, `tp_slots`, `tp_moduledef` | generated statics | immutable | never written after import |
 | `__typedpython_interpreted__` | module dict entry | immutable after init | the dict is filled by `tp_exec` only; read with `PyDict_GetItemRef` |
 | `__typedpython_deopts__` | module dict entry | critical section | the read-add-write of `tp_cg_redo` runs in `Py_BEGIN_CRITICAL_SECTION(module dict)`: concurrent deopts lose no count |
+| `buf_types` (array.array, numpy.ndarray) | module state | immutable after init | written by `tp_exec` (and `tp_clear`); read-only type pointers compared by identity |
+| buffer arguments of array parameters | caller's array.array / ndarray memory | atomic | relaxed 8-byte `__atomic_load_n` / `__atomic_store_n` per element; the Py_buffer export is held for the call (open point on concurrent resize, #149) |
 | list arguments of array parameters | caller's lists | critical section | `tp_cs_begin` before the copy-in, `tp_cs_end` after the write-back, on every path |
 | module globals (class names, entry globals) | module dict | strong reads | `tp_global` and `tp_class_global_ok` use `PyDict_GetItemRef` |
 | a compiled class's instances | other threads' objects | CPython | `PyMember_GetOne` / `SetOne` are what the interpreter's member descriptors call (they take the object's lock on free-threaded builds); `tp_new_fixed` writes only its own fresh object |

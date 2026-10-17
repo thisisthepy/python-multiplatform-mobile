@@ -45,6 +45,11 @@ Rules (the `rule` of a Diagnostic):
   verify/redo                 `Call.redo` where it is not legal (see below)
   verify/entry-global-open    a function with entry_globals is not closed
   verify/array-open           a function with an ArrayParam runs user code (#203)
+  verify/buffer               a malformed `ArrayParam.buffer`, a CopyArray of a buffer array, or, in a function with a "numpy"
+                              buffer array, a `/`, `//` or `%` whose divisor is not a nonzero Const
+                              (and any F64 `//` or `%`): an np.float64 / np.int64 element divides
+                              by zero without raising, so the compiled Python-float code would
+                              differ (#149)
   verify/class                a class named by FieldGet/FieldSet/New/IsExact/CheckExact/Param.cls is not
                               a (valid) ClassDecl of the module, a field is not one of its fields, a
                               New names a class without trivial_init or has the wrong arity, or a
@@ -230,6 +235,7 @@ PROVEN = "verify/proven-overflow"
 REDO = "verify/redo"
 ENTRY_OPEN = "verify/entry-global-open"
 ARRAY_OPEN = "verify/array-open"
+BUFFER = "verify/buffer"
 CLASS = "verify/class"
 FIELD = "verify/field-unproved"
 
@@ -265,6 +271,7 @@ _I64_MIN, _I64_MAX = -2 ** 63, 2 ** 63 - 1
 _FULL = (_I64_MIN, _I64_MAX)
 _LEN_MAX = 2 ** 62
 _PROVABLE_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL})
+_DIVISIONS = frozenset({BinOpKind.TRUEDIV, BinOpKind.FLOORDIV, BinOpKind.MOD})
 _POW2_OPS = frozenset({BinOpKind.FLOORDIV, BinOpKind.MOD})   # `proven` means shift / mask
 _NEGATE = {CompareKind.EQ: CompareKind.NE, CompareKind.NE: CompareKind.EQ,
            CompareKind.LT: CompareKind.GE, CompareKind.GE: CompareKind.LT,
@@ -328,6 +335,8 @@ class _Checker:
         self.loops: list[_Loop] = []
         self.scalars: dict[str, Type] = {}   # name -> type of every scalar/OBJ variable
         self.arrays: dict[str, Type] = {}    # name -> array type of every ArrayParam
+        self.numpy = False                   # some ArrayParam is a numpy buffer (#149)
+        self.buffers: set[str] = set()       # names of every buffer ArrayParam
         self.larrays: dict[str, Type] = {}   # name -> array type of every local array
         self.assigns: dict[str, int] = {}    # local array -> number of Assign statements to it
         self.lens: dict[str, tuple[int, int]] = {}   # single-assignment local array -> length
@@ -351,8 +360,13 @@ class _Checker:
                     self.error(TYPE, f"array parameter '{p.name}' has non-array type {p.type}")
                 elif not isinstance(p.stored, bool):
                     self.error(TYPE, f"array parameter '{p.name}' has a non-bool `stored`")
+                elif p.buffer not in (None, "array", "numpy"):
+                    self.error(BUFFER, f"array parameter '{p.name}' has buffer kind {p.buffer!r}")
                 else:
                     self.arrays[p.name] = p.type
+                    self.numpy = self.numpy or p.buffer == "numpy"
+                    if p.buffer:
+                        self.buffers.add(p.name)
             elif type(p) is Param:
                 if p.type not in _VALUE_TYPES:
                     self.error(TYPE, f"parameter '{p.name}' has type {p.type}; arrays must be "
@@ -366,7 +380,7 @@ class _Checker:
             if p.name in params:
                 self.error(STRUCTURE, f"parameter '{p.name}' appears twice")
             params.add(p.name)
-        if sum(type(p) is ArrayParam for p in fn.params) > 2:
+        if sum(type(p) is ArrayParam and p.buffer is None for p in fn.params) > 2:
             self.error(STRUCTURE, "more than two array parameters: compiled code holds each list's "
                                   "critical section from copy-in to write-back, and free-threaded "
                                   "CPython has no section for more than two objects (#159)")
@@ -721,6 +735,14 @@ class _Checker:
                                  f"{e.type.value}")
             if lt is Type.I64 and e.op in _I64_DEOPT_OPS and not proven:
                 self.can_deopt = True
+            if self.numpy and lt in (Type.I64, Type.F64) and e.op in _DIVISIONS:
+                nonzero = (type(right) is Const and type(right.value) in (int, float)
+                           and right.value != 0)
+                if not nonzero or (lt is Type.F64 and e.op is not BinOpKind.TRUEDIV):
+                    self.error(BUFFER, f"{lt.value} {e.op.value} in a function with a numpy buffer "
+                                       "array: an np.float64 / np.int64 element divides by zero "
+                                       "without raising, so only `/`, `//`, `%` by a nonzero "
+                                       "Const (`/` for floats) are compiled")
             if lt is Type.OBJ:
                 self.effects.append(f"OBJ {e.op.value} (runs user methods)")
                 self.opens.append(f"OBJ {e.op.value} (runs user methods)")
@@ -1106,6 +1128,9 @@ class _Checker:
             src = self.arrays.get(e.src) or self.larrays.get(e.src)
             if not isinstance(e.src, str) or src is None:
                 self.error(ARRAY_USE, f"CopyArray of '{e.src}', which is not an array")
+            elif e.src in self.buffers:
+                self.error(BUFFER, f"CopyArray of buffer array '{e.src}': a buffer array is never "
+                                   "copied (a numpy slice is a view)")
             else:
                 self.array(e.src, "copy", state)
                 if src is not e.type:
