@@ -151,15 +151,29 @@ class Agent:
         self.server.bind((LOOPBACK, port))
         self.server.listen()
         self.port = self.server.getsockname()[1]
-        threading.Thread(target=self._accept, name="python-multiplatform-devagent", daemon=True).start()
+        self.accept_thread = threading.Thread(target=self._accept, name="python-multiplatform-devagent", daemon=True)
+        self.accept_thread.start()
 
     def stop(self):
+        """Stop listening and close every connection; the port is free when this returns."""
+        # On Linux, close() alone leaves a socket that another thread is blocked accepting on in LISTEN, so the
+        # port stays taken (a restarted agent's bind failed with EADDRINUSE there). shutdown() wakes accept().
+        # macOS refuses shutdown() on a listening socket (ENOTCONN), and there close() is enough.
+        try:
+            self.server.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         try:
             self.server.close()
         except OSError:
             pass
-        for connection in list(self.connections):
+        connections = list(self.connections)
+        for connection in connections:
             connection.shutdown()
+        current = threading.current_thread()
+        for thread in [self.accept_thread] + [c.thread for c in connections]:
+            if thread is not None and thread is not current:
+                thread.join(timeout=5)
 
     def _accept(self):
         while True:
@@ -169,11 +183,13 @@ class Agent:
                 return
             connection = _Connection(self, sock)
             self.connections.append(connection)
-            threading.Thread(target=connection.serve, name="python-multiplatform-devagent-client", daemon=True).start()
+            connection.thread = threading.Thread(target=connection.serve, name="python-multiplatform-devagent-client", daemon=True)
+            connection.thread.start()
 
 
 class _Connection:
     def __init__(self, agent, sock):
+        self.thread = None
         self.agent = agent
         self.sock = sock
         self.reader = sock.makefile("r", encoding="utf-8")
@@ -298,9 +314,7 @@ class _Connection:
         written = []
         try:
             for relative, text in (message.get("files") or {}).items():
-                normal = os.path.normpath(relative)
-                if os.path.isabs(relative) or normal.startswith("..") or normal == "." or not normal.endswith(".py"):
-                    raise ValueError(f"{relative!r} is not a .py path inside the overlay")
+                normal = self._overlay_path(relative)
                 target = os.path.join(overlay, normal)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 with open(target, "w", encoding="utf-8") as f:
@@ -326,6 +340,29 @@ class _Connection:
                 return
             reloaded.append(name)
         self._done(request_id, written=written, reloaded=reloaded)
+
+    def _overlay_path(self, relative):
+        """A pushed path, checked by the protocol's own rule rather than os.path's, as an OS path in the overlay.
+
+        os.path differs per platform: on Windows `isabs("/x")` is False (Python 3.13+) and joining such a path to
+        the overlay lands on the drive root. So a path must be `/`-separated and relative, with no backslash, no
+        drive colon, and no empty, `.` or `..` segment, and must still resolve inside the overlay.
+        """
+        segments = relative.split("/") if isinstance(relative, str) else []
+        if (
+            not segments
+            or "\\" in relative
+            or ":" in relative
+            or any(segment in ("", ".", "..") for segment in segments)
+            or not segments[-1].endswith(".py")
+        ):
+            raise ValueError(f"{relative!r} is not a relative /-separated .py path inside the overlay")
+        normal = os.path.join(*segments)
+        overlay = os.path.realpath(self.agent.overlay)
+        target = os.path.realpath(os.path.join(overlay, normal))
+        if os.path.commonpath([overlay, target]) != overlay:
+            raise ValueError(f"{relative!r} resolves outside the overlay")
+        return normal
 
     @staticmethod
     def _module_name(path):
