@@ -482,7 +482,7 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `DeclarationModel` either: it is not part of the library's surface. The rule is a blacklist (decision 12.7
   in `AGENTS.md`): everything else that is public stays bound; it is not a list of what to expose. A segment
   must equal `internal` exactly (`internals` and `internal_api` are ordinary packages).
-  `Status: planned`, `GP/artifact/InternalPackageExclusionTest.kt`.
+  `Status: implemented`, `GP/artifact/InternalPackageExclusionTest.kt`.
 
 ## 7. Threading and builds
 
