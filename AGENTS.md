@@ -22,7 +22,7 @@ files, lives **inside this repository's root directory.**
 | Worktrees | `.worktrees/<name>` (git-ignored) |
 | Temporary files | `.tmp/` (git-ignored); delete when done |
 | Benchmarks | `benchmarks/` |
-| Developer tooling | `tools/` |
+| Developer tooling | `.github/scripts/` (CI-only), or beside the module it serves |
 
 Before writing a file, check that its absolute path starts with this repository's root. If it does
 not, stop. The only exceptions are a path the user names explicitly, and caches that build tools
@@ -70,7 +70,7 @@ landed or reported, not left. Branches named `release-*` are preserved snapshots
 
 `main` carries a reduced layout: of the Markdown files, only `README.md` stays at the repository
 root, and `docs/` keeps only its subdirectories (no Markdown files directly under `docs/`).
-CI runs `tools/release/sync-release.sh` (`.github/workflows/release-sync.yml`) to produce that layout; do not hand-edit `release` or `main`.
+CI runs `.github/scripts/release/sync-release.sh` (`.github/workflows/release-sync.yml`) to produce that layout; do not hand-edit `release` or `main`.
 
 ### Issues and pull requests
 
@@ -184,9 +184,8 @@ interoperability in both directions:
 | `python-multiplatform/` | The library: FFI layer, object model, upcall runtime |
 | `python-multiplatform-ksp/` | KSP processor that generates the upcall table from Kotlin sources |
 | `python-multiplatform-gradle-plugin/` | Gradle plugin: `PYTHONHOME` staging, artifact walker (binds prebuilt jars/klibs), `.pyi` stub generation |
-| `ksp-fixtures/` | Consumer modules that exercise what the generators produce |
+| `<module>/fixtures/` | Consumer modules that exercise what the generators produce, each inside the module whose output it checks (`python-multiplatform-ksp`, `python-multiplatform-gradle-plugin`, `python-multiplatform-compose`) |
 | `sample/` | Compose Multiplatform demo app (desktop, Android, iOS, wasmJs, GraalVM native image) |
-| `binary/` | Source archives of per-platform CPython distributions |
 | `python_for_kotlin_binding.mermaid` | User-authored sketch of the object model (see rule 14) |
 | `docs/INTENT.md`, `docs/SPEC.md` | Intent and behavioural contract (rule 5) |
 | `docs/design/`, `docs/platforms/`, `docs/investigations/`, `docs/roadmap/` | Current design records (one per topic), platform notes, investigation conclusions, the work left to do |
@@ -296,16 +295,22 @@ Rule 5 applies. In addition:
 checking only iOS lets androidNative break unnoticed (an `actual` placed only in `iosMain` once did,
 for days).
 
-### The generator consumers: `ksp-fixtures`
+### The generator consumers: `<module>/fixtures`
 
 `:python-multiplatform-gradle-plugin:test` alone does not verify the code that **uses** what the
 generators emit. Run each fixture module as a **separate** Gradle invocation (rule 8):
 
 | Task | Catches |
 |---|---|
-| `:ksp-fixtures:app:desktopTest` | Upcall and proxy runtime |
-| `:ksp-fixtures:compose:desktopTest` | Compose bindings and render proofs |
-| `:ksp-fixtures:artifact:desktopTest` | Artifact walker and `.pyi` stubs |
+| `:python-multiplatform-ksp:fixtures:app:desktopTest` | Upcall and proxy runtime |
+| `:python-multiplatform-compose:fixtures:compose:desktopTest` | Compose bindings and render proofs |
+| `:python-multiplatform-gradle-plugin-fixtures:artifact:desktopTest` | Artifact walker and `.pyi` stubs |
+
+Where each lives: `python-multiplatform-ksp/fixtures/{library,app,android}` (KSP processor),
+`python-multiplatform-gradle-plugin/fixtures/{artifact,artifact-valueclass,klib-artifact}` (artifact
+walker; the plugin is an included build, so their Gradle path is
+`:python-multiplatform-gradle-plugin-fixtures:<name>`) and
+`python-multiplatform-compose/fixtures/{compose,notebook-e2e}` (Compose host).
 
 Forgetting `artifact` has put red tests on `develop` twice; plugin unit tests cannot see them.
 Running the three in one invocation once hid 24 failures caused by an ordering dependency.

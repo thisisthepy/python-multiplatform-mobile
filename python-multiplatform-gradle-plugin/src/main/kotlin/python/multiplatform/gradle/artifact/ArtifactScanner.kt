@@ -196,9 +196,16 @@ internal object ArtifactScanner {
      *   test fixtures, false for `androidx.compose.foundation.layout`, whose `Dp` lives in
      *   `androidx.compose.ui.unit`. [PythonArtifactBindingsTask] passes the whole resolved
      *   configuration.
+     * @param excludePackages packages to leave out, on top of every `internal` package (SPEC B-11):
+     *   an entry covers the package it names and the ones below it.
      */
-    fun scanJar(target: File, includePrefixes: List<String> = emptyList(), classpath: List<File> = listOf(target)): List<ArtifactCallable> =
-        scan(target, includePrefixes, classpath).mapNotNull { it.callable }.sortedBy { it.name }
+    fun scanJar(
+        target: File,
+        includePrefixes: List<String> = emptyList(),
+        classpath: List<File> = listOf(target),
+        excludePackages: List<String> = emptyList(),
+    ): List<ArtifactCallable> =
+        scan(target, includePrefixes, classpath, excludePackages).mapNotNull { it.callable }.sortedBy { it.name }
 
     /**
      * The same walk, with the half `docs/design/pyi-generation-design.md` §2.2 asks for kept: one
@@ -214,11 +221,17 @@ internal object ArtifactScanner {
         target: File,
         includePrefixes: List<String> = emptyList(),
         classpath: List<File> = listOf(target),
-    ): List<DeclarationModel> = scan(target, includePrefixes, classpath)
+        excludePackages: List<String> = emptyList(),
+    ): List<DeclarationModel> = scan(target, includePrefixes, classpath, excludePackages)
         .map { it.declaration }
         .sortedWith(compareBy({ it.owner }, { it.simpleName }, { it.bindingName ?: "" }))
 
-    private fun scan(target: File, includePrefixes: List<String>, classpath: List<File>): List<Candidate> {
+    private fun scan(
+        target: File,
+        includePrefixes: List<String>,
+        classpath: List<File>,
+        excludePackages: List<String>,
+    ): List<Candidate> {
         val artifactClasspath = ArtifactClasspath(classpath)
         val entries = mutableListOf<Candidate>()
         forEachClassEntry(target) { relativePath, bytes ->
@@ -228,6 +241,7 @@ internal object ArtifactScanner {
             if ('$' in relativePath) return@forEachClassEntry
             val qualified = binaryNameToQualified(relativePath.removeSuffix(".class"))
             if (!matchesInclude(qualified, includePrefixes)) return@forEachClassEntry
+            if (isExcludedPackage(packageNameOf(relativePath.removeSuffix(".class")), excludePackages)) return@forEachClassEntry
             val node = readClassNodeOrNull(bytes) ?: return@forEachClassEntry
             entries += scanClassNode(node, artifactClasspath)
         }
@@ -379,6 +393,15 @@ internal object ArtifactScanner {
 
     private fun packageNameOf(binaryName: String): String =
         binaryNameToQualified(binaryName.substringBeforeLast('/', missingDelimiterValue = ""))
+
+    /**
+     * SPEC B-11: a package is out when one of its segments is exactly `internal` (`*.internal`,
+     * `*.internal.*`, the Kotlin `.api` dump convention) or when it equals, or lies below, an
+     * `excludePackages` entry (the KSP side's namespace rule). Shared with [KlibScanner].
+     */
+    internal fun isExcludedPackage(packageName: String, excludePackages: List<String>): Boolean =
+        packageName.split('.').any { it == "internal" } ||
+            excludePackages.any { packageName == it || packageName.startsWith("$it.") }
 
     /** A namespace match, not a text one: `junit.run` is a prefix of the string `junit.runner` and
      * of no package or class. */
@@ -1642,7 +1665,7 @@ internal object ArtifactScanner {
      *   *different* limit from the one this method opens, which is why it is named rather than left
      *   to fail as a compile error in somebody's generated fragment.
      * - **`@Composable`, inside a declaration that is not.** `Modifier.composed(factory:)` is the
-     *   case. The fragment is compiled without the Compose plugin (`:ksp-fixtures:artifact`'s
+     *   case. The fragment is compiled without the Compose plugin (`:python-multiplatform-gradle-plugin-fixtures:artifact`'s
      *   `build.gradle.kts` says so, and it is the whole shape of that fixture's claim), so
      *   `@Composable Modifier.() -> Modifier` written there is an ordinary `Function1` while the slot
      *   is a lowered `Function3`. **This one does not fail as a compile error**, which is why it is

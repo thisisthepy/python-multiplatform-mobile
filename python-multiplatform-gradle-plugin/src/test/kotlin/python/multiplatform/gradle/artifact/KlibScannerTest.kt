@@ -130,7 +130,7 @@ class KlibScannerTest {
      * test pinned one -- `checkIndexOverflow`, `kotlinx.coroutines.flow.internal`'s bounds check -- as
      * bound. It was wrong: `checkIndexOverflow` is `@PublishedApi internal`, binary-visible so an
      * inline call site elsewhere in the *same* library can resolve it, but not source-visible outside
-     * that module. `KlibScanWorkAction`'s KDoc records how this was found -- `:ksp-fixtures
+     * that module. `KlibScanWorkAction`'s KDoc records how this was found -- `:python-multiplatform-gradle-plugin-fixtures
      * :klib-artifact:compileKotlinAndroidNativeArm64` failing to compile the generated fragment with
      * "it is internal in file", the first time this walker's output was ever actually compiled rather
      * than only unit-tested. `KlibScanner`'s `PUBLISHED_API` constant has the rest. Every other candidate in
@@ -151,12 +151,12 @@ class KlibScannerTest {
     @Test
     fun aPublishedApiInternalDeclarationIsDeclinedWithItsOwnReason() {
         val declarations = KlibScanner.scanKlibDeclarations(coroutinesKlib, includePrefixes = emptyList())
-        val checkIndexOverflow = declarations.single { it.simpleName == "checkIndexOverflow" }
-        assertEquals(null, checkIndexOverflow.bindingName)
-        assertTrue(
-            checkIndexOverflow.declineReason?.contains("PublishedApi") == true,
-            "expected a @PublishedApi decline reason, got ${checkIndexOverflow.declineReason}",
-        )
+        // checkIndexOverflow lives in kotlinx.coroutines.internal, which B-11 (#192) skips outright:
+        // it gets no model at all, so the @PublishedApi reason is checked on declarations elsewhere.
+        assertTrue(declarations.none { it.simpleName == "checkIndexOverflow" })
+        val publishedApi = declarations.filter { it.declineReason?.contains("PublishedApi") == true }
+        assertTrue(publishedApi.isNotEmpty(), "expected a @PublishedApi decline outside internal packages")
+        assertTrue(publishedApi.all { it.bindingName == null })
     }
 
     /**

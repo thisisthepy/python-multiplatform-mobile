@@ -536,9 +536,9 @@ class ArrayParam:
     At entry (guards, before any effect): the argument is exactly a `list`, every element is exactly
     `float` (F64_ARRAY) or exactly `int` within i64 (I64_ARRAY), and no two array parameters are
     the same list object (aliasing would make separate copies diverge). Then the elements are copied
-    into a C array. The function body only indexes, stores into and takes `len` of it (no calls that
-    could observe the list, no appends: the front end checks), so the list and the array cannot
-    diverge observably. On **every** exit, return, exception, or deopt, dirty elements are
+    into a C array. The function body only indexes, stores into and takes `len` of it, no appends, and
+    runs no user code at all: the verifier rejects a function holding an array that is not closed
+    (`verify/array-open`, #203), so the list and the array cannot diverge observably. On **every** exit, return, exception, or deopt, dirty elements are
     written back as new float/int objects before control leaves the function, so CPython's
     partial-update-then-raise behaviour is preserved, and a deopt redo starts from the same list
     state the interpreted function would see... which is only correct because a function with array
