@@ -51,6 +51,29 @@ jobs:
         # Using --console=plain so logs are readable in GitHub Actions
         run: ./gradlew :python-multiplatform:desktopTest --console=plain
 
+  # The dev agent's protocol on the other desktop OSes (#238). Its socket options differ per platform
+  # (SO_EXCLUSIVEADDRUSE on Windows, SO_REUSEADDR on POSIX), and the port-takeover and restart tests are
+  # what check them. Stdlib only: no JDK, no Gradle.
+  dev-agent:
+    name: Dev agent protocol (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Dev agent protocol tests
+        working-directory: python-multiplatform/src/test/python
+        run: python -m unittest -v test_devagent
+
   # pythonx-compose's UI.ipynb, end to end (#26, #213): the installed pythonx-compose wheel drives a
   # real desktop Compose host, pixel-compared with the same composables drawn from Kotlin. Its own
   # job and Gradle invocation, so it neither hides nor is hidden by the module tests above.
