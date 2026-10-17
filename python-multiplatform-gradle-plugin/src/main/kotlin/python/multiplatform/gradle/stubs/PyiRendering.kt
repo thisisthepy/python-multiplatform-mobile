@@ -369,6 +369,21 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
      * (a module and a class cannot share the name, which is why this used to fall back to `Any`).
      * The object's own type (`Alignment`) has no such home and stays unresolved here.
      */
+    /**
+     * Where [ref]'s class is declared in its module's stub: its own path, or -- when a function of the
+     * module takes its top name (Kotlin's factory idiom, `Job` and `fun Job()`, issue #217) -- the same
+     * path under the stub-private name `_<Top>`. The function keeps the name, as at run time, and the
+     * type keeps a class every use of it can name; nothing at run time is called `_<Top>`. `null` when
+     * even that name is taken.
+     */
+    private fun stubPathOf(ref: ClassRef): List<String>? {
+        val taken = takenNames[ref.pkg].orEmpty()
+        if (ref.top !in taken) return ref.path
+        val private = "_" + ref.top
+        if (private in taken) return null
+        return listOf(private) + ref.path.drop(1)
+    }
+
     private fun resolveRef(qualifiedName: String): ClassRef? {
         val ref = classRefOf(qualifiedName) ?: return null
         val objectModule = "${ref.pkg}.${ref.top}"
@@ -378,9 +393,10 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
 
     private fun classReference(qualifiedName: String, valueClass: ValueClassModel?, ctx: ModuleOut): String {
         val ref = resolveRef(qualifiedName) ?: return ANY
-        if (ref.top in takenNames[ref.pkg].orEmpty() || "${ref.pkg}.${ref.top}" in moduleNames) return ANY
+        if ("${ref.pkg}.${ref.top}" in moduleNames) return ANY
+        val stubPath = stubPathOf(ref) ?: return ANY
         if (qualifiedName !in classes || classes[qualifiedName] == null) classes[qualifiedName] = valueClass ?: classes[qualifiedName]
-        val path = ref.path.joinToString(".")
+        val path = stubPath.joinToString(".")
         if (ref.pkg == ctx.module) return path
         ctx.imports += ref.pkg
         return "${ref.pkg}.$path"
@@ -660,14 +676,21 @@ private class StubRenderer(declarations: List<DeclarationModel>) {
     private fun renderClass(qualifiedName: String) {
         val ref = resolveRef(qualifiedName) ?: return
         val ctx = out(ref.pkg)
-        val node = ctx.node(ref.path)
+        val stubPath = stubPathOf(ref) ?: return
+        val node = ctx.node(stubPath)
         node.qualifiedName = qualifiedName
         val valueClass = classes[qualifiedName]
+        // A class under its stub-private name (issue #217) says so, and why, whatever else it says.
+        val privateNote = if (stubPath.first() != ref.top) {
+            " (stubbed as ${stubPath.joinToString(".")}: '${ref.top}' is the function of that name in its module)"
+        } else {
+            ""
+        }
         node.doc = if (valueClass != null) {
-            "Kotlin value class $qualifiedName over ${valueClass.underlying.qualifiedName}. As a parameter the raw " +
+            "Kotlin value class $qualifiedName$privateNote over ${valueClass.underlying.qualifiedName}. As a parameter the raw " +
                 "primitive is also accepted (the binding layer's allowlist decides, at run time); a result is the raw primitive."
         } else {
-            "Kotlin: $qualifiedName"
+            "Kotlin: $qualifiedName$privateNote"
         }
         stubBasesOf(qualifiedName, ctx).takeIf { it.isNotEmpty() }?.let { node.bases = it.joinToString(", ") }
 
