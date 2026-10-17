@@ -42,6 +42,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-konan-
 
+      # The dev agent's protocol (SPEC L-12, #233): stdlib-only, so the runner's own python3 runs it.
+      - name: Dev agent protocol tests
+        working-directory: python-multiplatform/src/test/python
+        run: python3 -m unittest -v test_devagent
+
       - name: Run Desktop Tests
         # Using --console=plain so logs are readable in GitHub Actions
         run: ./gradlew :python-multiplatform:desktopTest --console=plain
