@@ -67,4 +67,18 @@ class WalkedArtifactMemberFunctionTest {
             """.trimIndent(),
         )
     }
+
+    /** Issue #217: at run time the factory owns the name, and the value it makes keeps its members. */
+    @Test
+    fun aValueOfATypeWhoseNameAFactoryTakesKeepsItsMembers() {
+        Python3.exec(
+            """
+            from fixture.valueclass.member import Gauge
+            _mf_g = Gauge()
+            assert _mf_g.level == 0, repr(_mf_g.level)
+            _mf_g.bump()
+            assert _mf_g.level == 1, 'the member did not run on the value the factory made'
+            """.trimIndent(),
+        )
+    }
 }

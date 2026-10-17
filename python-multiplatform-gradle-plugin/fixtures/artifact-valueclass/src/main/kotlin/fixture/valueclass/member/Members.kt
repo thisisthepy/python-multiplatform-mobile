@@ -32,3 +32,18 @@ fun newSwitch(): Switch = object : Switch {
         on = false
     }
 }
+
+/** Kotlin's factory idiom (`kotlinx.coroutines.Job` and `fun Job()`): an interface and a function of one name (issue #217). */
+interface Gauge {
+    val level: Int
+
+    fun bump()
+}
+
+fun Gauge(): Gauge = object : Gauge {
+    override var level: Int = 0
+
+    override fun bump() {
+        level += 1
+    }
+}
