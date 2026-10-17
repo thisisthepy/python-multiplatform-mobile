@@ -471,8 +471,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   README with the cell map, the wheel commands and the gaps), 20 passed, 0 failed against the
   pythonx-compose `develop` wheel on 2026-10-04 (after #146, #168 and pythonx-compose #88), and again
   with the notebook's own state spelling (`main.App.messages.getValue()` / `setValue(...)`, #174)
-  against pythonx-compose f6dd3e2. No CI
-  workflow runs the module yet.
+  against pythonx-compose f6dd3e2. CI runs it on every push to `develop`
+  (`desktop.yml`, job `notebook-e2e`, #213), against a wheel built from pythonx-compose `develop`.
 - **B-11** (#192) The artifact walker skips every declaration whose package has an `internal` segment
   (`*.internal` and `*.internal.*`, as in `androidx.compose.ui.internal`), on jars and on klibs. That is the
   Kotlin `.api` dump convention: a library that puts a declaration in such a package has declared it
