@@ -91,10 +91,13 @@ class StubSignatureAgreesWithRuntimeTest {
                     # a value class bound as its primitive: the raw number crosses (`Dp | float`, or `float`
                     # where the class name is taken by a function in its module)
                     return TAG[tag] in parts
-                # an object: the stub class named by its FQN (or bare inside its own module), or `Any`
-                # where a function in its module owns the name -- never an `int` handle
+                # an object: the stub class named by its FQN (or bare inside its own module), or -- where a
+                # function in its module owns the name -- its stub-private class `_Name` (issue #217), or
+                # `Any`; never an `int` handle
                 simple = runtime.rsplit('.', 1)[-1]
-                return parts[0].endswith('Any') or runtime in stub or parts[0] == simple
+                private = '_' + simple
+                return (parts[0].endswith('Any') or runtime in stub or parts[0] == simple or
+                        parts[0] == private or parts[0].endswith('.' + private))
 
             def stub_parameters(fn):
                 a = fn.args
