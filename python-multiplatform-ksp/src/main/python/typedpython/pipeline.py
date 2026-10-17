@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 
-from typedpython import cbuild, cgen, frontend, gate, incremental, ir, verify
+from typedpython import cbuild, cgen, cost, frontend, gate, incremental, ir, verify
 
 
 class CompileError(RuntimeError):
@@ -54,15 +54,20 @@ def compile_module(
     ext_suffix: str | None = None,
     runtime_dir: Path | None = None,
     project_root: Path | None = None,
+    cost_rule: bool = True,
 ) -> Result:
     """`project_root`: the root the embedded source path is relative to (#112); default: the source's
-    own directory, so the file name alone is embedded."""
+    own directory, so the file name alone is embedded. `cost_rule=False` skips the cost policy
+    (`cost.py`) and compiles object-only functions too; it exists for tests of the object operations
+    and is never set by a user-facing path."""
     path = Path(path).resolve()
     root = path.parent if project_root is None else Path(project_root).resolve()
     _gate_or_raise(path)
 
     lowered = frontend.lower(path)
     proved, diagnostics = verify.verify(lowered)
+    if cost_rule:
+        proved, diagnostics = cost.apply(proved, diagnostics)   # policy after proof, see cost.py
     skipped = dict(proved.skipped)
     if not proved.functions:
         return Result(path, proved, None, skipped, diagnostics)
@@ -168,6 +173,7 @@ def compile_project(
     python_include: Path | None = None,
     ext_suffix: str | None = None,
     runtime_dir: Path | None = None,
+    cost_rule: bool = True,
 ) -> ProjectResult:
     sources = [Path(s).resolve() for s in sources]
     cache_dir = Path(cache_dir)
@@ -178,6 +184,8 @@ def compile_project(
     def lower(path: Path) -> ir.Module:
         _gate_or_raise(path)
         proved, diagnostics = verify.verify(frontend.lower(path))
+        if cost_rule:
+            proved, diagnostics = cost.apply(proved, diagnostics)
         verified_module_skipped[path] = dict(proved.skipped)
         verified[path] = skipped_items(proved.skipped, diagnostics, _relative(path, root))         # the VERIFIED module: its signatures are what gets compiled
         return proved
@@ -196,6 +204,8 @@ def compile_project(
     version = COMPILER_VERSION
     if runtime_dir is not None:
         version += ":" + _tree_hash(Path(runtime_dir))
+    if not cost_rule:
+        version += ":nocost"
     suffix = ext_suffix if ext_suffix is not None else sysconfig.get_config_var("EXT_SUFFIX")
     include = cbuild._python_include(python_include)
     flags = [*cbuild.DEFAULT_FLAGS, f"-I{include}"]

@@ -161,7 +161,7 @@ def built(tmp_path_factory):
     d = tmp_path_factory.mktemp("ft")
     path = d / "ftmod.py"
     path.write_text(SOURCE)
-    result = pipeline.compile_module(path, d / "out")
+    result = pipeline.compile_module(path, d / "out", cost_rule=False)  # object-only setters: the cost policy would skip them (#150)
     assert result.extension is not None, result.skipped
     compiled = {f.name for f in result.module.functions}
     wanted = {"geta", "seta", "mk", "total", "fill", "edge", "fill_int", "edge_int", "rotate", "zero2",
