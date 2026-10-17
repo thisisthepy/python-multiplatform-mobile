@@ -147,16 +147,18 @@ fail, then implement.
   `SO_REUSEADDR` only so that a restarted app can rebind the launcher's port past TIME_WAIT. A connection's first
   message must be `hello` with the token. Then, one JSON object per line: `execute` runs code in `__main__`'s
   persistent namespace, streams stdout and stderr, returns the last expression's value and reports errors with
-  their traceback; `complete` completes from that namespace; `push` writes `.py` files into a writable overlay
-  first on `sys.path` and re-imports the loaded ones, children first, through `typedpython.importgate` when the
+  their traceback; `complete` completes from that namespace; `push` writes `.py` files (relative `/`-separated paths with no
+  `.`, `..`, backslash or drive, resolving inside the overlay, on every OS) into a writable overlay first on `sys.path` and re-imports the loaded ones, children first, through `typedpython.importgate` when the
   app has it (N-7b), keeping the old module when a re-import is refused or fails. A malformed request is printed
   and does not stop the app. `Status: partial`: desktop
   (`PM/desktopTest/.../env/PythonDevAgentTest.kt`: the embedded agent answers over loopback; a child JVM with the
   marker and the variable has an agent on that port, one without the variable has none, one without the marker
   (a release build) opens no port with the variable set, and a short token opens no port; the protocol, token
   length, port takeover and restart: `python-multiplatform/src/test/python/test_devagent.py`, CI `Dev agent
-  protocol tests`, macOS only so far); nothing sets the variable or stages the marker on Android or iOS yet
-  (toolchain's M2, M3); no interrupt; `execute` runs on the agent's thread (no main-thread dispatch yet).
+  protocol tests` on macOS and the `dev-agent` job on ubuntu and windows (#238; with `SO_EXCLUSIVEADDRUSE`
+  removed, the Windows takeover test fails, checked once); toolchain stages the marker for `enableHotReload`
+  builds and passes the variable to the desktop run tasks (toolchain#105), but nothing sets the variable on
+  Android or iOS yet (toolchain's M2, M3); no interrupt; `execute` runs on the agent's thread (no main-thread dispatch yet).
 
 ## 2. Low-level C API (downcall surface)
 
