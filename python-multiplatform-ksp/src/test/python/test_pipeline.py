@@ -100,3 +100,38 @@ def test_demo_reports_identical_output(write, tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "identical output" in result.stdout and "249750.000" in result.stdout
     assert "compiled functions: total" in result.stdout
+
+
+ARRAY_CALLBACK = """\
+# typedpython: compiled
+from typing import Callable
+
+
+def first_after(xs: list[float], cb: Callable[[], None]) -> float:
+    cb()
+    return xs[0]
+
+
+def fill_then(xs: list[float], cb: Callable[[], None]) -> None:
+    xs[1] = 5.0
+    cb()
+"""
+
+
+def test_array_function_with_a_callback_matches_cpython(write, tmp_path):
+    # #203: the callback changes the list; a copy-in would read or write back stale values
+    path = write("arrcb.py", ARRAY_CALLBACK)
+    result = pipeline.compile_module(path, tmp_path / "out")
+    assert "first_after" in result.skipped and "fill_then" in result.skipped, result.skipped
+    compiled, ref = pipeline.load(result), interpreted(path)
+    for mod in (compiled, ref):
+        xs = [1.0, 2.0, 3.0]
+        def cb():
+            xs[0] = 100.0
+            xs[1] = 7.0
+        assert mod.first_after(xs, cb) == 100.0
+        ys = [1.0, 2.0, 3.0]
+        def cb2():
+            ys[1] = 9.0
+        mod.fill_then(ys, cb2)
+        assert ys == [1.0, 9.0, 3.0]

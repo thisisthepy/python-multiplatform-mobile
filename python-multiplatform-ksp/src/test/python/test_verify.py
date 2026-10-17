@@ -843,14 +843,16 @@ def test_range_up_to_a_param_bounds_the_var_by_the_param_range():
 
 
 def test_len_bound_is_zero_to_two_to_the_62():
-    a = [ArrayParam("a", F64A, stored=False)]
+    # impure through a store into the array itself (an array function may not call user code, #203)
+    a = [ArrayParam("a", F64A, stored=True)]
     L = Len(I64, "a")
-    assert_accepted(fn(params=a, returns=I64, body=[IMPURE, Return(padd(L, i(2 ** 62 - 1)))]))
+    W = If(Compare(BOOL, CompareKind.GT, L, i(0)), (StoreIndex("a", i(0), f(0.0)),))
+    assert_accepted(fn(params=a, returns=I64, body=[W, Return(padd(L, i(2 ** 62 - 1)))]))
     assert_rejected(PROVEN, fn(params=a, returns=I64,
-                               body=[IMPURE, Return(padd(L, i(2 ** 62)))]))
-    assert_rejected(PROVEN, fn(params=a, returns=I64, body=[IMPURE, Return(pmul(L, i(2)))]))
-    assert_accepted(fn(params=a, returns=I64, body=[IMPURE, Return(pmul(L, i(-2)))]))  # -2**63
-    assert_rejected(PROVEN, fn(params=a, returns=I64, body=[IMPURE, Return(pmul(L, i(-3)))]))
+                               body=[W, Return(padd(L, i(2 ** 62)))]))
+    assert_rejected(PROVEN, fn(params=a, returns=I64, body=[W, Return(pmul(L, i(2)))]))
+    assert_accepted(fn(params=a, returns=I64, body=[W, Return(pmul(L, i(-2)))]))  # -2**63
+    assert_rejected(PROVEN, fn(params=a, returns=I64, body=[W, Return(pmul(L, i(-3)))]))
 
 
 def test_mod_and_floordiv_are_full_range_so_nothing_is_provable_from_them():
@@ -978,10 +980,10 @@ def test_entry_global_in_a_function_running_user_code_is_rejected(node):
 
 
 def test_the_same_open_node_without_entry_globals_is_accepted():
-    # The open node alone is fine: only entry globals need the function closed.
-    a = ArrayParam("a", F64A, stored=False)
-    assert_accepted(fn(params=[a], returns=F64, body=[
-        ExprStmt(CallObject(OBJ, Global(OBJ, "print"), (), ())), Return(Index(F64, "a", i(0)))]))
+    # The open node alone is fine: only entry globals (and array parameters, #203) need the
+    # function closed.
+    assert_accepted(fn(params=[Param("x", F64)], returns=F64, body=[
+        ExprStmt(CallObject(OBJ, Global(OBJ, "print"), (), ())), Return(lf("x"))]))
 
 
 def test_global_read_and_box_keep_a_function_closed():
@@ -1074,9 +1076,10 @@ def _base_functions():
                   Return(add(lf("s"), MathCall(F64, MathFunc.SQRT, (ToFloat(F64, li("c")),)),
                              F64)),
               ])
-    impure = fn("scale", params=[ArrayParam("a", F64A, stored=True), Param("x", F64),
-                                 Param("o", OBJ), Param("c", BOOL)],
-                locals_={"k": I64, "r": OBJ, "y": F64}, returns=F64, line=20, body=[
+    # a local array, not an ArrayParam: this function calls user code (#203)
+    impure = fn("scale", params=[Param("x", F64), Param("o", OBJ), Param("c", BOOL)],
+                locals_={"a": F64A, "k": I64, "r": OBJ, "y": F64}, returns=F64, line=20, body=[
+                    Assign("a", na(F64A, i(4), f(1.0))),
                     Assign("r", call_obj(GetAttr(OBJ, g_("Modifier"), "padding"),
                                          Box(OBJ, lf("x")), lo("o"), kw=("dp",))),
                     Assign("y", Unbox(F64, lo("r"))),
@@ -1147,6 +1150,10 @@ def _breaking_mutations(rng, g):
     if kind == 4:   # flip may_deopt
         return "flip may_deopt", dataclasses.replace(g, may_deopt=not g.may_deopt), {
             FLAG_DEOPT, DEOPT}
+    if kind == 5 and not any(isinstance(p, ArrayParam) for p in g.params):
+        kind = 3    # no ArrayParam (scale has a local array since #203): flip pure instead
+    if kind == 3:
+        return "flip pure", dataclasses.replace(g, pure=not g.pure), {FLAG_PURE, DEOPT, FLAG_DEOPT}
     if kind == 5:   # flip stored on the first array
         k = next(j for j, p in enumerate(g.params) if isinstance(p, ArrayParam))
         p = g.params[k]
@@ -1915,7 +1922,7 @@ def _array_functions():
                     StoreIndex("a", li("k"), BinOp(F64, BinOpKind.ADD, Index(F64, "z", li("k")),
                                                    f(1.0))),
                 )),
-                Assign("r", call_obj(g_("print"), Box(OBJ, Index(F64, "z", i(0))))),
+                Assign("r", Box(OBJ, Index(F64, "z", i(0)))),   # no user call: an ArrayParam (#203)
                 Return(),
             ])
     sink = fn("sink", params=[Param("x", OBJ)], returns=NONE, line=12, body=[Return()])
@@ -2021,3 +2028,40 @@ def test_each_array_mutation_kind_was_exercised():
     base = _array_functions()
     kinds = {_array_mutations(rng, base)[0] for _ in range(400)}
     assert len(kinds) == 18, sorted(kinds)     # 16 kinds; kinds 7 and 8 have two variants
+
+
+# --- #203: an ArrayParam function must be closed ---------------------------------------------
+
+ARRAY_OPEN = "verify/array-open"
+
+
+def _arr_fn(name, body, returns=F64, locals_=None, params_extra=()):
+    return fn(name, params=[ArrayParam("a", F64A, stored=False), *params_extra], returns=returns,
+              locals_=locals_, body=body)
+
+
+def test_array_function_calling_an_object_is_rejected():
+    # the callback can change the list the function copied in (#203)
+    assert_rejected(ARRAY_OPEN, _arr_fn("f", [ExprStmt(pycall("cb")), Return(Index(F64, "a", i(0)))]))
+
+
+def test_array_function_reading_an_attribute_is_rejected():
+    body = [ExprStmt(GetAttr(OBJ, lo("o"), "x")), Return(Index(F64, "a", i(0)))]
+    assert_rejected(ARRAY_OPEN, _arr_fn("f", body, params_extra=[Param("o", OBJ)]))
+
+
+def test_array_function_testing_an_object_is_rejected():
+    body = [If(Truth(BOOL, lo("o")), (Return(f(0.0)),)), Return(Index(F64, "a", i(0)))]
+    assert_rejected(ARRAY_OPEN, _arr_fn("f", body, params_extra=[Param("o", OBJ)]))
+
+
+def test_array_function_calling_an_open_function_is_rejected():
+    g = fn("g", returns=NONE, body=[ExprStmt(pycall("cb")), Return()])
+    caller = _arr_fn("f", [ExprStmt(Call(NONE, "g", ())), Return(Index(F64, "a", i(0)))])
+    assert_rejected(ARRAY_OPEN, caller, g)
+
+
+def test_closed_array_function_is_still_accepted():
+    g = fn("g", params=[Param("x", F64)], returns=F64, body=[Return(lf("x"))])
+    caller = _arr_fn("f", [Return(Call(F64, "g", (Index(F64, "a", i(0)),)))])
+    assert_accepted(caller, g)
