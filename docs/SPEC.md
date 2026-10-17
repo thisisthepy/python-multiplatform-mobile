@@ -551,7 +551,12 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   first checks it with the N-7 gate, and a type error stops the import with the gate's diagnostics before
   any of the module's code runs. Release builds rely on the build gate (#20) and skip it. Results are cached
   by file content, so an unchanged module is not checked again. There are no per-call runtime type checks:
-  compiled and interpreted code behave exactly as CPython does (N-8). `Status: planned` (#183).
+  compiled and interpreted code behave exactly as CPython does (N-8). Form: `typedpython.importgate.install(source_roots)`
+  puts a meta path finder first on `sys.meta_path` (`uninstall()` removes it; `install_from_env()` installs it
+  when `TYPEDPYTHON_IMPORT_GATE` lists source roots). Only modules whose source file lies under a root are
+  checked; the stdlib and dependencies never are. A gate error raises `ImportGateError` (an `ImportError`
+  with `.diagnostics`) before the module runs. Results are cached in memory by file content hash, failures
+  included. `Status: implemented`, `python-multiplatform-ksp/src/test/python/test_importgate.py`.
 - **N-8** TypedPython compilation to C (INTENT §1.4; design §4.3; #41). `@compiled` (a builtin name, no
   import, #42) and a first-line `# typedpython: compiled` mark functions; the compiler lowers them
   through the typed IR (`typedpython/ir.py`) to C against the CPython C API and builds an extension with
