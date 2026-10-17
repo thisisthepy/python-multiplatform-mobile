@@ -55,30 +55,33 @@ class WalkedKlibArtifactTableTest {
     }
 
     /**
-     * The fixed text: everything `KlibScanner` bound out of the whole `kotlinx-coroutines-core`
-     * klib under the `kotlinx.coroutines` namespace -- nothing, correctly. This class's own KDoc has
-     * the reason; `KlibScannerTest.aRealThirdPartyKlibIsScannedWithoutCrashingAndDeclinesEveryDeclaration`
-     * pins the same fact walking the klib directly rather than through the build. If the two ever
-     * disagree, the wiring between `KlibScanner` and this generated table is what broke.
-     *
-     * A generated fragment file is only ever written when a walked artefact contributes at least one
-     * entry (`PythonArtifactBindingsTask.generate`'s `if (entries.isEmpty()) return@forEach`), so an
-     * empty klib means `ArtifactTable.fragments` itself has zero elements -- not one fragment with an
-     * empty `entries()`.
+     * The fixed text: everything `KlibScanner` bound out of the whole `kotlinx-coroutines-core` klib
+     * under the `kotlinx.coroutines` namespace. Zero before issue #234, when no Kotlin object could
+     * cross the klib boundary; since then the factories whose types are the klib's own classes.
+     * `KlibScannerTest.aRealThirdPartyKlibIsScannedWithoutCrashingAndBindsItsHandleFactories` pins the
+     * same list walking the klib directly; if the two disagree, the wiring between `KlibScanner` and
+     * this generated table is what broke.
      */
     @Test
-    fun theWalkerCorrectlyDeclinesEveryDeclarationInTheKlib() {
-        assertEquals(emptyList(), ArtifactTable.fragments)
+    fun theWalkerBindsExactlyTheKlibsHandleFactories() {
         ArtifactTable.registerInto()
-        assertEquals(emptyList(), UpcallTable.entries())
+        assertEquals(
+            listOf(
+                "kotlinx.coroutines.Job",
+                "kotlinx.coroutines.MainScope",
+                "kotlinx.coroutines.SupervisorJob",
+                "kotlinx.coroutines.newFixedThreadPoolContext",
+                "kotlinx.coroutines.newSingleThreadContext",
+                "kotlinx.coroutines.sync.Mutex",
+                "kotlinx.coroutines.sync.Semaphore",
+            ),
+            UpcallTable.entries().map { it.name }.filter { it.startsWith("kotlinx.") }.sorted(),
+        )
     }
 
-    /**
-     * `registerInto` on an empty `ArtifactTable` must not fail, and must not resolve a name that was
-     * never bound -- the two failure modes a table with zero fragments could otherwise hide.
-     */
+    /** `registerInto` must not resolve a name that was never bound: `checkIndexOverflow` stays declined. */
     @Test
-    fun registeringAnEmptyTableIsHarmlessAndResolvesNothing() {
+    fun aDeclinedNameStillResolvesToNothing() {
         ArtifactTable.registerInto()
         val entry = UpcallTable.resolve("kotlinx.coroutines.flow.internal.checkIndexOverflow")
         assertTrue(!entry.isValid, "checkIndexOverflow must not resolve: it is @PublishedApi internal and must stay declined")
