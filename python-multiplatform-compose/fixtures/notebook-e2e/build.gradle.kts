@@ -210,11 +210,30 @@ val composeExtendedVersion = providers.gradleProperty("composeExtended.version")
 val composeExtendedGroupPrefix = providers.gradleProperty("composeExtended.groupPrefix").orNull ?: "org.jetbrains.compose"
 val composeExtendedModules = providers.gradleProperty("composeExtended.modules").orNull
     ?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet().orEmpty()
-if (providers.gradleProperty("composeExtended.mavenLocal").orNull?.toBoolean() == true && composeExtendedVersion != null) {
+// Where the fork's modules come from: this machine's mavenLocal (`composeExtended.mavenLocal`), or a
+// Maven repository by URL (`composeExtended.repository`, e.g. the fork's GitHub Packages registry,
+// #251), read with `GITHUB_ACTOR`/`GITHUB_TOKEN` when they are set (GitHub Packages asks for a token
+// even for a public package). Either way only the fork's group at the fork's version is taken there.
+val composeExtendedMavenLocal = providers.gradleProperty("composeExtended.mavenLocal").orNull?.toBoolean() == true
+val composeExtendedRepository = providers.gradleProperty("composeExtended.repository").orNull?.takeIf { it.isNotBlank() }
+if (composeExtendedVersion != null && (composeExtendedMavenLocal || composeExtendedRepository != null)) {
+    val forkOnly: MavenRepositoryContentDescriptor.() -> Unit = {
+        includeVersionByRegex(Regex.escape(composeExtendedGroupPrefix) + ".*", ".*", Regex.escape(composeExtendedVersion))
+    }
     // A project's own repositories replace the settings' ones, so those are repeated here.
     repositories {
-        mavenLocal {
-            mavenContent { includeVersionByRegex(Regex.escape(composeExtendedGroupPrefix) + ".*", ".*", Regex.escape(composeExtendedVersion)) }
+        if (composeExtendedMavenLocal) mavenLocal { mavenContent(forkOnly) }
+        if (composeExtendedRepository != null) {
+            maven {
+                url = uri(composeExtendedRepository)
+                System.getenv("GITHUB_TOKEN")?.let { token ->
+                    credentials {
+                        username = System.getenv("GITHUB_ACTOR") ?: "token"
+                        password = token
+                    }
+                }
+                mavenContent(forkOnly)
+            }
         }
         google {
             mavenContent {
