@@ -71,6 +71,13 @@ class WalkedArtifactTableTest {
                 "fixture.valueclass.member.Tally.total=",
                 "fixture.valueclass.member.Tally.twin",
                 "fixture.valueclass.member.newSwitch",
+                // `fixture.valueclass.sam` (issue #216): functional-interface parameters, filled with a Python
+                // callable. `WalkedArtifactSamParameterTest` calls them.
+                "fixture.valueclass.sam.Listener.onEvent",
+                "fixture.valueclass.sam.lastHeard",
+                "fixture.valueclass.sam.loggingListener",
+                "fixture.valueclass.sam.notifyListener",
+                "fixture.valueclass.sam.runRunnable",
                 "fixture.valueclass.sumMeters",
                 "junit.runner.BaseTestRunner.getFilteredTrace",
                 "junit.runner.BaseTestRunner.getPreference__String",
