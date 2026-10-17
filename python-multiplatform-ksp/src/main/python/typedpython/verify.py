@@ -45,11 +45,8 @@ Rules (the `rule` of a Diagnostic):
   verify/redo                 `Call.redo` where it is not legal (see below)
   verify/entry-global-open    a function with entry_globals is not closed
   verify/array-open           a function with an ArrayParam runs user code (#203)
-  verify/buffer               a malformed `ArrayParam.buffer`, a CopyArray of a buffer array, or, in a function with a "numpy"
-                              buffer array, a `/`, `//` or `%` whose divisor is not a nonzero Const
-                              (and any F64 `//` or `%`): an np.float64 / np.int64 element divides
-                              by zero without raising, so the compiled Python-float code would
-                              differ (#149)
+  verify/buffer               a malformed `ArrayParam.buffer` (only None and "array"), or a
+                              CopyArray of a buffer array (#149)
   verify/class                a class named by FieldGet/FieldSet/New/IsExact/CheckExact/Param.cls is not
                               a (valid) ClassDecl of the module, a field is not one of its fields, a
                               New names a class without trivial_init or has the wrong arity, or a
@@ -271,7 +268,6 @@ _I64_MIN, _I64_MAX = -2 ** 63, 2 ** 63 - 1
 _FULL = (_I64_MIN, _I64_MAX)
 _LEN_MAX = 2 ** 62
 _PROVABLE_OPS = frozenset({BinOpKind.ADD, BinOpKind.SUB, BinOpKind.MUL})
-_DIVISIONS = frozenset({BinOpKind.TRUEDIV, BinOpKind.FLOORDIV, BinOpKind.MOD})
 _POW2_OPS = frozenset({BinOpKind.FLOORDIV, BinOpKind.MOD})   # `proven` means shift / mask
 _NEGATE = {CompareKind.EQ: CompareKind.NE, CompareKind.NE: CompareKind.EQ,
            CompareKind.LT: CompareKind.GE, CompareKind.GE: CompareKind.LT,
@@ -335,7 +331,6 @@ class _Checker:
         self.loops: list[_Loop] = []
         self.scalars: dict[str, Type] = {}   # name -> type of every scalar/OBJ variable
         self.arrays: dict[str, Type] = {}    # name -> array type of every ArrayParam
-        self.numpy = False                   # some ArrayParam is a numpy buffer (#149)
         self.buffers: set[str] = set()       # names of every buffer ArrayParam
         self.larrays: dict[str, Type] = {}   # name -> array type of every local array
         self.assigns: dict[str, int] = {}    # local array -> number of Assign statements to it
@@ -360,11 +355,10 @@ class _Checker:
                     self.error(TYPE, f"array parameter '{p.name}' has non-array type {p.type}")
                 elif not isinstance(p.stored, bool):
                     self.error(TYPE, f"array parameter '{p.name}' has a non-bool `stored`")
-                elif p.buffer not in (None, "array", "numpy"):
+                elif p.buffer not in (None, "array"):
                     self.error(BUFFER, f"array parameter '{p.name}' has buffer kind {p.buffer!r}")
                 else:
                     self.arrays[p.name] = p.type
-                    self.numpy = self.numpy or p.buffer == "numpy"
                     if p.buffer:
                         self.buffers.add(p.name)
             elif type(p) is Param:
@@ -735,14 +729,6 @@ class _Checker:
                                  f"{e.type.value}")
             if lt is Type.I64 and e.op in _I64_DEOPT_OPS and not proven:
                 self.can_deopt = True
-            if self.numpy and lt in (Type.I64, Type.F64) and e.op in _DIVISIONS:
-                nonzero = (type(right) is Const and type(right.value) in (int, float)
-                           and right.value != 0)
-                if not nonzero or (lt is Type.F64 and e.op is not BinOpKind.TRUEDIV):
-                    self.error(BUFFER, f"{lt.value} {e.op.value} in a function with a numpy buffer "
-                                       "array: an np.float64 / np.int64 element divides by zero "
-                                       "without raising, so only `/`, `//`, `%` by a nonzero "
-                                       "Const (`/` for floats) are compiled")
             if lt is Type.OBJ:
                 self.effects.append(f"OBJ {e.op.value} (runs user methods)")
                 self.opens.append(f"OBJ {e.op.value} (runs user methods)")
@@ -1130,7 +1116,7 @@ class _Checker:
                 self.error(ARRAY_USE, f"CopyArray of '{e.src}', which is not an array")
             elif e.src in self.buffers:
                 self.error(BUFFER, f"CopyArray of buffer array '{e.src}': a buffer array is never "
-                                   "copied (a numpy slice is a view)")
+                                   "copied)")
             else:
                 self.array(e.src, "copy", state)
                 if src is not e.type:

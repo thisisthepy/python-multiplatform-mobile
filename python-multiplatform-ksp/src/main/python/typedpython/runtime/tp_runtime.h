@@ -866,10 +866,10 @@ static inline int tp_i64_array_exit(tp_i64_array *a)
 }
 
 /* ------------------------------------------------------------------------------------------
- * Buffer arrays (issue #149; ir.ArrayParam.buffer): an exact array.array or numpy.ndarray argument
+ * Buffer arrays (issue #149; ir.ArrayParam.buffer): an exact array.array argument
  * is NOT copied. tp_buf_enter takes one Py_buffer export and tp_buf_exit releases it; the wrapper
  * calls exit on every path (ok, error, deopt), so the export, which forbids a resize of the
- * array.array and pins the memory of the ndarray, is held exactly as long as the compiled call.
+ * array.array, is held exactly as long as the compiled call.
  *
  * enter(obj, exact, fmt1, fmt2, writable, b): rc 0 = held (b->data, b->len set); rc 1 = deopt, b
  * is zeroed and nothing is held, nothing changed, no exception left; rc -1 = MemoryError set.
@@ -881,8 +881,7 @@ static inline int tp_i64_array_exit(tp_i64_array *a)
  * an 8-byte atomic). An empty buffer is held too (len 0, no element is ever touched).
  *
  * Element access (tp_buf_ld_* / tp_buf_st_*): one relaxed atomic 8-byte load or store of the bit
- * pattern on the buffer memory, bit-cast with memcpy. Another thread (or a numpy view of the same
- * memory) may write the same element concurrently: that is a data race in the Python program, and
+ * pattern on the buffer memory, bit-cast with memcpy. Another thread may write the same element concurrently: that is a data race in the program, and
  * the atomic makes it a torn-value-free one (an element is read or written whole), the closest a
  * compiled loop gets to what the interpreter's own element read/write does. -DTP_BUFFER_PLAIN
  * replaces the atomics with plain loads and stores; it exists only to measure what the atomics
@@ -953,9 +952,8 @@ static inline int tp_buf_enter(PyObject *obj, PyObject *exact, const char *fmt1,
 }
 
 /* index: a negative index counts from the end; out of range -> IndexError with the text CPython's
- * own container uses (array.array: "array index out of range"; numpy: "index %zd is out of bounds
- * for axis 0 with size %zd") */
-static inline int tp_buf_slot_array(const tp_buf *b, int64_t i, int store, Py_ssize_t *slot)
+ * own array.array uses ("array index out of range" / "array assignment index out of range") */
+static inline int tp_buf_slot(const tp_buf *b, int64_t i, int store, Py_ssize_t *slot)
 {
     if (i < 0) {
         i += (int64_t)b->len;
@@ -969,25 +967,6 @@ static inline int tp_buf_slot_array(const tp_buf *b, int64_t i, int store, Py_ss
 out_of_range:
     PyErr_SetString(PyExc_IndexError,
                     store ? "array assignment index out of range" : "array index out of range");
-    return -1;
-}
-
-static inline int tp_buf_slot_numpy(const tp_buf *b, int64_t i, int store, Py_ssize_t *slot)
-{
-    int64_t j = i;
-    (void)store;
-    if (j < 0) {
-        j += (int64_t)b->len;
-        if (j < 0) goto out_of_range;
-    }
-    else if (j >= (int64_t)b->len) {
-        goto out_of_range;
-    }
-    *slot = (Py_ssize_t)j;
-    return 0;
-out_of_range:
-    PyErr_Format(PyExc_IndexError, "index %lld is out of bounds for axis 0 with size %zd",
-                 (long long)i, b->len);
     return -1;
 }
 

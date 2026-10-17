@@ -134,7 +134,7 @@ class _ModuleInfo:
     scalar_globals: dict[str, Type] = field(default_factory=dict)  # entry-global candidates
     classes: dict[str, ir.ClassDecl] = field(default_factory=dict)  # compiled fixed-layout classes
     # Top-level `import x [as y]` / `from m import n [as k]` names bound exactly once in the module:
-    # local name -> dotted qualified name (`np` -> `numpy`, `NDArray` -> `numpy.typing.NDArray`).
+    # local name -> dotted qualified name (`a` -> `array`, `array` -> `array.array`).
     imports: dict[str, str] = field(default_factory=dict)
 
     def bound(self, name: str) -> bool:
@@ -255,7 +255,7 @@ def _import_names(tree: ast.Module, bindings: dict[str, list[tuple[int, str]]]) 
 
 
 def _qualified(node: ast.expr, info: _ModuleInfo) -> str | None:
-    """`np.float64` -> "numpy.float64" through the module's own imports, else None."""
+    """`a.b` -> "array.b" through the module's own imports, else None."""
     parts: list[str] = []
     while isinstance(node, ast.Attribute):
         parts.append(node.attr)
@@ -265,26 +265,19 @@ def _qualified(node: ast.expr, info: _ModuleInfo) -> str | None:
     return ".".join([info.imports[node.id], *reversed(parts)])
 
 
-_BUFFER_ELEMENTS = {"numpy.float64": Type.F64_ARRAY, "numpy.int64": Type.I64_ARRAY}
-
-
 def _buffer_kind(annotation: ast.expr, info: _ModuleInfo) -> tuple[Type, str] | None:
     """The buffer-array reading of an annotation (#149), else None (an ordinary object parameter):
     `array.array[float]` / `array.array[int]` (any spelling that resolves, through this module's
-    own imports, to `array.array`), and `numpy.typing.NDArray[numpy.float64]` / `[numpy.int64]`.
-    A bare `array.array`, `np.ndarray`, another dtype, or a name bound more than once is not one."""
+    own imports, to `array.array`). A bare `array.array`, another element type, a numpy
+    `NDArray[...]` (not supported: its element arithmetic is numpy's), or a name bound more than
+    once is not one."""
     if not isinstance(annotation, ast.Subscript):
         return None
     base = _qualified(annotation.value, info)
     arg = annotation.slice
-    if base == "array.array":
-        if isinstance(arg, ast.Name) and arg.id in ("float", "int") and not info.bound(arg.id):
-            return ARRAY_KIND[f"list[{arg.id}]"], "array"
-        return None
-    if base == "numpy.typing.NDArray":
-        element = _qualified(arg, info)
-        if element in _BUFFER_ELEMENTS:
-            return _BUFFER_ELEMENTS[element], "numpy"
+    if base == "array.array" and isinstance(arg, ast.Name) and arg.id in ("float", "int") \
+            and not info.bound(arg.id):
+        return ARRAY_KIND[f"list[{arg.id}]"], "array"
     return None
 
 
@@ -835,8 +828,8 @@ class _Lowerer:
             for stmt, kind, value in cs:
                 if kind == "copy" and value.value.id in buffers:  # type: ignore[attr-defined]
                     raise Skip(stmt.lineno, f"`{_src(value)}` slices buffer parameter "
-                                            f"`{value.value.id}`: a numpy slice is a view, "  # type: ignore[attr-defined]
-                                            "not a native copy (a buffer array is never copied)")
+                                            f"`{value.value.id}`: a buffer array is never copied "  # type: ignore[attr-defined]
+                                            "(`[:]` would be a native copy of a list)")
         known = set(self.arrays) | {n for n, cs in creations.items()
                                     if any(k != "copy" for _, k, _ in cs)}
         while True:

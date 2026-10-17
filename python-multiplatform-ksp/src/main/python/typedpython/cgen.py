@@ -37,8 +37,12 @@ critical section. Module state is written only by the exec slot; the class guard
 (tp_runtime.h).
 
 Buffer arrays (issue #149, identity-safe part). A parameter annotated `array.array[float]`,
-`array.array[int]`, `numpy.typing.NDArray[numpy.float64]` or `[numpy.int64]` is an `ArrayParam` with
-`buffer` "array" or "numpy". `tp_wrap_f` does not copy it: after the scalar guards, `tp_buf_enter`
+`array.array[int]` is an `ArrayParam` with `buffer` "array". numpy: not supported yet (#220):
+a numpy element's arithmetic produces np.float64 / np.int64 / np.bool (compiled code returns float),
+numpy scalar operations emit observable RuntimeWarnings and divide by zero without raising (compiled
+double arithmetic does neither), and emulating that needs taint tracking of numpy-derived values,
+numpy-scalar boxing and FP-exception-to-warning emulation. An `NDArray[...]` parameter is an ordinary
+object parameter. `tp_wrap_f` does not copy it: after the scalar guards, `tp_buf_enter`
 checks the exact type (captured in `tp_state.buf_types` by the exec slot), takes one `Py_buffer`
 export (C-contiguous, 1-D, 8-byte items, format `d` / `q` / `l`, aligned, writable when the function
 stores) and any mismatch deopts before an effect. The export is released by `tp_buf_exit`, part of the
@@ -166,7 +170,7 @@ _CT = {Type.I64: "int64_t", Type.F64: "double", Type.BOOL: "int", Type.OBJ: "PyO
 _ARRAY_CT = {Type.F64_ARRAY: "tp_f64_array", Type.I64_ARRAY: "tp_i64_array"}
 # Buffer arrays (#149): `ArrayParam.buffer` -> the exact type the guard compares against (the index
 # into the module state's `buf_types`), and the format strings the export must carry.
-_BUFFER_KINDS = {None: None, "array": 0, "numpy": 1}
+_BUFFER_KINDS = {None: None, "array": 0}
 _BUFFER_FMT = {Type.F64_ARRAY: ('"d"', "NULL"), Type.I64_ARRAY: ('"q"', '"l"')}
 _BUFFER_SFX = {Type.F64_ARRAY: "f64", Type.I64_ARRAY: "i64"}
 _CT_ARRAY_REV = {"tp_f64_array": Type.F64_ARRAY, "tp_i64_array": Type.I64_ARRAY}
@@ -585,7 +589,7 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w(f"    tp_class_rt cls_rt[{len(module.classes) + 1}];  /* version-tag / global guard state */")
     w("    int watch_id1;                  /* dict watcher id + 1 on the module dict; 0 = none */")
     w("    PyObject *breaker;              /* `lambda: None`; calling it runs the eval breaker (#141) */")
-    w("    PyObject *buf_types[2];         /* strong: array.array, numpy.ndarray (buffer arrays, #149); NULL: not importable */")
+    w("    PyObject *buf_types[1];         /* strong: array.array (buffer arrays, #149); NULL: not importable */")
     w("} tp_state;")
     w("")
     w("static const char *const tp_name_strings[] = {")
@@ -1354,7 +1358,7 @@ class _FnGen:
         return t
 
     def _buffer(self, name: str) -> str | None:
-        """`ArrayParam.buffer` of an array parameter ("array" / "numpy"), None for a list or local."""
+        """`ArrayParam.buffer` of an array parameter ("array"), None for a list or local."""
         a = self.arrays.get(name)
         return a.buffer if a is not None else None
 
@@ -1367,7 +1371,7 @@ class _FnGen:
             return f"(Py_ssize_t)({i})"
         slot = self.tmp("Py_ssize_t")
         if buffer:
-            self.check(f"tp_buf_slot_{buffer}({ptr}, {i}, {store}, &{slot})")
+            self.check(f"tp_buf_slot({ptr}, {i}, {store}, &{slot})")
         else:
             self.check(f"{_ARRAY_PFX[at]}_slot({ptr}, {i}, {store}, &{slot})")
         return slot
@@ -1920,7 +1924,7 @@ def _state_functions(mg: _ModGen) -> str:
         "    size_t i;",
         "    if (tp_st == NULL) return 0;",
         "    Py_VISIT(tp_st->breaker);",
-        "    for (i = 0; i < 2; i++) Py_VISIT(tp_st->buf_types[i]);",
+        "    for (i = 0; i < 1; i++) Py_VISIT(tp_st->buf_types[i]);",
         "    for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) Py_VISIT(tp_st->names[i]);",
         "    for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) Py_VISIT(tp_st->kwnames[i]);",
         "    for (i = 0; i < sizeof(tp_st->classes) / sizeof(tp_st->classes[0]); i++) Py_VISIT(tp_st->classes[i]);",
@@ -1936,7 +1940,7 @@ def _state_functions(mg: _ModGen) -> str:
         "    if (tp_st == NULL) return 0;",
         "    if (tp_st->watch_id1 > 0) tp_globals_unwatch(PyModule_GetDict(tp_module), &tp_st->watch_id1);",
         "    tp_release(&tp_st->breaker);",
-        "    for (i = 0; i < 2; i++) tp_release(&tp_st->buf_types[i]);",
+        "    for (i = 0; i < 1; i++) tp_release(&tp_st->buf_types[i]);",
         "    for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) tp_release(&tp_st->names[i]);",
         "    for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) tp_release(&tp_st->kwnames[i]);",
         "    for (i = 0; i < sizeof(tp_st->cls_ok) / sizeof(tp_st->cls_ok[0]); i++) tp_st->cls_ok[i] = 0;",
@@ -2034,10 +2038,8 @@ def _exec_function(mg: _ModGen) -> str:
              if isinstance(p, ir.ArrayParam) and p.buffer}
     # buffer arrays (#149): the exact types the entry guards compare against, taken after the
     # module source ran (so its own imports are done). Not importable: NULL, and every guard deopts.
-    for kind, (mod, attr) in (("array", ("array", "array")), ("numpy", ("numpy", "ndarray"))):
-        if kind in kinds:
-            L.append(f"    if (tp_import_attr({c_string(mod)}, {c_string(attr)}, "
-                     f"&tp_st->buf_types[{_BUFFER_KINDS[kind]}]) < 0) goto tp_done;")
+    if "array" in kinds:
+        L.append('    if (tp_import_attr("array", "array", &tp_st->buf_types[0]) < 0) goto tp_done;')
     L += [
         "    tp_table = PyDict_New();",
         "    if (tp_table == NULL || PyDict_SetItemString(tp_dict, \"__typedpython_interpreted__\", tp_table) < 0) goto tp_done;",

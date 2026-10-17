@@ -553,16 +553,16 @@ class ArrayParam:
     name: str
     type: Type        # F64_ARRAY or I64_ARRAY
     stored: bool      # whether the body stores into it (write-back needed)
-    # Buffer array (#149): None for a `list`. "array" (an exact `array.array`) or "numpy" (an exact
-    # `numpy.ndarray`) means the argument is NOT copied: the entry guard takes a Py_buffer export
+    # Buffer array (#149): None for a `list`. "array" (an exact `array.array`) means
+    # the argument is NOT copied: the entry guard takes a Py_buffer export
     # (exact type, 1-D, C-contiguous, aligned 8-byte items, format `d` for F64_ARRAY and `q` or `l`
     # for I64_ARRAY, writable when `stored`), holds it until the function returns on every exit, and
     # every Index/StoreIndex is one relaxed atomic 8-byte load/store on the buffer memory, no
     # copy-in, no write-back, no critical section, no aliasing guard (two buffers may share memory
     # and reads then see writes in program order, as in the interpreter). `len` is the export's
     # shape[0], fixed for the call because the export forbids resizing. Closedness (#203) applies
-    # unchanged; in a function with a "numpy" buffer a division or modulo whose divisor is not a
-    # nonzero Const is rejected (an np.float64 / np.int64 element divides by zero without raising).
+    # unchanged. numpy.ndarray is not a buffer kind (its element arithmetic is numpy's: np.float64
+    # results, RuntimeWarnings, no ZeroDivisionError); an ndarray parameter is an ordinary object.
     # Every other rule above for lists (stored, array-open, Index/StoreIndex/Len only) holds too.
     buffer: str | None = None
 
