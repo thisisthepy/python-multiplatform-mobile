@@ -405,6 +405,17 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `Status: partial`, `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactCallbackTest.kt`; a value-returning slot
   (`() -> Float`) does not yet accept a Python callable (`M3ProofRenderTest.kt`
   `aValueReturningFunctionSlotDoesNotYetAcceptAPythonCallable`).
+  A parameter typed as a **functional interface** (a Java interface with one abstract method, such as
+  `java.lang.Runnable`, or a Kotlin `fun interface`) whose method returns `Unit`/`void` and which is
+  not generic takes a Python callable as well as a Kotlin handle (#216). Its slot type name is the
+  interface, `|`, and the equivalent `kotlin.FunctionN` (`java.lang.Runnable|kotlin.Function0()->kotlin.Unit`):
+  the binding layer makes a callable into that function type and checks a handle against the
+  interface, and generated source converts a wrapper with a SAM lambda (`java.lang.Runnable { f() }`)
+  and casts anything else, with no reflection. A JDK interface is read from the JDK the build runs
+  on, any other from the consumer's jars. The stub shows the slot as a `Callable`. A functional
+  interface whose method returns a value, or a generic one, is left as it was: a handle parameter
+  (Compose's `Alignment` is one). `Status: implemented` on desktop, `GP/artifact/SamParameterBindingTest.kt`,
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactSamParameterTest.kt`.
 - **B-6** `@Composable` functions are callable from Python inside a composition; a Python click reaches
   a Kotlin callback and the redraw shows it. `Status: implemented` on desktop,
   `python-multiplatform-compose/fixtures/compose/src/desktopTest/` (`ComposableRenderTest.kt`, `M3ProofRenderTest.kt`,
