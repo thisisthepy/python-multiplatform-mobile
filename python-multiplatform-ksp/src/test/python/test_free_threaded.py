@@ -431,16 +431,22 @@ def test_class_modified_while_threads_read_fields(extension):
         cell = m.Cell(11, 22)
         stop = False
         bad = []
+        started = threading.Barrier(5)          # 4 readers + the modifier
         def reader():
-            while not stop:
+            started.wait()
+            while True:                          # at least one pass after the last modification
+                done = stop
                 if m.geta(cell) != 11:
                     bad.append("get")
                 c = m.mk(1, 2)
                 if (c.a, c.b) != (1, 2):
                     bad.append("mk")
                 m.seta(cell, 11)
+                if done:
+                    break
         def modifier():
             global stop
+            started.wait()                       # without this it can finish before any reader runs
             for i in range(300 * STRESS):
                 m.Cell.counter = i               # every assignment moves the class's version tag
                 if i % 7 == 0:
