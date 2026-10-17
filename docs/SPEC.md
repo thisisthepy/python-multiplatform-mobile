@@ -360,6 +360,24 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   static (`Arrangement.spacedBy`, #53), except `Any`'s members, ones that also exist as a
   `@JvmStatic` static, and `@Composable` ones (declined); an `internal` or file-private object is
   skipped. `Status: implemented`, `GP/artifact/ObjectMemberBindingTest.kt`.
+  The public, non-suspend **member functions** of a Kotlin-public `class`, `interface` or `enum class`
+  that crosses as an object handle bind as `METHOD` entries `Owner.name` (#215), the shape KSP's
+  members already have: `args[0]` is the receiver, uncounted in `arity`, and the generated call is
+  `(args[0] as Owner).name(...)`. The binding layer serves them as methods of the receiver's proxy
+  (supertypes included), ahead of an extension of the same name, because Kotlin resolves a member
+  first, and never as a module attribute; they take no part in a constructor's name check. Overloads
+  within one class are told apart as functions are (`Owner.add__Int`). Declined, each with its reason:
+  a `suspend` member, a `@Composable` member, a member of a generic class (not yet), and a member that
+  shares its name with a property of the class (the property is kept). `Any`'s members, statics and
+  synthetic methods are not bound. A member's default arguments are not omittable yet: Python passes
+  every argument. A member's stub is a method of the receiver's stub class whose docstring carries
+  `Kotlin member: <key>` (or a comment with that marker where the class has no stub). Klibs bind no
+  class member of any kind (B-2). `Status: implemented` on desktop (the walker reads jars),
+  `GP/artifact/MemberFunctionBindingTest.kt`, `GP/stubs/MemberFunctionStubTest.kt`,
+  `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactMemberFunctionTest.kt`
+  (and `WalkedArtifactStubTest`'s key check); the binding-layer half,
+  `PM/commonTest/.../pythonx/PythonxMethodTest.kt`, also passes on Kotlin/Native (iOS simulator).
+  Not verified: a GraalVM native image (§13); the entries are generated lambdas with no reflection.
   A public constructor of a public, non-abstract, non-generic class binds under the class's own name
   (`pkg.Class`), including one with a value-class parameter, which `kotlinc` compiles to a private
   `<init>` behind a public synthetic bridge ending in `DefaultConstructorMarker` (the descriptor
@@ -371,7 +389,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `python-multiplatform-compose/fixtures/compose/.../TextFieldStateRenderTest.kt`.
 - **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial`,
   `GP/artifact/KlibScannerTest.kt` and `python-multiplatform-gradle-plugin/fixtures/klib-artifact` assert that the scanned klib's
-  declarations are declined with reasons; no klib declaration is bound at run time yet.
+  declarations are declined with reasons; no klib declaration is bound at run time yet. It reads
+  top-level functions only: no class constructor, property or member function (B-1, #215).
 - **B-3** Default arguments can be omitted from Python (a call per subset of defaulted parameters,
   ambiguous omissions refused). `Status: implemented`, `GP/artifact/DefaultOmissionTest.kt`,
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactDefaultOmissionTest.kt`, `PM/commonTest/.../PythonxDefaultsTest.kt`.
