@@ -438,7 +438,8 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   `python-multiplatform-gradle-plugin/fixtures/klib-artifact` builds `androidNativeArm64` and
   `iosSimulatorArm64` from one table in `nativeMain`, and its suite (`WalkedKlibArtifactHandleTest`,
   `WalkedKlibArtifactTableTest`, `WalkedKlibArtifactPythonImportTest`) runs through Gradle on the iOS
-  simulator (`iosSimulatorArm64Test`); on androidNative it is linked by the build and run by hand.
+  simulator (`iosSimulatorArm64Test`, and on CI in `ios.yml`'s `klib-fixture` job, #240); on
+  androidNative it is linked by the build and run by hand.
 - **B-3** Default arguments can be omitted from Python (a call per subset of defaulted parameters,
   ambiguous omissions refused). `Status: implemented`, `GP/artifact/DefaultOmissionTest.kt`,
   `python-multiplatform-gradle-plugin/fixtures/artifact/.../WalkedArtifactDefaultOmissionTest.kt`, `PM/commonTest/.../PythonxDefaultsTest.kt`.
