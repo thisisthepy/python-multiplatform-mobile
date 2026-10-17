@@ -44,3 +44,80 @@ jobs:
       - name: Run Desktop Tests
         # Using --console=plain so logs are readable in GitHub Actions
         run: ./gradlew :python-multiplatform:desktopTest --console=plain
+
+  # pythonx-compose's UI.ipynb, end to end (#26, #213): the installed pythonx-compose wheel drives a
+  # real desktop Compose host, pixel-compared with the same composables drawn from Kotlin. Its own
+  # job and Gradle invocation, so it neither hides nor is hidden by the module tests above.
+  notebook-e2e:
+    name: Notebook E2E (pythonx-compose wheel)
+    runs-on: macos-latest
+    env:
+      WHEEL_DIR: ${{ github.workspace }}/.tmp/pythonx-compose-dist
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Beside this repository, as on a developer machine; the wheel is built from it, not installed
+      # from PyPI, so the scenarios follow pythonx-compose develop.
+      - name: Checkout pythonx-compose develop
+        uses: actions/checkout@v4
+        with:
+          repository: thisisthepy/pythonx-compose
+          ref: develop
+          path: .tmp/pythonx-compose
+          fetch-depth: 1
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Build the pythonx-compose wheel
+        run: |
+          uv build --wheel --directory .tmp/pythonx-compose --out-dir "$WHEEL_DIR"
+          ls -l "$WHEEL_DIR"
+          git -C .tmp/pythonx-compose log -1 --format='pythonx-compose %h %s'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Cache Konan
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-konan-
+
+      # No skip property: without a wheel every scenario fails by name, which is what CI wants.
+      - name: Run the notebook scenarios
+        run: >
+          ./gradlew :python-multiplatform-compose:fixtures:notebook-e2e:desktopTest --rerun
+          -PpythonxComposeWheel="$WHEEL_DIR" --console=plain
+
+      - name: Count the scenarios
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, xml.etree.ElementTree as ET
+          files = glob.glob("python-multiplatform-compose/fixtures/notebook-e2e/build/test-results/desktopTest/*.xml")
+          total = failed = skipped = 0
+          for f in files:
+              suite = ET.parse(f).getroot()
+              total += int(suite.get("tests", 0))
+              failed += int(suite.get("failures", 0)) + int(suite.get("errors", 0))
+              skipped += int(suite.get("skipped", 0))
+          print(f"Notebook E2E: {total} tests, {total - failed - skipped} passed, {failed} failed, {skipped} skipped ({len(files)} suites)")
+          PY
+          cat "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notebook-e2e-reports
+          path: |
+            python-multiplatform-compose/fixtures/notebook-e2e/build/reports/tests/desktopTest
+            python-multiplatform-compose/fixtures/notebook-e2e/build/test-results/desktopTest

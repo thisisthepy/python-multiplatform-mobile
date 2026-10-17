@@ -42,7 +42,8 @@ JAVA_HOME=<JDK 21> ./gradlew :python-multiplatform-compose:fixtures:notebook-e2e
 
 **Without a wheel the tests fail, by name, with a message that says how to give one.** They do not
 skip. Only `-PnotebookE2e.skip=true` disables `desktopTest`, and the build log then says that the
-scenarios did not run. Which of the two CI wants is CI's decision; no workflow runs this module yet.
+scenarios did not run. CI wants the scenarios run: the `notebook-e2e` job of `.github/workflows/desktop.yml` (#213) builds
+the wheel from pythonx-compose `develop` with uv and runs this module on every push to `develop`.
 
 "Installing" is unpacking the pure-Python wheel into `build/pythonx-compose/site-packages`
 (`installPythonxComposeWheel`), which is all installing a pure-Python wheel amounts to; the embedded
