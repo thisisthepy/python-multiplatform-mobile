@@ -388,7 +388,19 @@ All in `PM/commonTest`, so they run wherever the interpreter loads.
   declined (#73). `Status: implemented`, `GP/artifact/TextStateBindingTest.kt`,
   `python-multiplatform-compose/fixtures/compose/.../TextFieldStateRenderTest.kt`.
 - **B-2** The walker on **klibs** (Kotlin/Native libraries). `Status: partial`. It reads
-  top-level functions only: no class constructor, property or member function yet (B-1, #215).
+  top-level functions and, since #237, the **member functions** of the klib's classes; no class
+  constructor or property yet. A member binds as #215's `METHOD` `Owner.name` (receiver in `args[0]`,
+  `(args[0] as Owner).name(...)`, served on the proxy, never a module attribute) when its class can
+  cross as a handle and is an interface, a final class or an enum class: the pinned compiler's klib
+  ABI records modality but no visibility, so a member of an open, abstract or sealed class, which
+  may be `protected`, is declined with that reason, and an `object`'s functions (statics on the jar
+  side, #53) are declined too. Also declined, with reasons: members of a generic class, `suspend`,
+  `@Deprecated`, `@PublishedApi`, `@Composable`, member extensions and context receivers, a member
+  named like a property, data-class `copy`/`componentN`, and anything without a klib boundary type;
+  `Any`'s members and an enum's static `valueOf`/`values`/`entries` are not bound. From
+  `kotlinx-coroutines-core` this binds `CompletableJob.complete`, `Job.start`,
+  `Semaphore.tryAcquire`/`release` and others; `GP/artifact/KlibMemberFunctionTest.kt`, and on the iOS
+  simulator `WalkedKlibArtifactMemberFunctionTest`.
   Since #234 a **Kotlin object crosses as a handle**: a type whose class is a public, non-generic,
   non-value `class`, `interface`, `enum class` or `object` of the walked klib is an `OBJECT` slot
   or result, non-null or nullable, cast in generated source as the jar producer casts one, and a
