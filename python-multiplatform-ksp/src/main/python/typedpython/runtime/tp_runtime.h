@@ -1590,6 +1590,65 @@ static inline void tp_leave_call(void)
     }
 }
 
+/* Fast entry (issue #147). A *bounded* compiled function (cgen: no call cycle, bounded callees, no
+ * node that can run Python code) has a call tree of at most k compiled frames, k known at build time.
+ * `tp_depth_room(k)` is true exactly when tp_enter_call would accept all k nested frames, the same
+ * comparison with the deepest frame's count (depth + count + k <= limit); then the whole tree runs
+ * through its uncounted twins (`tp_fimpl_*`: no tp_enter_call, no tp_leave_call), which the C
+ * compiler can inline. When it is false the caller takes the counted path, so RecursionError is raised
+ * at exactly the call where it is raised without the fast entry, never earlier.
+ *
+ * Skipping Py_EnterRecursiveCall on the fast path is safe because the tree is bounded: at most k
+ * small compiled frames (no recursion, no Python callbacks except at the two points below), so they
+ * use a bounded amount of C stack on top of the entry's.
+ *
+ * The frames of a fast tree are not in `tp_depth.count`. A bounded tree runs Python code at exactly
+ * two points: a `redo` Call (the interpreted original) and the eval-breaker poll in a loop (signal
+ * handler, finalizer, another compiled call). Around each, the twin brackets the code with
+ * tp_depth_py_begin(tp_fd) / tp_depth_py_end(tp_fd), `tp_fd` being the tree's active frames (itself
+ * included), so the count is exactly what the counted path would have there: Python frames and
+ * compiled calls started from it see the true depth. */
+static inline int tp_depth_room(Py_ssize_t k)
+{
+    return tp_python_depth() + tp_depth.count + k <= Py_GetRecursionLimit();
+}
+
+/* After a fast tree: tp_python_depth may have cached the top frame (a strong reference) and, with
+ * no counted frame in flight, nothing else would drop it, as tp_leave_call does at count 0. */
+static inline void tp_depth_done(void)
+{
+    if (tp_depth.count == 0) {
+        Py_CLEAR(tp_depth.frame);
+    }
+}
+
+/* Around a point of a fast tree that can run Python code: the count includes the tree's `fd` active
+ * frames. begin/end are balanced. end also drops the cached top frame when no compiled frame is
+ * counted any more (the code in between may have cached another frame, as tp_leave_call would). */
+static inline void tp_depth_py_begin(int fd)
+{
+    tp_depth.count += fd;
+}
+
+static inline void tp_depth_py_end(int fd)
+{
+    tp_depth.count -= fd;
+    tp_depth_done();
+}
+
+#ifdef TP_TRACE_FAST
+/* Test builds only (-DTP_TRACE_FAST): how many entries took the fast path. */
+static Py_ssize_t tp_trace_fast_hits_count = 0;
+static inline void tp_trace_fast_hit(void) { tp_trace_fast_hits_count++; }
+static PyObject *tp_trace_fast_hits(PyObject *tp_module, PyObject *tp_unused)
+{
+    (void)tp_module; (void)tp_unused;
+    return PyLong_FromSsize_t(tp_trace_fast_hits_count);
+}
+#else
+static inline void tp_trace_fast_hit(void) {}
+#endif
+
 /* ------------------------------------------------------------------------------------------
  * Eval breaker (issue #141). The interpreter checks between bytecodes for signals, pending calls,
  * GIL drop requests, async exceptions and scheduled collections; compiled code has no bytecodes.
