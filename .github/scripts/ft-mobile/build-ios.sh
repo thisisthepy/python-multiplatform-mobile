@@ -52,7 +52,9 @@ minor="$(py_minor "$PY_VERSION")"
 archive="$(ls cross-build/dist/python-*-iOS-XCframework.tar.gz)"
 log "package: $archive"
 
-cross-build/build/python -c 'import sys, sysconfig; assert sysconfig.get_config_var("Py_GIL_DISABLED") == 1; print("build python free-threaded:", sys.version)'
+# On macOS the build interpreter is python.exe (cross-build/build/python is a directory).
+build_py=cross-build/build/python.exe; [ -x "$build_py" ] || build_py=cross-build/build/python
+"$build_py" -c 'import sys, sysconfig; assert sysconfig.get_config_var("Py_GIL_DISABLED") == 1; print("build python free-threaded:", sys.version)'
 
 check="$FT_WORK/ios-check"
 rm -rf "$check"; mkdir -p "$check"
