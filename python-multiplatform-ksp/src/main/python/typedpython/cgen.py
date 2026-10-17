@@ -36,6 +36,26 @@ unaffected. The `__typedpython_deopts__` read-add-write of `tp_cg_redo` runs in 
 critical section. Module state is written only by the exec slot; the class guards are atomic
 (tp_runtime.h).
 
+Buffer arrays (issue #149, identity-safe part). A parameter annotated `array.array[float]`,
+`array.array[int]` is an `ArrayParam` with `buffer` "array". numpy: not supported yet (#220):
+a numpy element's arithmetic produces np.float64 / np.int64 / np.bool (compiled code returns float),
+numpy scalar operations emit observable RuntimeWarnings and divide by zero without raising (compiled
+double arithmetic does neither), and emulating that needs taint tracking of numpy-derived values,
+numpy-scalar boxing and FP-exception-to-warning emulation. An `NDArray[...]` parameter is an ordinary
+object parameter. `tp_wrap_f` does not copy it: after the scalar guards, `tp_buf_enter`
+checks the exact type (captured in `tp_state.buf_types` by the exec slot), takes one `Py_buffer`
+export (C-contiguous, 1-D, 8-byte items, format `d` / `q` / `l`, aligned, writable when the function
+stores) and any mismatch deopts before an effect. The export is released by `tp_buf_exit`, part of the
+same `exits` as the list write-back, so every path (ok, error, deopt before the interpreted redo)
+releases it. Index/StoreIndex are `tp_buf_ld_*` / `tp_buf_st_*`: one relaxed atomic 8-byte access on
+the buffer memory (`-DTP_BUFFER_PLAIN` makes them plain, for measuring the atomics only), so there is
+no copy-in, no write-back, no critical section, no aliasing guard and no limit on their number; two
+buffers that share memory see each other's writes in program order. Closedness (#203) is required as
+for lists. OPEN POINT (decision pending in #149): holding the export makes another thread's `append`
+/ `resize` of the same array.array raise BufferError during the call; what a concurrent resize
+should observe is not decided here and nothing relies on it. A function holding a buffer does not poll
+the eval breaker (it counts as a snapshot holder, conservatively).
+
 Depth (issue #57): every impl function calls `tp_enter_call()` before it owns anything (a refusal
 returns -1 directly: RecursionError set, nothing counted) and `tp_leave_call()` in the one exit
 block, so ok, error and deopt exits all leave exactly once.
@@ -148,6 +168,11 @@ class CGenError(Exception):
 
 _CT = {Type.I64: "int64_t", Type.F64: "double", Type.BOOL: "int", Type.OBJ: "PyObject *"}
 _ARRAY_CT = {Type.F64_ARRAY: "tp_f64_array", Type.I64_ARRAY: "tp_i64_array"}
+# Buffer arrays (#149): `ArrayParam.buffer` -> the exact type the guard compares against (the index
+# into the module state's `buf_types`), and the format strings the export must carry.
+_BUFFER_KINDS = {None: None, "array": 0}
+_BUFFER_FMT = {Type.F64_ARRAY: ('"d"', "NULL"), Type.I64_ARRAY: ('"q"', '"l"')}
+_BUFFER_SFX = {Type.F64_ARRAY: "f64", Type.I64_ARRAY: "i64"}
 _CT_ARRAY_REV = {"tp_f64_array": Type.F64_ARRAY, "tp_i64_array": Type.I64_ARRAY}
 _ARRAY_ELEM = {Type.F64_ARRAY: Type.F64, Type.I64_ARRAY: Type.I64}
 _ARRAY_PFX = {Type.F64_ARRAY: "tp_f64_array", Type.I64_ARRAY: "tp_i64_array"}
@@ -564,6 +589,7 @@ def generate(module: ir.Module, source_path: Path, display_path: str | None = No
     w(f"    tp_class_rt cls_rt[{len(module.classes) + 1}];  /* version-tag / global guard state */")
     w("    int watch_id1;                  /* dict watcher id + 1 on the module dict; 0 = none */")
     w("    PyObject *breaker;              /* `lambda: None`; calling it runs the eval breaker (#141) */")
+    w("    PyObject *buf_types[1];         /* strong: array.array (buffer arrays, #149); NULL: not importable */")
     w("} tp_state;")
     w("")
     w("static const char *const tp_name_strings[] = {")
@@ -672,7 +698,7 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
                                 "without redo")
     if f.entry_globals:
         _check_entry_globals(f, functions)
-    n_arrays = sum(isinstance(p, ir.ArrayParam) for p in f.params)
+    n_arrays = sum(isinstance(p, ir.ArrayParam) and p.buffer is None for p in f.params)
     if n_arrays > 2:
         raise CGenError(f"{f.name}: {n_arrays} array parameters; at most two (CPython offers one- and "
                         "two-object critical sections only, and a third lock could suspend the others)")
@@ -680,6 +706,8 @@ def _check_function(f: ir.Function, functions: dict[str, ir.Function]) -> None:
         if isinstance(p, ir.ArrayParam):
             if p.type not in ir.ARRAYS:
                 raise CGenError(f"{f.name}: array param {p.name} has type {p.type}")
+            if p.buffer not in _BUFFER_KINDS:
+                raise CGenError(f"{f.name}: array param {p.name} has buffer kind {p.buffer!r}")
             if p.stored and f.pure:
                 raise CGenError(f"{f.name}: array param {p.name} is stored into in a pure function")
         elif p.type not in _CT:
@@ -733,7 +761,7 @@ def _impl_signature(f: ir.Function, fast: bool = False) -> str:
         params.append("int tp_fd")              # compiled frames of this fast tree, itself included
     for p in f.params:
         if isinstance(p, ir.ArrayParam):
-            params.append(f"{_ARRAY_CT[p.type]} *{_ident('l', p.name)}")
+            params.append(f"{'tp_buf' if p.buffer else _ARRAY_CT[p.type]} *{_ident('l', p.name)}")
         elif p.type is Type.OBJ:
             params.append(f"PyObject *{_ident('p', p.name)}")
         else:
@@ -1329,23 +1357,36 @@ class _FnGen:
         self.emit(f"{t} = (int64_t){ptr}->len;")
         return t
 
-    def _slot(self, at: Type, ptr: str, index: ir.Expr, proven: bool, store: int) -> str:
+    def _buffer(self, name: str) -> str | None:
+        """`ArrayParam.buffer` of an array parameter ("array"), None for a list or local."""
+        a = self.arrays.get(name)
+        return a.buffer if a is not None else None
+
+    def _slot(self, at: Type, ptr: str, index: ir.Expr, proven: bool, store: int,
+              buffer: str | None = None) -> str:
         if index.type is not Type.I64:
             raise CGenError(f"{self.f.name}: index of type {index.type}")
         i = self.ev(index)
         if proven:
             return f"(Py_ssize_t)({i})"
         slot = self.tmp("Py_ssize_t")
-        self.check(f"{_ARRAY_PFX[at]}_slot({ptr}, {i}, {store}, &{slot})")
+        if buffer:
+            self.check(f"tp_buf_slot({ptr}, {i}, {store}, &{slot})")
+        else:
+            self.check(f"{_ARRAY_PFX[at]}_slot({ptr}, {i}, {store}, &{slot})")
         return slot
 
     def ev_Index(self, e: ir.Index) -> str:
         at, ptr = self._array(e.array)
         if e.type is not _ARRAY_ELEM[at]:
             raise CGenError(f"{self.f.name}: Index of {at} typed {e.type}")
-        slot = self._slot(at, ptr, e.index, e.proven, 0)
+        buffer = self._buffer(e.array)
+        slot = self._slot(at, ptr, e.index, e.proven, 0, buffer)
         t = self.tmp(_CT[e.type])
-        self.emit(f"{t} = {ptr}->data[{slot}];")
+        if buffer:
+            self.emit(f"{t} = tp_buf_ld_{_BUFFER_SFX[at]}({ptr}, {slot});")
+        else:
+            self.emit(f"{t} = {ptr}->data[{slot}];")
         return t
 
     def ev_NewArray(self, e: ir.NewArray) -> str:
@@ -1395,6 +1436,8 @@ class _FnGen:
                 n = self.ev(v.length)
                 self.check(f"{pfx}_new(&{new}, {n}, {fill})")
         elif isinstance(v, ir.CopyArray):
+            if self._buffer(v.src):
+                raise CGenError(f"{self.f.name}: CopyArray of buffer array {v.src}")
             st, sptr = self._array(v.src)
             if st is not at:
                 raise CGenError(f"{self.f.name}: CopyArray of {st} into {at}")
@@ -1437,7 +1480,11 @@ class _FnGen:
         if s.value.type is not _ARRAY_ELEM[at]:
             raise CGenError(f"{self.f.name}: store of {s.value.type} into {at}")
         v = self.ev(s.value)                    # CPython: value, then container, then index
-        slot = self._slot(at, ptr, s.index, s.proven, 1)
+        buffer = self._buffer(s.array)
+        slot = self._slot(at, ptr, s.index, s.proven, 1, buffer)
+        if buffer:
+            self.emit(f"tp_buf_st_{_BUFFER_SFX[at]}({ptr}, {slot}, {v});")
+            return
         self.emit(f"{ptr}->data[{slot}] = {v};")
         if not local:                           # a local array has no list to write back to
             self.emit(f"{ptr}->dirty[{slot}] = 1;")
@@ -1684,14 +1731,15 @@ class _FnGen:
             init = "NULL" if f.returns is Type.OBJ else "0"
             L.append(f"    {_CT[f.returns]} tp_r = {init};")
         args = []
-        arrays = []
-        if sum(isinstance(p, ir.ArrayParam) for p in f.params) > 0:
+        arrays = []         # list parameters: copy-in / write-back under a critical section
+        buffers = []        # buffer parameters: a Py_buffer export held for the whole call (#149)
+        if any(isinstance(p, ir.ArrayParam) and p.buffer is None for p in f.params):
             L.append("    tp_cs tp_lock = {0};")
         for i, p in enumerate(f.params):
             if isinstance(p, ir.ArrayParam):
-                L.append(f"    {_ARRAY_CT[p.type]} tp_a{i} = {{0}};")
+                L.append(f"    {'tp_buf' if p.buffer else _ARRAY_CT[p.type]} tp_a{i} = {{0}};")
                 args.append(f"&tp_a{i}")
-                arrays.append((i, p))
+                (buffers if p.buffer else arrays).append((i, p))
             elif p.type is Type.OBJ:
                 args.append(f"tp_args[{i}]")            # borrowed for the call's duration
             else:
@@ -1699,9 +1747,12 @@ class _FnGen:
                 args.append(f"tp_a{i}")
         if f.returns is not Type.NONE:
             args.append("&tp_r")
-        exits = [f"    if ({_ARRAY_PFX[p.type]}_exit(&tp_a{i}) < 0) tp_x = -1;" for i, p in arrays]
+        # PyBuffer_Release first (cannot fail), then the lists' write-back and the critical section
+        exits = [f"    tp_buf_exit(&tp_a{i});" for i, p in buffers]
+        exits += [f"    if ({_ARRAY_PFX[p.type]}_exit(&tp_a{i}) < 0) tp_x = -1;" for i, p in arrays]
         if arrays:
             exits.append("    tp_cs_end(&tp_lock);       /* after the write-back; a no-op if never taken */")
+        has_exits = bool(arrays or buffers)
         L.append("    (void)tp_x;")
         # arity / keywords -> the interpreted function raises CPython's own TypeError
         L.append(f"    if (tp_nargs != {n} || (tp_kwnames != NULL && PyTuple_GET_SIZE(tp_kwnames) != 0)) goto tp_deopt;")
@@ -1733,6 +1784,16 @@ class _FnGen:
                 L.append(f"    tp_s = {_UNBOX[p.type]}(tp_args[{i}], &tp_a{i});")
                 L.append("    if (tp_s < 0) goto tp_error;")
                 L.append("    if (tp_s != 0) goto tp_deopt;")
+        # buffer arrays: exact type, then one Py_buffer export each, held until every exit runs
+        # `exits` (a failed guard leaves the struct zeroed, so its exit is a no-op)
+        for i, p in buffers:
+            fmt1, fmt2 = _BUFFER_FMT[p.type]
+            kind = _BUFFER_KINDS[p.buffer]
+            L.append(f"    tp_s = tp_buf_enter(tp_args[{i}], "
+                     f"((tp_state *)PyModule_GetState(tp_module))->buf_types[{kind}], "
+                     f"{fmt1}, {fmt2}, {int(p.stored)}, &tp_a{i});")
+            L.append("    if (tp_s < 0) goto tp_error;")
+            L.append("    if (tp_s != 0) goto tp_deopt;")
         # aliasing guard, then copy-in
         if len(arrays) > 1:
             objs = ", ".join(f"tp_args[{i}]" for i, _ in arrays)
@@ -1790,7 +1851,7 @@ class _FnGen:
             else:
                 L.append(f"    return {_BOX[f.returns]}(tp_r);")
         L.append("tp_error:")
-        if arrays:
+        if has_exits:
             # keep CPython's exception; write-back still runs (partial updates stay visible)
             L.append("    { PyObject *tp_exc = PyErr_GetRaisedException();")
             L += ["  " + e for e in exits]
@@ -1863,6 +1924,7 @@ def _state_functions(mg: _ModGen) -> str:
         "    size_t i;",
         "    if (tp_st == NULL) return 0;",
         "    Py_VISIT(tp_st->breaker);",
+        "    for (i = 0; i < 1; i++) Py_VISIT(tp_st->buf_types[i]);",
         "    for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) Py_VISIT(tp_st->names[i]);",
         "    for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) Py_VISIT(tp_st->kwnames[i]);",
         "    for (i = 0; i < sizeof(tp_st->classes) / sizeof(tp_st->classes[0]); i++) Py_VISIT(tp_st->classes[i]);",
@@ -1878,6 +1940,7 @@ def _state_functions(mg: _ModGen) -> str:
         "    if (tp_st == NULL) return 0;",
         "    if (tp_st->watch_id1 > 0) tp_globals_unwatch(PyModule_GetDict(tp_module), &tp_st->watch_id1);",
         "    tp_release(&tp_st->breaker);",
+        "    for (i = 0; i < 1; i++) tp_release(&tp_st->buf_types[i]);",
         "    for (i = 0; i < sizeof(tp_st->names) / sizeof(tp_st->names[0]); i++) tp_release(&tp_st->names[i]);",
         "    for (i = 0; i < sizeof(tp_st->kwnames) / sizeof(tp_st->kwnames[0]); i++) tp_release(&tp_st->kwnames[i]);",
         "    for (i = 0; i < sizeof(tp_st->cls_ok) / sizeof(tp_st->cls_ok[0]); i++) tp_st->cls_ok[i] = 0;",
@@ -1970,6 +2033,14 @@ def _exec_function(mg: _ModGen) -> str:
         "    if (tp_code == NULL) goto tp_done;",
         "    tp_res = PyEval_EvalCode(tp_code, tp_dict, tp_dict);",
         "    if (tp_res == NULL) goto tp_done;",
+    ]
+    kinds = {p.buffer for f in mg.module.functions for p in f.params
+             if isinstance(p, ir.ArrayParam) and p.buffer}
+    # buffer arrays (#149): the exact types the entry guards compare against, taken after the
+    # module source ran (so its own imports are done). Not importable: NULL, and every guard deopts.
+    if "array" in kinds:
+        L.append('    if (tp_import_attr("array", "array", &tp_st->buf_types[0]) < 0) goto tp_done;')
+    L += [
         "    tp_table = PyDict_New();",
         "    if (tp_table == NULL || PyDict_SetItemString(tp_dict, \"__typedpython_interpreted__\", tp_table) < 0) goto tp_done;",
     ]

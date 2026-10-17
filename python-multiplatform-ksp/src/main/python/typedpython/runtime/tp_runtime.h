@@ -866,6 +866,148 @@ static inline int tp_i64_array_exit(tp_i64_array *a)
 }
 
 /* ------------------------------------------------------------------------------------------
+ * Buffer arrays (issue #149; ir.ArrayParam.buffer): an exact array.array argument
+ * is NOT copied. tp_buf_enter takes one Py_buffer export and tp_buf_exit releases it; the wrapper
+ * calls exit on every path (ok, error, deopt), so the export, which forbids a resize of the
+ * array.array, is held exactly as long as the compiled call.
+ *
+ * enter(obj, exact, fmt1, fmt2, writable, b): rc 0 = held (b->data, b->len set); rc 1 = deopt, b
+ * is zeroed and nothing is held, nothing changed, no exception left; rc -1 = MemoryError set.
+ * Deopt (never memory access) unless ALL hold: `exact` is non-NULL and Py_IS_TYPE(obj, exact)
+ * (a subclass could override __getitem__), PyObject_GetBuffer succeeds with C_CONTIGUOUS | FORMAT
+ * (| WRITABLE when the function stores), ndim == 1, itemsize == 8, no suboffsets, shape[0] * 8 ==
+ * view.len, the format is exactly fmt1 or fmt2 ("d"; "q" or "l": the 8-byte signed ints, a byte
+ * order prefix or an unsigned/other format fails), and the data is 8-byte aligned (the access is
+ * an 8-byte atomic). An empty buffer is held too (len 0, no element is ever touched).
+ *
+ * Element access (tp_buf_ld_* / tp_buf_st_*): one relaxed atomic 8-byte load or store of the bit
+ * pattern on the buffer memory, bit-cast with memcpy. Another thread may write the same element concurrently: that is a data race in the program, and
+ * the atomic makes it a torn-value-free one (an element is read or written whole), the closest a
+ * compiled loop gets to what the interpreter's own element read/write does. -DTP_BUFFER_PLAIN
+ * replaces the atomics with plain loads and stores; it exists only to measure what the atomics
+ * cost, it is not a supported configuration for threads. len is the export's shape[0], fixed for
+ * the call (the export forbids resizing).
+ * ------------------------------------------------------------------------------------------ */
+typedef struct { Py_buffer view; Py_ssize_t len; void *data; int held; } tp_buf;
+
+/* `mod.attr` as a new reference in *out; not importable (or no such attribute): *out stays NULL
+ * and the error is cleared, so every guard against it deopts. -1 only for MemoryError. */
+static inline int tp_import_attr(const char *mod, const char *attr, PyObject **out)
+{
+    PyObject *m = PyImport_ImportModule(mod);
+    *out = NULL;
+    if (m != NULL) {
+        *out = PyObject_GetAttrString(m, attr);
+        Py_DECREF(m);
+    }
+    if (*out == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_MemoryError)) {
+            return -1;
+        }
+        PyErr_Clear();
+    }
+    return 0;
+}
+
+static inline void tp_buf_exit(tp_buf *b)
+{
+    if (b->held) {
+        PyBuffer_Release(&b->view);
+    }
+    memset(b, 0, sizeof(*b));
+}
+
+static inline int tp_buf_enter(PyObject *obj, PyObject *exact, const char *fmt1, const char *fmt2,
+                               int writable, tp_buf *b)
+{
+    int flags = PyBUF_C_CONTIGUOUS | PyBUF_FORMAT;
+    memset(b, 0, sizeof(*b));
+    if (exact == NULL || !Py_IS_TYPE(obj, (PyTypeObject *)exact)) {
+        return 1;
+    }
+    if (writable) {
+        flags |= PyBUF_WRITABLE;
+    }
+    if (PyObject_GetBuffer(obj, &b->view, flags) != 0) {
+        if (PyErr_ExceptionMatches(PyExc_MemoryError)) {
+            return -1;
+        }
+        PyErr_Clear();                       /* read-only, not contiguous, ...: the object path */
+        memset(b, 0, sizeof(*b));
+        return 1;
+    }
+    b->held = 1;
+    if (b->view.ndim != 1 || b->view.itemsize != 8 || b->view.shape == NULL
+            || b->view.suboffsets != NULL || b->view.shape[0] < 0
+            || b->view.shape[0] * 8 != b->view.len || b->view.format == NULL
+            || !(strcmp(b->view.format, fmt1) == 0 || (fmt2 != NULL && strcmp(b->view.format, fmt2) == 0))
+            || (writable && b->view.readonly)
+            || (b->view.shape[0] > 0 && (b->view.buf == NULL || ((uintptr_t)b->view.buf & 7) != 0))) {
+        tp_buf_exit(b);
+        return 1;
+    }
+    b->len = b->view.shape[0];
+    b->data = b->view.buf;
+    return 0;
+}
+
+/* index: a negative index counts from the end; out of range -> IndexError with the text CPython's
+ * own array.array uses ("array index out of range" / "array assignment index out of range") */
+static inline int tp_buf_slot(const tp_buf *b, int64_t i, int store, Py_ssize_t *slot)
+{
+    if (i < 0) {
+        i += (int64_t)b->len;
+        if (i < 0) goto out_of_range;
+    }
+    else if (i >= (int64_t)b->len) {
+        goto out_of_range;
+    }
+    *slot = (Py_ssize_t)i;
+    return 0;
+out_of_range:
+    PyErr_SetString(PyExc_IndexError,
+                    store ? "array assignment index out of range" : "array index out of range");
+    return -1;
+}
+
+#ifdef TP_BUFFER_PLAIN
+static inline double tp_buf_ld_f64(const tp_buf *b, Py_ssize_t i) { return ((const double *)b->data)[i]; }
+static inline int64_t tp_buf_ld_i64(const tp_buf *b, Py_ssize_t i) { return ((const int64_t *)b->data)[i]; }
+static inline void tp_buf_st_f64(const tp_buf *b, Py_ssize_t i, double v) { ((double *)b->data)[i] = v; }
+static inline void tp_buf_st_i64(const tp_buf *b, Py_ssize_t i, int64_t v) { ((int64_t *)b->data)[i] = v; }
+#else
+static inline double tp_buf_ld_f64(const tp_buf *b, Py_ssize_t i)
+{
+    uint64_t u = __atomic_load_n((const uint64_t *)b->data + i, __ATOMIC_RELAXED);
+    double d;
+    memcpy(&d, &u, sizeof d);
+    return d;
+}
+
+static inline int64_t tp_buf_ld_i64(const tp_buf *b, Py_ssize_t i)
+{
+    uint64_t u = __atomic_load_n((const uint64_t *)b->data + i, __ATOMIC_RELAXED);
+    int64_t v;
+    memcpy(&v, &u, sizeof v);
+    return v;
+}
+
+static inline void tp_buf_st_f64(const tp_buf *b, Py_ssize_t i, double v)
+{
+    uint64_t u;
+    memcpy(&u, &v, sizeof u);
+    __atomic_store_n((uint64_t *)b->data + i, u, __ATOMIC_RELAXED);
+}
+
+static inline void tp_buf_st_i64(const tp_buf *b, Py_ssize_t i, int64_t v)
+{
+    uint64_t u;
+    memcpy(&u, &v, sizeof u);
+    __atomic_store_n((uint64_t *)b->data + i, u, __ATOMIC_RELAXED);
+}
+#endif
+
+/* ------------------------------------------------------------------------------------------
  * Local arrays (ir.NewArray / CopyArray): owned by the function, no list object behind them.
  * Same structs as above with list == NULL and dirty == NULL; the slot helpers work on them
  * unchanged. rc 0 ok, -1 MemoryError (the struct is then zeroed, so _free is still safe).

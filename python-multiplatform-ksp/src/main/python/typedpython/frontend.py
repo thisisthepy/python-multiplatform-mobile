@@ -133,6 +133,9 @@ class _ModuleInfo:
     stdlib_math: bool
     scalar_globals: dict[str, Type] = field(default_factory=dict)  # entry-global candidates
     classes: dict[str, ir.ClassDecl] = field(default_factory=dict)  # compiled fixed-layout classes
+    # Top-level `import x [as y]` / `from m import n [as k]` names bound exactly once in the module:
+    # local name -> dotted qualified name (`a` -> `array`, `array` -> `array.array`).
+    imports: dict[str, str] = field(default_factory=dict)
 
     def bound(self, name: str) -> bool:
         return name in self.bindings
@@ -166,7 +169,7 @@ def lower(path: Path) -> ir.Module:
             continue
         assert isinstance(node, ast.FunctionDef)
         try:
-            signatures[node.name] = _signature(node, info.classes)
+            signatures[node.name] = _signature(node, info.classes, info)
         except Skip as e:
             skipped[node.name] = e.reason
 
@@ -229,7 +232,53 @@ def _module_info(tree: ast.Module) -> _ModuleInfo:
 
     math = bindings.get("math", [])
     return _ModuleInfo(bindings, len(math) == 1 and math[0][1] == "import math",
-                       _scalar_globals(tree, bindings))
+                       _scalar_globals(tree, bindings), imports=_import_names(tree, bindings))
+
+
+def _import_names(tree: ast.Module, bindings: dict[str, list[tuple[int, str]]]) -> dict[str, str]:
+    """Names bound by a plain top-level import and by nothing else in the module (so the name
+    certainly is that module or attribute when an annotation is evaluated)."""
+    out: dict[str, str] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Import):
+            for alias in stmt.names:
+                if alias.asname:
+                    out[alias.asname] = alias.name
+                else:
+                    root = alias.name.split(".")[0]
+                    out[root] = root
+        elif isinstance(stmt, ast.ImportFrom) and stmt.level == 0 and stmt.module:
+            for alias in stmt.names:
+                if alias.name != "*":
+                    out[alias.asname or alias.name] = f"{stmt.module}.{alias.name}"
+    return {n: q for n, q in out.items() if len(bindings.get(n, [])) == 1}
+
+
+def _qualified(node: ast.expr, info: _ModuleInfo) -> str | None:
+    """`a.b` -> "array.b" through the module's own imports, else None."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name) or node.id not in info.imports:
+        return None
+    return ".".join([info.imports[node.id], *reversed(parts)])
+
+
+def _buffer_kind(annotation: ast.expr, info: _ModuleInfo) -> tuple[Type, str] | None:
+    """The buffer-array reading of an annotation (#149), else None (an ordinary object parameter):
+    `array.array[float]` / `array.array[int]` (any spelling that resolves, through this module's
+    own imports, to `array.array`). A bare `array.array`, another element type, a numpy
+    `NDArray[...]` (not supported: its element arithmetic is numpy's), or a name bound more than
+    once is not one."""
+    if not isinstance(annotation, ast.Subscript):
+        return None
+    base = _qualified(annotation.value, info)
+    arg = annotation.slice
+    if base == "array.array" and isinstance(arg, ast.Name) and arg.id in ("float", "int") \
+            and not info.bound(arg.id):
+        return ARRAY_KIND[f"list[{arg.id}]"], "array"
+    return None
 
 
 def _scalar_globals(tree: ast.Module, bindings: dict[str, list[tuple[int, str]]]) -> dict[str, Type]:
@@ -492,7 +541,8 @@ def _targets(
     return found
 
 
-def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = None) -> _Signature:
+def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = None,
+               info: _ModuleInfo | None = None) -> _Signature:
     args = fn.args
     line = fn.lineno
     if args.posonlyargs:
@@ -510,13 +560,16 @@ def _signature(fn: ast.FunctionDef, classes: dict[str, ir.ClassDecl] | None = No
         if a.annotation is None:
             raise Skip(a.lineno, f"parameter `{a.arg}` has no annotation")
         kind = _annotation_kind(a.annotation)
-        if kind in ARRAY_KIND:
+        buffer = _buffer_kind(a.annotation, info) if info is not None else None
+        if buffer is not None:
+            params.append(ir.ArrayParam(a.arg, buffer[0], False, buffer[1]))  # `stored` set later
+        elif kind in ARRAY_KIND:
             params.append(ir.ArrayParam(a.arg, ARRAY_KIND[kind], False))  # `stored` set later
         elif (c := _class_of(kind, classes or {})) is not None:
             params.append(ir.Param(a.arg, Type.OBJ, c[0], c[1]))
         else:
             params.append(ir.Param(a.arg, SCALAR_KIND.get(kind, Type.OBJ)))
-    n_lists = sum(isinstance(p, ir.ArrayParam) for p in params)
+    n_lists = sum(isinstance(p, ir.ArrayParam) and p.buffer is None for p in params)
     if n_lists > 2:
         # Free-threaded CPython (#159): the lists are locked from copy-in to write-back, and CPython
         # offers one- and two-object critical sections only (a nested third could suspend the others).
@@ -717,7 +770,8 @@ class _Lowerer:
                 locals_[name] = self.local_type(name, self.bindings[name][0].line)
         locals_.update(self.temps)
         params = tuple(
-            ir.ArrayParam(p.name, p.type, p.name in self.stored) if isinstance(p, ir.ArrayParam)
+            ir.ArrayParam(p.name, p.type, p.name in self.stored, p.buffer)
+            if isinstance(p, ir.ArrayParam)
             else p for p in self.sig.params
         )
         pure = not self.impure
@@ -769,6 +823,13 @@ class _Lowerer:
             kind = _creation_kind(value)
             if kind is not None and name not in self.params:
                 creations.setdefault(name, []).append((stmt, kind, value))
+        buffers = {p.name for p in self.sig.params if isinstance(p, ir.ArrayParam) and p.buffer}
+        for cs in creations.values():
+            for stmt, kind, value in cs:
+                if kind == "copy" and value.value.id in buffers:  # type: ignore[attr-defined]
+                    raise Skip(stmt.lineno, f"`{_src(value)}` slices buffer parameter "
+                                            f"`{value.value.id}`: a buffer array is never copied "  # type: ignore[attr-defined]
+                                            "(`[:]` would be a native copy of a list)")
         known = set(self.arrays) | {n for n, cs in creations.items()
                                     if any(k != "copy" for _, k, _ in cs)}
         while True:
