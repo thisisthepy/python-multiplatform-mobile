@@ -1,6 +1,9 @@
 package python.multiplatform.gradle.artifact
 
+import org.jetbrains.kotlin.library.abi.AbiClass
+import org.jetbrains.kotlin.library.abi.AbiClassKind
 import org.jetbrains.kotlin.library.abi.AbiClassifierReference
+import org.jetbrains.kotlin.library.abi.AbiDeclarationContainer
 import org.jetbrains.kotlin.library.abi.AbiCompoundName
 import org.jetbrains.kotlin.library.abi.AbiFunction
 import org.jetbrains.kotlin.library.abi.AbiQualifiedName
@@ -163,6 +166,8 @@ internal object KlibScanner {
      */
     private val PUBLISHED_API = AbiQualifiedName(AbiCompoundName("kotlin"), AbiCompoundName("PublishedApi"))
 
+    private val DEPRECATED = AbiQualifiedName(AbiCompoundName("kotlin"), AbiCompoundName("Deprecated"))
+
     /** Every binding this klib offers, sorted by name -- the counterpart of [ArtifactScanner.scanJar]. */
     fun scanKlib(klib: File, includePrefixes: List<String>, excludePackages: List<String> = emptyList()): List<ArtifactCallable> =
         scan(klib, includePrefixes, excludePackages).mapNotNull { it.callable }.sortedBy { it.name }
@@ -191,7 +196,7 @@ internal object KlibScanner {
             // receiver handle to be worth anything. Filtered rather than declined for the same reason
             // `ArtifactScanner` never builds a model for `<init>`.
             .filter { !it.isConstructor }
-            .mapNotNull { candidateOrNull(it) }
+            .mapNotNull { candidateOrNull(it, classesOf(abi.topLevelDeclarations)) }
 
         // Same rule, same implementation as the JVM producer -- see this object's KDoc.
         return ArtifactScanner.disambiguateOverloads(candidates)
@@ -234,7 +239,27 @@ internal object KlibScanner {
      * `scanKlibDeclarations` only ever call `LibraryAbiReader.readAbiInfo` on a real file and have no
      * seam to inject one.
      */
-    internal fun candidateOrNull(function: AbiFunction): Candidate? {
+    /**
+     * Every class the klib declares, nested ones included, by its dotted Kotlin name -- what
+     * [klibBoundaryTypeOf] asks before it lets a type cross as a handle (issue #234).
+     */
+    private fun classesOf(container: AbiDeclarationContainer): Map<String, AbiClass> {
+        val found = LinkedHashMap<String, AbiClass>()
+        fun walk(current: AbiDeclarationContainer) {
+            current.declarations.filterIsInstance<AbiClass>().forEach { cls ->
+                found[cls.qualifiedName.dotted()] = cls
+                walk(cls)
+            }
+        }
+        walk(container)
+        return found
+    }
+
+    /**
+     * @param classes the walked klib's own classes ([classesOf]): a parameter or result whose class
+     *   is one of them, and qualifies ([handleClassOrNull]), crosses as an object handle.
+     */
+    internal fun candidateOrNull(function: AbiFunction, classes: Map<String, AbiClass> = emptyMap()): Candidate? {
         val model = declarationModelOf(function) ?: return null
         val declined = { reason: String -> Candidate(null, model.copy(declineReason = reason)) }
 
@@ -245,6 +270,12 @@ internal object KlibScanner {
         if (function.isSuspend) return declined("suspend")
         // See PUBLISHED_API's KDoc: `@PublishedApi internal` is binary-visible but not
         // source-visible, and the generated call expression is source in the consumer's own module.
+        // A `@Deprecated(level = HIDDEN)` declaration stays in a klib for binary compatibility
+        // (`kotlinx.coroutines.Job0`) but cannot be called from source, and this ABI exposes the
+        // annotation but not its level (issue #234), so every deprecated declaration is declined.
+        if (function.hasAnnotation(DEPRECATED)) {
+            return declined("@Deprecated: its level is not in this klib ABI, and a HIDDEN one cannot be called from source")
+        }
         if (function.hasAnnotation(PUBLISHED_API)) {
             return declined("@PublishedApi internal -- binary-visible for inlining, not part of the module's public Kotlin API")
         }
@@ -261,10 +292,10 @@ internal object KlibScanner {
             return declined("${function.contextReceiverParametersCount} context receiver(s), whose types this klib ABI does not expose")
         }
 
-        val returnType = klibBoundaryTypeOf(model.returnType)
+        val returnType = klibBoundaryTypeOf(model.returnType, classes)
             ?: return declined("no boundary type for return ${model.returnType.render()}")
         val boundaryTypes = model.parameters.map { parameter ->
-            klibBoundaryTypeOf(parameter.type)
+            klibBoundaryTypeOf(parameter.type, classes)
                 ?: return declined("no boundary type for parameter ${parameter.type.render()}")
         }
         if (boundaryTypes.any { it.isReturnOnly }) {
@@ -288,6 +319,10 @@ internal object KlibScanner {
             // supplied"; `DeclarationModel.parameterNamesKnown` says the same thing to the stub side.
             paramTypeNames = model.parameters.map { it.type.qualifiedName },
             returnTypeName = model.returnType.qualifiedName,
+            // What a handle result **is a** (issue #234), read off the klib's own supertypes, nearest
+            // first: `_member` and `_is_a` read it, so a `CompletableJob` serves `Job`'s members and fills
+            // a `Job` slot. Empty for a non-handle result, as on the jar side.
+            returnSupertypes = if (returnType.tag == OBJECT_TAG) supertypesOf(model.returnType.qualifiedName, classes) else emptyList(),
             // Deliberately all `false`, not `model.parameters.map { it.declaresDefault }`.
             // `ArtifactCallable.paramHasDefault`'s contract (see its KDoc) is a statement about
             // [lambdaBody] -- exactly the slots the generated call may omit -- and never about the
@@ -405,9 +440,21 @@ internal object KlibScanner {
      * an object handle in that case; this walker has no object boundary at all yet, so it declines.
      * Type *arguments* are ignored rather than refused, because no type this admits has any.
      */
-    private fun klibBoundaryTypeOf(type: KotlinTypeModel): BoundaryType? {
-        if (type.isNullable) return null
-        return when (type.qualifiedName) {
+    private fun klibBoundaryTypeOf(type: KotlinTypeModel, classes: Map<String, AbiClass> = emptyMap()): BoundaryType? {
+        // Issue #234: a class of the walked klib crosses as an object handle -- the jar producer's
+        // `(%s as Type)` read and an unwrapped result, which the common trampoline turns into a
+        // `HandleTable` handle and back. A nullable one carries the `?`: the handle is already
+        // nullable at the boundary (`UpcallTrampoline.toKotlin` maps Python `None` to `null`).
+        if (!type.isNullable) primitiveBoundaryTypeOf(type.qualifiedName)?.let { return it }
+        if (handleClassOrNull(type, classes) != null) {
+            val cast = type.qualifiedName + if (type.isNullable) "?" else ""
+            return BoundaryType(OBJECT_TAG, "(%s as $cast)", "(%s)")
+        }
+        return null
+    }
+
+    private fun primitiveBoundaryTypeOf(qualifiedName: String): BoundaryType? {
+        return when (qualifiedName) {
             "kotlin.Boolean" -> BoundaryType("BOOLEAN", "(%s as Boolean)", "(%s)")
             "kotlin.Byte" -> BoundaryType("INT", "(%s as Long).toByte()", "(%s).toLong()")
             "kotlin.Short" -> BoundaryType("INT", "(%s as Long).toShort()", "(%s).toLong()")
@@ -420,5 +467,44 @@ internal object KlibScanner {
             "kotlin.Unit" -> BoundaryType("UNIT", "(%s as Unit)", "(%s)", isReturnOnly = true)
             else -> null
         }
+    }
+
+    private const val OBJECT_TAG = "OBJECT"
+
+    /**
+     * The walked klib's class [type] names, when a handle of it can cross (issue #234): a public
+     * (the ABI lists nothing else) `class`, `interface`, `enum class` or `object` that is not a value
+     * class -- a value class's identity is not readable here (this object's KDoc) -- has no type
+     * parameters, is used without type arguments, and is not `@PublishedApi internal`. Anything else,
+     * a type from another klib included, is `null`, and the declaration stays declined.
+     */
+    private fun handleClassOrNull(type: KotlinTypeModel, classes: Map<String, AbiClass>): AbiClass? {
+        if (type.arguments.isNotEmpty()) return null
+        // `kotlin.Int`, `kotlin.String` and the rest of package `kotlin` are classes of the stdlib klib,
+        // and the boundary's own currency, never handles.
+        if (type.qualifiedName.substringBeforeLast('.') == "kotlin") return null
+        val cls = classes[type.qualifiedName] ?: return null
+        if (cls.kind !in HANDLE_CLASS_KINDS || cls.isValue || cls.typeParameters.isNotEmpty()) return null
+        if (cls.hasAnnotation(PUBLISHED_API)) return null
+        return cls
+    }
+
+    private val HANDLE_CLASS_KINDS = setOf(AbiClassKind.CLASS, AbiClassKind.INTERFACE, AbiClassKind.ENUM_CLASS, AbiClassKind.OBJECT)
+
+    /** [qualifiedName]'s supertypes, nearest first and transitive within the klib, `kotlin.Any` left out. */
+    private fun supertypesOf(qualifiedName: String, classes: Map<String, AbiClass>): List<String> {
+        val ordered = LinkedHashSet<String>()
+        var frontier = listOf(qualifiedName)
+        repeat(16) {
+            val next = frontier.flatMap { name ->
+                classes[name]?.superTypes.orEmpty().mapNotNull { superType ->
+                    ((superType as? AbiType.Simple)?.classifierReference as? AbiClassifierReference.ClassReference)
+                        ?.className?.dotted()
+                }
+            }.filter { it != "kotlin.Any" && it != qualifiedName && ordered.add(it) }
+            if (next.isEmpty()) return ordered.toList()
+            frontier = next
+        }
+        return ordered.toList()
     }
 }
