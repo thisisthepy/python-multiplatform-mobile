@@ -121,3 +121,15 @@ def test_the_rule_is_what_keeps_it_interpreted(tmp_path, monkeypatch):
     monkeypatch.setattr(cost, "does_native_work", lambda fn: True)
     with pytest.raises(AssertionError):
         test_an_object_only_loop_stays_interpreted_with_the_reason(tmp_path)
+
+
+STRAIGHT_LINE = HEADER + textwrap.dedent('''
+    def label(n: int, name: str) -> str:
+        return f"{name}:{n + 1}"
+''')
+
+
+def test_a_straight_line_impure_function_still_compiles(tmp_path):
+    # no loop to lose to the interpreter: what compiled before #150 keeps compiling
+    r = build(tmp_path, STRAIGHT_LINE)
+    assert names(r) == {"label"}, r.skipped

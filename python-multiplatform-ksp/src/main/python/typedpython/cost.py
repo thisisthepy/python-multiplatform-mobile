@@ -26,6 +26,10 @@ A rejected function stays interpreted with the diagnostic below. Because an impu
 the target of a direct C `Call`, anything that calls a rejected function is rejected too (the same
 propagation `verify` uses for an unverified callee).
 
+Straight-line impure functions (no loop at all) are kept: they have no loop to lose to the
+interpreter, and that keeps every function that compiled before #150 compiled (fixed-layout setters,
+Kotlin calls). The rule targets loops over objects only.
+
 The real fix is native ints in impure functions (a separate issue); when it lands, this rule is the
 thing to revisit.
 """
@@ -78,6 +82,10 @@ def _loops(body):
 
 def does_native_work(fn: ir.Function) -> bool:
     if fn.pure:
+        return True
+    if not any(isinstance(n, (ir.While, ir.ForRange, ir.ForObj)) for n in _walk(fn.body)):
+        # straight-line code (a field setter, a Kotlin call): no loop to lose to the interpreter, and
+        # what compiled before #150 keeps compiling
         return True
     return any(_native_op(n) for loop in _loops(fn.body) for n in _walk(loop.body))
 
