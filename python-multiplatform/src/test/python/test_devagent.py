@@ -141,7 +141,7 @@ class Authentication(unittest.TestCase):
     def test_another_socket_cannot_take_the_port_over(self):
         agent = devagent.start(port=0, token=TOKEN, overlay=tempfile.mkdtemp())
         try:
-            options = [socket.SO_REUSEADDR] + [getattr(socket, "SO_REUSEPORT")] * hasattr(socket, "SO_REUSEPORT")
+            options = [socket.SO_REUSEADDR] + ([socket.SO_REUSEPORT] if hasattr(socket, "SO_REUSEPORT") else [])
             for option in options:
                 hijacker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 try:
@@ -260,7 +260,10 @@ class Push(AgentTestCase):
         self.assertEqual("1", self.of_type(replies, "result")[0]["data"]["text/plain"])
 
     def test_a_path_outside_the_overlay_is_refused(self):
-        for path in ["../escape.py", "/abs/escape.py", "a/../../escape.py"]:
+        # Windows forms too, on every OS: on Windows `os.path.isabs("/abs/escape.py")` is False (Python 3.13+)
+        # and joining it to the overlay lands on the drive root, so the rule cannot be os.path's.
+        for path in ["../escape.py", "/abs/escape.py", "a/../../escape.py", "C:/escape.py", "C:escape.py",
+                     "\\escape.py", "a\\..\\..\\escape.py", "//server/share/escape.py", "./a.py", "a//b.py", ""]:
             done = self.done(self.client.request("push", files={path: "X = 1\n"}))
             self.assertEqual("error", done["status"], path)
             self.assertEqual("ValueError", done["ename"], path)
