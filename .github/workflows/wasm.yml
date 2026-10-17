@@ -13,11 +13,11 @@ name: WasmJS CI
 # `test` runs the real suite, and runs only when there is a runtime to run it against.
 
 on:
+  # Checked on develop after merging, not on every pull request (user decision,
+  # 2026-10-17). A red develop is fixed forward by its own pull request.
   push:
     branches: [ "develop", "main" ]
-  pull_request:
-    branches: [ "develop", "main" ]
-
+  workflow_dispatch:
 concurrency:
   # A newer push to the same ref supersedes this run; frees the shared macOS runners.
   group: ${{ github.workflow }}-${{ github.ref }}
